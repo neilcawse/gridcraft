@@ -270,6 +270,41 @@ fn linked_dynamic_array_keeps_saved_spill_values_after_recalc() {
 }
 
 #[test]
+fn legacy_arrays_use_saved_results_without_treating_follower_styles_as_obstructions() {
+    use gridcraft_core::RangeRef;
+    use gridcraft_model::{ExternalBook, ExternalSheet, StyleId};
+    for (text, expected) in [("=[1]Data!A1:B2", [10.0, 20.0, 30.0, 40.0]), ("={1,2;3,4}", [1.0, 2.0, 3.0, 4.0])] {
+        let mut t = T::new();
+        t.wb.external_books =
+            vec![ExternalBook { opaque: true, sheets: vec![ExternalSheet { name: "Data".into(), ..Default::default() }], ..Default::default() }]
+                .into();
+        let bold = t.wb.styles.derive(StyleId::DEFAULT, |style| style.font.bold = true);
+        let sh = t.wb.sheet_mut(0).unwrap();
+        let mut f = Formula::new(text);
+        let range = RangeRef::parse("A1:B2").unwrap();
+        f.array = Some(range);
+        f.legacy = true;
+        sh.cells.set(c("A1"), Cell { value: Value::Number(10.0), ..Cell::formula(f) });
+        sh.cells.set(c("B2"), Cell { style: bold, ..Default::default() });
+        sh.spill_ranges.insert(c("A1"), range);
+        for (address, value) in [("B1", 20.0), ("A2", 30.0), ("B2", 40.0)] {
+            sh.spill.insert(c(address), Value::Number(value));
+        }
+        for _ in 0..2 {
+            t.calc.recalc_all(&mut t.wb);
+            for (address, value) in ["A1", "B1", "A2", "B2"].into_iter().zip(expected) {
+                assert_eq!(t.get(address), Value::Number(value), "{text}: {address}");
+            }
+            let sh = t.wb.sheet(0).unwrap();
+            assert_eq!(sh.cell(c("B2")).unwrap().style, bold);
+            let f = sh.cell(c("A1")).unwrap().formula.as_ref().unwrap();
+            assert_eq!(f.array, Some(range));
+            assert!(!f.dynamic);
+        }
+    }
+}
+
+#[test]
 fn linked_dynamic_array_through_defined_name_keeps_saved_spill_values() {
     use gridcraft_core::RangeRef;
     use gridcraft_model::{DefinedName, ExternalBook, ExternalSheet};

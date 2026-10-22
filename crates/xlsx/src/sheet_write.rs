@@ -127,12 +127,9 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> (
     let mut extra: BTreeMap<CellRef, Value> = BTreeMap::new();
     // Values inside spills and legacy array ranges.
     for (a, r) in sheet.spill_ranges.iter().filter(|(a, r)| !r.is_single() && !as_read(a)) {
-        for c in r.iter().take(1_000_000) {
-            if c != *a
-                && let Some(v) = sheet.spill.get(&c)
-                && sheet.cells.get(c).is_none_or(|x| x.formula.is_none() && x.value.is_empty())
-            {
-                extra.insert(c, v.clone());
+        for (c, v) in sheet.spill.range(r.start..=r.end) {
+            if *c != *a && r.contains(*c) && sheet.cells.get(*c).is_none_or(|x| x.formula.is_none() && x.value.is_empty()) {
+                extra.insert(*c, v.clone());
             }
         }
     }

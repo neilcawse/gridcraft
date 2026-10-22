@@ -30,8 +30,8 @@ struct Shared {
 struct RowState {
     next_row: u32,
     shared: HashMap<u32, Shared>,
-    /// Dynamic-array spill ranges and legacy array ranges: cached values inside them (other than
-    /// the anchor) are not stored, so the formula can fill them again.
+    /// Dynamic-array spill ranges: cached values inside them (other than the anchor) are
+    /// not stored, so the formula can fill them again.
     dynamic: Vec<RangeRef>,
     dropped: u64,
     rows: u64,
@@ -221,6 +221,27 @@ pub fn read_sheet(cx: &mut Ctx<'_>, part: &str, name: &str) -> Result<Sheet, IoE
                 read_note_shapes(&x, &mut sheet, 0);
             }
         }
+    }
+    // Legacy CSE results share calc's sparse result store, not the occupied-cell store:
+    // saved followers must be readable without obstructing a calculable array on recalc.
+    // Do this after all rows so even followers stored before their anchor are retained.
+    let legacy: Vec<_> = sheet.cells.iter().filter_map(|(anchor, cell)| cell.formula.as_ref()?.array.map(|range| (anchor, range))).collect();
+    for (anchor, range) in legacy {
+        let followers: Vec<_> = sheet
+            .cells
+            .iter_range(range)
+            .filter(|(c, cell)| *c != anchor && cell.formula.is_none() && !cell.value.is_empty())
+            .map(|(c, _)| c)
+            .collect();
+        for c in followers {
+            if let Some(cell) = sheet.cells.get_mut(c) {
+                sheet.spill.insert(c, std::mem::take(&mut cell.value));
+                if cell.is_blank() {
+                    sheet.cells.remove(c);
+                }
+            }
+        }
+        sheet.spill_ranges.insert(anchor, range);
     }
     Ok(sheet)
 }
@@ -500,7 +521,7 @@ fn read_formula_text(cx: &mut Ctx<'_>, st: &mut RowState, f: &El, pos: CellRef, 
             }
             let mut fm = Formula::new(text);
             let range = f.attr("ref").and_then(RangeRef::parse).unwrap_or(RangeRef::cell(pos));
-            if !range.is_single() {
+            if dynamic && !range.is_single() {
                 st.dynamic.push(range);
             }
             if !dynamic {

@@ -1087,7 +1087,7 @@ impl Calc {
 
     /// Updates the graph for cells whose content changed and recalculates what depends on them.
     pub fn cells_changed(&mut self, wb: &mut Workbook, changed: &[Key]) {
-        let mut cleared: Vec<(usize, RangeRef)> = Vec::new();
+        let mut cleared: Vec<Key> = Vec::new();
         for &k in changed {
             let formula = wb.sheet(k.0).and_then(|s| s.cell(k.1)).and_then(|c| c.formula.clone());
             match formula.and_then(|f| f.expr()) {
@@ -1101,10 +1101,11 @@ impl Calc {
                     if let Some(sh) = wb.sheet_mut(k.0)
                         && let Some(r) = sh.spill_ranges.remove(&k.1)
                     {
-                        for c in r.iter() {
+                        let stored: Vec<CellRef> = sh.spill.range(r.start..=r.end).filter(|(c, _)| r.contains(**c)).map(|(c, _)| *c).collect();
+                        for c in stored {
                             sh.spill.remove(&c);
+                            cleared.push((k.0, c));
                         }
-                        cleared.push((k.0, r));
                     }
                     // A formula that doesn't parse evaluates to #NAME?.
                     if let Some(cell) = wb.sheet_mut(k.0).and_then(|s| s.cells.get_mut(k.1))
@@ -1156,13 +1157,13 @@ impl Calc {
         }
         // Spill areas of changed anchors also change.
         for &k in changed {
-            if let Some(r) = wb.sheet(k.0).and_then(|s| s.spill_ranges.get(&k.1)) {
-                seeds.extend(r.iter().map(|c| (k.0, c)));
+            if let Some(sh) = wb.sheet(k.0)
+                && let Some(r) = sh.spill_ranges.get(&k.1)
+            {
+                seeds.extend(sh.spill.range(r.start..=r.end).filter(|(c, _)| r.contains(**c)).map(|(c, _)| (k.0, *c)));
             }
         }
-        for (si, r) in &cleared {
-            seeds.extend(r.iter().map(|c| (*si, c)));
-        }
+        seeds.extend(cleared);
         let t0 = prof_now();
         let reached = self.kept_value_readers(wb, &seeds, &[]);
         let dirty = self.dirty_closure_from(&reached, &seeds);
@@ -1359,7 +1360,8 @@ impl Calc {
                     continue;
                 }
                 if let Some(r) = old {
-                    for c in r.iter() {
+                    let stored: Vec<CellRef> = sheet.spill.range(r.start..=r.end).filter(|(c, _)| r.contains(**c)).map(|(c, _)| *c).collect();
+                    for c in stored {
                         sheet.spill.remove(&c);
                     }
                     sheet.spill_ranges.remove(&k.1);
@@ -1370,7 +1372,8 @@ impl Calc {
                     let range = RangeRef::new(k.1, end);
                     let blocked = end.row >= gridcraft_core::MAX_ROWS
                         || end.col >= gridcraft_core::MAX_COLS
-                        || range.iter().any(|c| c != k.1 && (sheet.cells.has(c) || sheet.spill.contains_key(&c)))
+                        || sheet.cells.iter_range(range).any(|(c, cell)| c != k.1 && (!cell.value.is_empty() || cell.formula.is_some()))
+                        || sheet.spill.range(range.start..=range.end).any(|(c, _)| *c != k.1 && range.contains(*c))
                         || sheet.merges.iter().any(|m| m.intersects(&range))
                         || sheet.tables.iter().any(|t| t.range.contains(k.1));
                     if blocked {

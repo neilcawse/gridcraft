@@ -124,12 +124,93 @@ fn dynamic_spills_and_legacy_cse_keep_distinct_ranges() {
     let (back, _) = read_xlsx(&bytes).unwrap();
     let sh = back.sheet(0).unwrap();
     assert_eq!(sh.cell(at("A1")).unwrap().formula.as_ref().unwrap().array, Some(range("A1:A2")));
-    // A legacy array's cached values are dropped on read: the formula fills its range on recalc (#156).
+    // Saved followers remain readable without becoming occupied cells that block recalculation.
+    assert_eq!(sh.value(at("A2")), Value::Number(2.0));
     assert!(sh.cell(at("A2")).is_none());
     assert_eq!(sh.cell(at("B1")).unwrap().formula.as_ref().unwrap().array, None);
     assert!(sh.cell(at("B2")).is_none());
     assert!(sh.cell(at("B3")).is_none());
     assert_eq!(sh.value(at("C1")), Value::Number(6.0));
+}
+
+#[test]
+fn legacy_cse_saved_values_survive_import_and_roundtrip() {
+    let styles = r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font/><font><b/></font></fonts><cellXfs count="2"><xf/><xf fontId="1" applyFont="1"/></cellXfs></styleSheet>"#;
+    let external =
+        r#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><oleLink progId="Unavailable"/></externalLink>"#;
+    let body = r#"<sheetData>
+      <row r="1"><c r="A1"><f t="array" ref="A1:B2">[1]Data!A1:B2</f><v>11</v></c><c r="B1"><v>22</v></c>
+        <c r="D1"><f t="array" ref="D1:E2">{1,2;3,4}</f><v>91</v></c><c r="E1"><v>92</v></c>
+        <c r="G1"><f>1+2</f><v>999</v></c><c r="H1"><v>123</v></c></row>
+      <row r="2"><c r="A2"><v>33</v></c><c r="B2" s="1"><v>44</v></c><c r="D2"><v>93</v></c><c r="E2" s="1"><v>94</v></c>
+        <c r="G2"><f>[1]Data!Z1</f><v>77</v></c></row>
+      <row r="3"><c r="G3"><f>SUM(A1:B2)</f><v>0</v></c></row>
+    </sheetData>"#;
+    let rels = r#"<Relationship Id="styles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="link" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink" Target="externalLinks/externalLink1.xml"/>"#;
+    let bytes = super::minimal(
+        body,
+        &[("xl/styles.xml", styles), ("xl/externalLinks/externalLink1.xml", external)],
+        rels,
+        r#"<externalReferences><externalReference r:id="link"/></externalReferences>"#,
+    );
+    let (wb, _) = read_xlsx(&bytes).unwrap();
+    assert!(wb.external_books[0].opaque, "the linked source cannot supply these values");
+    let assert_legacy = |wb: &Workbook| {
+        let sh = wb.sheet(0).unwrap();
+        for (anchor, reference) in [("A1", "A1:B2"), ("D1", "D1:E2")] {
+            let f = sh.cell(at(anchor)).unwrap().formula.as_ref().unwrap();
+            assert_eq!(f.array, Some(range(reference)));
+            assert!(!f.dynamic, "legacy CSE must not acquire dynamic-array identity");
+            assert!(f.legacy);
+        }
+        for (address, value) in [("A1", 11.0), ("B1", 22.0), ("A2", 33.0), ("B2", 44.0)] {
+            assert_eq!(sh.value(at(address)), Value::Number(value), "{address}");
+        }
+        for address in ["B1", "A2", "B2", "E1", "D2", "E2"] {
+            assert!(sh.cell(at(address)).is_none_or(|c| c.formula.is_none() && c.value.is_empty()));
+        }
+        assert!(wb.styles.get(sh.cell(at("B2")).unwrap().style).font.bold);
+        assert!(wb.styles.get(sh.cell(at("E2")).unwrap().style).font.bold);
+    };
+    assert_legacy(&wb);
+    assert_eq!(wb.sheet(0).unwrap().value(at("E2")), Value::Number(94.0));
+    let saved = write_xlsx(&wb).unwrap();
+    let mut pkg = Package::open(&saved).unwrap();
+    let xml = pkg.read_xml("xl/worksheets/sheet1.xml").unwrap().unwrap();
+    for address in ["A1", "D1"] {
+        assert_eq!(cell(&xml, address).attr("cm"), None);
+        assert_eq!(cell(&xml, address).child("f").unwrap().attr("t"), Some("array"));
+    }
+    let (back, _) = read_xlsx(&saved).unwrap();
+    assert_legacy(&back);
+    assert_eq!(back.sheet(0).unwrap().value(at("E2")), Value::Number(94.0));
+}
+
+#[test]
+fn legacy_cse_import_visits_stored_followers_even_before_the_anchor() {
+    let bytes = super::minimal(
+        r#"<sheetData><row r="1048576"><c r="XFD1048576"><v>30</v></c></row>
+        <row r="2"><c r="A2"><v>20</v></c></row>
+        <row r="1"><c r="A1"><f t="array" ref="A1:XFD1048576">[1]Data!A1:XFD1048576</f><v>10</v></c></row></sheetData>"#,
+        &[],
+        "",
+        "",
+    );
+    let (wb, _) = read_xlsx(&bytes).unwrap();
+    let sh = wb.sheet(0).unwrap();
+    assert_eq!(sh.value(at("A1")), Value::Number(10.0));
+    assert_eq!(sh.value(at("A2")), Value::Number(20.0));
+    assert_eq!(sh.value(at("XFD1048576")), Value::Number(30.0));
+    assert_eq!(sh.spill.len(), 2, "the declared range must not be enumerated");
+    assert!(sh.cell(at("A2")).is_none());
+    assert!(sh.cell(at("XFD1048576")).is_none());
+
+    let (back, _) = read_xlsx(&write_xlsx(&wb).unwrap()).unwrap();
+    let sh = back.sheet(0).unwrap();
+    assert_eq!(sh.value(at("A2")), Value::Number(20.0));
+    assert_eq!(sh.value(at("XFD1048576")), Value::Number(30.0));
+    assert_eq!(sh.spill.len(), 2);
+    assert_eq!(sh.cell(at("A1")).unwrap().formula.as_ref().unwrap().array, Some(range("A1:XFD1048576")));
 }
 
 #[test]
