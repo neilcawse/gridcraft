@@ -552,33 +552,8 @@ impl<'a> Legacy<'a> {
                 },
                 _ => Kind::Ref,
             },
-            "OFFSET" => {
-                // Omitted dimensions keep the source reference's shape; unknown dimensions might
-                // become several cells on a later calculation.
-                let first_multi = first != Kind::Scalar;
-                let multi = if out.len() <= 3 { first_multi } else { !out.get(3).is_some_and(one) || out.get(4).map_or(first_multi, |e| !one(e)) };
-                if lifted {
-                    Kind::Array
-                } else if multi {
-                    Kind::Ref
-                } else {
-                    Kind::Scalar
-                }
-            }
-            "INDEX" => {
-                let row = out.get(1);
-                let col = out.get(2);
-                let row_positive = row.is_some_and(|e| positive_index(e, kinds.get(1).copied()));
-                let col_positive = col.is_some_and(|e| positive_index(e, kinds.get(2).copied()));
-                let multi = !row_positive || col.is_some_and(|_| !col_positive) || (col.is_none() && !out.first().is_some_and(one_line));
-                if multi {
-                    if first == Kind::Array { Kind::Array } else { Kind::Ref }
-                } else if lifted {
-                    Kind::Array
-                } else {
-                    Kind::Scalar
-                }
-            }
+            "OFFSET" => offset_kind(&out, first, lifted),
+            "INDEX" => index_kind(&out, &kinds, first, lifted),
             "XLOOKUP" if !lifted => match (out.get(1), out.get(2)) {
                 (Some(Expr::Ref(lookup)), Some(Expr::Ref(result))) => {
                     let multi = if lookup.range().width() == 1 { result.range().width() > 1 } else { result.range().height() > 1 };
@@ -603,7 +578,38 @@ impl<'a> Legacy<'a> {
         };
         (Expr::Call(name, out), kind)
     }
+}
 
+fn offset_kind(out: &[Expr], first: Kind, lifted: bool) -> Kind {
+    // Omitted dimensions keep the source reference's shape; unknown dimensions might
+    // become several cells on a later calculation.
+    let first_multi = first != Kind::Scalar;
+    let multi = if out.len() <= 3 { first_multi } else { !out.get(3).is_some_and(one) || out.get(4).map_or(first_multi, |e| !one(e)) };
+    if lifted {
+        Kind::Array
+    } else if multi {
+        Kind::Ref
+    } else {
+        Kind::Scalar
+    }
+}
+
+fn index_kind(out: &[Expr], kinds: &[Kind], first: Kind, lifted: bool) -> Kind {
+    let row = out.get(1);
+    let col = out.get(2);
+    let row_positive = row.is_some_and(|e| positive_index(e, kinds.get(1).copied()));
+    let col_positive = col.is_some_and(|e| positive_index(e, kinds.get(2).copied()));
+    let multi = !row_positive || col.is_some_and(|_| !col_positive) || (col.is_none() && !out.first().is_some_and(one_line));
+    if multi {
+        if first == Kind::Array { Kind::Array } else { Kind::Ref }
+    } else if lifted {
+        Kind::Array
+    } else {
+        Kind::Scalar
+    }
+}
+
+impl Legacy<'_> {
     /// A binary operation. `A1+A2+…+A70` parses as a left-nested chain as deep as it is long, so
     /// the chain's left operands are walked iteratively, at the same depth; each operation still
     /// costs one node of the budget.
