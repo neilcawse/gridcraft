@@ -8,12 +8,14 @@
 //! a slicer (`insert.slicer` / `table.insertSlicer`) selects everything, i.e. applies no filter.
 
 use gridcraft_core::CellRef;
-use gridcraft_model::*;
+use gridcraft_model::{Anchor, AnchorMode, AutoFilter, FilterCriterion, Slicer, SlicerPivot, SlicerSource, Workbook};
 
 use crate::pivot::{self as pv, SlicerTile};
 use serde_json::{Value as Json, json};
 
-use super::*;
+use super::{
+    CommandSpec, EngineError, Result, Session, bad, bool_param, cell_param_on, cmd, edit, f64_param, has_doc, str_param, target_sheet, u32_param,
+};
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![

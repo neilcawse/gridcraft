@@ -1,4 +1,11 @@
-use super::*;
+use std::fmt::Write as _;
+
+use super::{
+    CT_PIVOT_CACHE_DEF, CT_PIVOT_CACHE_REC, CT_PIVOT_TABLE, CellRef, DateSystem, EXT_X14_CACHE_ID, EXT_X14_DATA_FIELD, EXT_X14_PIVOT_TABLE, HashMap,
+    Key, MAX_ITEMS, MAX_RECORD_CELLS, MAX_SOURCE_CELLS, MONTHS, NS_MAIN, NS_REL, NS_X14, Out, PivotDateGroup, PivotField, PivotFilter, PivotFunc,
+    PivotLayout, PivotShowAs, PivotSort, PivotTable, PivotValue, RangeRef, Rels, Value, Workbook, XML_DECL, datetime_from_serial, esc_attr,
+    func_caption, func_name, group_by_name, group_caption, iso, key, label, mdy, same,
+};
 
 #[derive(Default)]
 struct Stats {
@@ -390,52 +397,8 @@ fn build_cache(wb: &Workbook, tables: &[(&PivotTable, usize)], slicer_fields: &[
         return None;
     }
     let sh = wb.sheet(si)?;
-    let mut fields: Vec<CField> = Vec::new();
-    // Lower-case names taken, and the next suffix for each header (linear for repeated headers).
-    let mut taken = std::collections::HashSet::new();
-    let mut next_suffix: HashMap<String, usize> = HashMap::new();
-    for (k, c) in (r.start.col..=r.end.col).enumerate() {
-        let mut h = header_text(&sh.value(CellRef::new(r.start.row, c)).scalar());
-        if h.is_empty() {
-            h = format!("Column{}", k + 1);
-        }
-        let mut n = h.clone();
-        let mut i = next_suffix.get(&h.to_lowercase()).copied().unwrap_or(2);
-        while taken.contains(&n.to_lowercase()) {
-            n = format!("{h}{i}");
-            i += 1;
-        }
-        next_suffix.insert(h.to_lowercase(), i);
-        taken.insert(n.to_lowercase());
-        fields.push(CField {
-            name: n,
-            col: Some(k as u32),
-            stats: Stats::default(),
-            items: vec![],
-            index: HashMap::new(),
-            itemized: false,
-            group: None,
-            formula: None,
-        });
-    }
+    let (mut fields, rows) = source_fields_and_rows(sh, r);
     let find = |fields: &[CField], name: &str| fields.iter().position(|f| f.col.is_some() && same(&f.name, name));
-
-    // Records (rows that aren't entirely blank), read once.
-    let mut rows: Vec<u32> = Vec::new();
-    if r.end.row > r.start.row {
-        for row in r.start.row + 1..=r.end.row {
-            let blank = (r.start.col..=r.end.col).all(|c| sh.value(CellRef::new(row, c)).scalar().is_empty());
-            if !blank {
-                rows.push(row);
-            }
-        }
-    }
-    for &row in &rows {
-        for f in fields.iter_mut() {
-            let c = r.start.col + f.col.unwrap_or(0);
-            f.stats.add(&sh.value(CellRef::new(row, c)).scalar());
-        }
-    }
 
     // How dates are grouped, by the axis fields and the filters (a filtered field in no area keeps
     // its grouping): per base column, the base field takes the finest grouping and coarser ones
@@ -447,68 +410,7 @@ fn build_cache(wb: &Workbook, tables: &[(&PivotTable, usize)], slicer_fields: &[
             axis.chain(pt.filters.iter().map(|f| (f.source_col.as_str(), pt.filter_group(f))))
         })
         .collect();
-    let groupable = |f: &CField| {
-        let s = &f.stats;
-        s.number
-            && !s.text
-            && !s.boolean
-            && !s.error
-            && datetime_from_serial(wb.date_system, s.min).is_some()
-            && datetime_from_serial(wb.date_system, s.max).is_some()
-    };
-    // (base column field, groupings fine → coarse)
-    let mut groupings: Vec<(usize, Vec<PivotDateGroup>)> = Vec::new();
-    for &(col, by) in &used {
-        let Some(b) = find(&fields, col) else { continue };
-        if by == PivotDateGroup::None || !fields.get(b).is_some_and(groupable) {
-            continue;
-        }
-        match groupings.iter_mut().find(|(x, _)| *x == b) {
-            Some((_, v)) => {
-                if !v.contains(&by) {
-                    v.push(by);
-                }
-            }
-            None => groupings.push((b, vec![by])),
-        }
-    }
-    for (b, list) in groupings.iter_mut() {
-        list.sort_by_key(|g| g.coarseness());
-        let (min, max) = fields.get(*b).map(|f| (f.stats.min, f.stats.max)).unwrap_or((0.0, 0.0));
-        let (start, end) = (min.floor(), max.floor() + 1.0);
-        let make = |by: PivotDateGroup| Group { by, base: *b, par: None, start, end, items: group_items(wb.date_system, by, start, end) };
-        let mut prev = *b;
-        for (k, by) in list.iter().enumerate() {
-            if k == 0 {
-                if let Some(f) = fields.get_mut(*b) {
-                    f.group = Some(make(*by));
-                }
-                continue;
-            }
-            let new = fields.len();
-            let caption = group_caption(*by);
-            let mut n = caption.to_string();
-            let mut i = 2;
-            while fields.iter().any(|f| same(&f.name, &n)) {
-                n = format!("{caption}{i}");
-                i += 1;
-            }
-            if let Some(g) = fields.get_mut(prev).and_then(|f| f.group.as_mut()) {
-                g.par = Some(new);
-            }
-            fields.push(CField {
-                name: n,
-                col: None,
-                stats: Stats::default(),
-                items: vec![],
-                index: HashMap::new(),
-                itemized: false,
-                group: Some(make(*by)),
-                formula: None,
-            });
-            prev = new;
-        }
-    }
+    apply_date_groupings(&mut fields, &used, wb.date_system);
     let mut axis_maps: Vec<AxisMap> = Vec::with_capacity(tables.len());
     for (pt, _) in tables {
         let mut axis_map: AxisMap = Vec::with_capacity(pt.rows.len() + pt.columns.len());
@@ -753,7 +655,6 @@ fn cache_xml(c: &Cache, records_rid: Option<&str>, sys: DateSystem) -> String {
 }
 
 fn table_xml(pt: &PivotTable, idx: usize, cache_id: u32, c: &Cache, axis_map: &[Option<usize>], fmt_id: &dyn Fn(&str) -> Option<u32>) -> String {
-    let nf = c.fields.len();
     let find_db = |name: &str| c.fields.iter().position(|f| f.col.is_some() && same(&f.name, name));
     let row_idx: Vec<usize> = axis_map.iter().take(pt.rows.len()).filter_map(|x| *x).collect();
     let col_idx: Vec<usize> = axis_map.iter().skip(pt.rows.len()).filter_map(|x| *x).collect();
@@ -782,10 +683,6 @@ fn table_xml(pt: &PivotTable, idx: usize, cache_id: u32, c: &Cache, axis_map: &[
     let find_calc = |name: &str| c.fields.iter().position(|f| f.formula.is_some() && same(&f.name, name));
     let vals: Vec<(usize, &PivotValue)> =
         pt.values.iter().filter_map(|v| find_db(&v.source_col).or_else(|| find_calc(&v.source_col)).map(|i| (i, v))).collect();
-    let axis_field = |i: usize| -> Option<&PivotField> {
-        let p = axis_map.iter().position(|x| *x == Some(i))?;
-        pt.rows.iter().chain(pt.columns.iter()).nth(p)
-    };
 
     let compact = pt.layout == PivotLayout::Compact;
     let name = if pt.name.trim().is_empty() { format!("PivotTable{}", idx + 1) } else { pt.name.clone() };
@@ -850,8 +747,109 @@ fn table_xml(pt: &PivotTable, idx: usize, cache_id: u32, c: &Cache, axis_map: &[
     }
     s.push_str("/>");
 
-    // Fields.
-    let _ = write!(s, "<pivotFields count=\"{nf}\">");
+    write_pivot_fields(&mut s, pt, c, axis_map, &row_idx, &col_idx, &pages, &vals, &hidden);
+    axis_fields_xml(&mut s, "rowFields", &row_idx, row_values);
+    axis_fields_xml(&mut s, "colFields", &col_idx, col_values);
+    write_page_fields(&mut s, c, &pages);
+    write_data_fields(&mut s, c, &vals, &row_idx, &col_idx, fmt_id);
+    s.push_str("<pivotTableStyleInfo");
+    if !pt.style.is_empty() {
+        let _ = write!(s, " name=\"{}\"", esc_attr(&pt.style));
+    }
+    s.push_str(" showRowHeaders=\"1\" showColHeaders=\"1\" showRowStripes=\"0\" showColStripes=\"0\" showLastColumn=\"1\"/>");
+    if hide_values_row {
+        let _ = write!(
+            s,
+            "<extLst><ext uri=\"{EXT_X14_PIVOT_TABLE}\" xmlns:x14=\"{NS_X14}\"><x14:pivotTableDefinition hideValuesRow=\"1\"/></ext></extLst>"
+        );
+    }
+    s.push_str("</pivotTableDefinition>");
+    s
+}
+
+fn apply_date_groupings(fields: &mut Vec<CField>, used: &[(&str, PivotDateGroup)], date_system: DateSystem) {
+    let find = |fields: &[CField], name: &str| fields.iter().position(|f| f.col.is_some() && same(&f.name, name));
+    let groupable = |f: &CField| {
+        let s = &f.stats;
+        s.number
+            && !s.text
+            && !s.boolean
+            && !s.error
+            && datetime_from_serial(date_system, s.min).is_some()
+            && datetime_from_serial(date_system, s.max).is_some()
+    };
+    // (base column field, groupings fine → coarse)
+    let mut groupings: Vec<(usize, Vec<PivotDateGroup>)> = Vec::new();
+    for &(col, by) in used {
+        let Some(b) = find(fields, col) else { continue };
+        if by == PivotDateGroup::None || !fields.get(b).is_some_and(groupable) {
+            continue;
+        }
+        match groupings.iter_mut().find(|(x, _)| *x == b) {
+            Some((_, v)) => {
+                if !v.contains(&by) {
+                    v.push(by);
+                }
+            }
+            None => groupings.push((b, vec![by])),
+        }
+    }
+    for (b, list) in groupings.iter_mut() {
+        list.sort_by_key(|g| g.coarseness());
+        let (min, max) = fields.get(*b).map(|f| (f.stats.min, f.stats.max)).unwrap_or((0.0, 0.0));
+        let (start, end) = (min.floor(), max.floor() + 1.0);
+        let make = |by: PivotDateGroup| Group { by, base: *b, par: None, start, end, items: group_items(date_system, by, start, end) };
+        let mut prev = *b;
+        for (k, by) in list.iter().enumerate() {
+            if k == 0 {
+                if let Some(f) = fields.get_mut(*b) {
+                    f.group = Some(make(*by));
+                }
+                continue;
+            }
+            let new = fields.len();
+            let caption = group_caption(*by);
+            let mut n = caption.to_string();
+            let mut i = 2;
+            while fields.iter().any(|f| same(&f.name, &n)) {
+                n = format!("{caption}{i}");
+                i += 1;
+            }
+            if let Some(g) = fields.get_mut(prev).and_then(|f| f.group.as_mut()) {
+                g.par = Some(new);
+            }
+            fields.push(CField {
+                name: n,
+                col: None,
+                stats: Stats::default(),
+                items: vec![],
+                index: HashMap::new(),
+                itemized: false,
+                group: Some(make(*by)),
+                formula: None,
+            });
+            prev = new;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_pivot_fields(
+    s: &mut String,
+    pt: &PivotTable,
+    c: &Cache,
+    axis_map: &[Option<usize>],
+    row_idx: &[usize],
+    col_idx: &[usize],
+    pages: &[(usize, &PivotFilter)],
+    vals: &[(usize, &PivotValue)],
+    hidden: &HashMap<usize, &PivotFilter>,
+) {
+    let axis_field = |i: usize| -> Option<&PivotField> {
+        let p = axis_map.iter().position(|x| *x == Some(i))?;
+        pt.rows.iter().chain(pt.columns.iter()).nth(p)
+    };
+    let _ = write!(s, "<pivotFields count=\"{}\">", c.fields.len());
     for (i, f) in c.fields.iter().enumerate() {
         s.push_str("<pivotField");
         let axis = if row_idx.contains(&i) {
@@ -931,84 +929,132 @@ fn table_xml(pt: &PivotTable, idx: usize, cache_id: u32, c: &Cache, axis_map: &[
         }
     }
     s.push_str("</pivotFields>");
+}
 
-    axis_fields_xml(&mut s, "rowFields", &row_idx, row_values);
-    axis_fields_xml(&mut s, "colFields", &col_idx, col_values);
-    if !pages.is_empty() {
-        let _ = write!(s, "<pageFields count=\"{}\">", pages.len());
-        for (i, f) in &pages {
-            let _ = write!(s, "<pageField fld=\"{i}\"");
-            if let Some(sel) = &f.selected
-                && sel.len() == 1
-                && let Some(one) = sel.first()
-                && let Some(x) = c.fields.get(*i).and_then(|cf| cf.item_labels().iter().position(|l| same(l, one)))
-            {
-                let _ = write!(s, " item=\"{x}\"");
-            }
-            s.push_str(" hier=\"-1\"/>");
+fn write_page_fields(s: &mut String, c: &Cache, pages: &[(usize, &PivotFilter)]) {
+    if pages.is_empty() {
+        return;
+    }
+    let _ = write!(s, "<pageFields count=\"{}\">", pages.len());
+    for (i, f) in pages {
+        let _ = write!(s, "<pageField fld=\"{i}\"");
+        if let Some(sel) = &f.selected
+            && sel.len() == 1
+            && let Some(one) = sel.first()
+            && let Some(x) = c.fields.get(*i).and_then(|cf| cf.item_labels().iter().position(|l| same(l, one)))
+        {
+            let _ = write!(s, " item=\"{x}\"");
         }
-        s.push_str("</pageFields>");
+        s.push_str(" hier=\"-1\"/>");
     }
-    if !vals.is_empty() {
-        let _ = write!(s, "<dataFields count=\"{k}\">");
-        let mut used: Vec<String> = Vec::new();
-        for (i, v) in &vals {
-            let base = if v.name.trim().is_empty() {
-                format!("{} of {}", func_caption(v.func), c.fields.get(*i).map(|f| f.name.as_str()).unwrap_or(""))
-            } else {
-                v.name.clone()
-            };
-            let mut n = base.clone();
-            let mut j = 2;
-            while used.iter().any(|u| same(u, &n)) {
-                n = format!("{base}{j}");
-                j += 1;
+    s.push_str("</pageFields>");
+}
+
+fn write_data_fields(
+    s: &mut String,
+    c: &Cache,
+    vals: &[(usize, &PivotValue)],
+    row_idx: &[usize],
+    col_idx: &[usize],
+    fmt_id: &dyn Fn(&str) -> Option<u32>,
+) {
+    if vals.is_empty() {
+        return;
+    }
+    let _ = write!(s, "<dataFields count=\"{}\">", vals.len());
+    let mut used: Vec<String> = Vec::new();
+    for (i, v) in vals {
+        let base = if v.name.trim().is_empty() {
+            format!("{} of {}", func_caption(v.func), c.fields.get(*i).map(|f| f.name.as_str()).unwrap_or(""))
+        } else {
+            v.name.clone()
+        };
+        let mut n = base.clone();
+        let mut j = 2;
+        while used.iter().any(|u| same(u, &n)) {
+            n = format!("{base}{j}");
+            j += 1;
+        }
+        used.push(n.clone());
+        let _ = write!(s, "<dataField name=\"{}\" fld=\"{i}\"", esc_attr(&n));
+        if v.func != PivotFunc::Sum {
+            let _ = write!(s, " subtotal=\"{}\"", func_name(v.func));
+        }
+        let base_field = row_idx.first().or(col_idx.first()).copied().unwrap_or(0);
+        match v.show_as {
+            PivotShowAs::Normal => s.push_str(" baseField=\"0\" baseItem=\"0\""),
+            PivotShowAs::PercentOfGrandTotal => s.push_str(" showDataAs=\"percentOfTotal\" baseField=\"0\" baseItem=\"0\""),
+            PivotShowAs::PercentOfColumnTotal => s.push_str(" showDataAs=\"percentOfCol\" baseField=\"0\" baseItem=\"0\""),
+            PivotShowAs::PercentOfRowTotal => s.push_str(" showDataAs=\"percentOfRow\" baseField=\"0\" baseItem=\"0\""),
+            PivotShowAs::RunningTotal => {
+                let _ = write!(s, " showDataAs=\"runTotal\" baseField=\"{base_field}\" baseItem=\"0\"");
             }
-            used.push(n.clone());
-            let _ = write!(s, "<dataField name=\"{}\" fld=\"{i}\"", esc_attr(&n));
-            if v.func != PivotFunc::Sum {
-                let _ = write!(s, " subtotal=\"{}\"", func_name(v.func));
-            }
-            let base_field = row_idx.first().or(col_idx.first()).copied().unwrap_or(0);
-            match v.show_as {
-                PivotShowAs::Normal => s.push_str(" baseField=\"0\" baseItem=\"0\""),
-                PivotShowAs::PercentOfGrandTotal => s.push_str(" showDataAs=\"percentOfTotal\" baseField=\"0\" baseItem=\"0\""),
-                PivotShowAs::PercentOfColumnTotal => s.push_str(" showDataAs=\"percentOfCol\" baseField=\"0\" baseItem=\"0\""),
-                PivotShowAs::PercentOfRowTotal => s.push_str(" showDataAs=\"percentOfRow\" baseField=\"0\" baseItem=\"0\""),
-                PivotShowAs::RunningTotal => {
-                    let _ = write!(s, " showDataAs=\"runTotal\" baseField=\"{base_field}\" baseItem=\"0\"");
-                }
-                PivotShowAs::Rank => {
-                    let _ = write!(s, " baseField=\"{base_field}\" baseItem=\"0\"");
-                }
-            }
-            if let Some(id) = v.number_format.as_deref().and_then(fmt_id) {
-                let _ = write!(s, " numFmtId=\"{id}\"");
-            }
-            if v.show_as == PivotShowAs::Rank {
-                let _ = write!(
-                    s,
-                    "><extLst><ext uri=\"{EXT_X14_DATA_FIELD}\" xmlns:x14=\"{NS_X14}\"><x14:dataField pivotShowAs=\"rankDescending\"/></ext></extLst></dataField>"
-                );
-            } else {
-                s.push_str("/>");
+            PivotShowAs::Rank => {
+                let _ = write!(s, " baseField=\"{base_field}\" baseItem=\"0\"");
             }
         }
-        s.push_str("</dataFields>");
+        if let Some(id) = v.number_format.as_deref().and_then(fmt_id) {
+            let _ = write!(s, " numFmtId=\"{id}\"");
+        }
+        if v.show_as == PivotShowAs::Rank {
+            let _ = write!(
+                s,
+                "><extLst><ext uri=\"{EXT_X14_DATA_FIELD}\" xmlns:x14=\"{NS_X14}\"><x14:dataField pivotShowAs=\"rankDescending\"/></ext></extLst></dataField>"
+            );
+        } else {
+            s.push_str("/>");
+        }
     }
-    s.push_str("<pivotTableStyleInfo");
-    if !pt.style.is_empty() {
-        let _ = write!(s, " name=\"{}\"", esc_attr(&pt.style));
+    s.push_str("</dataFields>");
+}
+
+fn source_fields_and_rows(sh: &gridcraft_model::Sheet, r: RangeRef) -> (Vec<CField>, Vec<u32>) {
+    let mut fields: Vec<CField> = Vec::new();
+    // Lower-case names taken, and the next suffix for each header (linear for repeated headers).
+    let mut taken = std::collections::HashSet::new();
+    let mut next_suffix: HashMap<String, usize> = HashMap::new();
+    for (k, c) in (r.start.col..=r.end.col).enumerate() {
+        let mut h = header_text(&sh.value(CellRef::new(r.start.row, c)).scalar());
+        if h.is_empty() {
+            h = format!("Column{}", k + 1);
+        }
+        let mut n = h.clone();
+        let mut i = next_suffix.get(&h.to_lowercase()).copied().unwrap_or(2);
+        while taken.contains(&n.to_lowercase()) {
+            n = format!("{h}{i}");
+            i += 1;
+        }
+        next_suffix.insert(h.to_lowercase(), i);
+        taken.insert(n.to_lowercase());
+        fields.push(CField {
+            name: n,
+            col: Some(k as u32),
+            stats: Stats::default(),
+            items: vec![],
+            index: HashMap::new(),
+            itemized: false,
+            group: None,
+            formula: None,
+        });
     }
-    s.push_str(" showRowHeaders=\"1\" showColHeaders=\"1\" showRowStripes=\"0\" showColStripes=\"0\" showLastColumn=\"1\"/>");
-    if hide_values_row {
-        let _ = write!(
-            s,
-            "<extLst><ext uri=\"{EXT_X14_PIVOT_TABLE}\" xmlns:x14=\"{NS_X14}\"><x14:pivotTableDefinition hideValuesRow=\"1\"/></ext></extLst>"
-        );
+
+    // Records (rows that aren't entirely blank), read once.
+    let mut rows: Vec<u32> = Vec::new();
+    if r.end.row > r.start.row {
+        for row in r.start.row + 1..=r.end.row {
+            let blank = (r.start.col..=r.end.col).all(|c| sh.value(CellRef::new(row, c)).scalar().is_empty());
+            if !blank {
+                rows.push(row);
+            }
+        }
     }
-    s.push_str("</pivotTableDefinition>");
-    s
+    for &row in &rows {
+        for f in fields.iter_mut() {
+            let c = r.start.col + f.col.unwrap_or(0);
+            f.stats.add(&sh.value(CellRef::new(row, c)).scalar());
+        }
+    }
+    (fields, rows)
 }
 
 /// `<rowFields>`/`<colFields>`: the axis's cache field indices, with Σ Values (`-2`) at `values_at`.

@@ -12,7 +12,6 @@
 //! (OLAP sources, calculated fields, numeric grouping…) becomes a warning.
 
 use std::collections::HashMap;
-use std::fmt::Write as _;
 
 use gridcraft_core::date::datetime_from_serial;
 use gridcraft_core::{CellRef, DateSystem, RangeRef, Value, number_to_text};

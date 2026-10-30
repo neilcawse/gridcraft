@@ -1,6 +1,9 @@
 use super::create::pivot_json;
 use super::params::{area_param, func_param, position_param, show_as_param};
-use super::*;
+use super::{
+    Json, PivotCalcField, PivotDateGroup, PivotField, PivotFilter, PivotFunc, PivotShowAs, PivotTable, PivotValue, Result, Session, SlicerSource,
+    Workbook, bad, bool_param, edit, find_pivot, json, ok, other, pv, str_param, u32_param,
+};
 
 // ---------------------------------------------------------------- layout editing (pure)
 
@@ -104,16 +107,17 @@ fn auto_name(f: PivotFunc, field: &str) -> String {
 }
 
 /// Adds `field` to an area (moving it out of the other axis areas).
-pub(super) fn add_to_area(
-    cmd: &str,
-    pt: &mut PivotTable,
-    src: &pv::Source,
-    field: &str,
-    area: &str,
-    func: Option<PivotFunc>,
-    name: Option<&str>,
-    position: Option<usize>,
-) -> Result<()> {
+pub(super) struct AreaPlacement<'a> {
+    pub cmd: &'a str,
+    pub field: &'a str,
+    pub area: &'a str,
+    pub func: Option<PivotFunc>,
+    pub name: Option<&'a str>,
+    pub position: Option<usize>,
+}
+
+pub(super) fn add_to_area(pt: &mut PivotTable, src: &pv::Source, placement: AreaPlacement<'_>) -> Result<()> {
+    let AreaPlacement { cmd, field, area, func, name, position } = placement;
     let is_calc = src.col(field).is_none() && calc_field(pt, field).is_some();
     if is_calc && area != "values" {
         return Err(other("A calculated field can only be placed in the Values area."));
@@ -124,16 +128,13 @@ pub(super) fn add_to_area(
             if pt.rows.len() + pt.columns.len() >= pv::MAX_AXIS_FIELDS && !in_axes(pt, &field) {
                 return Err(other(format!("A PivotTable can have at most {} row and column fields.", pv::MAX_AXIS_FIELDS)));
             }
-            // A field new to the axes keeps the date grouping its filter holds, and the filter
-            // keeps its level wherever the field moves.
             let held = pt.filters.iter().find(|f| f.source_col.eq_ignore_ascii_case(&field)).map(|f| pt.filter_group(f)).unwrap_or_default();
             for f in pt.filters.iter_mut().filter(|f| f.source_col.eq_ignore_ascii_case(&field)) {
                 f.date_group = held;
             }
             let existing =
                 take_from_axes(pt, &field).unwrap_or_else(|| PivotField { source_col: field.clone(), date_group: held, ..Default::default() });
-            // A report filter that selects nothing in particular goes away; a selection stays
-            // as the field's hidden items.
+            // A report filter that selects nothing in particular goes away; a selection stays as the field's hidden items.
             pt.filters.retain(|f| !(f.source_col.eq_ignore_ascii_case(&field) && f.selected.is_none()));
             insert_axis_field(pt, area == "rows", existing, position);
             pt.normalize_filter_groups();
@@ -334,7 +335,7 @@ pub(super) fn add_field(s: &mut Session, p: &Json) -> Result<Json> {
     let name = str_param(p, "name").map(str::to_string);
     let pos = position_param(p);
     update(s, p, |pt, src, _| {
-        add_to_area(C, pt, src, &field, area, func, name.as_deref(), pos)?;
+        add_to_area(pt, src, AreaPlacement { cmd: C, field: &field, area, func, name: name.as_deref(), position: pos })?;
         Ok(json!({"field": canonical_any(C, pt, src, &field)?, "area": area}))
     })
 }
@@ -398,7 +399,7 @@ pub(super) fn calculated_field(s: &mut Session, p: &Json) -> Result<Json> {
             return Err(bad(C, format!("`{canon}` refers to itself through its formula")));
         }
         if existing.is_none() && to_values && !pt.values.iter().any(|v| v.source_col.eq_ignore_ascii_case(&canon)) {
-            add_to_area(C, pt, src, &canon, "values", Some(PivotFunc::Sum), None, None)?;
+            add_to_area(pt, src, AreaPlacement { cmd: C, field: &canon, area: "values", func: Some(PivotFunc::Sum), name: None, position: None })?;
         }
         Ok(json!({
             "name": canon,
@@ -500,7 +501,7 @@ pub(super) fn move_field(s: &mut Session, p: &Json) -> Result<Json> {
         } else {
             remove_from_area(C, &mut pt.clone(), &field, from, keep_slicer)?
         };
-        add_to_area(C, pt, src, &src_field, to, None, None, pos)?;
+        add_to_area(pt, src, AreaPlacement { cmd: C, field: &src_field, area: to, func: None, name: None, position: pos })?;
         Ok(json!({"field": src_field, "to": to}))
     })
 }
