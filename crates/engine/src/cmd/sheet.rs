@@ -272,6 +272,7 @@ fn mark_changed_name_spans(cx: &mut Ctx, before: &[String], after: &[String]) {
 /// Formulas that now read other cells count as changed, and names whose references only moved
 /// don't (see `edit::rewrite_all_formulas`).
 pub(super) fn rewrite(cx: &mut Ctx, target: &str, e: &Edit) {
+    cx.edits.push((target.to_string(), e.clone()));
     // A single command can apply several edits (multi-area delete, column move). Keep formulas
     // forgotten by an earlier step at their final positions so their readers are seeded there.
     let old = std::mem::take(&mut cx.changed);

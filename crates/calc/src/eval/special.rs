@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    Area, BinOp, CellError, Ev, Expr, ExternalBook, ExternalName, ExternalSheet, LINKED_BOOK_BITS, LINKED_SHEET_BITS, LINKED_SHEETS, Reference,
+    SheetSel, Value, Workbook,
+};
+use gridcraft_core::{CellRef, MAX_COLS, MAX_ROWS, RangeRef};
 
 /// SUMIF and AVERAGEIF with a sum range: Excel sizes the sum range like the criteria range.
 pub(super) fn resizes_sum_range(name: &str, args: usize) -> bool {
@@ -334,6 +338,3 @@ pub const SPECIAL_FUNCTIONS: &[&str] = &[
 pub fn is_known_function(n: &str) -> bool {
     is_special(&n.to_ascii_uppercase()) || gridcraft_functions::lookup(n).is_some()
 }
-
-#[allow(dead_code)]
-fn unused(_: RefKind) {}
