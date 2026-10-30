@@ -1,5 +1,5 @@
 use super::output::Output;
-use super::*;
+use super::{CellRef, Chart, HashMap, HashSet, PivotTable, RangeRef, Series, Workbook, distinct_labels, quote_sheet, read_source, resolve_source};
 
 // ---------------------------------------------------------------- PivotCharts
 
