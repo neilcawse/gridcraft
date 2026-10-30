@@ -256,7 +256,7 @@ pub fn read_drawing(cx: &mut Ctx<'_>, part: &str, sheet: &mut Sheet) -> Result<(
         let px = 1.0 / EMU_PER_PX;
         let place = Place { anchor, rect: sheet.anchor_rect(&anchor), scale: (px, px), flip: (false, false) };
         for obj in drawing_objects(&a.children) {
-            read_object(cx, part, n, &rels, sheet, obj, place, 0)?;
+            read_object(cx, (part, n), &rels, sheet, obj, place, 0)?;
         }
     }
     Ok(())
@@ -268,8 +268,7 @@ pub fn read_drawing(cx: &mut Ctx<'_>, part: &str, sheet: &mut Sheet) -> Result<(
 /// supported are dropped with their own warning.
 fn read_object(
     cx: &mut Ctx<'_>,
-    part: &str,
-    n: usize,
+    (part, n): (&str, usize),
     rels: &[Rel],
     sheet: &mut Sheet,
     obj: &El,
@@ -357,7 +356,7 @@ fn read_object(
                 let rot = if child.name == "grpSp" { 0 } else { xfrm_rot(cxf) };
                 let rect = map.child(cxf, quarter_turn(rot));
                 let place = Place { anchor: sheet.rect_anchor(rect, anchor.mode), rect, scale: map.scale, flip: map.flip };
-                let Some(m) = read_object(cx, part, n, rels, sheet, child, place, depth + 1)? else {
+                let Some(m) = read_object(cx, (part, n), rels, sheet, child, place, depth + 1)? else {
                     file_complete = false;
                     continue;
                 };

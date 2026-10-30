@@ -127,6 +127,12 @@ fn styles_theme_and_sizes() {
     let bytes = minimal(body, &[("xl/styles.xml", styles), ("xl/theme/theme1.xml", theme)], rels, "");
     let (wb, _) = read_xlsx(&bytes).unwrap();
     let s = wb.sheet(0).unwrap();
+    assert_style_definitions(&wb, s);
+    assert_theme(&wb);
+    assert_sheet_settings(s);
+}
+
+fn assert_style_definitions(wb: &gridcraft_model::Workbook, s: &gridcraft_model::Sheet) {
     let st1 = wb.styles.get(s.cell(at("A1")).unwrap().style);
     assert_eq!(st1.num_fmt.as_str(), "0.000\"kg\"");
     assert!(st1.font.bold && st1.font.italic && st1.font.strike);
@@ -152,6 +158,9 @@ fn styles_theme_and_sizes() {
     assert_eq!(st3.fill.pattern, PatternType::DarkGrid);
     assert_eq!(st3.fill.fg, Color::Theme(5, 0));
     assert_eq!(wb.styles.get(s.cell(at("D1")).unwrap().style).num_fmt.as_str(), "General");
+}
+
+fn assert_theme(wb: &gridcraft_model::Workbook) {
     // Theme: file order dk1, lt1… maps to lt1, dk1… in the model.
     assert_eq!(wb.theme.colors[0], 0xFFFFFF);
     assert_eq!(wb.theme.colors[1], 0x000000);
@@ -159,6 +168,9 @@ fn styles_theme_and_sizes() {
     assert_eq!(wb.theme.colors[3], 0x44546A);
     assert_eq!(wb.theme.colors[4], 0x4472C4);
     assert_eq!(wb.theme.major_font, "Calibri Light");
+}
+
+fn assert_sheet_settings(s: &gridcraft_model::Sheet) {
     // Sheet settings.
     assert_eq!(s.tab_color, Some(Color::Rgb(0x00B050)));
     assert_eq!(s.freeze, Some((2, 1)));
@@ -557,7 +569,27 @@ fn grouped_objects_import_as_groups_through_nested_group_transforms() {
     // Saved: one anchor holding the outer grpSp, its members in order and in the file's child
     // coordinate spaces (the dropped SmartArt frame shrinks the outer group to its members' box).
     let saved = crate::write_xlsx(&wb).unwrap();
-    let mut pkg = crate::package::Package::open(&saved).unwrap();
+    assert_saved_group_drawing(&saved);
+    // Reopened: the same groups and members in the same places.
+    let (back, rep) = read_xlsx(&saved).unwrap();
+    assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
+    let b = back.sheet(0).unwrap();
+    let (bo, _) = structure(b);
+    let same = |x: &gridcraft_model::Anchor, y: &gridcraft_model::Anchor| {
+        x.cell == y.cell && near(x.dx, y.dx) && near(x.dy, y.dy) && near(x.width, y.width) && near(x.height, y.height) && x.mode == y.mode
+    };
+    assert!(same(&b.images[0].anchor, img), "{:?}", b.images[0].anchor);
+    assert!(same(&b.charts[0].anchor, ch), "{:?}", b.charts[0].anchor);
+    assert!(same(&b.shapes[0].anchor, sp), "{:?}", b.shapes[0].anchor);
+    // The outer group now spans its members (B3+20,5 → 204 × 150 px) at the file's half scale.
+    assert_eq!(bo.anchor.cell, at("B3"));
+    assert!(near(bo.anchor.width, 204.0) && near(bo.anchor.height, 150.0), "{:?}", bo.anchor);
+    let close = |(a, b): (i64, i64), (c, d): (i64, i64)| (a - c).abs() <= 2 && (b - d).abs() <= 2;
+    assert!(close(bo.child_offset, (1333500, 952500)) && close(bo.child_extent, (3886200, 2857500)), "{:?}", (bo.child_offset, bo.child_extent));
+}
+
+fn assert_saved_group_drawing(saved: &[u8]) {
+    let mut pkg = crate::package::Package::open(saved).unwrap();
     let x = pkg.read_xml("xl/drawings/drawing1.xml").unwrap().unwrap();
     assert_eq!(x.children.len(), 1);
     let anchor = &x.children[0];
@@ -578,22 +610,6 @@ fn grouped_objects_import_as_groups_through_nested_group_transforms() {
     assert!(close(pair(ch_xf.and_then(|x| x.child("ext")), "cx", "cy"), (6096000, 4762500)));
     let sp_xf = ig.path(&["sp", "spPr", "xfrm"]);
     assert!(close(pair(sp_xf.and_then(|x| x.child("off")), "x", "y"), (0, 0)));
-
-    // Reopened: the same groups and members in the same places.
-    let (back, rep) = read_xlsx(&saved).unwrap();
-    assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
-    let b = back.sheet(0).unwrap();
-    let (bo, _) = structure(b);
-    let same = |x: &gridcraft_model::Anchor, y: &gridcraft_model::Anchor| {
-        x.cell == y.cell && near(x.dx, y.dx) && near(x.dy, y.dy) && near(x.width, y.width) && near(x.height, y.height) && x.mode == y.mode
-    };
-    assert!(same(&b.images[0].anchor, img), "{:?}", b.images[0].anchor);
-    assert!(same(&b.charts[0].anchor, ch), "{:?}", b.charts[0].anchor);
-    assert!(same(&b.shapes[0].anchor, sp), "{:?}", b.shapes[0].anchor);
-    // The outer group now spans its members (B3+20,5 → 204 × 150 px) at the file's half scale.
-    assert_eq!(bo.anchor.cell, at("B3"));
-    assert!(near(bo.anchor.width, 204.0) && near(bo.anchor.height, 150.0), "{:?}", bo.anchor);
-    assert!(close(bo.child_offset, (1333500, 952500)) && close(bo.child_extent, (3886200, 2857500)), "{:?}", (bo.child_offset, bo.child_extent));
 }
 
 #[test]
