@@ -216,7 +216,8 @@ pub(super) fn pie(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx, inne
         a += sweep;
     }
     for (x, y, t, c) in labels {
-        ctx.text(x, y, &t, LABEL_SIZE, c, (HAlign::Center, VAlign::Middle));
+        let sz = if c == super::DARK_TEXT { 11.5 } else { LABEL_SIZE };
+        ctx.text(x, y, &t, sz, c, (HAlign::Center, VAlign::Middle));
     }
 }
 

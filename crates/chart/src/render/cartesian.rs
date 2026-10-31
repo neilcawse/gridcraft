@@ -216,18 +216,20 @@ fn draw_bar_label(
     pt: f32,
     lo: f32,
     len: f32,
+    bw: f32,
     pos: f32,
     horizontal: bool,
     stacked: bool,
     in_end: bool,
     fill: super::Rgba,
 ) {
+    let in_sz = if bw >= 16.0 && len >= 18.0 { 11.5 } else { LABEL_SIZE };
     let mid = (pb + pt) / 2.0;
     if horizontal {
         if stacked {
             ctx.text(mid, pos, t, LABEL_SIZE, on(fill), (HAlign::Center, VAlign::Middle));
         } else if in_end && v >= 0.0 {
-            ctx.text(pb.max(pt) - 3.0, pos, t, LABEL_SIZE, super::DARK_TEXT, (HAlign::Right, VAlign::Middle));
+            ctx.text(pb.max(pt) - 3.0, pos, t, in_sz, super::DARK_TEXT, (HAlign::Right, VAlign::Middle));
         } else if v >= 0.0 {
             ctx.text(pb.max(pt) + 3.0, pos, t, LABEL_SIZE, TEXT, (HAlign::Left, VAlign::Middle));
         } else {
@@ -236,7 +238,7 @@ fn draw_bar_label(
     } else if stacked {
         ctx.text(pos, mid, t, LABEL_SIZE, on(fill), (HAlign::Center, VAlign::Middle));
     } else if in_end && v >= 0.0 {
-        ctx.text(pos, lo + 2.0, t, LABEL_SIZE, super::DARK_TEXT, (HAlign::Center, VAlign::Top));
+        ctx.text(pos, lo + 2.0, t, in_sz, super::DARK_TEXT, (HAlign::Center, VAlign::Top));
     } else if v >= 0.0 {
         ctx.text(pos, lo - 2.0, t, LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Bottom));
     } else {
@@ -361,7 +363,7 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
                             let t = fmt.format(v, None);
                             let in_end = chart.axis_number_formats.label_pos.as_deref() == Some("inEnd");
                             let pos = if horizontal { c + nslots * bw / 2.0 - (k + 0.5) * bw } else { c - nslots * bw / 2.0 + (k + 0.5) * bw };
-                            draw_bar_label(ctx, &t, v, pb, pt, lo, len, pos, horizontal, fam != Fam::Col, in_end, s.color);
+                            draw_bar_label(ctx, &t, v, pb, pt, lo, len, bw, pos, horizontal, fam != Fam::Col, in_end, s.color);
                         }
                     }
                 }
