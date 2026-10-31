@@ -304,11 +304,22 @@ fn read_object(
                 let target = rel.target.clone();
                 if let Some(cx_xml) = cx.optional_xml(&target)? {
                     let chartex = uri.contains("chartex");
-                    match if chartex { crate::chartex::read_chartex(&cx_xml) } else { crate::chart::read_chart(&cx_xml) } {
-                        Some(mut ch) => {
+                    let read = if chartex {
+                        crate::chartex::read_chartex(&cx_xml).map(|c| (c, Vec::new(), false))
+                    } else {
+                        crate::chart::read_chart_with_budget(&cx_xml)
+                    };
+                    match read {
+                        Some((mut ch, caches, budget_exceeded)) => {
                             let id = cx.next_object_id();
                             ch.id = id;
                             ch.anchor = anchor;
+                            if budget_exceeded {
+                                cx.warn("cached chart points were dropped after the per-chart import budget was exceeded");
+                            }
+                            if !caches.is_empty() {
+                                cx.pivot_charts.push((id, caches));
+                            }
                             sheet.charts.push(ch);
                             return Ok(Some(DrawingRef::Chart(id)));
                         }

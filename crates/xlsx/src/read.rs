@@ -35,6 +35,9 @@ pub struct Ctx<'a> {
     /// Cells of the worksheet being read whose formulas lack dynamic-array metadata (legacy
     /// formulas, evaluated with implicit intersection), collected per sheet.
     pub legacy_formulas: Vec<gridcraft_core::CellRef>,
+    /// PivotCharts (by chart id) and their series' cached points, checked against the cells once
+    /// every sheet is read.
+    pub pivot_charts: Vec<(u32, Vec<crate::chart::PivotSeriesCache>)>,
 }
 
 impl Ctx<'_> {
@@ -242,6 +245,7 @@ pub fn read_xlsx(bytes: &[u8], functions: crate::FunctionInfo) -> Result<(Workbo
         cell_pictures: vec![],
         cf_ext_ids: vec![],
         legacy_formulas: vec![],
+        pivot_charts: vec![],
     };
     let root_rels = cx.pkg.rels("")?;
     let wb_part = find_rel(&root_rels, "officeDocument").map(|r| r.target.clone()).unwrap_or_else(|| "xl/workbook.xml".into());
@@ -330,6 +334,8 @@ pub fn read_xlsx(bytes: &[u8], functions: crate::FunctionInfo) -> Result<(Workbo
         wb.sheets.push(Arc::new(Sheet::new("Sheet1")));
     }
     wb.set_active_sheet(file_to_model.get(active_tab).copied().flatten().unwrap_or(0));
+    // PivotChart series whose references don't hold their cached points plot the cache.
+    crate::chart::plot_pivot_caches(&mut wb, &cx.pivot_charts);
 
     wb.external_books = Arc::new(crate::external::read(&mut cx, &wb_xml, &wb_rels)?);
 
