@@ -285,18 +285,7 @@ pub fn resolve(wb: &Workbook, sheet: usize, chart: &Chart) -> ChartData {
             .collect();
         let number_format = match &s.number_format {
             Some(code) if s.values.trim_start().starts_with('{') => code.clone(),
-            _ => {
-                let rf = ref_format(wb, sheet, &s.values);
-                let cache_fmt = (!chart.axis_number_formats.show_percent).then_some(chart.axis_number_formats.percent_format.as_deref()).flatten();
-                if rf.eq_ignore_ascii_case("general")
-                    && values.iter().any(|v| v.is_some_and(|x| (x - x.round()).abs() > 1e-6))
-                    && let Some(cf) = cache_fmt
-                {
-                    cf.to_string()
-                } else {
-                    rf
-                }
-            }
+            _ => ref_format(wb, sheet, &s.values),
         };
         series.push(SeriesData {
             name,

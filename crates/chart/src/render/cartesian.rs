@@ -196,6 +196,17 @@ fn column_slots(fams: &[Fam], sec: &[bool]) -> (Vec<usize>, f32) {
     (slot_of, slot_keys.len().max(1) as f32)
 }
 
+fn series_label_fmt(chart: &Chart, s: &SeriesData) -> Fmt {
+    if s.label_number_format.is_none()
+        && !chart.axis_number_formats.show_percent
+        && s.number_format.eq_ignore_ascii_case("general")
+        && s.values.iter().any(|v| v.is_some_and(|x| (x - x.round()).abs() > 1e-6))
+        && let Some(cf) = chart.axis_number_formats.percent_format.as_deref()
+    {
+        return Fmt::new(cf);
+    }
+    label_fmt(s)
+}
 #[allow(clippy::too_many_arguments)]
 fn draw_bar_label(
     ctx: &mut Ctx,
@@ -293,7 +304,7 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
                 continue;
             }
             let sc = scale_of(i);
-            let fmt = label_fmt(s);
+            let fmt = series_label_fmt(chart, s);
             let row = match spans.get(i) {
                 Some(r) => r,
                 None => continue,

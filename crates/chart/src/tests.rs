@@ -1384,3 +1384,114 @@ fn empty_titleless_chart_renders_no_opaque_card() {
     c.title = Some(String::new());
     assert!(render(&c, &d, 400.0, 300.0, &ApproxMeasure).is_empty());
 }
+
+#[test]
+fn dcp_render_verify() {
+    let mut wb = Workbook::default();
+    wb.theme.colors = [0xFFFFFF, 0x000000, 0xE7E6E6, 0x44546A, 0x5B9BD5, 0x70AD47, 0xFFC000, 0xED7D31, 0xE71C57, 0x4472C4, 0x0563C1, 0x954F72];
+    let mut sh = gridcraft_model::Sheet::new("Data");
+    // Risk Breakdown data: Low=261, Mild=39, Medium=3, High=0
+    sh.set_value(CellRef::new(0, 0), Value::from("Low"));
+    sh.set_value(CellRef::new(1, 0), Value::from("Mild"));
+    sh.set_value(CellRef::new(2, 0), Value::from("Medium"));
+    sh.set_value(CellRef::new(3, 0), Value::from("High"));
+    sh.set_value(CellRef::new(0, 1), Value::Number(261.0));
+    sh.set_value(CellRef::new(1, 1), Value::Number(39.0));
+    sh.set_value(CellRef::new(2, 1), Value::Number(3.0));
+    sh.set_value(CellRef::new(3, 1), Value::Number(0.0));
+    // Bottom Performers data: 68.23383085, 69.07216495
+    sh.set_value(CellRef::new(5, 2), Value::from("Driver A"));
+    sh.set_value(CellRef::new(6, 2), Value::from("Driver B"));
+    sh.set_value(CellRef::new(5, 3), Value::Number(68.23383085));
+    sh.set_value(CellRef::new(6, 3), Value::Number(69.07216495));
+    wb.sheets = vec![Arc::new(sh)];
+
+    // 1. chart1 (Risk Breakdown doughnut)
+    let mut c1 = chart(ChartKind::Doughnut);
+    c1.title = Some(String::new());
+    c1.legend = LegendPos::Bottom;
+    c1.data_labels = true;
+    c1.axis_number_formats = AxisNumberFormats {
+        no_fill: true,
+        hole_size: Some(65),
+        plot_w: Some(0.8571059),
+        show_percent: true,
+        percent_format: Some("[$-409]0.0%;[$-409];[$-409];[$-409]".into()),
+        point_colors: vec![(0, Color::Theme(5, 600)), (1, Color::Theme(6, 600)), (2, Color::Theme(7, 600)), (3, Color::Theme(8, 600))],
+        point_line_colors: vec![(0, Color::Theme(5, 0)), (1, Color::Theme(6, 0)), (2, Color::Theme(7, 0)), (3, Color::Theme(8, 0))],
+        ..Default::default()
+    };
+    c1.series = vec![Series { categories: Some("Data!$A$1:$A$4".into()), values: "Data!$B$1:$B$4".into(), ..Default::default() }];
+    let d1 = resolve(&wb, 0, &c1);
+    let p1 = render(&c1, &d1, 270.0, 235.0, &ApproxMeasure);
+    let texts1: Vec<_> = p1
+        .iter()
+        .filter_map(|p| match p {
+            Prim::Text { text, color, .. } => Some((text.clone(), *color)),
+            _ => None,
+        })
+        .collect();
+    let wedges1: Vec<_> = p1
+        .iter()
+        .filter_map(|p| match p {
+            Prim::Wedge { fill, stroke, r_outer, r_inner, .. } => Some((*fill, *stroke, *r_outer, *r_inner)),
+            _ => None,
+        })
+        .collect();
+    assert!(texts1.iter().any(|(t, _)| t == "86.1%"));
+    assert!(texts1.iter().any(|(t, _)| t == "12.9%"));
+    assert!(texts1.iter().any(|(t, _)| t == "1.0%"));
+
+    // 2. chart4 (Report doughnut with ser color 589601 overridden by dPt)
+    let mut c4 = c1.clone();
+    c4.legend = LegendPos::None;
+    c4.data_labels = false;
+    c4.axis_number_formats.plot_w = Some(0.61421335);
+    c4.series[0].color = Some(Color::Rgb(0x589601));
+    let d4 = resolve(&wb, 0, &c4);
+    let p4 = render(&c4, &d4, 96.0, 78.0, &ApproxMeasure);
+    let wedges4: Vec<_> = p4
+        .iter()
+        .filter_map(|p| match p {
+            Prim::Wedge { fill, stroke, r_outer, r_inner, .. } => Some((*fill, *stroke, *r_outer, *r_inner)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(wedges4[0].0, wedges1[0].0, "chart4 slice 0 uses pale green dPt, not 589601");
+
+    // 3. chart3 (Bottom Performers column chart)
+    let mut c3 = chart(ChartKind::ColumnClustered);
+    c3.title = Some(" ".into());
+    c3.y_title = Some(" ".into());
+    c3.x_title = None;
+    c3.legend = LegendPos::None;
+    c3.data_labels = true;
+    c3.axis_number_formats = AxisNumberFormats {
+        no_fill: true,
+        gap_width: Some(10),
+        y_max: Some(100.0),
+        x_label_rotation: Some(45.0),
+        label_pos: Some("inEnd".into()),
+        percent_format: Some("[$-409]0.00".into()),
+        series_line_color: Some(Color::Theme(8, 0)),
+        ..Default::default()
+    };
+    c3.series = vec![Series {
+        categories: Some("Data!$C$6:$C$7".into()),
+        values: "Data!$D$6:$D$7".into(),
+        color: Some(Color::Theme(8, 600)),
+        ..Default::default()
+    }];
+    let d3 = resolve(&wb, 0, &c3);
+    let p3 = render(&c3, &d3, 560.0, 340.0, &ApproxMeasure);
+    let texts3: Vec<_> = p3
+        .iter()
+        .filter_map(|p| match p {
+            Prim::Text { text, x, y, valign, .. } => Some((text.clone(), *x, *y, *valign)),
+            _ => None,
+        })
+        .collect();
+    assert!(texts3.iter().any(|(t, _, _, va)| t == "68.23" && *va == VAlign::Top));
+    assert!(texts3.iter().any(|(t, _, _, va)| t == "69.07" && *va == VAlign::Top));
+    assert!(texts3.iter().any(|(t, _, _, _)| t == "90"));
+}
