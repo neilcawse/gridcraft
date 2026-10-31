@@ -98,10 +98,12 @@ fn draw_swatch(ctx: &mut Ctx, sw: Swatch, x: f32, yc: f32, s: f32, color: Rgba, 
 }
 
 fn entry_stroke(data: &ChartData, i: usize) -> Option<Rgba> {
-    data.series
-        .first()
-        .and_then(|s| s.point_strokes.iter().find(|&&(idx, _)| idx as usize == i).map(|&(_, c)| c))
-        .or_else(|| data.series.get(i).and_then(|s| s.stroke))
+    if data.series.len() == 1
+        && let Some(c) = data.series[0].point_strokes.iter().find(|&&(idx, _)| idx as usize == i).map(|&(_, c)| c)
+    {
+        return Some(c);
+    }
+    data.series.get(i).and_then(|s| s.stroke)
 }
 
 pub(super) fn draw_legend(ctx: &mut Ctx, entries: &[(String, Rgba, Swatch)], pos: LegendPos, area: Bx, data: &ChartData) -> Bx {

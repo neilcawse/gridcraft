@@ -473,6 +473,35 @@ fn axis_num_fmt(a: Option<&El>) -> Option<String> {
 pub(crate) fn read_chart(root: &El) -> Option<(Chart, Vec<PivotSeriesCache>)> {
     read_chart_with_budget(root).map(|(chart, caches, _)| (chart, caches))
 }
+type PointColors = Vec<(u32, Color)>;
+
+fn read_series_styling(first: &El) -> (Option<Color>, PointColors, PointColors) {
+    let mut point_colors: Vec<(u32, Color)> = Vec::new();
+    let mut point_line_colors: Vec<(u32, Color)> = Vec::new();
+    let mut series_line_color: Option<Color> = None;
+    if let Some(s0) = first.kids("ser").next() {
+        series_line_color = s0.path(&["spPr", "ln", "solidFill"]).and_then(dml_color);
+        for dpt in s0.kids("dPt") {
+            if let Some(idx) = dpt.child_val("idx").and_then(|v| v.trim().parse::<u32>().ok()).filter(|&i| i <= 100_000) {
+                if let Some(c) = dpt.path(&["spPr", "solidFill"]).and_then(dml_color) {
+                    if let Some(slot) = point_colors.iter_mut().find(|(i, _)| *i == idx) {
+                        slot.1 = c;
+                    } else if point_colors.len() < 1024 {
+                        point_colors.push((idx, c));
+                    }
+                }
+                if let Some(lc) = dpt.path(&["spPr", "ln", "solidFill"]).and_then(dml_color) {
+                    if let Some(slot) = point_line_colors.iter_mut().find(|(i, _)| *i == idx) {
+                        slot.1 = lc;
+                    } else if point_line_colors.len() < 1024 {
+                        point_line_colors.push((idx, lc));
+                    }
+                }
+            }
+        }
+    }
+    (series_line_color, point_colors, point_line_colors)
+}
 
 pub(crate) fn read_chart_with_budget(root: &El) -> Option<(Chart, Vec<PivotSeriesCache>, bool)> {
     let chart = root.child("chart")?;
@@ -545,22 +574,7 @@ pub(crate) fn read_chart_with_budget(root: &El) -> Option<(Chart, Vec<PivotSerie
     let no_fill = root.path(&["spPr", "noFill"]).is_some();
     let hole_size = first.child_val("holeSize").and_then(|v| v.trim().parse::<u8>().ok()).map(|v| v.clamp(1, 90)).filter(|&v| v != 50);
     let gap_width = first.child_val("gapWidth").and_then(|v| v.trim().parse::<u16>().ok()).map(|v| v.min(500)).filter(|&v| v != 150);
-    let mut point_colors: Vec<(u32, Color)> = Vec::new();
-    let mut point_line_colors: Vec<(u32, Color)> = Vec::new();
-    let mut series_line_color: Option<Color> = None;
-    if let Some(s0) = first.kids("ser").next() {
-        series_line_color = s0.path(&["spPr", "ln", "solidFill"]).and_then(dml_color);
-        for dpt in s0.kids("dPt") {
-            if let Some(idx) = dpt.child_val("idx").and_then(|v| v.trim().parse::<u32>().ok()) {
-                if let Some(c) = dpt.path(&["spPr", "solidFill"]).and_then(dml_color) {
-                    point_colors.push((idx, c));
-                }
-                if let Some(lc) = dpt.path(&["spPr", "ln", "solidFill"]).and_then(dml_color) {
-                    point_line_colors.push((idx, lc));
-                }
-            }
-        }
-    }
+    let (series_line_color, point_colors, point_line_colors) = read_series_styling(first);
     let first_dlbls = first.kids("ser").next().and_then(|s0| s0.child("dLbls")).or_else(|| first.child("dLbls"));
     let label_pos = first_dlbls.and_then(|d| d.child_val("dLblPos")).map(str::trim).filter(|s| !s.is_empty()).map(String::from);
     let percent_format = if show_percent {
@@ -585,7 +599,7 @@ pub(crate) fn read_chart_with_budget(root: &El) -> Option<(Chart, Vec<PivotSerie
     let x_label_rotation = (!scatter)
         .then(|| x_ax.and_then(|a| a.path(&["txPr", "bodyPr"])).and_then(|b| b.attr_i64("rot")))
         .flatten()
-        .filter(|&r| r != 0)
+        .filter(|&r| r != 0 && r.abs() <= 5_400_000)
         .map(|r| (r as f64 / 60_000.0).clamp(-90.0, 90.0) as f32);
     let axis_number_formats = if scatter {
         AxisNumberFormats {
@@ -962,6 +976,11 @@ fn series_xml(s: &Series, idx: usize, g: G, ch: &Chart, wb: &Workbook, si: usize
             let _ = write!(x, "<c:spPr><a:solidFill>{c}</a:solidFill>{ln}</c:spPr>");
         }
         (None, _) if g == (G::Scatter { lines: false }) || g == G::Stock => x.push_str("<c:spPr><a:ln w=\"19050\"><a:noFill/></a:ln></c:spPr>"),
+        (None, false) if idx == 0 => {
+            if let Some(l) = ch.axis_number_formats.series_line_color.as_ref().and_then(|lc| srgb(lc, &wb.theme)) {
+                let _ = write!(x, "<c:spPr><a:ln><a:solidFill>{l}</a:solidFill></a:ln></c:spPr>");
+            }
+        }
         _ => {}
     }
     match g {
@@ -971,27 +990,47 @@ fn series_xml(s: &Series, idx: usize, g: G, ch: &Chart, wb: &Workbook, si: usize
         _ => {}
     }
     if idx == 0 {
-        for &(pt_idx, ref c) in &ch.axis_number_formats.point_colors {
-            if let Some(fill) = srgb(c, &wb.theme) {
-                let ln = ch
-                    .axis_number_formats
-                    .point_line_colors
-                    .iter()
-                    .find(|&&(i, _)| i == pt_idx)
-                    .and_then(|(_, lc)| srgb(lc, &wb.theme))
-                    .map(|l| format!("<a:ln w=\"19050\"><a:solidFill>{l}</a:solidFill></a:ln>"))
-                    .unwrap_or_default();
-                let _ = write!(
-                    x,
-                    "<c:dPt><c:idx val=\"{pt_idx}\"/><c:bubble3D val=\"0\"/><c:spPr><a:solidFill>{fill}</a:solidFill>{ln}</c:spPr></c:dPt>"
-                );
+        let mut pt_indices: Vec<u32> = ch
+            .axis_number_formats
+            .point_colors
+            .iter()
+            .map(|&(i, _)| i)
+            .chain(ch.axis_number_formats.point_line_colors.iter().map(|&(i, _)| i))
+            .filter(|&i| i <= 100_000)
+            .collect();
+        pt_indices.sort_unstable();
+        pt_indices.dedup();
+        for pt_idx in pt_indices.into_iter().take(1024) {
+            let fill = ch
+                .axis_number_formats
+                .point_colors
+                .iter()
+                .rfind(|&&(i, _)| i == pt_idx)
+                .and_then(|(_, c)| srgb(c, &wb.theme))
+                .map(|f| format!("<a:solidFill>{f}</a:solidFill>"))
+                .unwrap_or_default();
+            let ln = ch
+                .axis_number_formats
+                .point_line_colors
+                .iter()
+                .rfind(|&&(i, _)| i == pt_idx)
+                .and_then(|(_, lc)| srgb(lc, &wb.theme))
+                .map(|l| format!("<a:ln w=\"19050\"><a:solidFill>{l}</a:solidFill></a:ln>"))
+                .unwrap_or_default();
+            if !fill.is_empty() || !ln.is_empty() {
+                let _ = write!(x, "<c:dPt><c:idx val=\"{pt_idx}\"/><c:bubble3D val=\"0\"/><c:spPr>{fill}{ln}</c:spPr></c:dPt>");
             }
         }
     }
     // A typed label format needs the series' own dLbls (after dPt, before trendline in every
     // series type written here).
     if let Some(f) = s.label_number_format.as_deref() {
-        x.push_str(&dlbls(ch.data_labels, ch.axis_number_formats.show_percent, Some(f), ch.axis_number_formats.label_pos.as_deref()));
+        x.push_str(&dlbls(
+            ch.data_labels,
+            ch.axis_number_formats.show_percent,
+            Some(f),
+            valid_dlbl_pos(g, ch.axis_number_formats.label_pos.as_deref()),
+        ));
     }
     // Trendlines sit between dLbls and the data in CT_LineSer, CT_BarSer, CT_AreaSer,
     // CT_ScatterSer and CT_BubbleSer; pie and radar series have none.
@@ -1092,6 +1131,17 @@ fn num_fmt_xml(code: Option<&str>) -> String {
     }
 }
 
+fn valid_dlbl_pos(g: G, pos: Option<&str>) -> Option<&str> {
+    let p = pos?;
+    let ok = match g {
+        G::Bar { .. } => matches!(p, "ctr" | "inBase" | "inEnd" | "outEnd"),
+        G::Pie | G::Doughnut => matches!(p, "bestFit" | "ctr" | "inEnd" | "outEnd"),
+        G::Line { .. } | G::Scatter { .. } | G::Bubble => matches!(p, "b" | "ctr" | "l" | "r" | "t"),
+        G::Area { .. } | G::Radar | G::Stock => false,
+    };
+    ok.then_some(p)
+}
+
 /// `<c:dLbls>`; a typed `fmt` comes first, as CT_DLbls orders it.
 fn dlbls(show: bool, pct: bool, fmt: Option<&str>, pos: Option<&str>) -> String {
     let show_val = (show && !pct) as u8;
@@ -1109,7 +1159,7 @@ fn group_xml(g: G, series: &[(usize, &Series)], ch: &Chart, axes: (u32, u32), wb
         ch.data_labels,
         ch.axis_number_formats.show_percent,
         ch.axis_number_formats.percent_format.as_deref().filter(|_| ch.axis_number_formats.show_percent),
-        ch.axis_number_formats.label_pos.as_deref(),
+        valid_dlbl_pos(g, ch.axis_number_formats.label_pos.as_deref()),
     );
     let ax = format!("<c:axId val=\"{}\"/><c:axId val=\"{}\"/>", axes.0, axes.1);
     match g {
@@ -1189,7 +1239,7 @@ fn axis_xml(a: &Ax<'_>) -> String {
     }
     s.push_str(&num_fmt_xml(a.fmt));
     if let Some(deg) = a.rot.filter(|r| r.is_finite() && *r != 0.0) {
-        let rot = (f64::from(deg) * 60_000.0).round() as i64;
+        let rot = (f64::from(deg.clamp(-90.0, 90.0)) * 60_000.0).round() as i64;
         let _ = write!(s, "<c:txPr><a:bodyPr rot=\"{rot}\"/><a:lstStyle/><a:p><a:pPr><a:defRPr/></a:pPr><a:endParaRPr/></a:p></c:txPr>");
     }
     let _ = write!(

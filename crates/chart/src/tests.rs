@@ -1494,4 +1494,7 @@ fn dcp_render_verify() {
     assert!(texts3.iter().any(|(t, _, _, va)| t == "68.23" && *va == VAlign::Top));
     assert!(texts3.iter().any(|(t, _, _, va)| t == "69.07" && *va == VAlign::Top));
     assert!(texts3.iter().any(|(t, _, _, _)| t == "90"));
+    for h in [10.0, 30.0, 45.0] {
+        let _ = render(&c3, &d3, 300.0, h, &ApproxMeasure);
+    }
 }

@@ -174,7 +174,7 @@ pub(super) fn frame(ctx: &mut Ctx, area: Bx, cat: CatAxis, y: &ValAxis, y2: Opti
             CatAxis::Labels(l, o, Some(rot)) if *rot != 0.0 => {
                 let lw = l.iter().take(2000).map(|t| ctx.tw(t, ls)).fold(0.0f32, f32::max);
                 let a = rot.abs().to_radians();
-                (o.len() as f32, (lw * a.sin() + ls * a.cos()).clamp(lh, area.h * 0.35))
+                (o.len() as f32, (lw * a.sin() + ls * a.cos()).min(area.h * 0.35).max(lh))
             }
             CatAxis::Labels(_, o, _) => (o.len() as f32, lh),
             CatAxis::Numeric(..) => (0.0, lh),

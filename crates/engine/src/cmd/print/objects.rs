@@ -167,17 +167,29 @@ fn draw_shape(pg: &mut Page, wb: &Workbook, shp: &gridcraft_model::Shape, b: &Bl
     let deg = (rot.rem_euclid(21_600_000) as f64) / 60_000.0;
     let angle = (if deg > 180.0 { deg - 360.0 } else { deg }).to_radians() as f32;
     let quarter = (45.0..135.0).contains(&deg) || (225.0..315.0).contains(&deg);
-    let box_w = if quarter { h } else { w };
+    let (box_w, box_h) = if quarter { (h, w) } else { (w, h) };
     let lines = wrap_lines(&shp.text, font, size, (box_w - pad_l - 2.0 * b.k).max(size));
+    let block_h = lines.len().min(500) as f32 * size * 1.2;
     if angle.abs() > 1e-4 {
+        let (s, c) = angle.sin_cos();
+        let top_y = match anchor {
+            ShapeTextAnchor::Top => -box_h / 2.0 + 2.0 * b.k,
+            ShapeTextAnchor::Middle => -block_h / 2.0,
+            ShapeTextAnchor::Bottom => box_h / 2.0 - 2.0 * b.k - block_h,
+        };
         for (i, l) in lines.iter().take(500).enumerate() {
             let lw = gridcraft_pdf::text_width(font, size, l);
-            let pt = gridcraft_pdf::Point::new(x + w / 2.0 + i as f32 * size * 1.2, y + (h + lw) / 2.0);
+            let lx = match align {
+                ShapeTextAlign::Left => -box_w / 2.0 + pad_l,
+                ShapeTextAlign::Center => -lw / 2.0,
+                ShapeTextAlign::Right => box_w / 2.0 - 2.0 * b.k - lw,
+            };
+            let ly = top_y + i as f32 * size * 1.2 + size * 0.85;
+            let pt = gridcraft_pdf::Point::new(x + w / 2.0 + lx * c - ly * s, y + h / 2.0 + lx * s + ly * c);
             pg.text_rotated(pt, size, font, color, l, angle);
         }
         return;
     }
-    let block_h = lines.len().min(500) as f32 * size * 1.2;
     let mut yy = match anchor {
         ShapeTextAnchor::Top => y + 2.0 * b.k,
         ShapeTextAnchor::Middle => y + (h - block_h) / 2.0,
