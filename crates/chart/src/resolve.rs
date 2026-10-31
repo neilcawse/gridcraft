@@ -196,7 +196,7 @@ fn is_defined_name(wb: &Workbook, sheet: usize, t: &str) -> bool {
 
 /// A series name: a reference/formula or a defined name (`[0]!Title` in a file) is evaluated,
 /// a quoted or other bare literal is used as is.
-fn series_name(wb: &Workbook, sheet: usize, name: &str) -> String {
+pub fn series_name(wb: &Workbook, sheet: usize, name: &str) -> String {
     let t = name.trim();
     if let Some(q) = t.strip_prefix('"').and_then(|q| q.strip_suffix('"')) {
         return q.replace("\"\"", "\"");
@@ -281,6 +281,7 @@ pub fn resolve(wb: &Workbook, sheet: usize, chart: &Chart) -> ChartData {
                 Some(code) if s.values.trim_start().starts_with('{') => code.clone(),
                 _ => ref_format(wb, sheet, &s.values),
             },
+            label_number_format: s.label_number_format.clone(),
         });
     }
     let n = series.iter().map(|s| s.values.len()).max().unwrap_or(0);

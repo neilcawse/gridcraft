@@ -40,6 +40,7 @@ fn workbook(categories: &str, values: &str) -> Workbook {
             quartiles: Default::default(),
             number_format: None,
             innermost_categories: false,
+            label_number_format: None,
         }],
         legend: LegendPos::Bottom,
         data_labels: false,
@@ -48,8 +49,10 @@ fn workbook(categories: &str, values: &str) -> Workbook {
         x_title: None,
         y_title: None,
         source: None,
-        by_rows: false,
         pivot: None,
+        by_rows: false,
+        axis_number_formats: Default::default(),
+        pivot_label_formats: Vec::new(),
     });
     Workbook { sheets: vec![Arc::new(s)], ..Workbook::default() }
 }

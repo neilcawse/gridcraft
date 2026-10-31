@@ -5,10 +5,10 @@ use std::fmt::Write as _;
 
 use gridcraft_core::{CellRef, RangeRef, Value, category_levels};
 use gridcraft_formula::{BinOp, Expr, Reference, SheetSel};
-use gridcraft_model::{Chart, ChartKind, Color, DefinedName, LegendPos, LineDash, Series, Trendline, TrendlineKind, Workbook};
+use gridcraft_model::{AxisNumberFormats, Chart, ChartKind, Color, DefinedName, LegendPos, LineDash, Series, Trendline, TrendlineKind, Workbook};
 
 use crate::drawing::{dml_color, srgb};
-use crate::xml::{El, esc, num};
+use crate::xml::{El, esc, esc_attr, num};
 
 // ---------------------------------------------------------------- reading
 
@@ -339,7 +339,7 @@ pub(crate) fn plot_pivot_caches(wb: &mut Workbook, pending: &[(u32, Vec<PivotSer
     }
 }
 
-fn read_series(s: &El, budget: &mut ChartReadBudget) -> Series {
+fn read_series(s: &El, xy: bool, budget: &mut ChartReadBudget) -> Series {
     let name = s
         .child("tx")
         .and_then(|tx| tx.path(&["strRef", "f"]).map(|f| chart_ref_from_file(&f.text)).or_else(|| tx.child("v").map(|v| v.text.clone())));
@@ -369,6 +369,7 @@ fn read_series(s: &El, budget: &mut ChartReadBudget) -> Series {
             .filter(|c| !c.is_empty() && !c.eq_ignore_ascii_case("General"))
             .map(str::to_string),
         innermost_categories: false,
+        label_number_format: label_num_fmt(s.child("dLbls"), xy),
     }
 }
 
@@ -444,6 +445,29 @@ fn axis_ids(g: &El) -> Vec<String> {
     g.kids("axId").filter_map(|a| a.attr("val")).map(str::to_string).collect()
 }
 
+/// A `<c:numFmt>` typed in Excel's Format pane (`sourceLinked="0"`); `None` when it follows the
+/// source cells.
+fn typed_num_fmt(e: Option<&El>) -> Option<String> {
+    let e = e.filter(|e| !e.flag("sourceLinked", false))?;
+    e.attr("formatCode").map(str::trim).filter(|c| !c.is_empty()).map(str::to_string)
+}
+
+/// The typed number format of a `<c:dLbls>` that shows values. Labels that show other numbers
+/// but not the values keep none: percentages, bubble sizes, and on scatter and bubble charts
+/// (`xy`) the X values. The format was typed for those, and on the values `0.0%` reads 3 as
+/// "300.0%".
+fn label_num_fmt(d: Option<&El>, xy: bool) -> Option<String> {
+    let other = |d: &El| bool_val(d, "showPercent") || bool_val(d, "showBubbleSize") || (xy && bool_val(d, "showCatName"));
+    let d = d.filter(|d| bool_val(d, "showVal") || !other(d))?;
+    typed_num_fmt(d.child("numFmt"))
+}
+
+/// The typed number format of an axis that is drawn: a deleted (hidden) axis keeps none, since
+/// the model draws every axis and its format would show up on an axis Excel doesn't show.
+fn axis_num_fmt(a: Option<&El>) -> Option<String> {
+    typed_num_fmt(a.filter(|a| !bool_val(a, "delete")).and_then(|a| a.child("numFmt")))
+}
+
 /// A chart part, with the cached points of each series when it is a PivotChart (empty otherwise),
 #[cfg(test)]
 pub(crate) fn read_chart(root: &El) -> Option<(Chart, Vec<PivotSeriesCache>)> {
@@ -461,14 +485,20 @@ pub(crate) fn read_chart_with_budget(root: &El) -> Option<(Chart, Vec<PivotSerie
     let mut caches = vec![];
     let mut budget = ChartReadBudget::new();
     for (gi, (g, k)) in groups.iter().enumerate() {
+        let xy = matches!(k, ChartKind::Scatter | ChartKind::ScatterLines | ChartKind::Bubble);
         for s in g.kids("ser") {
-            let mut ser = read_series(s, &mut budget);
+            let mut ser = read_series(s, xy, &mut budget);
             if groups.len() > 1 {
                 // Every series of a combo chart keeps its own group's kind, the first group's included.
+                ser.kind = Some(*k);
                 ser.kind = Some(*k);
             }
             if gi > 0 {
                 ser.secondary = axis_ids(g) != first_axes;
+            }
+            // Labels set for the whole group apply to series without their own `dLbls`.
+            if s.child("dLbls").is_none() {
+                ser.label_number_format = label_num_fmt(g.child("dLbls"), xy);
             }
             series.push(ser);
             if pivot.is_some() {
@@ -482,12 +512,39 @@ pub(crate) fn read_chart_with_budget(root: &El) -> Option<(Chart, Vec<PivotSerie
     let val_axes: Vec<&El> = plot.kids("valAx").collect();
     let cat_ax = plot.child("catAx").or_else(|| plot.child("dateAx"));
     let scatter = matches!(first_kind, ChartKind::Scatter | ChartKind::ScatterLines | ChartKind::Bubble);
+    // Value axes by the groups that use them: the first group's, then a secondary group's.
+    let val_ax_of = |ids: &[String]| val_axes.iter().find(|a| a.child_val("axId").is_some_and(|v| ids.iter().any(|i| i == v))).copied();
     let (x_ax, y_ax) = if scatter {
-        let x = val_axes.iter().find(|a| matches!(a.child_val("axPos"), Some("b") | Some("t"))).copied();
-        let y = val_axes.iter().find(|a| matches!(a.child_val("axPos"), Some("l") | Some("r"))).copied();
-        (x, y)
+        // The first group's two value axes: X lies along the bottom or top. When `axPos`
+        // doesn't tell them apart (openpyxl writes "l" on both), the group lists X first.
+        let own: Vec<&El> = first_axes.iter().filter_map(|id| val_axes.iter().find(|a| a.child_val("axId") == Some(id.as_str())).copied()).collect();
+        let horizontal = |a: &&El| matches!(a.child_val("axPos"), Some("b") | Some("t"));
+        match (own.iter().find(|a| horizontal(a)), own.iter().find(|a| !horizontal(a))) {
+            (Some(x), Some(y)) => (Some(*x), Some(*y)),
+            _ => (own.first().copied(), own.get(1).copied()),
+        }
     } else {
         (cat_ax, val_axes.first().copied())
+    };
+    let secondary_ids = groups.iter().map(|(g, _)| axis_ids(g)).find(|ids| *ids != first_axes);
+    // A 100% stacked line or area group reads as plain stacked (the model has no 100% variant
+    // for them), so its values are drawn absolute. A format typed for its 0%–100% axis (`0.0%`)
+    // would label those absolute values ("2000000.0%"), so that axis keeps the source format.
+    let pct_unmodelled = |ids: &[String]| {
+        groups.iter().any(|(g, _)| {
+            matches!(g.name.as_str(), "lineChart" | "line3DChart" | "areaChart" | "area3DChart")
+                && g.child_val("grouping") == Some("percentStacked")
+                && axis_ids(g) == ids
+        })
+    };
+    let axis_number_formats = if scatter {
+        AxisNumberFormats { x: axis_num_fmt(x_ax), y: axis_num_fmt(y_ax), y2: None }
+    } else {
+        AxisNumberFormats {
+            x: None,
+            y: if pct_unmodelled(&first_axes) { None } else { axis_num_fmt(val_ax_of(&first_axes).or(y_ax)) },
+            y2: secondary_ids.filter(|ids| !pct_unmodelled(ids)).and_then(|ids| axis_num_fmt(val_ax_of(&ids))),
+        }
     };
     let legend = match chart.child("legend") {
         None => LegendPos::None,
@@ -518,6 +575,8 @@ pub(crate) fn read_chart_with_budget(root: &El) -> Option<(Chart, Vec<PivotSerie
         source: None,
         by_rows: false,
         pivot,
+        axis_number_formats,
+        pivot_label_formats: Vec::new(),
     };
     Some((ch, caches, budget.exceeded))
 }
@@ -793,7 +852,7 @@ fn multi_level_cat(f: &str, values: &str, wb: &Workbook, si: usize) -> Option<St
     Some(s)
 }
 
-fn series_xml(s: &Series, idx: usize, g: G, wb: &Workbook, si: usize) -> String {
+fn series_xml(s: &Series, idx: usize, g: G, labels: bool, wb: &Workbook, si: usize) -> String {
     let mut x = format!("<c:ser><c:idx val=\"{idx}\"/><c:order val=\"{idx}\"/>");
     if let Some(n) = &s.name {
         if is_ref(n) || is_defined_name(wb, si, n) {
@@ -825,6 +884,11 @@ fn series_xml(s: &Series, idx: usize, g: G, wb: &Workbook, si: usize) -> String 
         G::Line { markers: false, .. } | G::Scatter { lines: true } | G::Stock => x.push_str("<c:marker><c:symbol val=\"none\"/></c:marker>"),
         G::Bubble => x.push_str("<c:invertIfNegative val=\"0\"/>"),
         _ => {}
+    }
+    // A typed label format needs the series' own dLbls (after dPt, before trendline in every
+    // series type written here).
+    if let Some(f) = s.label_number_format.as_deref() {
+        x.push_str(&dlbls(labels, Some(f)));
     }
     // Trendlines sit between dLbls and the data in CT_LineSer, CT_BarSer, CT_AreaSer,
     // CT_ScatterSer and CT_BubbleSer; pie and radar series have none.
@@ -917,16 +981,26 @@ fn trendline_xml(t: &Trendline, wb: &Workbook) -> String {
     x
 }
 
-fn dlbls(show: bool) -> String {
+/// `<c:numFmt>`: a typed format code, or "linked to source" when `None`.
+fn num_fmt_xml(code: Option<&str>) -> String {
+    match code {
+        Some(c) => format!("<c:numFmt formatCode=\"{}\" sourceLinked=\"0\"/>", esc_attr(c)),
+        None => "<c:numFmt formatCode=\"General\" sourceLinked=\"1\"/>".into(),
+    }
+}
+
+/// `<c:dLbls>`; a typed `fmt` comes first, as CT_DLbls orders it.
+fn dlbls(show: bool, fmt: Option<&str>) -> String {
     format!(
-        "<c:dLbls><c:showLegendKey val=\"0\"/><c:showVal val=\"{}\"/><c:showCatName val=\"0\"/><c:showSerName val=\"0\"/><c:showPercent val=\"0\"/><c:showBubbleSize val=\"0\"/></c:dLbls>",
+        "<c:dLbls>{}<c:showLegendKey val=\"0\"/><c:showVal val=\"{}\"/><c:showCatName val=\"0\"/><c:showSerName val=\"0\"/><c:showPercent val=\"0\"/><c:showBubbleSize val=\"0\"/></c:dLbls>",
+        fmt.map(|f| num_fmt_xml(Some(f))).unwrap_or_default(),
         show as u8
     )
 }
 
 fn group_xml(g: G, series: &[(usize, &Series)], ch: &Chart, axes: (u32, u32), wb: &Workbook, si: usize) -> String {
-    let sers: String = series.iter().map(|(i, s)| series_xml(s, *i, g, wb, si)).collect();
-    let dl = dlbls(ch.data_labels);
+    let sers: String = series.iter().map(|(i, s)| series_xml(s, *i, g, ch.data_labels, wb, si)).collect();
+    let dl = dlbls(ch.data_labels, None);
     let ax = format!("<c:axId val=\"{}\"/><c:axId val=\"{}\"/>", axes.0, axes.1);
     match g {
         G::Bar { bar, grouping } => {
@@ -972,6 +1046,8 @@ struct Ax<'a> {
     grid: bool,
     title: Option<&'a str>,
     crosses_max: bool,
+    /// A typed number format (`None`: linked to source).
+    fmt: Option<&'a str>,
 }
 
 fn axis_xml(a: &Ax<'_>) -> String {
@@ -988,9 +1064,10 @@ fn axis_xml(a: &Ax<'_>) -> String {
     if let Some(t) = a.title {
         s.push_str(&title_xml(t));
     }
+    s.push_str(&num_fmt_xml(a.fmt));
     let _ = write!(
         s,
-        "<c:numFmt formatCode=\"General\" sourceLinked=\"1\"/><c:majorTickMark val=\"out\"/><c:minorTickMark val=\"none\"/><c:tickLblPos val=\"nextTo\"/><c:crossAx val=\"{}\"/><c:crosses val=\"{}\"/>",
+        "<c:majorTickMark val=\"out\"/><c:minorTickMark val=\"none\"/><c:tickLblPos val=\"nextTo\"/><c:crossAx val=\"{}\"/><c:crosses val=\"{}\"/>",
         a.cross,
         if a.crosses_max { "max" } else { "autoZero" }
     );
@@ -1077,6 +1154,7 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 grid: false,
                 title: ch.x_title.as_deref(),
                 crosses_max: false,
+                fmt: ch.axis_number_formats.x.as_deref(),
             }));
             s.push_str(&axis_xml(&Ax {
                 cat: false,
@@ -1087,6 +1165,7 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 grid: ch.gridlines,
                 title: ch.y_title.as_deref(),
                 crosses_max: false,
+                fmt: ch.axis_number_formats.y.as_deref(),
             }));
         }
         G::Bar { bar: true, .. } => {
@@ -1099,6 +1178,7 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 grid: false,
                 title: ch.x_title.as_deref(),
                 crosses_max: false,
+                fmt: None,
             }));
             s.push_str(&axis_xml(&Ax {
                 cat: false,
@@ -1109,6 +1189,7 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 grid: ch.gridlines,
                 title: ch.y_title.as_deref(),
                 crosses_max: false,
+                fmt: ch.axis_number_formats.y.as_deref(),
             }));
         }
         _ => {
@@ -1121,6 +1202,7 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 grid: false,
                 title: ch.x_title.as_deref(),
                 crosses_max: false,
+                fmt: None,
             }));
             s.push_str(&axis_xml(&Ax {
                 cat: false,
@@ -1131,12 +1213,23 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 grid: ch.gridlines,
                 title: ch.y_title.as_deref(),
                 crosses_max: false,
+                fmt: ch.axis_number_formats.y.as_deref(),
             }));
         }
     }
     if secondary.is_some() {
-        s.push_str(&axis_xml(&Ax { cat: true, id: 3, cross: 4, pos: "b", delete: true, grid: false, title: None, crosses_max: false }));
-        s.push_str(&axis_xml(&Ax { cat: false, id: 4, cross: 3, pos: "r", delete: false, grid: false, title: None, crosses_max: true }));
+        s.push_str(&axis_xml(&Ax { cat: true, id: 3, cross: 4, pos: "b", delete: true, grid: false, title: None, crosses_max: false, fmt: None }));
+        s.push_str(&axis_xml(&Ax {
+            cat: false,
+            id: 4,
+            cross: 3,
+            pos: "r",
+            delete: false,
+            grid: false,
+            title: None,
+            crosses_max: true,
+            fmt: ch.axis_number_formats.y2.as_deref(),
+        }));
     }
     s.push_str("</c:plotArea>");
     let pos = match ch.legend {

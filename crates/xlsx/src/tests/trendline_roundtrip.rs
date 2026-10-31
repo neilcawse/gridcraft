@@ -52,6 +52,7 @@ fn chart(id: u32, kind: ChartKind, trendlines: Vec<Trendline>) -> Chart {
             trendlines,
             number_format: None,
             innermost_categories: false,
+            label_number_format: None,
         }],
         legend: LegendPos::Bottom,
         data_labels: false,
@@ -62,6 +63,8 @@ fn chart(id: u32, kind: ChartKind, trendlines: Vec<Trendline>) -> Chart {
         source: None,
         by_rows: false,
         pivot: None,
+        axis_number_formats: Default::default(),
+        pivot_label_formats: Vec::new(),
     }
 }
 
