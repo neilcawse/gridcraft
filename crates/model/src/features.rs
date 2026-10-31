@@ -579,6 +579,21 @@ pub struct AxisNumberFormats {
     /// Bar/column gap width (`<c:barChart><c:gapWidth val="0..=500"/>`, percent of bar width).
     #[serde(default)]
     pub gap_width: Option<u16>,
+    /// Series outline colour (`<c:ser><c:spPr><a:ln><a:solidFill>`).
+    #[serde(default)]
+    pub series_line_color: Option<Color>,
+    /// Per-point outline colours (`<c:dPt><c:spPr><a:ln><a:solidFill>`).
+    #[serde(default)]
+    pub point_line_colors: Vec<(u32, Color)>,
+    /// Typed percentage format code (`<c:dLbls><c:numFmt sourceLinked="0"/>` when `showPercent="1"`).
+    #[serde(default)]
+    pub percent_format: Option<String>,
+    /// Data label placement (`<c:dLblPos val="inEnd"/>`, etc.).
+    #[serde(default)]
+    pub label_pos: Option<String>,
+    /// Manual plot-area width fraction (`<c:plotArea><c:layout><c:manualLayout><c:w val="..."/>`).
+    #[serde(default)]
+    pub plot_w: Option<f32>,
 }
 impl Trendline {
     /// Longest forward / backward forecast kept from a file or a command, in x units. Excel's own

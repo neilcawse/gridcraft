@@ -42,7 +42,7 @@ const MAX_LINE_PTS: usize = 2000;
 /// Most markers per series (after de-duplicating by pixel).
 const MAX_MARKERS: usize = 5000;
 /// Data labels are skipped when a series has more points than this.
-const MAX_LABELS: usize = 200;
+const MAX_LABELS: usize = 300;
 
 struct Ctx<'a> {
     out: Vec<Prim>,
@@ -126,6 +126,8 @@ fn sanitize(d: &ChartData) -> ChartData {
                 trendlines: s.trendlines.iter().take(MAX_TRENDLINES).cloned().collect(),
                 number_format: s.number_format.clone(),
                 label_number_format: s.label_number_format.clone(),
+                stroke: s.stroke,
+                point_strokes: s.point_strokes.clone(),
             })
             .collect(),
     }
@@ -154,10 +156,15 @@ pub fn render(chart: &Chart, data: &ChartData, w: f32, h: f32, m: &dyn Measure) 
         let used = size * 1.3 + 4.0;
         area.y += used;
         area.h -= used;
+    } else if chart.title.as_deref().is_some_and(|t| !t.is_empty() && t.trim().is_empty()) {
+        let size = TITLE_SIZE.min(h * 0.12).max(4.0);
+        let used = size * 1.3 + 4.0;
+        area.y += used;
+        area.h -= used;
     }
     let entries = legend_entries(chart, &data);
     if !entries.is_empty() && area.ok() {
-        area = draw_legend(&mut ctx, &entries, chart.legend, area);
+        area = draw_legend(&mut ctx, &entries, chart.legend, area, &data);
     }
     if area.ok() && !data.series.is_empty() {
         draw_kind(&mut ctx, chart, &data, area);

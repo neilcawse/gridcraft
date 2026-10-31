@@ -68,6 +68,7 @@ fn series(name: &str, values: &[f64], color: Rgba, kind: ChartKind) -> SeriesDat
         trendlines: Vec::new(),
         number_format: "$#,##0".into(),
         label_number_format: None,
+        ..SeriesData::default()
     }
 }
 
@@ -703,6 +704,7 @@ fn fuzz_random_data_and_sizes() {
                     .collect(),
                 number_format: ["General", "$#,##0", "0.00%", "yyyy-mm-dd", "#,##0.0;[Red]-#,##0.0", "@"][(r.next() % 6) as usize].into(),
                 label_number_format: [None, Some("0;;;"), Some("[h]:mm"), Some(";;;")][(r.next() % 4) as usize].map(str::to_string),
+                ..SeriesData::default()
             })
             .collect();
         let ncat = (r.next() % 50) as usize;

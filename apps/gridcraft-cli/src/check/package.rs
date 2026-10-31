@@ -7,8 +7,8 @@ const MAX_XML_PART: u64 = 64 * 1024 * 1024;
 const MAX_ENTRIES: usize = 200_000;
 
 /// Relationship kinds (lower case) whose absence after a save isn't a loss: the calculation chain is
-/// a cache Excel rebuilds, and GridCraft never writes it.
-pub(super) const REBUILT_KINDS: [&str; 1] = ["calcchain"];
+/// a cache Excel rebuilds, and chart style / theme-override sidecars are spelled out inline.
+pub(super) const REBUILT_KINDS: [&str; 4] = ["calcchain", "chartcolorstyle", "chartstyle", "themeoverride"];
 
 // ---------------------------------------------------------------- package validation
 

@@ -172,32 +172,44 @@ pub(super) fn pie(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx, inne
         return;
     }
     let (cx, cy) = (area.cx(), area.cy());
-    let r = area.w.min(area.h) / 2.0 * 0.92;
+    let pw = chart.axis_number_formats.plot_w.filter(|&w| (0.2..=1.0).contains(&w)).map(|w| area.w * w).unwrap_or(area.w * 0.92);
+    let r = pw.min(area.h * 0.92) / 2.0;
     if r < 2.0 {
         return;
     }
     let ri = r * inner;
     let f = label_fmt(s);
+    let pct_fmt = chart.axis_number_formats.percent_format.as_deref().map(Fmt::new);
+    let few_slices = vals.iter().filter(|&&x| x > 0.0).count() <= 6;
     let mut a = 0.0f32;
     let mut labels = Vec::new();
     for (j, v) in vals.iter().enumerate() {
         let sweep = (*v / total) as f32 * TAU;
         if sweep > 1e-4 {
             let fill = point_color(data, j);
-            ctx.out.push(Prim::Wedge { cx, cy, r_outer: r, r_inner: ri, a0: a, a1: (a + sweep).min(TAU), fill, stroke: Some((WHITE, 1.5)) });
+            let pt_stroke = s.point_strokes.iter().find(|&&(idx, _)| idx as usize == j).map(|&(_, c)| c).or(s.stroke);
+            let stroke = match pt_stroke {
+                Some(c) => Some((c, (r * 0.035).clamp(0.85, 1.25))),
+                None => Some((WHITE, 1.5)),
+            };
+            ctx.out.push(Prim::Wedge { cx, cy, r_outer: r, r_inner: ri, a0: a, a1: (a + sweep).min(TAU), fill, stroke });
             if (chart.data_labels || names) && vals.len() <= MAX_LABELS {
                 let t = if names {
                     cat_label(data, j)
                 } else if chart.axis_number_formats.show_percent {
-                    format!("{}%", (*v / total * 100.0).round() as i64)
+                    match &pct_fmt {
+                        Some(pf) => pf.format(*v / total, None),
+                        None => format!("{}%", (*v / total * 100.0).round() as i64),
+                    }
                 } else {
                     f.format(s.values.get(j).copied().flatten().unwrap_or(0.0), None)
                 };
                 let mid = a + sweep / 2.0;
                 let rr = if ri > 0.0 { (r + ri) / 2.0 } else { r * 0.65 };
                 let room = sweep * rr;
-                if ctx.tw(&t, LABEL_SIZE) <= room.max(r - ri) && room >= LABEL_SIZE {
-                    labels.push((cx + rr * mid.sin(), cy - rr * mid.cos(), t, on(fill)));
+                if !t.is_empty() && ((ctx.tw(&t, LABEL_SIZE) <= room.max(r - ri) && room >= LABEL_SIZE) || (few_slices && r >= 50.0)) {
+                    let col = if pt_stroke.is_some() { super::DARK_TEXT } else { on(fill) };
+                    labels.push((cx + rr * mid.sin(), cy - rr * mid.cos(), t, col));
                 }
             }
         }

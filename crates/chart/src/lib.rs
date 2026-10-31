@@ -156,6 +156,12 @@ pub struct SeriesData {
     /// Number format typed for the data labels; `None` labels with `number_format`.
     #[serde(default)]
     pub label_number_format: Option<String>,
+    /// Series outline colour (`<c:ser><c:spPr><a:ln><a:solidFill>`).
+    #[serde(default)]
+    pub stroke: Option<Rgba>,
+    /// Per-point outline colours (`<c:dPt><c:spPr><a:ln><a:solidFill>`).
+    #[serde(default)]
+    pub point_strokes: Vec<(u32, Rgba)>,
 }
 
 /// A trendline to draw: the model settings with the line colour resolved against the theme.
@@ -179,6 +185,8 @@ impl Default for SeriesData {
             trendlines: vec![],
             number_format: "General".into(),
             label_number_format: None,
+            stroke: None,
+            point_strokes: vec![],
         }
     }
 }

@@ -85,9 +85,9 @@ fn swatch_w(sw: Swatch, s: f32) -> f32 {
     if sw == Swatch::Box { s } else { s * 2.0 }
 }
 
-fn draw_swatch(ctx: &mut Ctx, sw: Swatch, x: f32, yc: f32, s: f32, color: Rgba) {
+fn draw_swatch(ctx: &mut Ctx, sw: Swatch, x: f32, yc: f32, s: f32, color: Rgba, stroke: Option<Rgba>) {
     match sw {
-        Swatch::Box => ctx.rect(x, yc - s / 2.0, s, s, color, None),
+        Swatch::Box => ctx.rect(x, yc - s / 2.0, s, s, color, stroke.map(|c| (c, 1.0))),
         Swatch::Line => ctx.hline(x, x + 2.0 * s, yc, color, 2.0),
         Swatch::LineMarker => {
             ctx.hline(x, x + 2.0 * s, yc, color, 2.0);
@@ -97,7 +97,14 @@ fn draw_swatch(ctx: &mut Ctx, sw: Swatch, x: f32, yc: f32, s: f32, color: Rgba) 
     }
 }
 
-pub(super) fn draw_legend(ctx: &mut Ctx, entries: &[(String, Rgba, Swatch)], pos: LegendPos, area: Bx) -> Bx {
+fn entry_stroke(data: &ChartData, i: usize) -> Option<Rgba> {
+    data.series
+        .first()
+        .and_then(|s| s.point_strokes.iter().find(|&&(idx, _)| idx as usize == i).map(|&(_, c)| c))
+        .or_else(|| data.series.get(i).and_then(|s| s.stroke))
+}
+
+pub(super) fn draw_legend(ctx: &mut Ctx, entries: &[(String, Rgba, Swatch)], pos: LegendPos, area: Bx, data: &ChartData) -> Bx {
     let size = LABEL_SIZE;
     let row_h = size * 1.6;
     let s = size * 0.8;
@@ -133,7 +140,7 @@ pub(super) fn draw_legend(ctx: &mut Ctx, entries: &[(String, Rgba, Swatch)], pos
                 let yc = y0 + ri as f32 * row_h + row_h / 2.0;
                 for &(i, iw) in row {
                     if let Some(e) = entries.get(i) {
-                        draw_swatch(ctx, e.2, x, yc, s, e.1);
+                        draw_swatch(ctx, e.2, x, yc, s, e.1, entry_stroke(data, i));
                         let sx = swatch_w(e.2, s) + gap;
                         let t = ctx.fit(&e.0, size, (iw - sx).max(0.0) + 0.5);
                         ctx.text(x + sx, yc, &t, size, TEXT, (HAlign::Left, VAlign::Middle));
@@ -153,7 +160,7 @@ pub(super) fn draw_legend(ctx: &mut Ctx, entries: &[(String, Rgba, Swatch)], pos
             let x0 = if pos == LegendPos::Right { area.right() - colw } else { area.x };
             for (i, e) in entries.iter().take(n).enumerate() {
                 let yc = y0 + i as f32 * row_h + row_h / 2.0;
-                draw_swatch(ctx, e.2, x0, yc, s, e.1);
+                draw_swatch(ctx, e.2, x0, yc, s, e.1, entry_stroke(data, i));
                 let sx = swatch_w(e.2, s) + gap;
                 let t = ctx.fit(&e.0, size, (colw - sx).max(0.0) + 0.5);
                 ctx.text(x0 + sx, yc, &t, size, TEXT, (HAlign::Left, VAlign::Middle));

@@ -42,28 +42,38 @@ pub(super) fn chart_title(chart: &Chart, data: &ChartData) -> Option<String> {
 
 pub(super) fn axis_titles(ctx: &mut Ctx, chart: &Chart, mut area: Bx) -> Bx {
     let lh = AXIS_TITLE_SIZE * 1.4 + 2.0;
-    if let Some(t) = chart.x_title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
-        let t = ctx.fit(t, AXIS_TITLE_SIZE, area.w);
-        ctx.text(area.cx(), area.bottom(), &t, AXIS_TITLE_SIZE, TEXT, (HAlign::Center, VAlign::Bottom));
+    if let Some(t) = chart.x_title.as_deref().filter(|t| !t.is_empty()) {
+        let trimmed = t.trim();
+        if !trimmed.is_empty() {
+            let t = ctx.fit(trimmed, AXIS_TITLE_SIZE, area.w);
+            ctx.text(area.cx(), area.bottom(), &t, AXIS_TITLE_SIZE, TEXT, (HAlign::Center, VAlign::Bottom));
+        }
         area.h -= lh;
     }
-    if let Some(t) = chart.y_title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
-        let t = ctx.fit(t, AXIS_TITLE_SIZE, area.h);
-        if !t.is_empty() {
-            ctx.out.push(Prim::Text {
-                x: area.x,
-                y: area.cy(),
-                text: t,
-                size: AXIS_TITLE_SIZE,
-                color: TEXT,
-                bold: false,
-                align: HAlign::Center,
-                valign: VAlign::Top,
-                rotation: -PI / 2.0,
-            });
+    if let Some(t) = chart.y_title.as_deref().filter(|t| !t.is_empty()) {
+        let trimmed = t.trim();
+        if !trimmed.is_empty() {
+            let t = ctx.fit(trimmed, AXIS_TITLE_SIZE, area.h);
+            if !t.is_empty() {
+                ctx.out.push(Prim::Text {
+                    x: area.x,
+                    y: area.cy(),
+                    text: t,
+                    size: AXIS_TITLE_SIZE,
+                    color: TEXT,
+                    bold: false,
+                    align: HAlign::Center,
+                    valign: VAlign::Top,
+                    rotation: -PI / 2.0,
+                });
+            }
+            area.x += lh;
+            area.w -= lh;
+        } else {
+            let pad = lh * 1.6;
+            area.x += pad;
+            area.w -= pad;
         }
-        area.x += lh;
-        area.w -= lh;
     }
     area
 }

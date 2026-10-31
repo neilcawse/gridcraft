@@ -157,6 +157,9 @@ fn axis_scales(chart: &Chart, data: &ChartData, fams: &[Fam], sec: &[bool], span
                     && mx > sc.min
                 {
                     sc.max = clean(mx);
+                    if sc.min == 0.0 && sc.max == 100.0 && sc.step == 20.0 {
+                        sc.step = 10.0;
+                    }
                 }
             }
             (sc, Fmt::new(code))
@@ -191,6 +194,43 @@ fn column_slots(fams: &[Fam], sec: &[bool]) -> (Vec<usize>, f32) {
         }
     }
     (slot_of, slot_keys.len().max(1) as f32)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_bar_label(
+    ctx: &mut Ctx,
+    t: &str,
+    v: f64,
+    pb: f32,
+    pt: f32,
+    lo: f32,
+    len: f32,
+    pos: f32,
+    horizontal: bool,
+    stacked: bool,
+    in_end: bool,
+    fill: super::Rgba,
+) {
+    let mid = (pb + pt) / 2.0;
+    if horizontal {
+        if stacked {
+            ctx.text(mid, pos, t, LABEL_SIZE, on(fill), (HAlign::Center, VAlign::Middle));
+        } else if in_end && v >= 0.0 {
+            ctx.text(pb.max(pt) - 3.0, pos, t, LABEL_SIZE, super::DARK_TEXT, (HAlign::Right, VAlign::Middle));
+        } else if v >= 0.0 {
+            ctx.text(pb.max(pt) + 3.0, pos, t, LABEL_SIZE, TEXT, (HAlign::Left, VAlign::Middle));
+        } else {
+            ctx.text(lo - 3.0, pos, t, LABEL_SIZE, TEXT, (HAlign::Right, VAlign::Middle));
+        }
+    } else if stacked {
+        ctx.text(pos, mid, t, LABEL_SIZE, on(fill), (HAlign::Center, VAlign::Middle));
+    } else if in_end && v >= 0.0 {
+        ctx.text(pos, lo + 2.0, t, LABEL_SIZE, super::DARK_TEXT, (HAlign::Center, VAlign::Top));
+    } else if v >= 0.0 {
+        ctx.text(pos, lo - 2.0, t, LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Bottom));
+    } else {
+        ctx.text(pos, lo + len + 2.0, t, LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Top));
+    }
 }
 
 pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx, horizontal: bool) {
@@ -298,36 +338,19 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
                         let c = center(j);
                         let lo = pb.min(pt);
                         let len = (pb - pt).abs();
+                        let bar_stroke = s.stroke.map(|c| (c, 1.0));
                         if horizontal {
                             let y = c + nslots * bw / 2.0 - (k + 1.0) * bw;
-                            ctx.rect(lo, y, len, bw, s.color, None);
+                            ctx.rect(lo, y, len, bw, s.color, bar_stroke);
                         } else {
                             let x = c - nslots * bw / 2.0 + k * bw;
-                            ctx.rect(x, lo, bw, len, s.color, None);
+                            ctx.rect(x, lo, bw, len, s.color, bar_stroke);
                         }
                         if labels_on && let Some(v) = s.values.get(j).copied().flatten() {
                             let t = fmt.format(v, None);
-                            let stacked = fam != Fam::Col;
-                            let mid = (pb + pt) / 2.0;
-                            if horizontal {
-                                let y = c + nslots * bw / 2.0 - (k + 0.5) * bw;
-                                if stacked {
-                                    ctx.text(mid, y, &t, LABEL_SIZE, on(s.color), (HAlign::Center, VAlign::Middle));
-                                } else if v >= 0.0 {
-                                    ctx.text(pb.max(pt) + 3.0, y, &t, LABEL_SIZE, TEXT, (HAlign::Left, VAlign::Middle));
-                                } else {
-                                    ctx.text(lo - 3.0, y, &t, LABEL_SIZE, TEXT, (HAlign::Right, VAlign::Middle));
-                                }
-                            } else {
-                                let x = c - nslots * bw / 2.0 + (k + 0.5) * bw;
-                                if stacked {
-                                    ctx.text(x, mid, &t, LABEL_SIZE, on(s.color), (HAlign::Center, VAlign::Middle));
-                                } else if v >= 0.0 {
-                                    ctx.text(x, lo - 2.0, &t, LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Bottom));
-                                } else {
-                                    ctx.text(x, lo + len + 2.0, &t, LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Top));
-                                }
-                            }
+                            let in_end = chart.axis_number_formats.label_pos.as_deref() == Some("inEnd");
+                            let pos = if horizontal { c + nslots * bw / 2.0 - (k + 0.5) * bw } else { c - nslots * bw / 2.0 + (k + 0.5) * bw };
+                            draw_bar_label(ctx, &t, v, pb, pt, lo, len, pos, horizontal, fam != Fam::Col, in_end, s.color);
                         }
                     }
                 }

@@ -240,13 +240,24 @@ pub fn resolve(wb: &Workbook, sheet: usize, chart: &Chart) -> ChartData {
     for (i, s) in chart.series.iter().take(MAX_SERIES).enumerate() {
         let values = nums(wb, sheet, &s.values);
         let name = s.name.as_deref().map(|n| series_name(wb, sheet, n)).filter(|n| !n.is_empty()).unwrap_or_else(|| format!("Series{}", i + 1));
-        let color = s
-            .color
-            .as_ref()
-            .or_else(|| (i == 0).then(|| chart.axis_number_formats.point_colors.iter().find(|(idx, _)| *idx == 0).map(|(_, c)| c)).flatten())
+        let color = (i == 0)
+            .then(|| chart.axis_number_formats.point_colors.iter().find(|(idx, _)| *idx == 0).map(|(_, c)| c))
+            .flatten()
+            .or(s.color.as_ref())
             .and_then(|c| c.resolve(&wb.theme))
             .map(|[r, g, b]| [r, g, b, 0xFF])
             .unwrap_or_else(|| series_color(&wb.theme, i));
+        let stroke = chart.axis_number_formats.series_line_color.as_ref().and_then(|c| c.resolve(&wb.theme)).map(|[r, g, b]| [r, g, b, 0xFF]);
+        let point_strokes = if i == 0 {
+            chart
+                .axis_number_formats
+                .point_line_colors
+                .iter()
+                .filter_map(|&(idx, ref c)| c.resolve(&wb.theme).map(|[r, g, b]| (idx, [r, g, b, 0xFF])))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let kind = effective_kind(chart.kind, s.kind, i);
         let x = match (&s.categories, numeric_x || matches!(kind, ChartKind::Scatter | ChartKind::ScatterLines | ChartKind::Bubble)) {
             // X values with text in them (labels) are ignored: the points are numbered 1..n.
@@ -272,6 +283,21 @@ pub fn resolve(wb: &Workbook, sheet: usize, chart: &Chart) -> ChartData {
                 color: t.color.as_ref().and_then(|c| c.resolve(&wb.theme)).map(|[r, g, b]| [r, g, b, 0xFF]).unwrap_or(color),
             })
             .collect();
+        let number_format = match &s.number_format {
+            Some(code) if s.values.trim_start().starts_with('{') => code.clone(),
+            _ => {
+                let rf = ref_format(wb, sheet, &s.values);
+                let cache_fmt = (!chart.axis_number_formats.show_percent).then_some(chart.axis_number_formats.percent_format.as_deref()).flatten();
+                if rf.eq_ignore_ascii_case("general")
+                    && values.iter().any(|v| v.is_some_and(|x| (x - x.round()).abs() > 1e-6))
+                    && let Some(cf) = cache_fmt
+                {
+                    cf.to_string()
+                } else {
+                    rf
+                }
+            }
+        };
         series.push(SeriesData {
             name,
             values,
@@ -282,11 +308,10 @@ pub fn resolve(wb: &Workbook, sheet: usize, chart: &Chart) -> ChartData {
             secondary: s.secondary,
             smooth: s.smooth,
             trendlines,
-            number_format: match &s.number_format {
-                Some(code) if s.values.trim_start().starts_with('{') => code.clone(),
-                _ => ref_format(wb, sheet, &s.values),
-            },
+            number_format,
             label_number_format: s.label_number_format.clone(),
+            stroke,
+            point_strokes,
         });
     }
     let n = series.iter().map(|s| s.values.len()).max().unwrap_or(0);

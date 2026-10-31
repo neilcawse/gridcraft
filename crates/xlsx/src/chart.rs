@@ -546,15 +546,38 @@ pub(crate) fn read_chart_with_budget(root: &El) -> Option<(Chart, Vec<PivotSerie
     let hole_size = first.child_val("holeSize").and_then(|v| v.trim().parse::<u8>().ok()).map(|v| v.clamp(1, 90)).filter(|&v| v != 50);
     let gap_width = first.child_val("gapWidth").and_then(|v| v.trim().parse::<u16>().ok()).map(|v| v.min(500)).filter(|&v| v != 150);
     let mut point_colors: Vec<(u32, Color)> = Vec::new();
+    let mut point_line_colors: Vec<(u32, Color)> = Vec::new();
+    let mut series_line_color: Option<Color> = None;
     if let Some(s0) = first.kids("ser").next() {
+        series_line_color = s0.path(&["spPr", "ln", "solidFill"]).and_then(dml_color);
         for dpt in s0.kids("dPt") {
-            if let (Some(idx), Some(c)) =
-                (dpt.child_val("idx").and_then(|v| v.trim().parse::<u32>().ok()), dpt.path(&["spPr", "solidFill"]).and_then(dml_color))
-            {
-                point_colors.push((idx, c));
+            if let Some(idx) = dpt.child_val("idx").and_then(|v| v.trim().parse::<u32>().ok()) {
+                if let Some(c) = dpt.path(&["spPr", "solidFill"]).and_then(dml_color) {
+                    point_colors.push((idx, c));
+                }
+                if let Some(lc) = dpt.path(&["spPr", "ln", "solidFill"]).and_then(dml_color) {
+                    point_line_colors.push((idx, lc));
+                }
             }
         }
     }
+    let first_dlbls = first.kids("ser").next().and_then(|s0| s0.child("dLbls")).or_else(|| first.child("dLbls"));
+    let label_pos = first_dlbls.and_then(|d| d.child_val("dLblPos")).map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+    let percent_format = if show_percent {
+        first_dlbls.and_then(|d| typed_num_fmt(d.child("numFmt")))
+    } else if label_pos.is_some() {
+        first
+            .kids("ser")
+            .next()
+            .and_then(|s0| s0.path(&["val", "numRef", "numCache", "formatCode"]))
+            .map(|c| c.text.trim())
+            .filter(|c| !c.is_empty() && !c.eq_ignore_ascii_case("General"))
+            .map(String::from)
+    } else {
+        None
+    };
+    let plot_w =
+        plot.path(&["layout", "manualLayout"]).and_then(|m| f64_val(m, "w")).filter(|v| v.is_finite() && (0.05..=1.0).contains(v)).map(|v| v as f32);
     let primary_val_ax = if scatter { y_ax } else { val_ax_of(&first_axes).or(y_ax) };
     let scaling = primary_val_ax.and_then(|a| a.child("scaling"));
     let y_min = scaling.and_then(|s| f64_val(s, "min")).filter(|v| v.is_finite());
@@ -577,6 +600,11 @@ pub(crate) fn read_chart_with_budget(root: &El) -> Option<(Chart, Vec<PivotSerie
             y_max,
             x_label_rotation,
             gap_width,
+            series_line_color,
+            point_line_colors,
+            percent_format,
+            label_pos,
+            plot_w,
         }
     } else {
         AxisNumberFormats {
@@ -591,6 +619,11 @@ pub(crate) fn read_chart_with_budget(root: &El) -> Option<(Chart, Vec<PivotSerie
             y_max,
             x_label_rotation,
             gap_width,
+            series_line_color,
+            point_line_colors,
+            percent_format,
+            label_pos,
+            plot_w,
         }
     };
     let legend = match chart.child("legend") {
@@ -921,7 +954,12 @@ fn series_xml(s: &Series, idx: usize, g: G, ch: &Chart, wb: &Workbook, si: usize
             );
         }
         (Some(c), false) => {
-            let _ = write!(x, "<c:spPr><a:solidFill>{c}</a:solidFill></c:spPr>");
+            let ln = (idx == 0)
+                .then(|| ch.axis_number_formats.series_line_color.as_ref().and_then(|lc| srgb(lc, &wb.theme)))
+                .flatten()
+                .map(|l| format!("<a:ln><a:solidFill>{l}</a:solidFill></a:ln>"))
+                .unwrap_or_default();
+            let _ = write!(x, "<c:spPr><a:solidFill>{c}</a:solidFill>{ln}</c:spPr>");
         }
         (None, _) if g == (G::Scatter { lines: false }) || g == G::Stock => x.push_str("<c:spPr><a:ln w=\"19050\"><a:noFill/></a:ln></c:spPr>"),
         _ => {}
@@ -935,15 +973,25 @@ fn series_xml(s: &Series, idx: usize, g: G, ch: &Chart, wb: &Workbook, si: usize
     if idx == 0 {
         for &(pt_idx, ref c) in &ch.axis_number_formats.point_colors {
             if let Some(fill) = srgb(c, &wb.theme) {
-                let _ =
-                    write!(x, "<c:dPt><c:idx val=\"{pt_idx}\"/><c:bubble3D val=\"0\"/><c:spPr><a:solidFill>{fill}</a:solidFill></c:spPr></c:dPt>");
+                let ln = ch
+                    .axis_number_formats
+                    .point_line_colors
+                    .iter()
+                    .find(|&&(i, _)| i == pt_idx)
+                    .and_then(|(_, lc)| srgb(lc, &wb.theme))
+                    .map(|l| format!("<a:ln w=\"19050\"><a:solidFill>{l}</a:solidFill></a:ln>"))
+                    .unwrap_or_default();
+                let _ = write!(
+                    x,
+                    "<c:dPt><c:idx val=\"{pt_idx}\"/><c:bubble3D val=\"0\"/><c:spPr><a:solidFill>{fill}</a:solidFill>{ln}</c:spPr></c:dPt>"
+                );
             }
         }
     }
     // A typed label format needs the series' own dLbls (after dPt, before trendline in every
     // series type written here).
     if let Some(f) = s.label_number_format.as_deref() {
-        x.push_str(&dlbls(ch.data_labels, ch.axis_number_formats.show_percent, Some(f)));
+        x.push_str(&dlbls(ch.data_labels, ch.axis_number_formats.show_percent, Some(f), ch.axis_number_formats.label_pos.as_deref()));
     }
     // Trendlines sit between dLbls and the data in CT_LineSer, CT_BarSer, CT_AreaSer,
     // CT_ScatterSer and CT_BubbleSer; pie and radar series have none.
@@ -1045,18 +1093,24 @@ fn num_fmt_xml(code: Option<&str>) -> String {
 }
 
 /// `<c:dLbls>`; a typed `fmt` comes first, as CT_DLbls orders it.
-fn dlbls(show: bool, pct: bool, fmt: Option<&str>) -> String {
+fn dlbls(show: bool, pct: bool, fmt: Option<&str>, pos: Option<&str>) -> String {
     let show_val = (show && !pct) as u8;
     let show_pct = (show && pct) as u8;
+    let pos_xml = pos.map(|p| format!("<c:dLblPos val=\"{}\"/>", esc_attr(p))).unwrap_or_default();
     format!(
-        "<c:dLbls>{}<c:showLegendKey val=\"0\"/><c:showVal val=\"{show_val}\"/><c:showCatName val=\"0\"/><c:showSerName val=\"0\"/><c:showPercent val=\"{show_pct}\"/><c:showBubbleSize val=\"0\"/></c:dLbls>",
+        "<c:dLbls>{}{pos_xml}<c:showLegendKey val=\"0\"/><c:showVal val=\"{show_val}\"/><c:showCatName val=\"0\"/><c:showSerName val=\"0\"/><c:showPercent val=\"{show_pct}\"/><c:showBubbleSize val=\"0\"/></c:dLbls>",
         fmt.map(|f| num_fmt_xml(Some(f))).unwrap_or_default(),
     )
 }
 
 fn group_xml(g: G, series: &[(usize, &Series)], ch: &Chart, axes: (u32, u32), wb: &Workbook, si: usize) -> String {
     let sers: String = series.iter().map(|(i, s)| series_xml(s, *i, g, ch, wb, si)).collect();
-    let dl = dlbls(ch.data_labels, ch.axis_number_formats.show_percent, None);
+    let dl = dlbls(
+        ch.data_labels,
+        ch.axis_number_formats.show_percent,
+        ch.axis_number_formats.percent_format.as_deref().filter(|_| ch.axis_number_formats.show_percent),
+        ch.axis_number_formats.label_pos.as_deref(),
+    );
     let ax = format!("<c:axId val=\"{}\"/><c:axId val=\"{}\"/>", axes.0, axes.1);
     match g {
         G::Bar { bar, grouping } => {
@@ -1181,7 +1235,11 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
         Some(_) => s.push_str("<c:autoTitleDeleted val=\"1\"/>"),
         None => s.push_str("<c:autoTitleDeleted val=\"0\"/>"),
     }
-    s.push_str("<c:plotArea><c:layout/>");
+    if let Some(pw) = ch.axis_number_formats.plot_w.filter(|v| v.is_finite() && (0.05..=1.0).contains(v)) {
+        let _ = write!(s, "<c:plotArea><c:layout><c:manualLayout><c:w val=\"{}\"/></c:manualLayout></c:layout>", num(f64::from(pw)));
+    } else {
+        s.push_str("<c:plotArea><c:layout/>");
+    }
     let all: Vec<(usize, &Series)> = ch.series.iter().enumerate().collect();
     let primary_g;
     let mut secondary: Option<G> = None;
