@@ -94,6 +94,9 @@ pub(crate) fn export(wb: &Workbook, sheet: usize, at: CellRef, formula: &Formula
     expr.walk(&mut |e| explicit |= matches!(e, Expr::Unary(UnOp::At, _)));
     let mut legacy = Legacy::new(wb, at, functions);
     if !explicit {
+        if crate::external::saved_as_read(formula) {
+            return Export::Unchanged;
+        }
         legacy.formula(expr.as_ref().clone(), sheet);
         return if !legacy.certain {
             Export::Dynamic
@@ -153,8 +156,9 @@ pub(crate) fn apply_legacy(wb: &mut Workbook, cells: Vec<(usize, Vec<CellRef>)>,
             continue;
         }
         let Some(sheet) = wb.sheet_mut(si) else { continue };
-        for (at, f) in changed {
+        for (at, mut f) in changed {
             if let Some(cell) = sheet.cells.get_mut(at) {
+                f.legacy = cell.formula.as_ref().is_some_and(|old| old.legacy);
                 cell.formula = Some(Arc::new(f));
             }
         }
