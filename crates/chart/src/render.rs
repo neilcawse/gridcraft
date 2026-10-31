@@ -142,7 +142,9 @@ pub fn render(chart: &Chart, data: &ChartData, w: f32, h: f32, m: &dyn Measure) 
         return vec![];
     }
     let mut ctx = Ctx { out: Vec::new(), m };
-    ctx.out.push(Prim::Rect { x: 0.0, y: 0.0, w, h, fill: Some(WHITE), stroke: Some((GRID, 1.0)), radius: 0.0 });
+    if !chart.axis_number_formats.no_fill {
+        ctx.out.push(Prim::Rect { x: 0.0, y: 0.0, w, h, fill: Some(WHITE), stroke: Some((GRID, 1.0)), radius: 0.0 });
+    }
     let pad = (w.min(h) * 0.04).clamp(2.0, 10.0);
     let mut area = Bx { x: pad, y: pad, w: w - 2.0 * pad, h: h - 2.0 * pad };
     if let Some(t) = title {
@@ -167,7 +169,7 @@ fn draw_kind(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx) {
     use ChartKind::*;
     match chart.kind {
         Pie => pie(ctx, chart, data, area, 0.0, false),
-        Doughnut => pie(ctx, chart, data, area, 0.5, false),
+        Doughnut => pie(ctx, chart, data, area, chart.axis_number_formats.hole_size.map_or(0.5, |h| (h as f32 / 100.0).clamp(0.01, 0.9)), false),
         Sunburst => pie(ctx, chart, data, area, 0.2, true),
         Treemap => treemap(ctx, chart, data, area),
         Funnel => funnel(ctx, chart, data, area),

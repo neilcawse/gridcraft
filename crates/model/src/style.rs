@@ -400,6 +400,8 @@ pub struct DxfStated {
     pub underline: bool,
     pub size: bool,
     pub name: bool,
+    #[serde(default)]
+    pub color: bool,
     /// `<scheme val>`: the theme font the face follows (`major`, `minor` or `none`).
     pub scheme: Option<String>,
     pub protection: bool,

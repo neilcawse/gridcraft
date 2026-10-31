@@ -82,14 +82,36 @@ fn read_anchor(a: &El, sheet: &Sheet) -> Option<Anchor> {
 }
 
 /// Colour of a DrawingML colour choice inside `e` (e.g. a `solidFill`).
+fn dml_tint(el: &El) -> i16 {
+    let pct = |name: &str| el.child(name).and_then(|c| c.attr_f64("val")).filter(|v| v.is_finite());
+    let t = if let Some(off) = pct("lumOff").filter(|&v| v > 0.0) {
+        (off / 100.0).round()
+    } else if let Some(m) = pct("lumMod").filter(|&v| (0.0..100_000.0).contains(&v)) {
+        ((m - 100_000.0) / 100.0).round()
+    } else if let Some(t) = pct("tint") {
+        (t / 100.0).round()
+    } else if let Some(s) = pct("shade") {
+        -(s / 100.0).round()
+    } else {
+        0.0
+    };
+    t.clamp(-1000.0, 1000.0) as i16
+}
+
 pub fn dml_color(e: &El) -> Option<Color> {
-    if let Some(c) = e.child("srgbClr").and_then(|c| c.attr("val")) {
-        return Color::from_hex(c);
+    if let Some(el) = e.child("srgbClr")
+        && let Some(c) = el.attr("val").and_then(Color::from_hex)
+    {
+        return Some(c);
     }
-    if let Some(c) = e.child("sysClr").and_then(|c| c.attr("lastClr")) {
-        return Color::from_hex(c);
+    if let Some(el) = e.child("sysClr")
+        && let Some(c) = el.attr("lastClr").and_then(Color::from_hex)
+    {
+        return Some(c);
     }
-    if let Some(c) = e.child("schemeClr").and_then(|c| c.attr("val")) {
+    if let Some(el) = e.child("schemeClr")
+        && let Some(c) = el.attr("val")
+    {
         let i = match c {
             "bg1" | "lt1" => 0,
             "tx1" | "dk1" => 1,
@@ -105,7 +127,7 @@ pub fn dml_color(e: &El) -> Option<Color> {
             "folHlink" => 11,
             _ => return None,
         };
-        return Some(Color::Theme(i, 0));
+        return Some(Color::Theme(i, dml_tint(el)));
     }
     None
 }
@@ -393,7 +415,7 @@ fn read_object(
             if rotates(rotation) {
                 cx.warn("a rotated group was laid out without its rotation");
             }
-            if member_rotations.iter().any(|&(_, r)| rotates(r)) {
+            if member_rotations.iter().any(|&(m, r)| rotates(r) && !matches!(m, DrawingRef::Shape(_))) {
                 cx.warn("a rotated picture or shape in a group is drawn without its rotation");
             }
             if flip.0 || flip.1 {
@@ -454,7 +476,17 @@ fn read_shape(obj: &El, anchor: Anchor, grouped: bool) -> Option<Shape> {
     let text = obj
         .child("txBody")
         .map(|tb| {
-            tb.kids("p").map(|p| p.kids("r").filter_map(|r| r.child("t")).map(|t| t.text.as_str()).collect::<String>()).collect::<Vec<_>>().join("\n")
+            tb.kids("p")
+                .map(|p| {
+                    p.children
+                        .iter()
+                        .filter(|c| matches!(c.name.as_str(), "r" | "fld"))
+                        .filter_map(|r| r.child("t"))
+                        .map(|t| t.text.as_str())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
         })
         .unwrap_or_default();
     let mut format = read_text_format(obj.child("txBody"));
@@ -480,7 +512,12 @@ fn read_text_format(body: Option<&El>) -> ShapeFormat {
         _ => ShapeTextAlign::Left,
     });
     f.rtl = ppr.is_some_and(|p| p.flag("rtl", false));
-    let rpr = body.kids("p").flat_map(|p| p.kids("r")).find_map(|r| r.child("rPr"));
+    f.level = ppr.and_then(|p| p.attr_u32("lvl")).unwrap_or(0).min(8) as u8;
+    let rpr = body
+        .kids("p")
+        .flat_map(|p| p.children.iter().filter(|c| matches!(c.name.as_str(), "r" | "fld")))
+        .find_map(|r| r.child("rPr"))
+        .or_else(|| ppr.and_then(|p| p.child("defRPr")));
     if let Some(r) = rpr {
         // `sz` is in hundredths of a point (100..=400000 in the schema).
         f.font_size = r.attr_f64("sz").filter(|v| v.is_finite()).map(|v| (v / 100.0).clamp(1.0, 4000.0) as f32);
@@ -949,8 +986,9 @@ fn write_obj(s: &mut String, theme: &Theme, o: &Obj<'_>, id: usize, off: (i64, i
                     Some(ShapeTextAlign::Center) => " algn=\"ctr\"",
                     Some(ShapeTextAlign::Right) => " algn=\"r\"",
                 };
+                let lvl = if f.level > 0 { format!(" lvl=\"{}\"", f.level) } else { String::new() };
                 let rtl = if f.rtl { " rtl=\"1\"" } else { "" };
-                let ppr = if algn.is_empty() && rtl.is_empty() { String::new() } else { format!("<a:pPr{algn}{rtl}/>") };
+                let ppr = if lvl.is_empty() && algn.is_empty() && rtl.is_empty() { String::new() } else { format!("<a:pPr{lvl}{algn}{rtl}/>") };
                 let (rpr_attrs, rpr_body) = run_props(f, theme);
                 for line in sh.text.split('\n') {
                     if line.is_empty() {

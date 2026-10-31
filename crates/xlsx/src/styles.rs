@@ -381,6 +381,7 @@ pub fn read_dxf(x: &El, palette: &[u32], fmts: &HashMap<u32, String>) -> Style {
         st.underline = e.child("u").is_some() && f.underline == Underline::None;
         st.size = has_size && size == def.size;
         st.name = has_name && name == def.name;
+        st.color = e.child("color").is_some() && f.color == Color::Auto;
         st.scheme = e.child_val("scheme").map(str::to_string);
         // A differential font's scheme is in `dxf_stated`.
         s.font = Font { name, size, minor: s.font.minor, ..f };
@@ -457,6 +458,8 @@ fn font_xml(f: &Font, dxf: Option<&DxfStated>, minor: bool) -> String {
         let _ = write!(s, "<color {}/>", color_attrs(&f.color));
     } else if dxf.is_none() {
         s.push_str("<color theme=\"1\"/>");
+    } else if stated.color {
+        s.push_str("<color auto=\"1\"/>");
     }
     if dxf.is_none() {
         let family = f.family.filter(|v| *v <= MAX_FONT_FAMILY).unwrap_or(DEFAULT_FONT_FAMILY);
@@ -761,6 +764,7 @@ pub fn dxf_xml(tag: &str, d: &Style, nf: &mut NumFmts) -> String {
         || d.dxf_stated.underline
         || d.dxf_stated.size
         || d.dxf_stated.name
+        || d.dxf_stated.color
         || d.dxf_stated.scheme.is_some()
     {
         dx.push_str(&font_xml(&d.font, Some(&d.dxf_stated), false));

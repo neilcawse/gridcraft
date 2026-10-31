@@ -21,7 +21,7 @@ impl Scale {
         if !(span.is_finite() && self.step.is_finite() && self.step > 0.0 && span > 0.0) {
             return vec![self.min];
         }
-        let n = ((span / self.step).round() as i64).clamp(1, 50);
+        let n = (((span + self.step * 1e-6) / self.step).floor() as i64).clamp(1, 50);
         (0..=n)
             .map(|i| {
                 let v = self.min + i as f64 * self.step;

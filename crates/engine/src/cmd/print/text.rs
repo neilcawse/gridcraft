@@ -145,7 +145,7 @@ pub(super) fn draw_text(pg: &mut Page, b: &Block, placement: TextPlacement<'_>) 
     let code = st.num_fmt.as_str();
     let formatted = crate::display::format(&v, code, wb);
     let mut color = formatted.color.and_then(gridcraft_numfmt::FormatColor::rgb).or_else(|| rgb_of(st.font.color, wb)).unwrap_or([0, 0, 0]);
-    if l.cf.as_ref().and_then(|x| x.style.as_ref()).is_some_and(|s| s.font.color != Color::Auto) {
+    if l.cf.as_ref().and_then(|x| x.style.as_ref()).is_some_and(|s| s.font.color != Color::Auto || s.dxf_stated.color) {
         color = rgb_of(st.font.color, wb).unwrap_or(color);
     }
     let is_num = matches!(v, Value::Number(_));
@@ -230,7 +230,12 @@ pub(super) fn draw_text(pg: &mut Page, b: &Block, placement: TextPlacement<'_>) 
     if rot == 255 {
         // Vertical stacked text.
         let chars: Vec<char> = lines.concat().chars().take(500).collect();
-        let mut yy = y + pad + size * 0.8;
+        let cn = chars.len().max(1) as f32;
+        let mut yy = match st.align.v {
+            VAlign::Top => y + pad + size * 0.8,
+            VAlign::Center | VAlign::Justify | VAlign::Distributed => y + (h - cn * line_h) / 2.0 + line_h * 0.5 + size * 0.33,
+            VAlign::Bottom => y + h - pad - size * 0.22 - (cn - 1.0) * line_h,
+        };
         for ch in chars {
             let s = ch.to_string();
             let cw = gridcraft_pdf::text_width(font, size, &s);

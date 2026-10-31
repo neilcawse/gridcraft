@@ -41,7 +41,7 @@ fn typed_formats_are_read_and_linked_ones_are_not() {
     let (ch, _) = read_chart(&parse(excel_combo().as_bytes()).unwrap()).unwrap();
     assert_eq!(
         ch.axis_number_formats,
-        AxisNumberFormats { x: None, y: Some("[h]:mm".into()), y2: Some("0%".into()) },
+        AxisNumberFormats { x: None, y: Some("[h]:mm".into()), y2: Some("0%".into()), ..Default::default() },
         "each value axis by the group that uses it, not by file order"
     );
     let labels: Vec<Option<&str>> = ch.series.iter().map(|s| s.label_number_format.as_deref()).collect();
@@ -113,7 +113,7 @@ fn scatter_axes_are_the_groups_own_and_x_comes_first() {
          <c:valAx><c:axId val=\"10\"/><c:axPos val=\"l\"/><c:numFmt formatCode=\"0.0\" sourceLinked=\"0\"/><c:crossAx val=\"20\"/></c:valAx>\
          <c:valAx><c:axId val=\"20\"/><c:axPos val=\"l\"/><c:numFmt formatCode=\"0%\" sourceLinked=\"0\"/><c:crossAx val=\"10\"/></c:valAx>",
     );
-    assert_eq!(ch.axis_number_formats, AxisNumberFormats { x: Some("0.0".into()), y: Some("0%".into()), y2: None });
+    assert_eq!(ch.axis_number_formats, AxisNumberFormats { x: Some("0.0".into()), y: Some("0%".into()), y2: None, ..Default::default() });
 }
 
 #[test]
@@ -134,7 +134,11 @@ fn a_100_percent_line_or_area_axis_keeps_no_typed_format() {
              <c:catAx><c:axId val=\"3\"/><c:delete val=\"1\"/><c:crossAx val=\"4\"/></c:catAx>\
              <c:valAx><c:axId val=\"4\"/><c:numFmt formatCode=\"0.0%\" sourceLinked=\"0\"/><c:crossAx val=\"3\"/></c:valAx>"
         ));
-        assert_eq!(ch.axis_number_formats, AxisNumberFormats { x: None, y: Some("#,##0".into()), y2: None }, "{group} on the secondary axis");
+        assert_eq!(
+            ch.axis_number_formats,
+            AxisNumberFormats { x: None, y: Some("#,##0".into()), y2: None, ..Default::default() },
+            "{group} on the secondary axis"
+        );
         let ch = read(&format!(
             "<c:{group}><c:grouping val=\"percentStacked\"/>\
              <c:ser><c:idx val=\"0\"/><c:order val=\"0\"/><c:val><c:numRef><c:f>Data!$B$2:$B$5</c:f></c:numRef></c:val></c:ser>\
@@ -181,13 +185,13 @@ fn typed_formats_round_trip() {
         1,
         ChartKind::Combo,
         vec![series("Data!$B$2:$B$5", Some("0;;;")), secondary],
-        AxisNumberFormats { x: None, y: Some("#,##0".into()), y2: Some("0%".into()) },
+        AxisNumberFormats { x: None, y: Some("#,##0".into()), y2: Some("0%".into()), ..Default::default() },
     );
     let scatter = chart(
         2,
         ChartKind::Scatter,
         vec![Series { categories: Some("Data!$A$2:$A$5".into()), ..series("Data!$B$2:$B$5", None) }],
-        AxisNumberFormats { x: Some("[h]:mm".into()), y: Some("0.00E+00".into()), y2: None },
+        AxisNumberFormats { x: Some("[h]:mm".into()), y: Some("0.00E+00".into()), y2: None, ..Default::default() },
     );
     let plain = chart(3, ChartKind::Pie, vec![series("Data!$B$2:$B$5", Some("0.0%"))], AxisNumberFormats::default());
     s.charts = vec![combo, scatter, plain];

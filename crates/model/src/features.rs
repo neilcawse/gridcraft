@@ -555,6 +555,30 @@ pub struct AxisNumberFormats {
     pub y: Option<String>,
     /// The secondary value axis of a combo chart.
     pub y2: Option<String>,
+    /// Chart frame has `<c:spPr><a:noFill/>` (transparent card background).
+    #[serde(default)]
+    pub no_fill: bool,
+    /// Doughnut hole size (`<c:holeSize val="1..=90"/>`, percent of outer radius).
+    #[serde(default)]
+    pub hole_size: Option<u8>,
+    /// Per-point fill colours (`<c:dPt><c:idx val="..."/></c:dPt>`).
+    #[serde(default)]
+    pub point_colors: Vec<(u32, Color)>,
+    /// Data labels show percentage (`<c:dLbls><c:showPercent val="1"/>`).
+    #[serde(default)]
+    pub show_percent: bool,
+    /// Explicit primary value axis minimum (`<c:valAx><c:scaling><c:min val="..."/>`).
+    #[serde(default)]
+    pub y_min: Option<f64>,
+    /// Explicit primary value axis maximum (`<c:valAx><c:scaling><c:max val="..."/>`).
+    #[serde(default)]
+    pub y_max: Option<f64>,
+    /// Category axis label rotation in degrees (`<c:catAx><c:txPr><a:bodyPr rot="..."/>`).
+    #[serde(default)]
+    pub x_label_rotation: Option<f32>,
+    /// Bar/column gap width (`<c:barChart><c:gapWidth val="0..=500"/>`, percent of bar width).
+    #[serde(default)]
+    pub gap_width: Option<u16>,
 }
 impl Trendline {
     /// Longest forward / backward forecast kept from a file or a command, in x units. Excel's own
@@ -681,6 +705,9 @@ pub struct ShapeFormat {
     pub anchor: Option<ShapeTextAnchor>,
     /// Paragraphs run right to left (`a:pPr rtl`).
     pub rtl: bool,
+    /// Paragraph indent level (`a:pPr lvl`, 0..=8).
+    #[serde(default)]
+    pub level: u8,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

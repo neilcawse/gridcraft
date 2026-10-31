@@ -60,36 +60,49 @@ pub(super) fn draw_objects(pg: &mut Page, wb: &Workbook, si: usize, sh: &Sheet, 
     pg.save();
     pg.clip_rect(bx, by, bw, bh);
     draw_sparklines(pg, wb, si, sh, b, block);
-    for (imi, im) in sh.images.iter().enumerate() {
-        let r = anchor_rect(sh, &im.anchor);
-        if !visible(r) {
-            continue;
+    let mut order: Vec<(u32, u8, usize)> = Vec::with_capacity(sh.shapes.len() + sh.images.len() + sh.charts.len());
+    order.extend(sh.shapes.iter().enumerate().map(|(i, sp)| (sp.id, 0u8, i)));
+    order.extend(sh.images.iter().enumerate().map(|(i, im)| (im.id, 1u8, i)));
+    order.extend(sh.charts.iter().enumerate().map(|(i, ch)| (ch.id, 2u8, i)));
+    order.sort_by_key(|&(id, kind, i)| (id, kind, i));
+    for (_, kind, idx) in order {
+        match kind {
+            0 => {
+                let shp = &sh.shapes[idx];
+                let r = anchor_rect(sh, &shp.anchor);
+                if !visible(r) {
+                    continue;
+                }
+                let (x, y, w, h) = place(r);
+                let rot = sh.object_rotation(gridcraft_model::DrawingRef::Shape(shp.id));
+                draw_shape(pg, wb, shp, b, (x, y, w, h), rot);
+            }
+            1 => {
+                let im = &sh.images[idx];
+                let r = anchor_rect(sh, &im.anchor);
+                if !visible(r) {
+                    continue;
+                }
+                let (x, y, w, h) = place(r);
+                // About 150 dpi is plenty for print.
+                let (mw, mh) = (((w / 72.0) * 150.0).ceil().clamp(1.0, 4000.0) as u32, ((h / 72.0) * 150.0).ceil().clamp(1.0, 4000.0) as u32);
+                let decoded = pics.entry((si, idx)).or_insert_with(|| decode_image(&im.data, mw, mh));
+                if let Some((px, pw, ph)) = decoded.as_ref() {
+                    pg.image_rgba(Rect::new(x, y, w, h), px, [*pw, *ph]);
+                }
+            }
+            _ => {
+                let ch = &sh.charts[idx];
+                let r = anchor_rect(sh, &ch.anchor);
+                if !visible(r) {
+                    continue;
+                }
+                let (x, y, _, _) = place(r);
+                let data = gridcraft_chart::resolve(wb, si, ch);
+                let prims = gridcraft_chart::render(ch, &data, r.2 as f32, r.3 as f32, &PdfMeasure);
+                draw_prims(pg, &prims, Xf { ox: x, oy: y, k: b.k });
+            }
         }
-        let (x, y, w, h) = place(r);
-        // About 150 dpi is plenty for print.
-        let (mw, mh) = (((w / 72.0) * 150.0).ceil().clamp(1.0, 4000.0) as u32, ((h / 72.0) * 150.0).ceil().clamp(1.0, 4000.0) as u32);
-        let decoded = pics.entry((si, imi)).or_insert_with(|| decode_image(&im.data, mw, mh));
-        if let Some((px, pw, ph)) = decoded.as_ref() {
-            pg.image_rgba(Rect::new(x, y, w, h), px, [*pw, *ph]);
-        }
-    }
-    for shp in &sh.shapes {
-        let r = anchor_rect(sh, &shp.anchor);
-        if !visible(r) {
-            continue;
-        }
-        let (x, y, w, h) = place(r);
-        draw_shape(pg, wb, shp, b, (x, y, w, h));
-    }
-    for ch in &sh.charts {
-        let r = anchor_rect(sh, &ch.anchor);
-        if !visible(r) {
-            continue;
-        }
-        let (x, y, _, _) = place(r);
-        let data = gridcraft_chart::resolve(wb, si, ch);
-        let prims = gridcraft_chart::render(ch, &data, r.2 as f32, r.3 as f32, &PdfMeasure);
-        draw_prims(pg, &prims, Xf { ox: x, oy: y, k: b.k });
     }
     pg.restore();
 }
@@ -111,7 +124,7 @@ fn draw_sparklines(pg: &mut Page, wb: &Workbook, si: usize, sh: &Sheet, b: &Bloc
     }
 }
 
-fn draw_shape(pg: &mut Page, wb: &Workbook, shp: &gridcraft_model::Shape, b: &Block, (x, y, w, h): (f32, f32, f32, f32)) {
+fn draw_shape(pg: &mut Page, wb: &Workbook, shp: &gridcraft_model::Shape, b: &Block, (x, y, w, h): (f32, f32, f32, f32), rot: i64) {
     let fill = rgb_of(shp.fill, wb);
     let line = rgb_of(shp.line, wb).filter(|_| !shp.format.no_line).map(|c| (c, (0.75 * b.k).max(0.25)));
     match shp.kind {
@@ -150,7 +163,20 @@ fn draw_shape(pg: &mut Page, wb: &Workbook, shp: &gridcraft_model::Shape, b: &Bl
     let color = fm.text_color.and_then(|c| rgb_of(c, wb)).unwrap_or([0, 0, 0]);
     let align = fm.align.unwrap_or(if text_box { ShapeTextAlign::Left } else { ShapeTextAlign::Center });
     let anchor = fm.anchor.unwrap_or(if text_box { ShapeTextAnchor::Top } else { ShapeTextAnchor::Middle });
-    let lines = wrap_lines(&shp.text, font, size, (w - 4.0 * b.k).max(size));
+    let pad_l = (2.0 + fm.level as f32 * 30.0) * b.k;
+    let deg = (rot.rem_euclid(21_600_000) as f64) / 60_000.0;
+    let angle = (if deg > 180.0 { deg - 360.0 } else { deg }).to_radians() as f32;
+    let quarter = (45.0..135.0).contains(&deg) || (225.0..315.0).contains(&deg);
+    let box_w = if quarter { h } else { w };
+    let lines = wrap_lines(&shp.text, font, size, (box_w - pad_l - 2.0 * b.k).max(size));
+    if angle.abs() > 1e-4 {
+        for (i, l) in lines.iter().take(500).enumerate() {
+            let lw = gridcraft_pdf::text_width(font, size, l);
+            let pt = gridcraft_pdf::Point::new(x + w / 2.0 + i as f32 * size * 1.2, y + (h + lw) / 2.0);
+            pg.text_rotated(pt, size, font, color, l, angle);
+        }
+        return;
+    }
     let block_h = lines.len().min(500) as f32 * size * 1.2;
     let mut yy = match anchor {
         ShapeTextAnchor::Top => y + 2.0 * b.k,
@@ -160,7 +186,7 @@ fn draw_shape(pg: &mut Page, wb: &Workbook, shp: &gridcraft_model::Shape, b: &Bl
     for l in lines.iter().take(500) {
         let lw = gridcraft_pdf::text_width(font, size, l);
         let lx = match align {
-            ShapeTextAlign::Left => x + 2.0 * b.k,
+            ShapeTextAlign::Left => x + pad_l,
             ShapeTextAlign::Center => x + (w - lw) / 2.0,
             ShapeTextAlign::Right => x + w - 2.0 * b.k - lw,
         };

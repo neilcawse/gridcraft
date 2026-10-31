@@ -74,7 +74,9 @@ pub(super) fn read_cf(cx: &mut Ctx<'_>, e: &El, sheet: &mut Sheet) {
 
 fn push_cf(cx: &mut Ctx<'_>, sheet: &mut Sheet, ranges: &[RangeRef], r: &El, rule: CfRule) -> bool {
     let rules = sheet.cond_formats.len();
-    let area = ranges.iter().map(RangeRef::count).sum::<u64>().saturating_mul(1 + rules as u64);
+    let used = sheet.used_range();
+    let cells: u64 = ranges.iter().map(|rg| used.and_then(|u| rg.intersection(&u)).map_or(1, |x| x.count())).sum();
+    let area = cells.max(ranges.len() as u64).saturating_mul(1 + rules as u64);
     if area > MAX_COND_CELLS {
         cx.warn(format!("conditional formats past {MAX_COND_CELLS} kept range cells were dropped"));
         return false;

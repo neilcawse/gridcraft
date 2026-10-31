@@ -159,6 +159,10 @@ impl Sheet {
             DrawingRef::Group(_) => None,
         }
     }
+    /// The rotation (`a:xfrm rot`, 60000ths of a degree) of a grouped object, or `0`.
+    pub fn object_rotation(&self, r: DrawingRef) -> i64 {
+        self.groups.iter().flat_map(|g| &g.member_rotations).find(|&&(m, _)| m == r).map_or(0, |&(_, rot)| rot)
+    }
 
     /// An object's box; a group's is the box around its members. `None` when the object is
     /// missing or a group holds none.

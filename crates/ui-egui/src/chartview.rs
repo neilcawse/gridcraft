@@ -212,7 +212,7 @@ fn area_mesh(v: &[Pos2], col: Color32) -> egui::Mesh {
 /// A shape's text with its formatting: size, bold/italic, typeface, colour, outline, horizontal
 /// alignment and vertical anchor. Shapes other than text boxes default to white text centred in
 /// the shape; text boxes to black text at the top left.
-fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Shape, r: Rect, z: f32) {
+fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Shape, r: Rect, z: f32, rot: i64) {
     use gridcraft_engine::model::{ShapeTextAlign, ShapeTextAnchor};
     let f = &sp.format;
     let text_box = sp.kind == ShapeKind::TextBox;
@@ -224,7 +224,12 @@ fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Sh
     let size = f.font_size.map_or(14.0, |pt| pt * 96.0 / 72.0).clamp(1.0, 2000.0) * z;
     let family = theme::cell_family(f.font.as_deref().unwrap_or(""), f.bold, f.italic);
     let inset = 4.0;
-    let width = (r.width() - 2.0 * inset).max(1.0);
+    let pad_l = inset + f.level as f32 * 40.0 * z;
+    let deg = (rot.rem_euclid(21_600_000) as f64) / 60_000.0;
+    let angle = (if deg > 180.0 { deg - 360.0 } else { deg }).to_radians() as f32;
+    let quarter = (45.0..135.0).contains(&deg) || (225.0..315.0).contains(&deg);
+    let (box_w, box_h) = if quarter { (r.height(), r.width()) } else { (r.width(), r.height()) };
+    let width = (box_w - pad_l - inset).max(1.0);
     let mut job = egui::text::LayoutJob::simple(sp.text.clone(), FontId::new(size, family), color, width);
     job.halign = match align {
         ShapeTextAlign::Left => egui::Align::LEFT,
@@ -232,8 +237,27 @@ fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Sh
         ShapeTextAlign::Right => egui::Align::RIGHT,
     };
     let g = p.layout_job(job);
+    if angle.abs() > 1e-4 {
+        let lx = match align {
+            ShapeTextAlign::Left => -box_w / 2.0 + pad_l,
+            ShapeTextAlign::Center => 0.0,
+            ShapeTextAlign::Right => box_w / 2.0 - inset,
+        };
+        let ly = match anchor {
+            ShapeTextAnchor::Top => -box_h / 2.0 + inset,
+            ShapeTextAnchor::Middle => -g.size().y / 2.0,
+            ShapeTextAnchor::Bottom => box_h / 2.0 - inset - g.size().y,
+        };
+        let rot_m = egui::emath::Rot2::from_angle(angle);
+        let pos = r.center() + rot_m * vec2(lx, ly);
+        let clip = p.with_clip_rect(r.expand(4.0).intersect(p.clip_rect()));
+        let mut shape = egui::epaint::TextShape::new(pos, g, color);
+        shape.angle = angle;
+        clip.add(shape);
+        return;
+    }
     let x = match align {
-        ShapeTextAlign::Left => r.left() + inset,
+        ShapeTextAlign::Left => r.left() + pad_l,
         ShapeTextAlign::Center => r.center().x,
         ShapeTextAlign::Right => r.right() - inset,
     };
@@ -301,108 +325,132 @@ pub(crate) fn paint_objects(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Wor
     let mut done = |start: egui::layers::ShapeIdx, rect: Rect| painted.push(PaintedObject { shapes: start.0..p.add(egui::Shape::Noop).0, rect });
     // The grid paints the active workbook: its pictures are cached under it.
     let doc = app.session.active().map_or(0, |d| d.uid);
-    for sp in &sh.shapes {
-        let r = anchor_rect(geo, sh, &sp.anchor);
-        if !r.intersects(p.clip_rect()) {
-            continue;
-        }
-        let start = p.add(egui::Shape::Noop);
-        let mut label = true;
-        let fill = sp.fill.resolve(&wb.theme).map(theme::color32).unwrap_or(Color32::TRANSPARENT);
-        let line =
-            if sp.format.no_line { Color32::TRANSPARENT } else { sp.line.resolve(&wb.theme).map(theme::color32).unwrap_or(Color32::DARK_GRAY) };
-        match sp.kind {
-            ShapeKind::Rectangle | ShapeKind::TextBox => {
-                p.rect_filled(r, 0.0, fill);
-                p.rect_stroke(r, 0.0, Stroke::new(1.0, line), StrokeKind::Inside);
-            }
-            ShapeKind::RoundedRectangle => {
-                p.rect_filled(r, 10.0 * geo.z, fill);
-                p.rect_stroke(r, 10.0 * geo.z, Stroke::new(1.0, line), StrokeKind::Inside);
-            }
-            ShapeKind::Ellipse => {
-                let pts: Vec<Pos2> = (0..64)
-                    .map(|i| {
-                        let a = i as f32 / 64.0 * std::f32::consts::TAU;
-                        pos2(r.center().x + r.width() / 2.0 * a.cos(), r.center().y + r.height() / 2.0 * a.sin())
-                    })
-                    .collect();
-                p.add(PathShape::convex_polygon(pts, fill, Stroke::new(1.0, line)));
-            }
-            ShapeKind::Triangle => {
-                p.add(PathShape::convex_polygon(vec![pos2(r.center().x, r.top()), r.right_bottom(), r.left_bottom()], fill, Stroke::new(1.0, line)));
-            }
-            ShapeKind::Ink => {
-                let w = gridcraft_engine::cmd::draw::ink_width(sp) * geo.z;
-                let pts: Vec<Pos2> =
-                    gridcraft_engine::cmd::draw::ink_points(sp).iter().map(|q| pos2(r.left() + q[0] * geo.z, r.top() + q[1] * geo.z)).collect();
-                if pts.len() >= 2 {
-                    let col = if w > 8.0 { line.gamma_multiply(0.45) } else { line };
-                    p.add(PathShape::line(pts, PathStroke::new(w, col)));
+    let mut order: Vec<(u32, u8, usize)> = Vec::with_capacity(sh.shapes.len() + sh.images.len() + sh.charts.len());
+    order.extend(sh.shapes.iter().enumerate().map(|(i, sp)| (sp.id, 0u8, i)));
+    order.extend(sh.images.iter().enumerate().map(|(i, im)| (im.id, 1u8, i)));
+    order.extend(sh.charts.iter().enumerate().map(|(i, ch)| (ch.id, 2u8, i)));
+    order.sort_by_key(|&(id, kind, i)| (id, kind, i));
+    for (_, kind, idx) in order {
+        match kind {
+            0 => {
+                let sp = &sh.shapes[idx];
+                let r = anchor_rect(geo, sh, &sp.anchor);
+                if !r.intersects(p.clip_rect()) {
+                    continue;
                 }
-                label = false;
-            }
-            ShapeKind::Icon => {
-                if let Some(icon) = crate::icons::from_name(&sp.text) {
-                    let t = Tokens::get(p.ctx());
-                    crate::icons::paint_on_sheet(p, r, icon, if fill == Color32::TRANSPARENT { t.cell_text } else { fill });
+                let start = p.add(egui::Shape::Noop);
+                let mut label = true;
+                let fill = sp.fill.resolve(&wb.theme).map(theme::color32).unwrap_or(Color32::TRANSPARENT);
+                let line = if sp.format.no_line {
+                    Color32::TRANSPARENT
+                } else {
+                    sp.line.resolve(&wb.theme).map(theme::color32).unwrap_or(Color32::DARK_GRAY)
+                };
+                match sp.kind {
+                    ShapeKind::Rectangle | ShapeKind::TextBox => {
+                        p.rect_filled(r, 0.0, fill);
+                        p.rect_stroke(r, 0.0, Stroke::new(1.0, line), StrokeKind::Inside);
+                    }
+                    ShapeKind::RoundedRectangle => {
+                        p.rect_filled(r, 10.0 * geo.z, fill);
+                        p.rect_stroke(r, 10.0 * geo.z, Stroke::new(1.0, line), StrokeKind::Inside);
+                    }
+                    ShapeKind::Ellipse => {
+                        let pts: Vec<Pos2> = (0..64)
+                            .map(|i| {
+                                let a = i as f32 / 64.0 * std::f32::consts::TAU;
+                                pos2(r.center().x + r.width() / 2.0 * a.cos(), r.center().y + r.height() / 2.0 * a.sin())
+                            })
+                            .collect();
+                        p.add(PathShape::convex_polygon(pts, fill, Stroke::new(1.0, line)));
+                    }
+                    ShapeKind::Triangle => {
+                        p.add(PathShape::convex_polygon(
+                            vec![pos2(r.center().x, r.top()), r.right_bottom(), r.left_bottom()],
+                            fill,
+                            Stroke::new(1.0, line),
+                        ));
+                    }
+                    ShapeKind::Ink => {
+                        let w = gridcraft_engine::cmd::draw::ink_width(sp) * geo.z;
+                        let pts: Vec<Pos2> = gridcraft_engine::cmd::draw::ink_points(sp)
+                            .iter()
+                            .map(|q| pos2(r.left() + q[0] * geo.z, r.top() + q[1] * geo.z))
+                            .collect();
+                        if pts.len() >= 2 {
+                            let col = if w > 8.0 { line.gamma_multiply(0.45) } else { line };
+                            p.add(PathShape::line(pts, PathStroke::new(w, col)));
+                        }
+                        label = false;
+                    }
+                    ShapeKind::Icon => {
+                        if let Some(icon) = crate::icons::from_name(&sp.text) {
+                            let t = Tokens::get(p.ctx());
+                            crate::icons::paint_on_sheet(p, r, icon, if fill == Color32::TRANSPARENT { t.cell_text } else { fill });
+                        }
+                        label = false;
+                    }
+                    ShapeKind::Line | ShapeKind::Arrow => {
+                        p.line_segment([r.left_top(), r.right_bottom()], Stroke::new(2.0, line));
+                        if sp.kind == ShapeKind::Arrow {
+                            let d = (r.right_bottom() - r.left_top()).normalized();
+                            let n = vec2(-d.y, d.x);
+                            let tip = r.right_bottom();
+                            p.add(PathShape::convex_polygon(vec![tip, tip - d * 10.0 + n * 5.0, tip - d * 10.0 - n * 5.0], line, Stroke::NONE));
+                        }
+                    }
                 }
-                label = false;
-            }
-            ShapeKind::Line | ShapeKind::Arrow => {
-                p.line_segment([r.left_top(), r.right_bottom()], Stroke::new(2.0, line));
-                if sp.kind == ShapeKind::Arrow {
-                    let d = (r.right_bottom() - r.left_top()).normalized();
-                    let n = vec2(-d.y, d.x);
-                    let tip = r.right_bottom();
-                    p.add(PathShape::convex_polygon(vec![tip, tip - d * 10.0 + n * 5.0, tip - d * 10.0 - n * 5.0], line, Stroke::NONE));
+                if label && !sp.text.is_empty() && !app.editing_text_box(sp.id) {
+                    let rot = sh.object_rotation(DrawingRef::Shape(sp.id));
+                    paint_shape_text(p, wb, sp, r, geo.z, rot);
                 }
+                if label && sp.kind == ShapeKind::TextBox && app.selected_chart == Some(sp.id) {
+                    selection_frame(p, r);
+                }
+                done(start, r);
+            }
+            1 => {
+                let im = &sh.images[idx];
+                let r = anchor_rect(geo, sh, &im.anchor);
+                if !r.intersects(p.clip_rect()) {
+                    continue;
+                }
+                let start = p.add(egui::Shape::Noop);
+                if let Some(tex) = crate::floating_pictures::texture(p.ctx(), doc, im, r) {
+                    p.image(tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                } else {
+                    p.rect_filled(r, 0.0, Tokens::get(p.ctx()).sheet_track);
+                }
+                if app.selected_chart == Some(im.id) {
+                    selection_frame(p, r);
+                }
+                done(start, r);
+            }
+            _ => {
+                let ch = &sh.charts[idx];
+                if ch.series.is_empty() && ch.title.as_deref().is_none_or(str::is_empty) && app.selected_chart != Some(ch.id) {
+                    continue;
+                }
+                let r = anchor_rect(geo, sh, &ch.anchor);
+                if !r.intersects(p.clip_rect()) {
+                    continue;
+                }
+                let start = p.add(egui::Shape::Noop);
+                if !ch.axis_number_formats.no_fill {
+                    // Soft shadow + white card.
+                    p.rect_filled(r.translate(vec2(0.0, 1.5)), 2.0, Color32::from_black_alpha(18));
+                    p.rect_filled(r, 0.0, Tokens::get(p.ctx()).grid_bg);
+                }
+                let data = gridcraft_chart::resolve(wb, si, ch);
+                let m = EguiMeasure { painter: p, z: geo.z };
+                let prims = gridcraft_chart::render(ch, &data, ch.anchor.width, ch.anchor.height, &m);
+                paint_prims(&p.with_clip_rect(r.intersect(p.clip_rect())), r.min, &prims, geo.z);
+                if app.selected_chart == Some(ch.id) {
+                    selection_frame(p, r);
+                }
+                done(start, r);
             }
         }
-        if label && !sp.text.is_empty() && !app.editing_text_box(sp.id) {
-            paint_shape_text(p, wb, sp, r, geo.z);
-        }
-        if label && sp.kind == ShapeKind::TextBox && app.selected_chart == Some(sp.id) {
-            selection_frame(p, r);
-        }
-        done(start, r);
-    }
-    for im in &sh.images {
-        let r = anchor_rect(geo, sh, &im.anchor);
-        if !r.intersects(p.clip_rect()) {
-            continue;
-        }
-        let start = p.add(egui::Shape::Noop);
-        if let Some(tex) = crate::floating_pictures::texture(p.ctx(), doc, im, r) {
-            p.image(tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-        } else {
-            p.rect_filled(r, 0.0, Tokens::get(p.ctx()).sheet_track);
-        }
-        if app.selected_chart == Some(im.id) {
-            selection_frame(p, r);
-        }
-        done(start, r);
-    }
-    for ch in &sh.charts {
-        if ch.series.is_empty() && ch.title.as_deref().is_none_or(str::is_empty) && app.selected_chart != Some(ch.id) {
-            continue;
-        }
-        let r = anchor_rect(geo, sh, &ch.anchor);
-        if !r.intersects(p.clip_rect()) {
-            continue;
-        }
-        let start = p.add(egui::Shape::Noop);
-        // Soft shadow + white card.
-        p.rect_filled(r.translate(vec2(0.0, 1.5)), 2.0, Color32::from_black_alpha(18));
-        p.rect_filled(r, 0.0, Tokens::get(p.ctx()).grid_bg);
-        let data = gridcraft_chart::resolve(wb, si, ch);
-        let m = EguiMeasure { painter: p, z: geo.z };
-        let prims = gridcraft_chart::render(ch, &data, ch.anchor.width, ch.anchor.height, &m);
-        paint_prims(&p.with_clip_rect(r.intersect(p.clip_rect())), r.min, &prims, geo.z);
-        if app.selected_chart == Some(ch.id) {
-            selection_frame(p, r);
-        }
-        done(start, r);
     }
     // A selected group is framed as a whole, like Excel. The early return above ensures hidden
     // objects, including groups, receive no frame.

@@ -236,6 +236,7 @@ impl CfCache {
         if sh.cond_formats.is_empty() {
             return None;
         }
+        let c = sh.merge_at(c).map(|m| m.start).unwrap_or(c);
         let mut out = CfLook::default();
         let mut any = false;
         let mut rules: Vec<(usize, &CondFormat)> =
@@ -371,14 +372,25 @@ fn layer_under(style: &mut Style, lower: &Style) {
     if style.fill.pattern == PatternType::None {
         style.fill = lower.fill;
     }
-    if style.font.color == Color::Auto {
+    if style.font.color == Color::Auto && !style.dxf_stated.color {
         style.font.color = lower.font.color;
+        style.dxf_stated.color = lower.dxf_stated.color;
     }
-    style.font.bold |= lower.font.bold;
-    style.font.italic |= lower.font.italic;
-    style.font.strike |= lower.font.strike;
-    if style.font.underline == Underline::None {
+    if !style.font.bold && !style.dxf_stated.bold {
+        style.font.bold = lower.font.bold;
+        style.dxf_stated.bold = lower.dxf_stated.bold;
+    }
+    if !style.font.italic && !style.dxf_stated.italic {
+        style.font.italic = lower.font.italic;
+        style.dxf_stated.italic = lower.dxf_stated.italic;
+    }
+    if !style.font.strike && !style.dxf_stated.strike {
+        style.font.strike = lower.font.strike;
+        style.dxf_stated.strike = lower.dxf_stated.strike;
+    }
+    if style.font.underline == Underline::None && !style.dxf_stated.underline {
         style.font.underline = lower.font.underline;
+        style.dxf_stated.underline = lower.dxf_stated.underline;
     }
     let b = &mut style.borders;
     for (dst, src) in [

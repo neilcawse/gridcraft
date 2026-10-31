@@ -718,6 +718,7 @@ fn fuzz_random_data_and_sizes() {
             x: [None, Some("0%"), Some(";;;")][(r.next() % 3) as usize].map(str::to_string),
             y: [None, Some("[h]:mm"), Some("#,##0"), Some("")][(r.next() % 4) as usize].map(str::to_string),
             y2: [None, Some("0%"), Some("0;;;")][(r.next() % 3) as usize].map(str::to_string),
+            ..Default::default()
         };
         c.data_labels = r.next().is_multiple_of(2);
         c.gridlines = r.next().is_multiple_of(2);

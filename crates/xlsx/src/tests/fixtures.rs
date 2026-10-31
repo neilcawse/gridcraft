@@ -904,10 +904,7 @@ fn a_member_turned_a_quarter_is_placed_at_its_turned_box_and_keeps_its_rotation(
     let s = wb.sheet(0).unwrap();
     // T's turned box: child x -304800 + (1381125 - 257175) / 2 = 257175 (27 px), 27 × 145 px.
     assert!(near_box(shape_box(s, "T"), (27.0, 21.0, 27.0, 145.0)), "{:?}", shape_box(s, "T"));
-    assert_eq!(
-        rep.warnings.iter().filter(|w| w.contains("rotated")).collect::<Vec<_>>(),
-        vec!["a rotated picture or shape in a group is drawn without its rotation"]
-    );
+    assert!(rep.warnings.iter().all(|w| !w.contains("rotated")), "{:?}", rep.warnings);
     let t = s.shapes.iter().find(|sh| sh.text == "T").unwrap().id;
     assert_eq!(s.groups[0].member_rotations, vec![(DrawingRef::Shape(t), 16200000)]);
 
@@ -1272,4 +1269,66 @@ fn every_skipped_drawing_object_is_reported() {
         let hits = rep.warnings.iter().filter(|w| w.contains("skipped") && w.contains("drawing1.xml") && w.contains(&tag)).count();
         assert_eq!(hits, 1, "object {n}: {:?}", rep.warnings);
     }
+}
+
+#[test]
+fn report_dashboard_drawing_chart_and_cf_features_round_trip() {
+    let styles = r#"<?xml version="1.0" encoding="UTF-8"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
+  <fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
+  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+  <cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellXfs>
+  <dxfs count="1"><dxf><font><color auto="1"/></font><fill><patternFill><bgColor rgb="FFC6EFCE"/></patternFill></fill></dxf></dxfs>
+</styleSheet>"#;
+    let chart = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:plotArea>
+      <c:doughnutChart><c:varyColors val="1"/><c:ser><c:idx val="0"/><c:order val="0"/>
+        <c:dPt><c:idx val="0"/><c:spPr><a:solidFill><a:schemeClr val="accent2"><a:lumMod val="40000"/><a:lumOff val="60000"/></a:schemeClr></a:solidFill></c:spPr></c:dPt>
+        <c:val><c:numRef><c:f>Sheet1!$A$1:$A$2</c:f></c:numRef></c:val></c:ser>
+        <c:dLbls><c:showVal val="0"/><c:showPercent val="1"/></c:dLbls>
+        <c:holeSize val="65"/></c:doughnutChart></c:plotArea></c:chart>
+      <c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr></c:chartSpace>"#;
+    let drawing = r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+      <xdr:twoCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>4</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>6</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+        <xdr:sp macro="" textlink=""><xdr:nvSpPr><xdr:cNvPr id="2" name="Callout"/><xdr:cNvSpPr txBox="1"/></xdr:nvSpPr>
+          <xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="952500" cy="476250"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:schemeClr val="accent5"><a:lumMod val="40000"/><a:lumOff val="60000"/></a:schemeClr></a:solidFill></xdr:spPr>
+          <xdr:txBody><a:bodyPr anchor="ctr"/><a:p><a:pPr lvl="1"/><a:fld id="{11111111-2222-3333-4444-555555555555}" type="slidenum"><a:rPr sz="900"/><a:t>FieldText</a:t></a:fld></a:p></xdr:txBody>
+        </xdr:sp><xdr:clientData/></xdr:twoCellAnchor>
+      <xdr:twoCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>7</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>5</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>15</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+        <xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="3" name="C"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>
+          <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rId1"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor>
+    </xdr:wsDr>"#;
+    let drels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#;
+    let srels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#;
+    let sheet_body = r#"<sheetData><row r="1"><c r="A1"><v>30</v></c><c r="G1"><v>1</v></c></row><row r="2"><c r="A2"><v>70</v></c><c r="G2"><v>2</v></c></row></sheetData>
+      <conditionalFormatting sqref="A1:F1048576"><cfRule type="expression" dxfId="0" priority="1"><formula>A1&gt;0</formula></cfRule></conditionalFormatting>
+      <drawing r:id="rId1"/>"#;
+    let bytes = super::minimal(
+        sheet_body,
+        &[
+            ("xl/styles.xml", styles),
+            ("xl/worksheets/_rels/sheet1.xml.rels", srels),
+            ("xl/drawings/drawing1.xml", drawing),
+            ("xl/drawings/_rels/drawing1.xml.rels", drels),
+            ("xl/charts/chart1.xml", chart),
+        ],
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>"#,
+        "",
+    );
+    let (wb, rep) = read_xlsx(&bytes).unwrap();
+    assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
+    let s = wb.sheet(0).unwrap();
+    assert_eq!(s.cond_formats.len(), 1);
+    let gridcraft_model::CfRule::Expression { style, .. } = &s.cond_formats[0].rule else { panic!("expected Expression") };
+    assert!(style.dxf_stated.color);
+    assert_eq!(style.font.color, Color::Auto);
+    assert_eq!(s.shapes[0].text, "FieldText");
+    assert_eq!(s.shapes[0].format.level, 1);
+    assert_eq!(s.shapes[0].fill, Color::Theme(8, 600));
+    let ch = &s.charts[0];
+    assert!(ch.data_labels);
+    assert!(ch.axis_number_formats.show_percent);
+    assert!(ch.axis_number_formats.no_fill);
+    assert_eq!(ch.axis_number_formats.hole_size, Some(65));
+    assert_eq!(ch.axis_number_formats.point_colors, vec![(0, Color::Theme(5, 600))]);
 }

@@ -240,8 +240,13 @@ pub fn resolve(wb: &Workbook, sheet: usize, chart: &Chart) -> ChartData {
     for (i, s) in chart.series.iter().take(MAX_SERIES).enumerate() {
         let values = nums(wb, sheet, &s.values);
         let name = s.name.as_deref().map(|n| series_name(wb, sheet, n)).filter(|n| !n.is_empty()).unwrap_or_else(|| format!("Series{}", i + 1));
-        let color =
-            s.color.as_ref().and_then(|c| c.resolve(&wb.theme)).map(|[r, g, b]| [r, g, b, 0xFF]).unwrap_or_else(|| series_color(&wb.theme, i));
+        let color = s
+            .color
+            .as_ref()
+            .or_else(|| (i == 0).then(|| chart.axis_number_formats.point_colors.iter().find(|(idx, _)| *idx == 0).map(|(_, c)| c)).flatten())
+            .and_then(|c| c.resolve(&wb.theme))
+            .map(|[r, g, b]| [r, g, b, 0xFF])
+            .unwrap_or_else(|| series_color(&wb.theme, i));
         let kind = effective_kind(chart.kind, s.kind, i);
         let x = match (&s.categories, numeric_x || matches!(kind, ChartKind::Scatter | ChartKind::ScatterLines | ChartKind::Bubble)) {
             // X values with text in them (labels) are ignored: the points are numbered 1..n.
@@ -286,6 +291,11 @@ pub fn resolve(wb: &Workbook, sheet: usize, chart: &Chart) -> ChartData {
     }
     let n = series.iter().map(|s| s.values.len()).max().unwrap_or(0);
     let categories = categories.unwrap_or_else(|| (1..=n).map(|i| i.to_string()).collect());
-    let palette = default_palette(&wb.theme, n.min(PALETTE_CYCLE));
+    let mut palette = default_palette(&wb.theme, n.clamp(1, PALETTE_CYCLE));
+    for &(idx, ref c) in &chart.axis_number_formats.point_colors {
+        if let (Some(slot), Some([r, g, b])) = (palette.get_mut(idx as usize), c.resolve(&wb.theme)) {
+            *slot = [r, g, b, 0xFF];
+        }
+    }
     ChartData { categories, category_levels, series, palette }
 }

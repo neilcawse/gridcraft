@@ -146,7 +146,20 @@ fn axis_scales(chart: &Chart, data: &ChartData, fams: &[Fam], sec: &[bool], span
             (fixed_scale(if lo < -1e-9 { -1.0 } else { 0.0 }, if hi > 1e-9 || lo >= -1e-9 { 1.0 } else { 0.0 }, 0.2), Fmt::new(typed.unwrap_or("0%")))
         } else {
             let code = typed.or_else(|| members.first().and_then(|i| data.series.get(*i)).map(|s| s.number_format.as_str())).unwrap_or("General");
-            (nice_scale(lo, hi, force_zero), Fmt::new(code))
+            let (lo_eff, hi_eff) =
+                if !axis { (chart.axis_number_formats.y_min.unwrap_or(lo), chart.axis_number_formats.y_max.unwrap_or(hi)) } else { (lo, hi) };
+            let mut sc = nice_scale(lo_eff, hi_eff, force_zero);
+            if !axis {
+                if let Some(mn) = chart.axis_number_formats.y_min.filter(|v| v.is_finite()) {
+                    sc.min = clean(mn);
+                }
+                if let Some(mx) = chart.axis_number_formats.y_max.filter(|v| v.is_finite())
+                    && mx > sc.min
+                {
+                    sc.max = clean(mx);
+                }
+            }
+            (sc, Fmt::new(code))
         };
         axes.push((scale, fmt));
         if !axis && sec.iter().all(|s| !s) {
@@ -209,7 +222,8 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
     // Outer levels padded to the slots (forecast slots stay in the last group).
     let outer: Vec<Vec<String>> =
         data.category_levels.iter().map(|l| (0..ncat_slots).map(|j| l.get(j).cloned().unwrap_or_default()).collect()).collect();
-    let plot = frame(ctx, area, CatAxis::Labels(&labels, &outer), &y1, y2.as_ref(), horizontal, chart.gridlines);
+    let plot =
+        frame(ctx, area, CatAxis::Labels(&labels, &outer, chart.axis_number_formats.x_label_rotation), &y1, y2.as_ref(), horizontal, chart.gridlines);
     if !plot.ok() {
         return;
     }
@@ -220,7 +234,8 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
     let vpos = |v: f64, sc: &Scale| if horizontal { plot.x + sc.frac(v) * plot.w } else { plot.bottom() - sc.frac(v) * plot.h };
 
     let (slot_of, nslots) = column_slots(&fams, &sec);
-    let bw = cw / (nslots + 1.5);
+    let gap = chart.axis_number_formats.gap_width.map_or(1.5, |g| (g.min(500) as f32) / 100.0);
+    let bw = cw / (nslots + gap);
     let labels_on = chart.data_labels && ncat <= MAX_LABELS;
     // Area labels wait until every area is filled, so a later (stacked) area can't paint over them.
     let mut area_labels = Vec::new();

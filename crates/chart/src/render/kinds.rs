@@ -40,7 +40,7 @@ pub(super) fn histogram(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
     let maxc = counts.iter().copied().max().unwrap_or(0) as f64;
     let ys = nice_scale(0.0, maxc, true);
     let fc = Fmt::new("General");
-    let plot = frame(ctx, area, CatAxis::Labels(&labels, &[]), &ValAxis { scale: ys, fmt: &fc }, None, false, chart.gridlines);
+    let plot = frame(ctx, area, CatAxis::Labels(&labels, &[], None), &ValAxis { scale: ys, fmt: &fc }, None, false, chart.gridlines);
     if !plot.ok() {
         return;
     }
@@ -93,7 +93,7 @@ pub(super) fn waterfall(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
     let ys = nice_scale(lo, hi, true);
     let f = axis_fmt(chart.axis_number_formats.y.as_deref(), data);
     let fl = label_fmt(s);
-    let plot = frame(ctx, area, CatAxis::Labels(&labels, &[]), &ValAxis { scale: ys, fmt: &f }, None, false, chart.gridlines);
+    let plot = frame(ctx, area, CatAxis::Labels(&labels, &[], None), &ValAxis { scale: ys, fmt: &f }, None, false, chart.gridlines);
     if !plot.ok() {
         return;
     }
@@ -186,7 +186,13 @@ pub(super) fn pie(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx, inne
             let fill = point_color(data, j);
             ctx.out.push(Prim::Wedge { cx, cy, r_outer: r, r_inner: ri, a0: a, a1: (a + sweep).min(TAU), fill, stroke: Some((WHITE, 1.5)) });
             if (chart.data_labels || names) && vals.len() <= MAX_LABELS {
-                let t = if names { cat_label(data, j) } else { f.format(s.values.get(j).copied().flatten().unwrap_or(0.0), None) };
+                let t = if names {
+                    cat_label(data, j)
+                } else if chart.axis_number_formats.show_percent {
+                    format!("{}%", (*v / total * 100.0).round() as i64)
+                } else {
+                    f.format(s.values.get(j).copied().flatten().unwrap_or(0.0), None)
+                };
                 let mid = a + sweep / 2.0;
                 let rr = if ri > 0.0 { (r + ri) / 2.0 } else { r * 0.65 };
                 let room = sweep * rr;
@@ -388,7 +394,7 @@ pub(super) fn box_whisker(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: 
     let Some((lo, hi)) = value_range(data.series.iter().flat_map(|s| s.values.iter().flatten().copied())) else { return };
     let ys = nice_scale(lo, hi, false);
     let f = axis_fmt(chart.axis_number_formats.y.as_deref(), data);
-    let plot = frame(ctx, area, CatAxis::Labels(&labels, &[]), &ValAxis { scale: ys, fmt: &f }, None, false, chart.gridlines);
+    let plot = frame(ctx, area, CatAxis::Labels(&labels, &[], None), &ValAxis { scale: ys, fmt: &f }, None, false, chart.gridlines);
     if !plot.ok() {
         return;
     }
@@ -437,7 +443,7 @@ pub(super) fn stock(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx) {
     let Some((lo, hi)) = value_range(data.series.iter().flat_map(|s| s.values.iter().flatten().copied())) else { return };
     let ys = nice_scale(lo, hi, false);
     let f = axis_fmt(chart.axis_number_formats.y.as_deref(), data);
-    let plot = frame(ctx, area, CatAxis::Labels(&labels, &[]), &ValAxis { scale: ys, fmt: &f }, None, false, chart.gridlines);
+    let plot = frame(ctx, area, CatAxis::Labels(&labels, &[], None), &ValAxis { scale: ys, fmt: &f }, None, false, chart.gridlines);
     if !plot.ok() {
         return;
     }

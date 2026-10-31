@@ -35,13 +35,19 @@ fn cell_look(wb: &Workbook, si: usize, sh: &Sheet, c: CellRef, cf: &mut Option<c
         if st.fill.pattern != PatternType::None {
             style.fill = st.fill;
         }
-        if st.font.color != Color::Auto {
+        if st.font.color != Color::Auto || st.dxf_stated.color {
             style.font.color = st.font.color;
         }
-        style.font.bold |= st.font.bold;
-        style.font.italic |= st.font.italic;
-        style.font.strike |= st.font.strike;
-        if st.font.underline != Underline::None {
+        if st.font.bold || st.dxf_stated.bold {
+            style.font.bold = st.font.bold;
+        }
+        if st.font.italic || st.dxf_stated.italic {
+            style.font.italic = st.font.italic;
+        }
+        if st.font.strike || st.dxf_stated.strike {
+            style.font.strike = st.font.strike;
+        }
+        if st.font.underline != Underline::None || st.dxf_stated.underline {
             style.font.underline = st.font.underline;
         }
         // In a differential style General means "not set" (#1163).

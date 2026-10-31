@@ -73,7 +73,7 @@ pub(super) fn axis_titles(ctx: &mut Ctx, chart: &Chart, mut area: Bx) -> Bx {
 pub(super) enum CatAxis<'a> {
     /// Category labels and, for a multi-level axis, the outer levels (nearest the labels first;
     /// one entry per category, non-empty where a group starts).
-    Labels(&'a [String], &'a [Vec<String>]),
+    Labels(&'a [String], &'a [Vec<String>], Option<f32>),
     Numeric(Scale, &'a Fmt),
 }
 
@@ -96,6 +96,56 @@ impl ValAxis<'_> {
     }
 }
 
+fn draw_cat_labels(ctx: &mut Ctx, plot: Bx, l: &[String], outer: &[Vec<String>], rot: Option<f32>, cat_h: f32) {
+    let ls = LABEL_SIZE;
+    let lh = ls * 1.4;
+    let n = l.len().max(1);
+    let cw = plot.w / n as f32;
+    let lw = l.iter().take(2000).map(|t| ctx.tw(t, ls)).fold(0.0f32, f32::max);
+    let rot_rad = rot.filter(|r| r.is_finite() && r.abs() >= 1.0).map(|r| -r.abs().to_radians());
+    let k = match rot_rad {
+        Some(a) => ((ls / (cw * a.sin().abs()).max(1e-3)).ceil() as usize).clamp(1, n),
+        None => (((lw + 6.0) / cw.max(1e-3)).ceil() as usize).clamp(1, n),
+    };
+    for (j, t) in l.iter().enumerate().step_by(k) {
+        let cx = plot.x + (j as f32 + 0.5) * cw;
+        if let Some(a) = rot_rad {
+            let room = (cat_h / a.sin().abs().max(0.1)).min((cx - 2.0) / a.cos().abs().max(0.1));
+            let t = ctx.fit(t, ls, room);
+            if !t.is_empty() {
+                ctx.out.push(Prim::Text {
+                    x: cx,
+                    y: plot.bottom() + 3.0,
+                    text: t,
+                    size: ls,
+                    color: TEXT,
+                    bold: false,
+                    align: HAlign::Right,
+                    valign: VAlign::Top,
+                    rotation: a,
+                });
+            }
+        } else {
+            let t = ctx.fit(t, ls, cw * k as f32 - 2.0);
+            ctx.text(cx, plot.bottom() + 3.0, &t, ls, TEXT, (HAlign::Center, VAlign::Top));
+        }
+    }
+    for (i, level) in outer.iter().enumerate() {
+        let top = plot.bottom() + 3.0 + cat_h + lh * i as f32;
+        for (first, end) in level_groups(level, n) {
+            let (x0, x1) = (plot.x + first as f32 * cw, plot.x + end as f32 * cw);
+            if let Some(t) = level.get(first).filter(|t| !t.is_empty()) {
+                let t = ctx.fit(t, ls, x1 - x0 - 2.0);
+                ctx.text((x0 + x1) / 2.0, top, &t, ls, TEXT, (HAlign::Center, VAlign::Top));
+            }
+            if first > 0 {
+                ctx.vline(x0, plot.bottom(), top + lh - 2.0, AXIS, 0.75);
+            }
+        }
+        ctx.vline(plot.right(), plot.bottom(), top + lh - 2.0, AXIS, 0.75);
+    }
+}
+
 /// Draws gridlines, axis labels and the category axis line; returns the plot rectangle.
 pub(super) fn frame(ctx: &mut Ctx, area: Bx, cat: CatAxis, y: &ValAxis, y2: Option<&ValAxis>, horizontal: bool, grid: bool) -> Bx {
     let ls = LABEL_SIZE;
@@ -110,11 +160,16 @@ pub(super) fn frame(ctx: &mut Ctx, area: Bx, cat: CatAxis, y: &ValAxis, y2: Opti
             (None, CatAxis::Numeric(s, f)) => (ctx.tw(&f.format(s.max, Some(s.step)), ls) / 2.0).min(area.w * 0.2),
             _ => 4.0,
         };
-        let levels = match &cat {
-            CatAxis::Labels(_, o) => o.len() as f32,
-            CatAxis::Numeric(..) => 0.0,
+        let (levels, cat_h) = match &cat {
+            CatAxis::Labels(l, o, Some(rot)) if *rot != 0.0 => {
+                let lw = l.iter().take(2000).map(|t| ctx.tw(t, ls)).fold(0.0f32, f32::max);
+                let a = rot.abs().to_radians();
+                (o.len() as f32, (lw * a.sin() + ls * a.cos()).clamp(lh, area.h * 0.35))
+            }
+            CatAxis::Labels(_, o, _) => (o.len() as f32, lh),
+            CatAxis::Numeric(..) => (0.0, lh),
         };
-        let plot = Bx { x: area.x + left, y: area.y + lh * 0.5, w: area.w - left - right, h: area.h - lh * 1.5 - 4.0 - lh * levels };
+        let plot = Bx { x: area.x + left, y: area.y + lh * 0.5, w: area.w - left - right, h: area.h - lh * 0.5 - cat_h - 4.0 - lh * levels };
         if !plot.ok() {
             return plot;
         }
@@ -135,32 +190,7 @@ pub(super) fn frame(ctx: &mut Ctx, area: Bx, cat: CatAxis, y: &ValAxis, y2: Opti
         let y0 = plot.bottom() - y.scale.frac(zero) * plot.h;
         ctx.hline(plot.x, plot.right(), y0, AXIS, 0.75);
         match cat {
-            CatAxis::Labels(l, outer) => {
-                let n = l.len().max(1);
-                let cw = plot.w / n as f32;
-                let lw = l.iter().take(2000).map(|t| ctx.tw(t, ls)).fold(0.0f32, f32::max);
-                let k = (((lw + 6.0) / cw.max(1e-3)).ceil() as usize).clamp(1, n);
-                for (j, t) in l.iter().enumerate().step_by(k) {
-                    let t = ctx.fit(t, ls, cw * k as f32 - 2.0);
-                    ctx.text(plot.x + (j as f32 + 0.5) * cw, plot.bottom() + 3.0, &t, ls, TEXT, (HAlign::Center, VAlign::Top));
-                }
-                // Outer levels, one row each below the labels: a group's name centred under its
-                // categories, and a separator at each group boundary down through the rows.
-                for (i, level) in outer.iter().enumerate() {
-                    let top = plot.bottom() + 3.0 + lh * (i as f32 + 1.0);
-                    for (first, end) in level_groups(level, n) {
-                        let (x0, x1) = (plot.x + first as f32 * cw, plot.x + end as f32 * cw);
-                        if let Some(t) = level.get(first).filter(|t| !t.is_empty()) {
-                            let t = ctx.fit(t, ls, x1 - x0 - 2.0);
-                            ctx.text((x0 + x1) / 2.0, top, &t, ls, TEXT, (HAlign::Center, VAlign::Top));
-                        }
-                        if first > 0 {
-                            ctx.vline(x0, plot.bottom(), top + lh - 2.0, AXIS, 0.75);
-                        }
-                    }
-                    ctx.vline(plot.right(), plot.bottom(), top + lh - 2.0, AXIS, 0.75);
-                }
-            }
+            CatAxis::Labels(l, outer, rot) => draw_cat_labels(ctx, plot, l, outer, rot, cat_h),
             CatAxis::Numeric(s, f) => {
                 let ticks = s.ticks();
                 let labels: Vec<String> = ticks.iter().map(|v| f.format(*v, Some(s.step))).collect();
@@ -180,7 +210,7 @@ pub(super) fn frame(ctx: &mut Ctx, area: Bx, cat: CatAxis, y: &ValAxis, y2: Opti
         plot
     } else {
         let (labels, outer): (Vec<String>, &[Vec<String>]) = match cat {
-            CatAxis::Labels(l, o) => (l.to_vec(), o),
+            CatAxis::Labels(l, o, _) => (l.to_vec(), o),
             CatAxis::Numeric(..) => (vec![], &[]),
         };
         let lw = (labels.iter().take(2000).map(|t| ctx.tw(t, ls)).fold(0.0f32, f32::max) + 6.0).min(area.w * 0.35);

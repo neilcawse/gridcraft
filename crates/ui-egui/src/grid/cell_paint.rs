@@ -40,20 +40,20 @@ pub(super) fn look(wb: &Workbook, si: usize, sh: &Sheet, c: CellRef, cf: &mut Cf
         if st.fill.pattern != PatternType::None {
             style.fill = st.fill;
         }
-        if st.font.color != Color::Auto {
+        if st.font.color != Color::Auto || st.dxf_stated.color {
             style.font.color = st.font.color;
         }
-        if st.font.bold {
-            style.font.bold = true;
+        if st.font.bold || st.dxf_stated.bold {
+            style.font.bold = st.font.bold;
         }
-        if st.font.italic {
-            style.font.italic = true;
+        if st.font.italic || st.dxf_stated.italic {
+            style.font.italic = st.font.italic;
         }
-        if st.font.underline != Underline::None {
+        if st.font.underline != Underline::None || st.dxf_stated.underline {
             style.font.underline = st.font.underline;
         }
-        if st.font.strike {
-            style.font.strike = true;
+        if st.font.strike || st.dxf_stated.strike {
+            style.font.strike = st.font.strike;
         }
         // In a differential style General means "not set" (#1163).
         if st.num_fmt.as_str() != "General" {

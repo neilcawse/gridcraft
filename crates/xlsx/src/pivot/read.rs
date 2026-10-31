@@ -350,7 +350,10 @@ fn read_table(cx: &mut Ctx<'_>, x: &El, cache: &CacheIn, id: u32) -> Option<Pivo
     pt.empty_caption = caption("missingCaption").filter(|_| x.flag("showMissing", true));
     pt.show_values_row = !x14_ext(x, EXT_X14_TABLE).is_some_and(|e| e.flag("hideValuesRow", false));
     pt.classic_layout = x.flag("gridDropZones", false);
-    if x.child("calculatedItems").is_some() || x.path(&["filters", "filter"]).is_some() {
+    let uncached_filter = x
+        .child("filters")
+        .is_some_and(|fs| fs.kids("filter").any(|f| f.attr_u32("fld").and_then(|i| pf(i as usize)).is_none_or(|e| items_of(e).is_empty())));
+    if x.child("calculatedItems").is_some() || uncached_filter {
         cx.warn(format!("PivotTable \"{}\": calculated items and label/value filters are not supported", pt.name));
     }
 

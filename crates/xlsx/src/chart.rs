@@ -507,8 +507,13 @@ pub(crate) fn read_chart_with_budget(root: &El) -> Option<(Chart, Vec<PivotSerie
         }
     }
     let kind = if groups.len() > 1 { ChartKind::Combo } else { first_kind };
-    let show_val = |e: &El| e.child("dLbls").is_some_and(|d| bool_val(d, "showVal"));
-    let data_labels = groups.iter().any(|(g, _)| show_val(g) || g.kids("ser").any(show_val));
+    let d_active = |e: &El| e.child("dLbls").is_some_and(|d| !bool_val(d, "delete") && (bool_val(d, "showVal") || bool_val(d, "showPercent")));
+    let d_deleted = |e: &El| e.child("dLbls").is_some_and(|d| bool_val(d, "delete"));
+    let data_labels = groups
+        .iter()
+        .any(|(g, _)| g.kids("ser").any(d_active) || (d_active(g) && (g.kids("ser").next().is_none() || g.kids("ser").any(|s| !d_deleted(s)))));
+    let show_pct = |e: &El| e.child("dLbls").is_some_and(|d| !bool_val(d, "delete") && bool_val(d, "showPercent") && !bool_val(d, "showVal"));
+    let show_percent = data_labels && groups.iter().any(|(g, _)| show_pct(g) || g.kids("ser").any(show_pct));
     let val_axes: Vec<&El> = plot.kids("valAx").collect();
     let cat_ax = plot.child("catAx").or_else(|| plot.child("dateAx"));
     let scatter = matches!(first_kind, ChartKind::Scatter | ChartKind::ScatterLines | ChartKind::Bubble);
@@ -537,13 +542,55 @@ pub(crate) fn read_chart_with_budget(root: &El) -> Option<(Chart, Vec<PivotSerie
                 && axis_ids(g) == ids
         })
     };
+    let no_fill = root.path(&["spPr", "noFill"]).is_some();
+    let hole_size = first.child_val("holeSize").and_then(|v| v.trim().parse::<u8>().ok()).map(|v| v.clamp(1, 90)).filter(|&v| v != 50);
+    let gap_width = first.child_val("gapWidth").and_then(|v| v.trim().parse::<u16>().ok()).map(|v| v.min(500)).filter(|&v| v != 150);
+    let mut point_colors: Vec<(u32, Color)> = Vec::new();
+    if let Some(s0) = first.kids("ser").next() {
+        for dpt in s0.kids("dPt") {
+            if let (Some(idx), Some(c)) =
+                (dpt.child_val("idx").and_then(|v| v.trim().parse::<u32>().ok()), dpt.path(&["spPr", "solidFill"]).and_then(dml_color))
+            {
+                point_colors.push((idx, c));
+            }
+        }
+    }
+    let primary_val_ax = if scatter { y_ax } else { val_ax_of(&first_axes).or(y_ax) };
+    let scaling = primary_val_ax.and_then(|a| a.child("scaling"));
+    let y_min = scaling.and_then(|s| f64_val(s, "min")).filter(|v| v.is_finite());
+    let y_max = scaling.and_then(|s| f64_val(s, "max")).filter(|v| v.is_finite());
+    let x_label_rotation = (!scatter)
+        .then(|| x_ax.and_then(|a| a.path(&["txPr", "bodyPr"])).and_then(|b| b.attr_i64("rot")))
+        .flatten()
+        .filter(|&r| r != 0)
+        .map(|r| (r as f64 / 60_000.0).clamp(-90.0, 90.0) as f32);
     let axis_number_formats = if scatter {
-        AxisNumberFormats { x: axis_num_fmt(x_ax), y: axis_num_fmt(y_ax), y2: None }
+        AxisNumberFormats {
+            x: axis_num_fmt(x_ax),
+            y: axis_num_fmt(y_ax),
+            y2: None,
+            no_fill,
+            hole_size,
+            point_colors,
+            show_percent,
+            y_min,
+            y_max,
+            x_label_rotation,
+            gap_width,
+        }
     } else {
         AxisNumberFormats {
             x: None,
-            y: if pct_unmodelled(&first_axes) { None } else { axis_num_fmt(val_ax_of(&first_axes).or(y_ax)) },
+            y: if pct_unmodelled(&first_axes) { None } else { axis_num_fmt(primary_val_ax) },
             y2: secondary_ids.filter(|ids| !pct_unmodelled(ids)).and_then(|ids| axis_num_fmt(val_ax_of(&ids))),
+            no_fill,
+            hole_size,
+            point_colors,
+            show_percent,
+            y_min,
+            y_max,
+            x_label_rotation,
+            gap_width,
         }
     };
     let legend = match chart.child("legend") {
@@ -852,7 +899,7 @@ fn multi_level_cat(f: &str, values: &str, wb: &Workbook, si: usize) -> Option<St
     Some(s)
 }
 
-fn series_xml(s: &Series, idx: usize, g: G, labels: bool, wb: &Workbook, si: usize) -> String {
+fn series_xml(s: &Series, idx: usize, g: G, ch: &Chart, wb: &Workbook, si: usize) -> String {
     let mut x = format!("<c:ser><c:idx val=\"{idx}\"/><c:order val=\"{idx}\"/>");
     if let Some(n) = &s.name {
         if is_ref(n) || is_defined_name(wb, si, n) {
@@ -885,10 +932,18 @@ fn series_xml(s: &Series, idx: usize, g: G, labels: bool, wb: &Workbook, si: usi
         G::Bubble => x.push_str("<c:invertIfNegative val=\"0\"/>"),
         _ => {}
     }
+    if idx == 0 {
+        for &(pt_idx, ref c) in &ch.axis_number_formats.point_colors {
+            if let Some(fill) = srgb(c, &wb.theme) {
+                let _ =
+                    write!(x, "<c:dPt><c:idx val=\"{pt_idx}\"/><c:bubble3D val=\"0\"/><c:spPr><a:solidFill>{fill}</a:solidFill></c:spPr></c:dPt>");
+            }
+        }
+    }
     // A typed label format needs the series' own dLbls (after dPt, before trendline in every
     // series type written here).
     if let Some(f) = s.label_number_format.as_deref() {
-        x.push_str(&dlbls(labels, Some(f)));
+        x.push_str(&dlbls(ch.data_labels, ch.axis_number_formats.show_percent, Some(f)));
     }
     // Trendlines sit between dLbls and the data in CT_LineSer, CT_BarSer, CT_AreaSer,
     // CT_ScatterSer and CT_BubbleSer; pie and radar series have none.
@@ -990,23 +1045,25 @@ fn num_fmt_xml(code: Option<&str>) -> String {
 }
 
 /// `<c:dLbls>`; a typed `fmt` comes first, as CT_DLbls orders it.
-fn dlbls(show: bool, fmt: Option<&str>) -> String {
+fn dlbls(show: bool, pct: bool, fmt: Option<&str>) -> String {
+    let show_val = (show && !pct) as u8;
+    let show_pct = (show && pct) as u8;
     format!(
-        "<c:dLbls>{}<c:showLegendKey val=\"0\"/><c:showVal val=\"{}\"/><c:showCatName val=\"0\"/><c:showSerName val=\"0\"/><c:showPercent val=\"0\"/><c:showBubbleSize val=\"0\"/></c:dLbls>",
+        "<c:dLbls>{}<c:showLegendKey val=\"0\"/><c:showVal val=\"{show_val}\"/><c:showCatName val=\"0\"/><c:showSerName val=\"0\"/><c:showPercent val=\"{show_pct}\"/><c:showBubbleSize val=\"0\"/></c:dLbls>",
         fmt.map(|f| num_fmt_xml(Some(f))).unwrap_or_default(),
-        show as u8
     )
 }
 
 fn group_xml(g: G, series: &[(usize, &Series)], ch: &Chart, axes: (u32, u32), wb: &Workbook, si: usize) -> String {
-    let sers: String = series.iter().map(|(i, s)| series_xml(s, *i, g, ch.data_labels, wb, si)).collect();
-    let dl = dlbls(ch.data_labels, None);
+    let sers: String = series.iter().map(|(i, s)| series_xml(s, *i, g, ch, wb, si)).collect();
+    let dl = dlbls(ch.data_labels, ch.axis_number_formats.show_percent, None);
     let ax = format!("<c:axId val=\"{}\"/><c:axId val=\"{}\"/>", axes.0, axes.1);
     match g {
         G::Bar { bar, grouping } => {
             let overlap = if grouping == "clustered" { String::new() } else { "<c:overlap val=\"100\"/>".into() };
+            let gw = ch.axis_number_formats.gap_width.unwrap_or(150).min(500);
             format!(
-                "<c:barChart><c:barDir val=\"{}\"/><c:grouping val=\"{grouping}\"/><c:varyColors val=\"0\"/>{sers}{dl}<c:gapWidth val=\"150\"/>{overlap}{ax}</c:barChart>",
+                "<c:barChart><c:barDir val=\"{}\"/><c:grouping val=\"{grouping}\"/><c:varyColors val=\"0\"/>{sers}{dl}<c:gapWidth val=\"{gw}\"/>{overlap}{ax}</c:barChart>",
                 if bar { "bar" } else { "col" }
             )
         }
@@ -1016,7 +1073,8 @@ fn group_xml(g: G, series: &[(usize, &Series)], ch: &Chart, axes: (u32, u32), wb
         ),
         G::Pie => format!("<c:pieChart><c:varyColors val=\"1\"/>{sers}{dl}<c:firstSliceAng val=\"0\"/></c:pieChart>"),
         G::Doughnut => {
-            format!("<c:doughnutChart><c:varyColors val=\"1\"/>{sers}{dl}<c:firstSliceAng val=\"0\"/><c:holeSize val=\"50\"/></c:doughnutChart>")
+            let hs = ch.axis_number_formats.hole_size.unwrap_or(50).clamp(1, 90);
+            format!("<c:doughnutChart><c:varyColors val=\"1\"/>{sers}{dl}<c:firstSliceAng val=\"0\"/><c:holeSize val=\"{hs}\"/></c:doughnutChart>")
         }
         G::Area { grouping } => format!("<c:areaChart><c:grouping val=\"{grouping}\"/><c:varyColors val=\"0\"/>{sers}{dl}{ax}</c:areaChart>"),
         G::Scatter { .. } => format!("<c:scatterChart><c:scatterStyle val=\"lineMarker\"/><c:varyColors val=\"0\"/>{sers}{dl}{ax}</c:scatterChart>"),
@@ -1048,11 +1106,22 @@ struct Ax<'a> {
     crosses_max: bool,
     /// A typed number format (`None`: linked to source).
     fmt: Option<&'a str>,
+    min: Option<f64>,
+    max: Option<f64>,
+    rot: Option<f32>,
 }
 
 fn axis_xml(a: &Ax<'_>) -> String {
+    let mut sc = String::from("<c:scaling><c:orientation val=\"minMax\"/>");
+    if let Some(hi) = a.max.filter(|v| v.is_finite()) {
+        let _ = write!(sc, "<c:max val=\"{}\"/>", num(hi));
+    }
+    if let Some(lo) = a.min.filter(|v| v.is_finite()) {
+        let _ = write!(sc, "<c:min val=\"{}\"/>", num(lo));
+    }
+    sc.push_str("</c:scaling>");
     let mut s = format!(
-        "<c:{0}><c:axId val=\"{1}\"/><c:scaling><c:orientation val=\"minMax\"/></c:scaling><c:delete val=\"{2}\"/><c:axPos val=\"{3}\"/>",
+        "<c:{0}><c:axId val=\"{1}\"/>{sc}<c:delete val=\"{2}\"/><c:axPos val=\"{3}\"/>",
         if a.cat { "catAx" } else { "valAx" },
         a.id,
         a.delete as u8,
@@ -1065,6 +1134,10 @@ fn axis_xml(a: &Ax<'_>) -> String {
         s.push_str(&title_xml(t));
     }
     s.push_str(&num_fmt_xml(a.fmt));
+    if let Some(deg) = a.rot.filter(|r| r.is_finite() && *r != 0.0) {
+        let rot = (f64::from(deg) * 60_000.0).round() as i64;
+        let _ = write!(s, "<c:txPr><a:bodyPr rot=\"{rot}\"/><a:lstStyle/><a:p><a:pPr><a:defRPr/></a:pPr><a:endParaRPr/></a:p></c:txPr>");
+    }
     let _ = write!(
         s,
         "<c:majorTickMark val=\"out\"/><c:minorTickMark val=\"none\"/><c:tickLblPos val=\"nextTo\"/><c:crossAx val=\"{}\"/><c:crosses val=\"{}\"/>",
@@ -1155,6 +1228,9 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 title: ch.x_title.as_deref(),
                 crosses_max: false,
                 fmt: ch.axis_number_formats.x.as_deref(),
+                min: None,
+                max: None,
+                rot: None,
             }));
             s.push_str(&axis_xml(&Ax {
                 cat: false,
@@ -1166,6 +1242,9 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 title: ch.y_title.as_deref(),
                 crosses_max: false,
                 fmt: ch.axis_number_formats.y.as_deref(),
+                min: ch.axis_number_formats.y_min,
+                max: ch.axis_number_formats.y_max,
+                rot: None,
             }));
         }
         G::Bar { bar: true, .. } => {
@@ -1179,6 +1258,9 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 title: ch.x_title.as_deref(),
                 crosses_max: false,
                 fmt: None,
+                min: None,
+                max: None,
+                rot: ch.axis_number_formats.x_label_rotation,
             }));
             s.push_str(&axis_xml(&Ax {
                 cat: false,
@@ -1190,6 +1272,9 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 title: ch.y_title.as_deref(),
                 crosses_max: false,
                 fmt: ch.axis_number_formats.y.as_deref(),
+                min: ch.axis_number_formats.y_min,
+                max: ch.axis_number_formats.y_max,
+                rot: None,
             }));
         }
         _ => {
@@ -1203,6 +1288,9 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 title: ch.x_title.as_deref(),
                 crosses_max: false,
                 fmt: None,
+                min: None,
+                max: None,
+                rot: ch.axis_number_formats.x_label_rotation,
             }));
             s.push_str(&axis_xml(&Ax {
                 cat: false,
@@ -1214,11 +1302,27 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 title: ch.y_title.as_deref(),
                 crosses_max: false,
                 fmt: ch.axis_number_formats.y.as_deref(),
+                min: ch.axis_number_formats.y_min,
+                max: ch.axis_number_formats.y_max,
+                rot: None,
             }));
         }
     }
     if secondary.is_some() {
-        s.push_str(&axis_xml(&Ax { cat: true, id: 3, cross: 4, pos: "b", delete: true, grid: false, title: None, crosses_max: false, fmt: None }));
+        s.push_str(&axis_xml(&Ax {
+            cat: true,
+            id: 3,
+            cross: 4,
+            pos: "b",
+            delete: true,
+            grid: false,
+            title: None,
+            crosses_max: false,
+            fmt: None,
+            min: None,
+            max: None,
+            rot: None,
+        }));
         s.push_str(&axis_xml(&Ax {
             cat: false,
             id: 4,
@@ -1229,6 +1333,9 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
             title: None,
             crosses_max: true,
             fmt: ch.axis_number_formats.y2.as_deref(),
+            min: None,
+            max: None,
+            rot: None,
         }));
     }
     s.push_str("</c:plotArea>");
@@ -1242,6 +1349,10 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
     if let Some(p) = pos {
         let _ = write!(s, "<c:legend><c:legendPos val=\"{p}\"/><c:overlay val=\"0\"/></c:legend>");
     }
-    s.push_str("<c:plotVisOnly val=\"1\"/><c:dispBlanksAs val=\"gap\"/></c:chart></c:chartSpace>");
+    s.push_str("<c:plotVisOnly val=\"1\"/><c:dispBlanksAs val=\"gap\"/></c:chart>");
+    if ch.axis_number_formats.no_fill {
+        s.push_str("<c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr>");
+    }
+    s.push_str("</c:chartSpace>");
     s
 }

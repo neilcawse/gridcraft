@@ -379,7 +379,11 @@ fn paint_cell(q: &QuadrantPaint<'_>, painted: &(CellRef, Rect, Look, Option<CfLo
     };
     let indent = st.align.indent as f32 * 9.0 * z;
     let pad = 2.5 * z;
-    let rotated = st.align.rotation != 0 && st.align.rotation != 255;
+    if st.align.rotation == 255 {
+        paint_stacked_text(p, &text, font, color, *rect, (halign, st.align.v), (text_left + pad + indent, pad, z));
+        return;
+    }
+    let rotated = st.align.rotation != 0;
     // Rotated text wraps along its own direction (below), not across the column width.
     if !rotated && (st.align.wrap || st.align.h == HAlign::Justify) {
         let wrap_w = (rect.width() - 2.0 * pad - indent).max(4.0);
@@ -510,6 +514,24 @@ fn paint_cell(q: &QuadrantPaint<'_>, painted: &(CellRef, Rect, Look, Option<CfLo
         cp.galley(pos2(x, y), galley.clone(), color);
     }
     paint_text_decorations(&cp, TextDecoration { x, y, width: w, height: gh, color, underline: st.font.underline, strike: st.font.strike });
+}
+
+fn paint_stacked_text(p: &Painter, text: &str, font: FontId, color: Color32, rect: Rect, (h, v): (HAlign, VAlign), (left, pad, z): (f32, f32, f32)) {
+    let stacked: String = text.chars().filter(|&ch| ch != '\r' && ch != '\n').take(500).map(|ch| ch.to_string()).collect::<Vec<_>>().join("\n");
+    let mut job = egui::text::LayoutJob::simple(stacked, font, color, f32::INFINITY);
+    job.halign = match h {
+        HAlign::Right => egui::Align::RIGHT,
+        HAlign::Left => egui::Align::LEFT,
+        _ => egui::Align::Center,
+    };
+    let galley = p.layout_job(job);
+    let x = match h {
+        HAlign::Right => rect.right() - pad,
+        HAlign::Left => left,
+        _ => rect.center().x,
+    };
+    let y = cell_text_y(v, rect, galley.size().y, z);
+    p.with_clip_rect(rect.intersect(p.clip_rect())).galley(pos2(x, y), galley, color);
 }
 
 struct TextDecoration {
