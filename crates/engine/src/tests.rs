@@ -5309,6 +5309,8 @@ fn a_multi_level_pivot_chart_draws_one_label_per_point_after_saves() {
         source: None,
         by_rows: false,
         pivot: Some("Graph!PivotTable1".into()),
+        axis_number_formats: Default::default(),
+        pivot_label_formats: Vec::new(),
     });
     let labels = ["Ottawa", "Toronto", "Boston", "NYC"];
     for _ in 0..2 {

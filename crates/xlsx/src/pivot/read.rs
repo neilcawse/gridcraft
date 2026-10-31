@@ -411,7 +411,10 @@ fn read_table(cx: &mut Ctx<'_>, x: &El, cache: &CacheIn, id: u32) -> Option<Pivo
                     f.item_order = items.iter().filter_map(|it| lab(it)).collect();
                 }
                 if items.iter().any(|it| it.flag("h", false)) {
-                    let shown: Vec<String> = items.iter().filter(|it| !it.flag("h", false)).filter_map(|it| lab(it)).collect();
+                    let mut shown: Vec<(u32, String)> =
+                        items.iter().filter(|it| !it.flag("h", false)).filter_map(|it| Some((it.attr_u32("x")?, lab(it)?))).collect();
+                    shown.sort_by_key(|(x, _)| *x);
+                    let shown: Vec<String> = shown.into_iter().map(|(_, l)| l).collect();
                     if !filters.iter().any(|ff| same(&ff.source_col, &name)) {
                         filters.push(PivotFilter { source_col: name.clone(), selected: Some(shown), hidden: false, date_group: group });
                     }

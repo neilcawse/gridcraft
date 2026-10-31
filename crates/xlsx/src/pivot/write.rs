@@ -1,10 +1,10 @@
 use std::fmt::Write as _;
 
 use super::{
-    CT_PIVOT_CACHE_DEF, CT_PIVOT_CACHE_REC, CT_PIVOT_TABLE, CellRef, DateSystem, EXT_X14_CACHE_ID, EXT_X14_DATA_FIELD, EXT_X14_FIELD,
-    EXT_X14_TABLE, EXT_XPDL_TABLE, HashMap, Key, MAX_ITEMS, MAX_RECORD_CELLS, MAX_SOURCE_CELLS, MONTHS, NS_MAIN, NS_REL, NS_X14, NS_XPDL, Out,
-    PivotDateGroup, PivotField, PivotFilter, PivotFunc, PivotLayout, PivotShowAs, PivotSort, PivotTable, PivotValue, RangeRef, Rels, VALUES_FIELD,
-    Value, Workbook, XML_DECL, datetime_from_serial, esc_attr, func_caption, func_name, group_by_name, group_caption, iso, key, label, mdy, same,
+    CT_PIVOT_CACHE_DEF, CT_PIVOT_CACHE_REC, CT_PIVOT_TABLE, CellRef, DateSystem, EXT_X14_CACHE_ID, EXT_X14_DATA_FIELD, EXT_X14_FIELD, EXT_X14_TABLE,
+    EXT_XPDL_TABLE, HashMap, Key, MAX_ITEMS, MAX_RECORD_CELLS, MAX_SOURCE_CELLS, MONTHS, NS_MAIN, NS_REL, NS_X14, NS_XPDL, Out, PivotDateGroup,
+    PivotField, PivotFilter, PivotFunc, PivotLayout, PivotShowAs, PivotSort, PivotTable, PivotValue, RangeRef, Rels, VALUES_FIELD, Value, Workbook,
+    XML_DECL, datetime_from_serial, esc_attr, func_caption, func_name, group_by_name, group_caption, iso, key, label, mdy, same,
 };
 
 #[derive(Default)]
@@ -757,15 +757,9 @@ fn table_xml(pt: &PivotTable, idx: usize, cache_id: u32, c: &Cache, axis_map: &[
     // In Columns Σ Values comes after the last field: the column layout doesn't place it elsewhere.
     let col_values = (k > 1 && !pt.values_on_rows).then_some(col_idx.len());
     // The engine shows the Values row and the classic caption row only with field headers on.
-    let values_row = col_idx.is_empty()
-        && !compact
-        && pt.show_headers
-        && ((col_values.is_some() && pt.show_values_row) || (k == 1 && pt.classic_layout));
-    let first_data_row = if col_idx.is_empty() {
-        1 + usize::from(values_row)
-    } else {
-        1 + col_idx.len() + usize::from(col_values.is_some())
-    };
+    let values_row =
+        col_idx.is_empty() && !compact && pt.show_headers && ((col_values.is_some() && pt.show_values_row) || (k == 1 && pt.classic_layout));
+    let first_data_row = if col_idx.is_empty() { 1 + usize::from(values_row) } else { 1 + col_idx.len() + usize::from(col_values.is_some()) };
     let row_levels = row_idx.len() + usize::from(row_values.is_some());
     let first_data_col = if row_levels == 0 && col_idx.is_empty() {
         0
@@ -777,8 +771,7 @@ fn table_xml(pt: &PivotTable, idx: usize, cache_id: u32, c: &Cache, axis_map: &[
     // Two or more value fields in Columns alone: Excel 365 adds a `Values` caption row
     // when field headers are shown. Page-filter layouts retain their classic header row
     // unless the table explicitly hides the Values row.
-    let hide_values_row =
-        col_values.is_some() && col_idx.is_empty() && (pages.is_empty() || !pt.show_values_row) && pt.show_headers;
+    let hide_values_row = col_values.is_some() && col_idx.is_empty() && (pages.is_empty() || !pt.show_values_row) && pt.show_headers;
     let first_header_row = usize::from(!hide_values_row);
     let _ = write!(
         s,
@@ -1009,7 +1002,14 @@ fn write_pivot_fields(
     s.push_str("</pivotFields>");
 }
 
-fn write_auto_sort_scope(s: &mut String, pt: &PivotTable, c: &Cache, axis_map: &[Option<usize>], vals: &[(usize, &PivotValue)], af: Option<&PivotField>) {
+fn write_auto_sort_scope(
+    s: &mut String,
+    pt: &PivotTable,
+    c: &Cache,
+    axis_map: &[Option<usize>],
+    vals: &[(usize, &PivotValue)],
+    af: Option<&PivotField>,
+) {
     let Some(d) =
         af.filter(|f| f.sort != PivotSort::None).and_then(|f| f.sort_by.as_deref()).and_then(|n| vals.iter().position(|(_, v)| same(&v.name, n)))
     else {
