@@ -38,6 +38,8 @@ pub struct Ctx<'a> {
     /// PivotCharts (by chart id) and their series' cached points, checked against the cells once
     /// every sheet is read.
     pub pivot_charts: Vec<(u32, Vec<crate::chart::PivotSeriesCache>)>,
+    /// PivotTable slicer pieces collected from sheets, joined once sheets are read.
+    pub slicers: crate::slicer::SlicersIn,
 }
 
 impl Ctx<'_> {
@@ -246,6 +248,7 @@ pub fn read_xlsx(bytes: &[u8], functions: crate::FunctionInfo) -> Result<(Workbo
         cf_ext_ids: vec![],
         legacy_formulas: vec![],
         pivot_charts: vec![],
+        slicers: Default::default(),
     };
     let root_rels = cx.pkg.rels("")?;
     let wb_part = find_rel(&root_rels, "officeDocument").map(|r| r.target.clone()).unwrap_or_else(|| "xl/workbook.xml".into());
@@ -338,6 +341,7 @@ pub fn read_xlsx(bytes: &[u8], functions: crate::FunctionInfo) -> Result<(Workbo
     crate::chart::plot_pivot_caches(&mut wb, &cx.pivot_charts);
 
     wb.external_books = Arc::new(crate::external::read(&mut cx, &wb_xml, &wb_rels)?);
+    crate::slicer::resolve(&mut cx, &wb_xml, &wb_rels, &sheet_els, &file_to_model, &pivot_caches, &mut wb);
 
     // Defined names. Chartex parts refer to their data through hidden `_xlchart.*` names.
     let mut chart_names: Vec<(String, String)> = vec![];

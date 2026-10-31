@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-24 · **Change:** minor (§8: PivotTable Enable show details; §3: Excel 2010 conditional formats read and written; grouped shapes from XLSX are kept from files; earlier: PivotTable Show Details) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-24 · **Change:** minor (§8: PivotTable Enable show details; §3, §8: PivotTable slicers landed; §3: Excel 2010 conditional formats read and written; grouped shapes from XLSX are kept from files; earlier: PivotTable Show Details) · **Target:** Microsoft Excel (Microsoft 365)
 
 Every known shortfall against Excel, one entry each, ranked by user impact (what blocks someone
 using GridCraft for real work first). This is the work list: pick from the top, check the open
@@ -45,7 +45,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
   synthetic files, Excel for Mac 16.114 stored cross-sheet expression and `cfvo` rules in x14;
   GridCraft-written main-section cfvo files opened without a repair prompt.
 - **Evidence:** `crates/xlsx/src/passthrough.rs` (what is kept, and why the rest isn't).
-- **Impact:** open-edit-save still simplifies workbooks with slicers, timelines or Power Pivot.
+- **Impact:** open-edit-save still simplifies workbooks with table or OLAP slicers, timelines or Power Pivot.
 - **Estimate:** 6–10 h. [file-format-parity.md](file-format-parity.md)
 
 ### 4. Charts lose options on round trip; shallow chart model (F, FF)
@@ -87,13 +87,19 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
   routine in business.
 - **Estimate:** 14–21 h (`.xls` styles and objects 10–15, encryption 4–6). [file-format-parity.md](file-format-parity.md)
 
-### 8. PivotTables: no slicers, calculated items, PivotCharts; unverified in Excel (F)
+### 8. PivotTables: no calculated items, inserting slicers, timelines; unverified in Excel (F)
 - **Evidence:** `parity-checklist.md` missing `insert.slicer`, `insert.timeline`,
   `insert.pivotChart`, `table.insertSlicer`; calculated items and GETPIVOTDATA missing (calculated fields
   and values on rows done). Show Details (double-click a value, subtotal or grand total cell) lists
   its source records on a new sheet. The "Enable show details" option (`pivot.options`
   `enableShowDetails`, saved as `enableDrill`) turns it off; it has no PivotTable Options dialog
   yet (command only).
+  PivotTable slicers from files are shown, filter their PivotTables when clicked and are saved;
+  inserting one on a PivotTable, and slicer settings, are not done yet. A slicer connected to
+  PivotTables that can't share one pivot cache (different sources or calculated fields, or a
+  date field grouped differently) is saved connected to the first of them only. A slicer on a
+  coarser level of a date grouped at several levels (a Years slicer on a Date grouped by years
+  and months, which Excel keeps in its own cache field) is skipped with a warning on open.
 - **Impact:** pivots are the analyst's main tool.
 - **Estimate:** 20–30 h for beta (25–40 h full).
 
@@ -198,6 +204,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 | 2026-10-15 | minor | §13: Solver prepares reports before committing the solution, model and report sheets together; report refusal preserves the workbook and Undo/Redo (#1050) |
 | 2026-10-13 | minor | §3: Excel 2010 conditional formats (`x14:conditionalFormattings`, cross-sheet rules) read, evaluated and written back in the extension |
 | 2026-10-13 | minor | §17: drawing groups (`grpSp`) opened from a file are kept on save and move or delete as one; Group / Ungroup commands remain |
+| 2026-10-13 | minor | §3, §8: PivotTable slicers read, shown, clickable and written |
 | 2026-10-13 | trivial | §4: multi-level category axes landed |
 | 2026-10-12 | minor | §9: next/previous sheet commands retain the current visible sheet and selection when there is no visible destination |
 | 2026-10-12 | minor | rows auto-fit oversized fonts on open and whole-row/column formatting (#833) |
