@@ -1371,3 +1371,13 @@ fn box_whisker_draws_each_series_quartile_method() {
     // The boxes span 3.5 and 2.5 data units on the same value axis.
     assert!((heights[0] / heights[1] - 1.4).abs() < 0.001);
 }
+
+#[test]
+fn empty_titleless_chart_renders_no_opaque_card() {
+    let mut c = chart(ChartKind::ColumnClustered);
+    c.title = None;
+    let d = ChartData::default();
+    assert!(render(&c, &d, 400.0, 300.0, &ApproxMeasure).is_empty());
+    c.title = Some(String::new());
+    assert!(render(&c, &d, 400.0, 300.0, &ApproxMeasure).is_empty());
+}

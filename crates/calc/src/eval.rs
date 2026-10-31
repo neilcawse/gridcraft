@@ -122,6 +122,12 @@ pub trait Host {
     fn range_values(&mut self, sheet: usize, range: RangeRef) -> Vec<Value> {
         range.iter().map(|c| self.cell_value(sheet, c)).collect()
     }
+    /// Values of a block as an [`Array`]. Hosts can cache immutable evaluated ranges.
+    fn range_array(&mut self, sheet: usize, range: RangeRef) -> Option<Arc<Array>> {
+        let (h, w) = (range.height() as usize, range.width() as usize);
+        let data = self.range_values(sheet, range);
+        Array::new(h, w, data).map(Arc::new)
+    }
     /// The sheet's used range ([`used_range_of`]). Hosts that keep the workbook unchanged while
     /// evaluating can remember it.
     fn used_range(&mut self, sheet: usize) -> Option<RangeRef> {
@@ -385,6 +391,9 @@ impl<'h> Evaluator<'h> {
         let (h, w) = (range.height() as usize, range.width() as usize);
         if (h as u64) * (w as u64) > MAX_CELLS {
             return Value::Error(CellError::Num);
+        }
+        if linked_parts(a.sheet).is_none() {
+            return self.host.range_array(a.sheet, range).map(Value::Array).unwrap_or(Value::Error(CellError::Value));
         }
         let data = self.block_values(a.sheet, range);
         Array::new(h, w, data).map(Value::from).unwrap_or(Value::Error(CellError::Value))

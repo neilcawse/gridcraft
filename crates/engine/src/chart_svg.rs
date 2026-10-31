@@ -26,6 +26,9 @@ pub(crate) fn chart_svg(wb: &Workbook, sheet: usize, chart: &Chart, style: &str)
     }
     let data = gridcraft_chart::resolve(wb, sheet, chart);
     let prims = gridcraft_chart::render(chart, &data, w, h, &HelveticaMeasure);
+    if prims.is_empty() {
+        return None;
+    }
     Some(prims_svg(&prims, w, h, style))
 }
 

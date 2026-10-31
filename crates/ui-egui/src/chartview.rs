@@ -384,6 +384,9 @@ pub(crate) fn paint_objects(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Wor
         done(start, r);
     }
     for ch in &sh.charts {
+        if ch.series.is_empty() && ch.title.as_deref().is_none_or(str::is_empty) && app.selected_chart != Some(ch.id) {
+            continue;
+        }
         let r = anchor_rect(geo, sh, &ch.anchor);
         if !r.intersects(p.clip_rect()) {
             continue;
@@ -421,6 +424,9 @@ pub fn hit_object(geo: &Geo, sh: &Sheet, p: Pos2) -> Option<(&'static str, u32, 
         }
     }
     for ch in sh.charts.iter().rev() {
+        if ch.series.is_empty() && ch.title.as_deref().is_none_or(str::is_empty) {
+            continue;
+        }
         let r = anchor_rect(geo, sh, &ch.anchor);
         if r.expand(4.0).contains(p) && geo.cells.contains(p) {
             return Some(("chart", ch.id, r));

@@ -137,11 +137,15 @@ pub fn render(chart: &Chart, data: &ChartData, w: f32, h: f32, m: &dyn Measure) 
         return vec![];
     }
     let data = sanitize(data);
+    let title = chart_title(chart, &data);
+    if data.series.is_empty() && title.is_none() {
+        return vec![];
+    }
     let mut ctx = Ctx { out: Vec::new(), m };
     ctx.out.push(Prim::Rect { x: 0.0, y: 0.0, w, h, fill: Some(WHITE), stroke: Some((GRID, 1.0)), radius: 0.0 });
     let pad = (w.min(h) * 0.04).clamp(2.0, 10.0);
     let mut area = Bx { x: pad, y: pad, w: w - 2.0 * pad, h: h - 2.0 * pad };
-    if let Some(t) = chart_title(chart, &data) {
+    if let Some(t) = title {
         let size = TITLE_SIZE.min(h * 0.12).max(4.0);
         let t = ctx.fit(&t, size, area.w);
         ctx.text(w / 2.0, area.y, &t, size, TEXT, (HAlign::Center, VAlign::Top));
