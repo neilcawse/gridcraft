@@ -177,7 +177,7 @@ pub(super) fn pie(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx, inne
             let target_cx = ctx.chart_w * (px + pw * 0.5);
             (target_cx.min(area.right() - 20.0).max(area.x + 20.0), area.cy())
         }
-        _ => (if out_end { area.cx() + 14.0 } else { area.cx() }, area.cy()),
+        _ => (if out_end { area.cx() + 19.0 } else { area.cx() }, area.cy()),
     };
     let pw = chart.axis_number_formats.plot_w.filter(|&w| (0.2..=1.0).contains(&w)).map(|w| (ctx.chart_w * w).min(area.w)).unwrap_or(area.w);
     let span = pw.min(area.h);

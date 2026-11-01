@@ -673,7 +673,7 @@ pub fn auto_row_height(wb: &mut Workbook, si: usize, row: u32) {
             continue;
         }
         let h = if is_verdana && lines > 1.0 {
-            (size * 96.0 / 72.0 * 1.545 * lines.ceil()).round()
+            size * 96.0 / 72.0 * 1.4045 * lines.ceil()
         } else if lines >= 6.0 && col_w > 400.0 {
             (size * 96.0 / 72.0 * 1.21 * lines + 2.0).ceil()
         } else if lines >= 9.0 {

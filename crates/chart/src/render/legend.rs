@@ -168,7 +168,7 @@ pub(super) fn draw_legend(ctx: &mut Ctx, entries: &[(String, Rgba, Swatch)], pos
             } else {
                 None
             };
-            let colw = manual_w.unwrap_or_else(|| entries.iter().map(|e| item_w(ctx, e)).fold(0.0f32, f32::max).min(area.w * 0.365));
+            let colw = manual_w.unwrap_or_else(|| entries.iter().map(|e| item_w(ctx, e)).fold(0.0f32, f32::max).min(area.w * 0.39));
             let sx = swatch_w(Swatch::Box, s) + gap;
             let avail_est = (colw - sx).max(0.0) + 0.5;
             let wraps = entries.iter().filter(|e| ctx.tw(&e.0, size) > avail_est && e.0.contains(' ')).count();
@@ -199,7 +199,7 @@ pub(super) fn draw_legend(ctx: &mut Ctx, entries: &[(String, Rgba, Swatch)], pos
                 draw_swatch(ctx, e.2, x0, yc, s, e.1, entry_stroke(data, i));
                 let sx = swatch_w(e.2, s) + gap;
                 let avail = (colw - sx).max(0.0) + 0.5;
-                let wrap_avail = (colw - sx).max(0.0) * 1.15;
+                let wrap_avail = (colw - sx).max(0.0) * 1.07;
                 if eff_row_h >= size * 1.9
                     && ctx.tw(&e.0, size) > avail
                     && let Some(sp) =

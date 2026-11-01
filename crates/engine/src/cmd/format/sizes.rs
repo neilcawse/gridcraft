@@ -182,7 +182,7 @@ pub fn approx_verdana_width(text: &str, size: f32, bold: bool) -> f32 {
             _ => 1280,
         };
     }
-    (units as f32 / 2048.0) * size * 0.905 * if bold { 1.08 } else { 1.0 } * 96.0 / 72.0
+    (units as f32 / 2048.0) * size * 0.927 * if bold { 1.08 } else { 1.0 } * 96.0 / 72.0
 }
 
 /// Distinct texts AutoFit measures exactly; past this many, `Session::text_width` is asked for a
