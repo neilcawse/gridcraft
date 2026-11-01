@@ -153,8 +153,8 @@ fn axis_scales(chart: &Chart, data: &ChartData, fams: &[Fam], sec: &[bool], span
                 && force_zero
                 && lo > 0.0
                 && lo < hi_eff
-                && lo >= hi_eff * 0.85;
-            let lo_in = if tight_top { lo - (hi_eff - lo) * 0.5 } else { lo_eff };
+                && lo >= hi_eff * 0.80;
+            let lo_in = if tight_top { lo - (hi_eff - lo) * 0.1 } else { lo_eff };
             let mut sc = nice_scale(lo_in, hi_eff, force_zero && !tight_top);
             if !axis {
                 if let Some(mn) = chart.axis_number_formats.y_min.filter(|v| v.is_finite()) {
@@ -168,7 +168,7 @@ fn axis_scales(chart: &Chart, data: &ChartData, fams: &[Fam], sec: &[bool], span
                         sc.step = 10.0;
                     }
                 }
-                if tight_top && (sc.max - sc.min) <= 20.0 && sc.step > 2.0 {
+                if tight_top && (hi_eff - lo) <= 20.0 {
                     sc.step = 2.0;
                     sc.min = (lo_in / 2.0).floor() * 2.0;
                 }
@@ -394,7 +394,7 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
                         let lo = pb.min(pt);
                         let len = (pb - pt).abs();
                         let fill = if multi_pt { super::legend::point_color(data, j) } else { s.color };
-                        let stroke_w = if (horizontal && bw < 6.0) || (!horizontal && bw < 6.0) { 0.4 } else { 1.0 };
+                        let stroke_w = if bw < 6.0 { 0.75 } else { 1.0 };
                         let bar_stroke = s
                             .point_strokes
                             .iter()
@@ -420,18 +420,6 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
                             draw_bar_label(ctx, &t, v, pb, pt, lo, len, bw, pos, horizontal, fam != Fam::Col, in_end, rot_deg, fill);
                         }
                     }
-                    if !horizontal && !ctx.cat_axis_deleted {
-                        let zero = if s1.min <= 0.0 && s1.max >= 0.0 { 0.0 } else { s1.min };
-                        let y0 = vpos(zero, s1);
-                        let ax_col = if ctx.grid_color != super::GRID { ctx.grid_color } else { super::AXIS };
-                        ctx.hline(plot.x, plot.right(), y0, ax_col, 0.75);
-                        if chart.axis_number_formats.cat_major_tick.as_deref() != Some("none") {
-                            for j in 0..=ncat_slots {
-                                let tx = plot.x + j as f32 * cw;
-                                ctx.vline(tx, plot.bottom(), plot.bottom() + 4.0, ax_col, 0.75);
-                            }
-                        }
-                    }
                 }
                 _ => {
                     let pts: Vec<Option<[f32; 2]>> = row.iter().enumerate().map(|(j, sp)| sp.map(|(_, t)| [center(j), vpos(t, &sc)])).collect();
@@ -442,7 +430,7 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
                             Some(mf) => (mf, Some(s.color)),
                             None => (s.color, None),
                         };
-                        draw_markers(ctx, pts.iter().flatten().copied(), 3.5, m_fill, m_ring);
+                        draw_markers(ctx, pts.iter().flatten().copied(), 2.75, m_fill, m_ring);
                     }
                     if ser_labels_on {
                         let lpos = chart
@@ -468,6 +456,18 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
                             }
                         }
                     }
+                }
+            }
+        }
+        if pass == 1 && !horizontal && !ctx.cat_axis_deleted && fams.iter().copied().any(is_col) {
+            let zero = if s1.min <= 0.0 && s1.max >= 0.0 { 0.0 } else { s1.min };
+            let y0 = vpos(zero, s1);
+            let ax_col = if ctx.grid_color != super::GRID { ctx.grid_color } else { super::AXIS };
+            ctx.hline(plot.x, plot.right(), y0, ax_col, 0.75);
+            if chart.axis_number_formats.cat_major_tick.as_deref() != Some("none") {
+                for j in 0..=ncat_slots {
+                    let tx = plot.x + j as f32 * cw;
+                    ctx.vline(tx, plot.bottom(), plot.bottom() + 4.0, ax_col, 0.75);
                 }
             }
         }

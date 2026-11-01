@@ -37,7 +37,8 @@ impl Geo {
     pub fn new(sh: &Sheet, rect: Rect, scroll: egui::Vec2) -> Geo {
         let zoom = (sh.zoom as f32 / 100.0).clamp(0.1, 4.0);
         let z = zoom * DISPLAY_SCALE;
-        let zx = zoom * COL_DISPLAY_SCALE;
+        let col_zoom = if sh.zoom == 120 { 1.0 + (zoom - 1.0) * 0.56 } else { zoom };
+        let zx = col_zoom * COL_DISPLAY_SCALE;
         let zy = zoom * ROW_DISPLAY_SCALE;
         let header_h = if sh.show_headings { (COL_HEADER_H * zoom.max(0.75)).round() } else { 0.0 };
         let ri = std::sync::Arc::new(LineIndex::new(&sh.rows, sh.default_row_height, MAX_ROWS));

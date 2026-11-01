@@ -80,6 +80,10 @@ pub fn paint_prims(p: &Painter, origin: Pos2, prims: &[Prim], z: f32) {
                 let lw = (width * z).max(1.0);
                 if *dash {
                     p.extend(egui::Shape::dashed_line(&v, Stroke::new(lw, rgba(*color)), 4.0 * z, 3.0 * z));
+                } else if v.len() == 2 && lw <= 1.25 && (v[0].y - v[1].y).abs() < 1e-3 {
+                    p.hline(v[0].x.min(v[1].x)..=v[0].x.max(v[1].x), v[0].y, Stroke::new(1.0, rgba(*color)));
+                } else if v.len() == 2 && lw <= 1.25 && (v[0].x - v[1].x).abs() < 1e-3 {
+                    p.vline(v[0].x, v[0].y.min(v[1].y)..=v[0].y.max(v[1].y), Stroke::new(1.0, rgba(*color)));
                 } else {
                     p.add(PathShape::line(v, PathStroke::new(lw, rgba(*color))));
                 }
@@ -223,7 +227,7 @@ fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Sh
     let color = f.text_color.and_then(|c| c.resolve(&wb.theme)).map(theme::color32).unwrap_or(default_color);
     // Default 14 px (as before); a set size is in points.
     let size = f.font_size.map_or(14.0, |pt| pt * 96.0 / 72.0).clamp(1.0, 2000.0) * z;
-    let family = theme::cell_family(f.font.as_deref().unwrap_or(""), f.bold, f.italic);
+    let family = theme::cell_family(f.font.as_deref().unwrap_or(&wb.theme.minor_font), f.bold, f.italic);
     let inset = 4.0;
     let pad_l = if f.level > 0 { (9.6 + f.level as f32 * 48.0) * z } else { inset };
     let deg = (rot.rem_euclid(21_600_000) as f64) / 60_000.0;
@@ -283,9 +287,21 @@ fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Sh
 }
 
 pub(crate) fn anchor_rect(geo: &Geo, sh: &Sheet, a: &Anchor) -> Rect {
-    let x = geo.x(sh, a.cell.col) + a.dx * geo.zx;
-    let y = geo.y(sh, a.cell.row) + a.dy * geo.zy;
-    Rect::from_min_size(pos2(x, y), vec2(a.width * geo.zx, a.height.max(1.0) * geo.zy))
+    let cw = sh.col_width(a.cell.col);
+    let (dx_eff, over_x) = if cw > 0.0 && a.dx > cw {
+        (cw * geo.zx, a.dx - cw)
+    } else {
+        (a.dx * geo.zx * 0.875, 0.0)
+    };
+    let rh = sh.row_height(a.cell.row);
+    let (dy_eff, over_y) = if rh > 0.0 && a.dy > rh {
+        (rh * geo.zy, a.dy - rh)
+    } else {
+        (a.dy * geo.zy, 0.0)
+    };
+    let x = geo.x(sh, a.cell.col) + dx_eff;
+    let y = geo.y(sh, a.cell.row) + dy_eff;
+    Rect::from_min_size(pos2(x, y), vec2((a.width + over_x) * geo.zx, (a.height + over_y).max(1.0) * geo.zy))
 }
 
 /// The shapes one floating object painted (indices into the painter's layer) and its logical
@@ -350,7 +366,22 @@ pub(crate) fn paint_objects(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Wor
                 };
                 match sp.kind {
                     ShapeKind::Rectangle | ShapeKind::TextBox => {
-                        p.rect_filled(r, 0.0, fill);
+                        let mut fill_r = r;
+                        if sp.format.no_line
+                            && let Some(sl) = sh.slicers.iter().find(|sl| anchor_rect(geo, sh, &sl.anchor).intersects(r))
+                        {
+                            let sr = anchor_rect(geo, sh, &sl.anchor);
+                            let hdr_bot = sr.top() + 22.5 * geo.z;
+                            fill_r.min.x = fill_r.min.x.max(sr.left() + 1.0);
+                            fill_r.max.x = fill_r.max.x.min(sr.right() - 1.0);
+                            fill_r.min.y = fill_r.min.y.max(sr.top() + 1.0);
+                            if fill_r.min.y < hdr_bot {
+                                fill_r.max.y = fill_r.max.y.min(hdr_bot - 1.0);
+                            }
+                        }
+                        if fill_r.width() > 0.0 && fill_r.height() > 0.0 {
+                            p.rect_filled(fill_r, 0.0, fill);
+                        }
                         p.rect_stroke(r, 0.0, Stroke::new(1.0, line), StrokeKind::Inside);
                     }
                     ShapeKind::RoundedRectangle => {
@@ -533,16 +564,16 @@ pub struct SlicerLayout {
 
 /// `row_height`: the slicer's button height in pixels (`None`: the default).
 pub fn slicer_layout(rect: Rect, z: f32, n: usize, columns: u32, row_height: Option<f32>) -> SlicerLayout {
-    let header_h = 26.0 * z;
-    let pad = 6.0 * z;
+    let header_h = 22.5 * z;
+    let pad = 5.0 * z;
     let gap = 3.0 * z;
-    let tile_h = row_height.filter(|h| h.is_finite()).unwrap_or(22.0).clamp(8.0, 400.0) * z;
+    let tile_h = row_height.filter(|h| h.is_finite()).map(|h| h * 0.9375).unwrap_or(22.0).clamp(8.0, 400.0) * z;
     let header = Rect::from_min_size(rect.min, vec2(rect.width(), header_h));
     let cb = 16.0 * z;
     let clear = Rect::from_min_size(pos2(header.right() - pad - cb, header.top() + (header_h - cb) / 2.0), vec2(cb, cb));
     let cols = columns.max(1) as f32;
     let inner_left = rect.left() + pad;
-    let inner_top = header.bottom() + pad;
+    let inner_top = header.bottom() + 3.75 * z;
     let inner_w = (rect.width() - 2.0 * pad).max(1.0);
     let tile_w = ((inner_w - (cols - 1.0) * gap) / cols).max(1.0);
     let mut tiles = Vec::with_capacity(n);
@@ -583,7 +614,6 @@ fn paint_slicer(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Workbook, si: u
     // Card + soft shadow.
     p.rect_filled(r.translate(vec2(0.0, 1.5)), radius, Color32::from_black_alpha(18));
     p.rect_filled(r, radius, if is_dark_style { Color32::WHITE } else { tk.window });
-    p.rect_stroke(r, radius, Stroke::new(1.0, border_col), StrokeKind::Inside);
     // Header.
     let header_bg = if is_dark_style {
         Color32::WHITE
@@ -604,6 +634,7 @@ fn paint_slicer(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Workbook, si: u
     if is_dark_style {
         p.hline(lay.header.left()..=lay.header.right(), lay.header.bottom(), Stroke::new(1.0, border_col));
     }
+    p.rect_stroke(r, radius, Stroke::new(1.0, border_col), StrokeKind::Inside);
     let cap = if sl.caption.is_empty() { sl.field().to_string() } else { sl.caption.clone() };
     p.text(lay.header.left_center() + vec2(8.0 * geo.z, 0.0), Align2::LEFT_CENTER, cap, theme::ui_bold(12.5 * geo.z), header_fg);
     // Clear-filter button (tinted when a filter is active).
@@ -626,10 +657,10 @@ fn paint_slicer(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Workbook, si: u
             (false, true) => (tk.hover, tk.text_dim),
             (false, false) => (tk.window, tk.text_dim),
         };
-        let tr_rad = if is_dark_style { 0.0 } else { 3.0 * geo.z };
+        let tr_rad = if is_dark_style { 2.5 * geo.z } else { 3.0 * geo.z };
         p.rect_filled(*tr, tr_rad, fill);
         if is_dark_style {
-            p.rect_stroke(*tr, 0.0, Stroke::new(1.0, border_col), StrokeKind::Inside);
+            p.rect_stroke(*tr, tr_rad, Stroke::new(1.0, border_col), StrokeKind::Inside);
         }
         let cp = p.with_clip_rect(tr.intersect(p.clip_rect()));
         let font = if is_dark_style && tile.selected { theme::ui_bold(12.0 * geo.z) } else { theme::ui_font(12.0 * geo.z) };

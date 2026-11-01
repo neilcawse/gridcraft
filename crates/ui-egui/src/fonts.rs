@@ -54,7 +54,16 @@ pub fn system_font_dirs() -> Vec<PathBuf> {
         let mut dirs: Vec<PathBuf> = Vec::new();
         let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from);
         if cfg!(target_os = "macos") {
-            dirs.extend(["/System/Library/Fonts", "/System/Library/Fonts/Supplemental", "/Library/Fonts"].map(Into::into));
+            dirs.extend(
+                [
+                    "/System/Library/Fonts",
+                    "/System/Library/Fonts/Supplemental",
+                    "/Library/Fonts",
+                    "/Library/Fonts/Microsoft",
+                    "/Applications/Microsoft Excel.app/Contents/Resources/DFonts",
+                ]
+                .map(Into::into),
+            );
             if let Some(h) = &home {
                 dirs.push(h.join("Library/Fonts"));
             }
@@ -231,7 +240,10 @@ pub fn scan_done() -> bool {
 /// The faces of one installed family, by any of its names, regular-weight first (the order roles
 /// pick from).
 pub fn faces_of(family: &str) -> Vec<Face> {
-    catalog_now().map(|cat| faces_named(cat, family)).unwrap_or_default()
+    if family.is_empty() {
+        return Vec::new();
+    }
+    faces_named(catalog(), family)
 }
 
 /// The faces in `cat` that go by `wanted`. When two families claim one name the winner is fixed,
@@ -257,7 +269,10 @@ fn faces_named(cat: &[Face], wanted: &str) -> Vec<Face> {
 /// [`cell_family`](crate::theme::cell_family) looks up, so `맑은 고딕` binds as `맑은 고딕`, not as
 /// the catalog's `Malgun Gothic`.
 pub fn installed_among(names: &[String]) -> Vec<String> {
-    catalog_now().map(|cat| installed_in(cat, names)).unwrap_or_default()
+    if names.is_empty() {
+        return Vec::new();
+    }
+    installed_in(catalog(), names)
 }
 
 /// [`installed_among`] over a given catalog. Names dedupe exactly, not case-folded: a role key is
@@ -358,6 +373,9 @@ pub fn bind_faces(fonts: &mut egui::FontDefinitions, family: &str, faces: &[Face
                 let Ok(bytes) = std::fs::read(&face.path) else { continue };
                 let mut fd = egui::FontData::from_owned(bytes);
                 fd.index = face.index;
+                if cfg!(target_os = "macos") && face.weight >= 600.0 {
+                    fd.tweak.hinting = Some(false);
+                }
                 fonts.font_data.insert(key.clone(), std::sync::Arc::new(fd));
             }
             chain.push(key);

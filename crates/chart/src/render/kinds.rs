@@ -175,17 +175,17 @@ pub(super) fn pie(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx, inne
     let (cx, cy) = match (chart.axis_number_formats.plot_x, chart.axis_number_formats.plot_w) {
         (Some(px), Some(pw)) if (0.0..=0.8).contains(&px) && (0.2..=1.0).contains(&pw) => {
             let target_cx = ctx.chart_w * (px + pw * 0.5);
-            (target_cx.clamp(area.x + 20.0, area.right() - 20.0), area.cy())
+            (target_cx.min(area.right() - 20.0).max(area.x + 20.0), area.cy())
         }
         _ => (area.cx(), area.cy()),
     };
     let pw = chart.axis_number_formats.plot_w.filter(|&w| (0.2..=1.0).contains(&w)).map(|w| (ctx.chart_w * w).min(area.w)).unwrap_or(area.w);
     let r_scale = if out_end {
-        0.72
+        0.81
     } else if chart.axis_number_formats.plot_w.is_some() {
         0.96
     } else if inner > 0.0 {
-        0.95
+        if area.h < 100.0 { 0.86 } else { 0.96 }
     } else {
         0.84
     };
@@ -222,11 +222,6 @@ pub(super) fn pie(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx, inne
                 };
                 let mid = a + sweep / 2.0;
                 if out_end && !t.is_empty() {
-                    if sweep < 0.35 {
-                        let p0 = [cx + r * mid.sin(), cy - r * mid.cos()];
-                        let p1 = [cx + (r + 6.0) * mid.sin(), cy - (r + 6.0) * mid.cos()];
-                        ctx.line(vec![p0, p1], AXIS, 0.75);
-                    }
                     let lr = r + 10.0;
                     labels.push((cx + lr * mid.sin(), cy - lr * mid.cos(), t, TEXT));
                 } else {
@@ -244,7 +239,7 @@ pub(super) fn pie(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx, inne
         a += sweep;
     }
     for (x, y, t, c) in labels {
-        let sz = if c == super::DARK_TEXT { 11.5 } else { LABEL_SIZE };
+        let sz = if inner > 0.0 { 13.0 } else if c == super::DARK_TEXT { 11.5 } else { LABEL_SIZE };
         let align = if out_end {
             if x > cx + r * 0.15 {
                 HAlign::Left

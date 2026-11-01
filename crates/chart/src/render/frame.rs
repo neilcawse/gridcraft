@@ -41,8 +41,8 @@ pub(super) fn chart_title(chart: &Chart, data: &ChartData) -> Option<String> {
 }
 
 pub(super) fn axis_titles(ctx: &mut Ctx, chart: &Chart, mut area: Bx) -> Bx {
-    let lh = AXIS_TITLE_SIZE * 1.5 + 3.0;
     let bold = chart.axis_number_formats.axis_title_bold;
+    let lh = if bold { AXIS_TITLE_SIZE * 1.8 + 6.0 } else { AXIS_TITLE_SIZE * 1.5 + 3.0 };
     if let Some(t) = chart.x_title.as_deref().filter(|t| !t.is_empty()) {
         let trimmed = t.trim();
         if !trimmed.is_empty() {
@@ -68,6 +68,7 @@ pub(super) fn axis_titles(ctx: &mut Ctx, chart: &Chart, mut area: Bx) -> Bx {
         if !trimmed.is_empty() {
             let t = ctx.fit(trimmed, AXIS_TITLE_SIZE, area.h);
             if !t.is_empty() {
+                ctx.y_title_prims.push(ctx.out.len());
                 ctx.out.push(Prim::Text {
                     x: area.x,
                     y: area.cy(),
@@ -91,6 +92,7 @@ pub(super) fn axis_titles(ctx: &mut Ctx, chart: &Chart, mut area: Bx) -> Bx {
     if let Some(t) = chart.axis_number_formats.y2_title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
         let t = ctx.fit(t, AXIS_TITLE_SIZE, area.h);
         if !t.is_empty() {
+            ctx.y_title_prims.push(ctx.out.len());
             ctx.out.push(Prim::Text {
                 x: area.right() - lh * 0.45,
                 y: area.cy(),
@@ -154,12 +156,11 @@ fn draw_cat_labels(ctx: &mut Ctx, plot: Bx, l: &[String], outer: &[Vec<String>],
     for (j, t) in l.iter().enumerate().step_by(k) {
         let cx = plot.x + (j as f32 + 0.5) * cw;
         if let Some(a) = rot_rad {
+            let r_v = (cat_h - ls * a.cos() * 0.5).max(lh * 0.8) / a.sin().abs().max(0.1);
             let (align, room) = if a > 0.0 {
-                let r_v = cat_h / a.sin().abs().max(0.1);
                 let r_h = (ctx.chart_w - cx - 2.0).max(20.0) / a.cos().abs().max(0.1);
                 (HAlign::Left, r_v.min(r_h))
             } else {
-                let r_v = cat_h / a.sin().abs().max(0.1);
                 let r_h = (cx - 2.0).max(20.0) / a.cos().abs().max(0.1);
                 (HAlign::Right, r_v.min(r_h))
             };
@@ -182,8 +183,9 @@ fn draw_cat_labels(ctx: &mut Ctx, plot: Bx, l: &[String], outer: &[Vec<String>],
             if ctx.tw(t, ls) > maxw
                 && let Some((a, b)) = split_two_lines(t)
             {
-                let l1 = ctx.fit(a, ls, maxw);
-                let l2 = ctx.fit(b, ls, maxw);
+                let wrap_w = (cw * k as f32 + 6.0).max(1.0);
+                let l1 = ctx.fit(a, ls, wrap_w);
+                let l2 = ctx.fit(b, ls, wrap_w);
                 ctx.text(cx, plot.bottom() + 3.0, &l1, ls, TEXT, (HAlign::Center, VAlign::Top));
                 ctx.text(cx, plot.bottom() + 3.0 + lh * 0.85, &l2, ls, TEXT, (HAlign::Center, VAlign::Top));
             } else {
@@ -225,11 +227,6 @@ pub(super) fn frame(ctx: &mut Ctx, area: Bx, cat: CatAxis, y: &ValAxis, y2: Opti
     if !horizontal {
         let left = (maxw(ctx, &ylabels) + 6.0).min(area.w * 0.4);
         let y2labels = y2.map(ValAxis::labels);
-        let right = match (&y2labels, &cat) {
-            (Some(l), _) => (maxw(ctx, l) + 6.0).min(area.w * 0.3),
-            (None, CatAxis::Numeric(s, f)) => (ctx.tw(&f.format(s.max, Some(s.step)), ls) / 2.0).min(area.w * 0.2),
-            _ => 4.0,
-        };
         let (levels, cat_h) = if ctx.cat_axis_deleted {
             (0.0, 2.0)
         } else {
@@ -237,7 +234,13 @@ pub(super) fn frame(ctx: &mut Ctx, area: Bx, cat: CatAxis, y: &ValAxis, y2: Opti
                 CatAxis::Labels(l, o, Some(rot)) if *rot != 0.0 => {
                     let lw = l.iter().take(2000).map(|t| ctx.tw(t, ls)).fold(0.0f32, f32::max);
                     let a = rot.abs().to_radians();
-                    (o.len() as f32, (lw * a.sin() + ls * a.cos()).min(area.h * 0.48).max(lh))
+                    let raw_h = lw * a.sin() + ls * a.cos();
+                    let ch = if ctx.has_bottom_legend || area.h < 220.0 {
+                        raw_h.min(area.h * 0.34).min(56.0).max(lh)
+                    } else {
+                        (raw_h + 6.0).min(area.h * 0.45).max(area.h * 0.35).max(lh)
+                    };
+                    (o.len() as f32, ch)
                 }
                 CatAxis::Labels(l, o, _) => {
                     let cw = (area.w * 0.85) / l.len().max(1) as f32;
@@ -247,9 +250,32 @@ pub(super) fn frame(ctx: &mut Ctx, area: Bx, cat: CatAxis, y: &ValAxis, y2: Opti
                 CatAxis::Numeric(..) => (0.0, lh),
             }
         };
+        let right = match (&y2labels, &cat) {
+            (Some(l), _) => (maxw(ctx, l) + 6.0).min(area.w * 0.3),
+            (None, CatAxis::Numeric(s, f)) => (ctx.tw(&f.format(s.max, Some(s.step)), ls) / 2.0).min(area.w * 0.2),
+            (None, CatAxis::Labels(l, _, Some(rot))) if *rot > 0.0 && !l.is_empty() && !ctx.cat_axis_deleted => {
+                let a = rot.to_radians();
+                let n = l.len();
+                let cw_est = (area.w - left - 4.0).max(10.0) / n as f32;
+                let r_v = (cat_h - ls * a.cos() * 0.5).max(lh * 0.8) / a.sin().abs().max(0.1);
+                let mut over = 4.0f32;
+                for (j, t) in l.iter().enumerate().rev().take(4) {
+                    let w = ctx.tw(t, ls).min(r_v) * a.cos();
+                    let dist = (n as f32 - 0.5 - j as f32) * cw_est;
+                    over = over.max(w - dist + 4.0);
+                }
+                over.min(area.w * 0.12).max(4.0)
+            }
+            _ => 4.0,
+        };
         let plot = Bx { x: area.x + left, y: area.y + lh * 0.5, w: area.w - left - right, h: area.h - lh * 0.5 - cat_h - 4.0 - lh * levels };
         if !plot.ok() {
             return plot;
+        }
+        for &idx in &ctx.y_title_prims {
+            if let Some(Prim::Text { y, .. }) = ctx.out.get_mut(idx) {
+                *y = plot.cy();
+            }
         }
         for (v, t) in &ylabels {
             let yy = plot.bottom() - y.scale.frac(*v) * plot.h;

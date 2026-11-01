@@ -135,6 +135,9 @@ impl SheetApp {
         updates_ui::tick(self, ctx);
         // Files read asynchronously (web file picker, dropped files).
         self.poll_async_opens();
+        if !self.prepared_fonts && self.fonts_ready && !self.fonts_rebind && !(self.synthetic_pending || !self.synthetic.is_empty()) {
+            self.rebind_workbook_fonts(ctx);
+        }
         self.autosave(ctx);
         self.update_title(ctx);
         self.request_hidden_paint(ctx);

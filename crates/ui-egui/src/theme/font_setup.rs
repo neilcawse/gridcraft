@@ -492,7 +492,7 @@ fn build_role_chain(
     if let Some(mut fd) = loaded {
         // Helvetica Neue Bold's own TrueType hints close Cyrillic е into ө at 13 pt on a Retina
         // screen (#1184). Core Text never runs them, so this draws it the way macOS does.
-        if cfg!(target_os = "macos") && role == UI_BOLD {
+        if cfg!(target_os = "macos") && matches!(role, UI_BOLD | CELL_BOLD | CELL_BOLD_ITALIC) {
             fd.tweak.hinting = Some(false);
         }
         let key = format!("sys-{role}");

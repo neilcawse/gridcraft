@@ -32,7 +32,7 @@ const STOCK: Rgba = [0x40, 0x40, 0x40, 0xFF];
 pub(crate) const UP: Rgba = [0x3E, 0x9B, 0x5F, 0xFF];
 pub(crate) const DOWN: Rgba = [0xD6, 0x4F, 0x45, 0xFF];
 
-const TITLE_SIZE: f32 = 17.5;
+const TITLE_SIZE: f32 = 19.5;
 const LABEL_SIZE: f32 = 11.5;
 const AXIS_TITLE_SIZE: f32 = 12.5;
 const MAX_CATS: usize = 20_000;
@@ -52,6 +52,8 @@ struct Ctx<'a> {
     chart_h: f32,
     legend_x: Option<f32>,
     legend_h: Option<f32>,
+    has_bottom_legend: bool,
+    y_title_prims: Vec<usize>,
 }
 
 impl Ctx<'_> {
@@ -165,6 +167,8 @@ pub fn render(chart: &Chart, data: &ChartData, w: f32, h: f32, m: &dyn Measure) 
         chart_h: h,
         legend_x: chart.axis_number_formats.legend_x,
         legend_h: chart.axis_number_formats.legend_h,
+        has_bottom_legend: chart.legend == gridcraft_model::LegendPos::Bottom,
+        y_title_prims: Vec::new(),
     };
     if !chart.axis_number_formats.no_fill {
         let stroke = (!chart.axis_number_formats.no_border).then_some((GRID, 1.0));
@@ -188,12 +192,12 @@ pub fn render(chart: &Chart, data: &ChartData, w: f32, h: f32, m: &dyn Measure) 
             valign: VAlign::Top,
             rotation: 0.0,
         });
-        let used = size * 1.3 + 4.0;
+        let used = if chart.axis_number_formats.title_bold { size * 1.65 + 6.0 } else { size * 1.3 + 4.0 };
         area.y += used;
         area.h -= used;
     } else if chart.title.as_deref().is_some_and(|t| !t.is_empty() && t.trim().is_empty()) {
         let size = TITLE_SIZE.min(h * 0.14).max(4.0);
-        let used = size * 1.3 + 4.0;
+        let used = size * 0.65;
         area.y += used;
         area.h -= used;
     }

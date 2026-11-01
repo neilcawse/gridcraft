@@ -101,16 +101,33 @@ fn fit_imported_rows(wb: &mut Workbook) {
         rows.sort_unstable();
         rows.dedup();
         for row in rows {
-            let before = wb.sheet(si).and_then(|sh| sh.rows.get(&row)).and_then(|i| i.size);
+            let row_info = wb.sheet(si).and_then(|sh| sh.rows.get(&row)).copied();
+            if row_info.is_some_and(|i| i.custom) {
+                continue;
+            }
+            let before = row_info.and_then(|i| i.size);
             let cur_h = before.unwrap_or_else(|| wb.sheet(si).map_or(gridcraft_model::DEFAULT_ROW_HEIGHT, |sh| sh.default_row_height));
-            let needs_autofit = wb.sheet(si).is_some_and(|sh| {
-                sh.cells.row(row, 0, gridcraft_core::MAX_COLS - 1).any(|(_, cell)| {
+            let (needs_autofit, has_wrapped_formula, has_wrapped) = wb.sheet(si).map_or((false, false, false), |sh| {
+                let mut nf = false;
+                let mut wf = false;
+                let mut wr = false;
+                for (c, cell) in sh.cells.row(row, 0, gridcraft_core::MAX_COLS - 1) {
                     let st = wb.styles.get(cell.style);
                     let size = st.font.size;
-                    (size > gridcraft_model::DEFAULT_FONT_SIZE
-                        && (size * 1.8).round().max(gridcraft_model::DEFAULT_ROW_HEIGHT * size / gridcraft_model::DEFAULT_FONT_SIZE) > cur_h + 0.5)
-                        || (before.is_none() && !cell.value.is_empty() && st.align.wrap)
-                })
+                    if size > gridcraft_model::DEFAULT_FONT_SIZE
+                        && (size * 1.8).round().max(gridcraft_model::DEFAULT_ROW_HEIGHT * size / gridcraft_model::DEFAULT_FONT_SIZE) > cur_h + 0.5
+                    {
+                        nf = true;
+                    }
+                    if st.align.wrap && sh.col_width(c) > 0.0 && (!cell.value.is_empty() || cell.formula.is_some()) {
+                        nf = true;
+                        wr = true;
+                        if cell.formula.is_some() {
+                            wf = true;
+                        }
+                    }
+                }
+                (nf, wf, wr)
             });
             if !needs_autofit {
                 continue;
@@ -118,7 +135,9 @@ fn fit_imported_rows(wb: &mut Workbook) {
             crate::cmd::auto_row_height(wb, si, row);
             let Some(before) = before else { continue };
             let after = wb.sheet(si).and_then(|sh| sh.rows.get(&row)).and_then(|i| i.size);
-            if after.is_none_or(|a| before > a + 0.5)
+            let allow_shrink = has_wrapped_formula || (has_wrapped && before > 165.0 && after.is_some());
+            if !allow_shrink
+                && after.is_none_or(|a| before > a + 0.5)
                 && let Some(sh) = wb.sheet_mut(si)
             {
                 sh.rows.entry(row).or_default().size = Some(before);

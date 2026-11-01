@@ -3,7 +3,7 @@ use super::cell_paint::{
     rotated_text_pos, shrink_font, wrapped_cell_text_y,
 };
 use super::geo::Geo;
-use super::tables::{filter_button_rect, paint_filter_button};
+use super::tables::{filter_button_rect, paint_filter_button, paint_pivot_button};
 use super::{
     CellRef, CfCache, CfLook, Color32, FontId, HAlign, MAX_COLS, Painter, Pos2, RangeRef, Rect, Sheet, Stroke, StrokeKind, Tokens, Underline, VAlign,
     Value, Workbook, pos2, theme, vec2,
@@ -697,12 +697,12 @@ fn paint_filter_buttons(q: &QuadrantPaint<'_>, range: RangeRef) {
         if !pt.show_headers {
             continue;
         }
-        let mut pbtns: Vec<(CellRef, bool)> = Vec::new();
+        let mut pbtns: Vec<(CellRef, bool, gridcraft_engine::model::PivotSort)> = Vec::new();
         let vis_filters: Vec<_> = pt.filters.iter().filter(|f| !f.hidden).collect();
         if !vis_filters.is_empty() && pt.anchor.row > vis_filters.len() as u32 {
             let start_r = pt.anchor.row - vis_filters.len() as u32 - 1;
             for (i, f) in vis_filters.iter().enumerate() {
-                pbtns.push((CellRef::new(start_r + i as u32, pt.anchor.col + 1), f.selected.is_some()));
+                pbtns.push((CellRef::new(start_r + i as u32, pt.anchor.col + 1), f.selected.is_some(), gridcraft_engine::model::PivotSort::None));
             }
         }
         let row_cols = if pt.rows.is_empty() {
@@ -717,29 +717,32 @@ fn paint_filter_buttons(q: &QuadrantPaint<'_>, range: RangeRef) {
                 && ((pt.values.len() >= 2 && !pt.values_on_rows && pt.show_values_row) || (pt.values.len() == 1 && pt.classic_layout)));
         let row_hdr_r = pt.anchor.row + u32::from(top_values_row);
         for j in 0..row_cols {
-            let filtered = pt
-                .rows
-                .get(j as usize)
-                .is_some_and(|rf| pt.filters.iter().any(|f| f.source_col.eq_ignore_ascii_case(&rf.source_col) && f.selected.is_some()));
-            pbtns.push((CellRef::new(row_hdr_r, pt.anchor.col + j), filtered));
+            let rf = pt.rows.get(j as usize);
+            let filtered = rf.is_some_and(|rf| {
+                !rf.collapsed_items.is_empty()
+                    || pt.filters.iter().any(|f| f.source_col.eq_ignore_ascii_case(&rf.source_col) && f.selected.is_some())
+            });
+            let sort = rf.map_or(gridcraft_engine::model::PivotSort::None, |rf| rf.sort);
+            pbtns.push((CellRef::new(row_hdr_r, pt.anchor.col + j), filtered, sort));
         }
         if !pt.columns.is_empty() {
             let filtered = pt
                 .columns
                 .iter()
                 .any(|cf| pt.filters.iter().any(|f| f.source_col.eq_ignore_ascii_case(&cf.source_col) && f.selected.is_some()));
-            pbtns.push((CellRef::new(pt.anchor.row, pt.anchor.col + row_cols), filtered));
+            let sort = pt.columns.first().map_or(gridcraft_engine::model::PivotSort::None, |cf| cf.sort);
+            pbtns.push((CellRef::new(pt.anchor.row, pt.anchor.col + row_cols), filtered, sort));
         }
-        for (c, active) in pbtns {
+        for (c, active, sort) in pbtns {
             if !range.contains(c) || sh.is_row_hidden(c.row) || sh.is_col_hidden(c.col) {
                 continue;
             }
             let rect = geo.cell_rect(sh, c);
-            let pad = 2.0 * geo.z;
-            let s = (rect.height() - 4.0).clamp(10.0, 16.0).min((rect.width() - 2.0 * pad).max(0.0));
+            let pad = 1.5 * geo.z;
+            let s = (rect.height() - 2.0).clamp(11.0, 16.0).min((rect.width() - 2.0 * pad).max(0.0));
             if s >= 8.0 {
-                let r = Rect::from_min_size(pos2(rect.right() - s - pad, rect.bottom() - s - pad), vec2(s, s));
-                paint_filter_button(p, r, active);
+                let r = Rect::from_min_size(pos2(rect.right() - s - pad, rect.center().y - s / 2.0), vec2(s, s));
+                paint_pivot_button(p, r, active, sort);
             }
         }
     }

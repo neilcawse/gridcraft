@@ -54,7 +54,7 @@ pub fn legend_entries(chart: &Chart, data: &ChartData) -> Vec<(String, Rgba, Swa
             let total = data.series.first().map(|s| s.color).unwrap_or(TEXT);
             vec![("Increase".into(), UP, Swatch::Box), ("Decrease".into(), DOWN, Swatch::Box), ("Total".into(), total, Swatch::Box)]
         }
-        _ if data.series.len() == 1 && chart.axis_number_formats.point_colors.len() > 1 && chart.series.first().is_none_or(|s| s.color.is_none()) => {
+        _ if data.series.len() == 1 && chart.axis_number_formats.point_colors.len() > 1 => {
             let n = first_len(data).min(MAX_CATS);
             (0..n).map(|j| (cat_label(data, j), point_color(data, j), Swatch::Box)).collect()
         }
@@ -92,7 +92,7 @@ fn swatch_w(sw: Swatch, s: f32) -> f32 {
 
 fn draw_swatch(ctx: &mut Ctx, sw: Swatch, x: f32, yc: f32, s: f32, color: Rgba, stroke: Option<Rgba>) {
     match sw {
-        Swatch::Box => ctx.rect(x, yc - s / 2.0, s, s, color, stroke.map(|c| (c, 1.5))),
+        Swatch::Box => ctx.rect(x, yc - s / 2.0, s, s, color, stroke.map(|c| (c, 2.0))),
         Swatch::Line => ctx.hline(x, x + 2.0 * s, yc, color, 2.0),
         Swatch::LineMarker => {
             ctx.hline(x, x + 2.0 * s, yc, color, 2.0);
@@ -119,8 +119,8 @@ pub(super) fn draw_legend(ctx: &mut Ctx, entries: &[(String, Rgba, Swatch)], pos
     let size = LABEL_SIZE;
     let row_h = size * 1.6;
     let s = size * 0.8;
-    let gap = 4.0;
-    let spacing = size * 1.3;
+    let gap = 3.0;
+    let spacing = size * 0.85;
     let item_w = |ctx: &Ctx, e: &(String, Rgba, Swatch)| swatch_w(e.2, s) + gap + ctx.tw(&e.0, size);
     match pos {
         LegendPos::None => area,
@@ -169,12 +169,22 @@ pub(super) fn draw_legend(ctx: &mut Ctx, entries: &[(String, Rgba, Swatch)], pos
                 None
             };
             let colw = manual_w.unwrap_or_else(|| entries.iter().map(|e| item_w(ctx, e)).fold(0.0f32, f32::max).min(area.w * 0.38));
+            let sx = swatch_w(Swatch::Box, s) + gap;
+            let avail_est = (colw - sx).max(0.0) + 0.5;
+            let wraps = entries.iter().filter(|e| ctx.tw(&e.0, size) > avail_est && e.0.contains(' ')).count();
             let target_h = ctx.legend_h.filter(|&lh| (0.3..=1.0).contains(&lh)).map(|lh| (ctx.chart_h * lh).min(area.h));
-            let eff_row_h = match target_h {
-                Some(th) if !entries.is_empty() => (th / entries.len() as f32).clamp(row_h, row_h * 2.4),
-                _ => row_h,
+            let (eff_row_h, max_rows) = match target_h {
+                Some(th) if !entries.is_empty() && wraps * 2 >= entries.len() => {
+                    let min_rh = row_h * 1.95;
+                    let mr = ((th / min_rh).round() as usize).clamp(1, entries.len());
+                    ((th / mr as f32).max(min_rh), mr)
+                }
+                Some(th) if !entries.is_empty() => {
+                    let erh = (th / entries.len() as f32).clamp(row_h, row_h * 2.4);
+                    (erh, ((area.h / erh).floor() as usize).max(1))
+                }
+                _ => (row_h, ((area.h / row_h).floor() as usize).max(1)),
             };
-            let max_rows = ((area.h / eff_row_h).floor() as usize).max(1);
             let n = entries.len().min(max_rows);
             let lh = n as f32 * eff_row_h;
             let y0 = area.y + (area.h - lh).max(0.0) / 2.0;

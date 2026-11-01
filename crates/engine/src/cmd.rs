@@ -667,7 +667,7 @@ pub fn auto_row_height(wb: &mut Workbook, si: usize, row: u32) {
         } else if st.font.size <= gridcraft_model::DEFAULT_FONT_SIZE {
             continue;
         }
-        let h = if lines > 1.0 { (size * 96.0 / 72.0 * 1.22 * lines + 5.0).ceil() } else { line };
+        let h = if lines > 1.0 { (size * 96.0 / 72.0 * 1.48 * lines + 4.0).ceil() } else { line };
         need = need.max(h.min(546.0));
     }
     let Some(shm) = wb.sheet_mut(si) else { return };

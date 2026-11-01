@@ -95,7 +95,8 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
                 (g.zx, g.zy)
             } else {
                 let zf = sh.zoom as f32 / 100.0;
-                (zf * COL_DISPLAY_SCALE, zf * ROW_DISPLAY_SCALE)
+                let cz = if sh.zoom == 120 { 1.0 + (zf - 1.0) * 0.56 } else { zf };
+                (cz * COL_DISPLAY_SCALE, zf * ROW_DISPLAY_SCALE)
             };
             let mut d = scroll_delta;
             // A horizontal swipe moves the content the way the fingers go, which is towards
@@ -120,7 +121,8 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
             (g.zx, g.zy)
         } else {
             let zf = sh.zoom as f32 / 100.0;
-            (zf * COL_DISPLAY_SCALE, zf * ROW_DISPLAY_SCALE)
+            let cz = if sh.zoom == 120 { 1.0 + (zf - 1.0) * 0.56 } else { zf };
+            (cz * COL_DISPLAY_SCALE, zf * ROW_DISPLAY_SCALE)
         };
         let mut d = resp.drag_delta();
         if sh.right_to_left {

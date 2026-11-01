@@ -1,5 +1,4 @@
 use super::{SheetApp, theme};
-use crate::fonts;
 
 impl SheetApp {
     /// Test-harness setup: mark a deterministic font set (see
@@ -28,6 +27,9 @@ impl SheetApp {
             names.push(d.wb.theme.minor_font.clone());
             // Text boxes and shapes name their own typefaces.
             names.extend(d.wb.sheets.iter().flat_map(|sh| sh.shapes.iter().filter_map(|s| s.format.font.clone())));
+        }
+        if !self.session.documents().is_empty() {
+            names.extend(["Arial", "Calibri", "Segoe UI", "Verdana"].map(String::from));
         }
         names
     }
@@ -65,7 +67,7 @@ impl SheetApp {
         } else if self.fonts_rebind {
             // A font-set change made last frame is active now.
             self.fonts_rebind = false;
-        } else if !defer_font_change && !self.prepared_fonts && fonts::scan_done() {
+        } else if !defer_font_change && !self.prepared_fonts {
             self.rebind_workbook_fonts(ctx);
         }
     }
@@ -94,7 +96,7 @@ impl SheetApp {
     /// Binds the workbook's installed fonts once the background scan has finished. Adding fonts
     /// re-applies the font set, which egui activates at the next pass, so skip this frame's paint
     /// (same one-frame cost as startup). Only when an open workbook changed.
-    fn rebind_workbook_fonts(&mut self, ctx: &egui::Context) {
+    pub(super) fn rebind_workbook_fonts(&mut self, ctx: &egui::Context) {
         let seen = self.fonts_key();
         if seen == self.fonts_seen {
             return;

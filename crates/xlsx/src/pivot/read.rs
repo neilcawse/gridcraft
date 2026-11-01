@@ -829,6 +829,7 @@ fn apply_pivot_style(cx: &mut Ctx<'_>, x: &El, pt: &PivotTable, sheet: &mut grid
                         merge_dxf(&mut layer, d);
                     }
                     if col == loc.start.col
+                        && (!pt.columns.is_empty() || pt.rows.len() > 1)
                         && let Some(d) = custom.as_ref().and_then(|cs| cs.get("firstRowSubheading"))
                     {
                         merge_dxf(&mut layer, d);
