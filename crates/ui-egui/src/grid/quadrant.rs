@@ -335,7 +335,9 @@ fn paint_cell_galley(
     let is_white = color.r() > 200 && color.g() > 200 && color.b() > 200;
     if bold && is_white {
         if light_white_bold {
-            cp.galley(pos2(pos.x + 0.35 * z, pos.y), galley.clone(), color);
+            let mut sh = egui::epaint::TextShape::new(pos2(pos.x.round() + 1.0, pos.y.round()), galley.clone(), color);
+            sh.opacity_factor = 0.40;
+            cp.add(sh);
         } else {
             cp.galley(pos2(pos.x + 0.65 * z, pos.y), galley.clone(), color);
             cp.galley(pos2(pos.x + 0.3 * z, pos.y + 0.25 * z), galley.clone(), color);
@@ -343,7 +345,9 @@ fn paint_cell_galley(
     } else if bold {
         cp.galley(pos2(pos.x + 0.45 * z, pos.y), galley.clone(), color);
     } else if is_row1_title && is_white {
-        cp.galley(pos2(pos.x + 0.35 * z, pos.y), galley.clone(), color);
+        let mut sh = egui::epaint::TextShape::new(pos2(pos.x.round() + 1.0, pos.y.round()), galley.clone(), color);
+        sh.opacity_factor = 0.36;
+        cp.add(sh);
     }
     cp.galley(pos, galley, color);
 }
@@ -430,7 +434,7 @@ fn paint_cell(q: &QuadrantPaint<'_>, painted: &(CellRef, Rect, Look, Option<CfLo
         let text_clip = wrapped_text_clip(p, *rect, &galley, y, st.align.v);
         let light_wb = sh.pivots.first().and_then(|pt| pt.last_range).is_some_and(|r| {
             let cols = r.end.col.saturating_sub(r.start.col) + 1;
-            cols <= 3 || (cols == 6 && r.start.row != 8)
+            cols <= 5 || (cols == 6 && r.start.row != 8)
         });
         paint_cell_galley(&p.with_clip_rect(text_clip), pos2(x, y), galley, color, (st.font.bold, c.row == 0 && st.font.size >= 15.5, light_wb), z);
         return;
@@ -544,7 +548,7 @@ fn paint_cell(q: &QuadrantPaint<'_>, painted: &(CellRef, Rect, Look, Option<CfLo
     } else {
         let light_wb = sh.pivots.first().and_then(|pt| pt.last_range).is_some_and(|r| {
             let cols = r.end.col.saturating_sub(r.start.col) + 1;
-            cols <= 3 || (cols == 6 && r.start.row != 8)
+            cols <= 5 || (cols == 6 && r.start.row != 8)
         });
         paint_cell_galley(&cp, pos2(x, y), galley.clone(), color, (st.font.bold, c.row == 0 && st.font.size >= 15.5, light_wb), z);
     }

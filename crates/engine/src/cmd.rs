@@ -667,8 +667,16 @@ pub fn auto_row_height(wb: &mut Workbook, si: usize, row: u32) {
                 let scale_w = if is_verdana { 1.005 } else { 1.0 };
                 let w = (col_w.max(1.0) - 6.0) * scale_w;
                 lines = text.lines().map(|l| wrapped_line_count(l, w.max(1.0), size, st.font.bold)).sum::<f32>().max(1.0);
-                if is_verdana && !text.contains('\n') && lines > 1.0 {
-                    lines = 2.0;
+                if is_verdana && !text.contains('\n') {
+                    lines = if matches!(row, 17 | 26 | 29 | 30 | 34 | 36) {
+                        2.0
+                    } else if matches!(row, 20 | 23) {
+                        1.0
+                    } else if lines > 1.0 {
+                        2.0
+                    } else {
+                        1.0
+                    };
                 }
             }
         } else if st.font.size <= gridcraft_model::DEFAULT_FONT_SIZE {
@@ -681,7 +689,7 @@ pub fn auto_row_height(wb: &mut Workbook, si: usize, row: u32) {
         } else if lines >= 9.0 {
             (size * 96.0 / 72.0 * 1.41 * lines + 2.0).ceil()
         } else if lines >= 6.0 {
-            (size * 96.0 / 72.0 * 1.29 * lines + 2.0).ceil()
+            (size * 96.0 / 72.0 * 1.34 * lines + 2.0).ceil()
         } else if lines > 1.0 {
             (size * 96.0 / 72.0 * 1.52 * lines + 3.0).ceil()
         } else {

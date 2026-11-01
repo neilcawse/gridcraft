@@ -53,6 +53,7 @@ struct Ctx<'a> {
     legend_x: Option<f32>,
     legend_h: Option<f32>,
     has_bottom_legend: bool,
+    has_plot_w: bool,
     y_title_prims: Vec<usize>,
 }
 
@@ -168,6 +169,7 @@ pub fn render(chart: &Chart, data: &ChartData, w: f32, h: f32, m: &dyn Measure) 
         legend_x: chart.axis_number_formats.legend_x,
         legend_h: chart.axis_number_formats.legend_h,
         has_bottom_legend: chart.legend == gridcraft_model::LegendPos::Bottom,
+        has_plot_w: chart.axis_number_formats.plot_w.is_some(),
         y_title_prims: Vec::new(),
     };
     if !chart.axis_number_formats.no_fill {

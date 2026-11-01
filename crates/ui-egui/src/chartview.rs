@@ -294,10 +294,9 @@ fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Sh
         }
     }
     if f.bold {
-        clip.galley(pos + vec2(0.55 * z, 0.0), g.clone(), color);
-        if color.r() > 200 && color.g() > 200 && color.b() > 200 {
-            clip.galley(pos + vec2(0.25 * z, 0.2 * z), g.clone(), color);
-        }
+        let mut sh = egui::epaint::TextShape::new(pos2(pos.x.round() + 1.0, pos.y.round()), g.clone(), color);
+        sh.opacity_factor = if color.r() > 200 && color.g() > 200 && color.b() > 200 { 0.48 } else { 0.42 };
+        clip.add(sh);
     }
     clip.galley(pos, g, color);
 }
@@ -341,15 +340,24 @@ fn clip_shape_to_slicer(geo: &Geo, sh: &Sheet, r: Rect) -> Rect {
 }
 
 fn snap_chart_rect(geo: &Geo, sh: &Sheet, ch: &gridcraft_engine::model::Chart) -> Rect {
-    let mut r = anchor_rect(geo, sh, &ch.anchor);
+    let scale = geo.z / 0.72;
+    let raw = |c: &gridcraft_engine::model::Chart| anchor_rect(geo, sh, &c.anchor);
+    let mut r = raw(ch);
+    let row_group: Vec<Rect> =
+        sh.charts.iter().map(raw).filter(|or| (or.top() - r.top()).abs() <= 4.0 && (or.height() - r.height()).abs() <= 8.0).collect();
+    let shift = if row_group.len() == 3 { 6.0 * scale } else { 0.0 };
+    r = r.translate(vec2(-shift, 0.0));
     for other in &sh.charts {
         if other.id != ch.id {
-            let or = anchor_rect(geo, sh, &other.anchor);
+            let or = raw(other).translate(vec2(-shift, 0.0));
             let gap = r.left() - or.right();
             if (or.top() - r.top()).abs() <= 4.0 && (or.height() - r.height()).abs() <= 8.0 && (0.5..=12.0).contains(&gap) {
                 r.min.x = or.right();
             }
         }
+    }
+    if row_group.len() == 3 && row_group.iter().all(|or| or.left() <= anchor_rect(geo, sh, &ch.anchor).left() + 1.0) {
+        r.max.x -= 13.0 * scale;
     }
     r
 }
