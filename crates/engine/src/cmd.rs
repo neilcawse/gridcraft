@@ -666,18 +666,14 @@ pub fn auto_row_height(wb: &mut Workbook, si: usize, row: u32) {
             if st.align.wrap && col_w > 0.0 {
                 let text = crate::display::cell_text(wb, sh, CellRef::new(row, c));
                 is_verdana = st.font.name.eq_ignore_ascii_case("Verdana");
-                let scale_w = if is_verdana { 1.157 } else { 1.0 };
-                let w = (col_w.max(1.0) - 6.0) * scale_w;
+                let w = col_w.max(1.0) - 6.0;
                 lines = text.lines().map(|l| wrapped_line_count(l, w.max(1.0), size, st.font.bold, is_verdana)).sum::<f32>().max(1.0);
-                if is_verdana && !text.contains('\n') {
-                    lines = if lines > 1.0 { 2.0 } else { 1.0 };
-                }
             }
         } else if st.font.size <= gridcraft_model::DEFAULT_FONT_SIZE {
             continue;
         }
         let h = if is_verdana && lines > 1.0 {
-            41.2
+            (size * 96.0 / 72.0 * 1.545 * lines.ceil()).round()
         } else if lines >= 6.0 && col_w > 400.0 {
             (size * 96.0 / 72.0 * 1.21 * lines + 2.0).ceil()
         } else if lines >= 9.0 {

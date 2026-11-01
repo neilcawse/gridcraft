@@ -157,11 +157,11 @@ fn draw_cat_labels(ctx: &mut Ctx, plot: Bx, l: &[String], outer: &[Vec<String>],
         let cx = plot.x + (j as f32 + 0.5) * cw;
         if let Some(a) = rot_rad {
             let eff_cat_h = if ctx.has_bottom_legend && ctx.has_plot_w {
-                cat_h + 24.0
-            } else if ctx.has_bottom_legend && ctx.y_title_prims.len() >= 2 {
+                cat_h + 21.2
+            } else if ctx.has_bottom_legend && ctx.y_title_prims.len() >= 2 && plot.w < 330.0 {
                 cat_h.min(50.0)
-            } else if ctx.has_bottom_legend {
-                cat_h - 6.0
+            } else if ctx.has_bottom_legend && ctx.y_title_prims.is_empty() {
+                cat_h - 11.0
             } else {
                 cat_h
             };
@@ -239,7 +239,7 @@ fn vertical_cat_band(ctx: &Ctx, area: Bx, cat: &CatAxis, has_y2: bool, ls: f32, 
             let raw_h = lw * a.sin() + ls * a.cos();
             let ch = if ctx.has_bottom_legend && has_y2 && ctx.has_plot_w {
                 raw_h.min(area.h * 0.33).min(53.0).max(lh)
-            } else if ctx.has_bottom_legend && has_y2 && ctx.y_title_prims.len() >= 2 {
+            } else if ctx.has_bottom_legend && has_y2 && ctx.y_title_prims.len() >= 2 && area.w < 330.0 {
                 raw_h.min(area.h * 0.43).max(lh)
             } else if ctx.has_bottom_legend && has_y2 {
                 raw_h.min(area.h * 0.455).max(lh)

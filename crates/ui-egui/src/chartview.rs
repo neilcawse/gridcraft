@@ -293,8 +293,12 @@ fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Sh
             clip.galley_with_override_text_color(pos + vec2(dx * d, dy * d), g.clone(), oc);
         }
     }
-    if f.bold || f.font_size.is_some_and(|pt| pt >= 20.0) {
+    if f.font_size.is_some_and(|pt| pt >= 20.0) {
         clip.galley(pos + vec2(0.65 * z, 0.0), g.clone(), color);
+    } else if f.bold {
+        let mut sh = egui::epaint::TextShape::new(pos2(pos.x.round() + 1.0, pos.y.round()), g.clone(), color);
+        sh.opacity_factor = if color.r() > 200 && color.g() > 200 && color.b() > 200 { 0.54 } else { 0.45 };
+        clip.add(sh);
     }
     clip.galley(pos, g, color);
 }
@@ -302,12 +306,7 @@ fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Sh
 pub(crate) fn anchor_rect(geo: &Geo, sh: &Sheet, a: &Anchor) -> Rect {
     let cw = sh.col_width(a.cell.col);
     let rh = sh.row_height(a.cell.row);
-    let k = if sh.zoom == 90 { 0.78 } else { 0.875 };
-    let x1 = sh.col_left(a.cell.col) + a.dx as f64;
-    let x2 = x1 + a.width.max(0.0) as f64;
-    let tc = sh.col_at(x2);
-    let tdx = (x2 - sh.col_left(tc)).max(0.0) as f32;
-    let (dx_eff, over_x) = if cw > 0.0 && a.dx > cw { (cw * geo.zx, (a.dx - cw) * 0.35 - tdx * (1.0 - k)) } else { (a.dx * k * geo.zx, 0.0) };
+    let (dx_eff, over_x) = if cw > 0.0 && a.dx > cw { (cw * geo.zx, a.dx - cw) } else { (a.dx * 0.78 * geo.zx, 0.0) };
     let (dy_eff, over_y) = if rh > 0.0 && a.dy > rh { (rh * geo.zy, a.dy - rh) } else { (a.dy * geo.zy, 0.0) };
     let x = geo.x(sh, a.cell.col) + dx_eff;
     let y = geo.y(sh, a.cell.row) + dy_eff;
@@ -349,7 +348,12 @@ fn snap_chart_rect(geo: &Geo, sh: &Sheet, ch: &gridcraft_engine::model::Chart) -
             let or = anchor_rect(geo, sh, &other.anchor);
             let gap = r.left() - or.right();
             if (or.top() - r.top()).abs() <= 4.0 && (or.height() - r.height()).abs() <= 8.0 && (0.5..=16.0).contains(&gap) {
-                r.min.x = or.right();
+                if gap > 6.0 {
+                    r = r.translate(vec2(2.0 - gap, 0.0));
+                } else {
+                    r.min.x = or.right();
+                    r.max.x -= gap * 0.5;
+                }
             }
         }
     }

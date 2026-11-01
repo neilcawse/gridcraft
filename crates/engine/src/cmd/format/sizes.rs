@@ -170,17 +170,19 @@ pub fn approx_verdana_width(text: &str, size: f32, bold: bool) -> f32 {
             'r' => 874,
             's' => 1067,
             'c' | 'z' => 1075,
-            'a' | 'v' | 'x' | 'y' => 1212,
+            'a' | 'k' | 'v' | 'x' | 'y' => 1212,
             'e' => 1221,
             'o' => 1243,
             'b' | 'd' | 'g' | 'p' | 'q' => 1276,
             'h' | 'n' | 'u' => 1296,
             'w' => 1675,
             'm' => 1992,
+            '.' | ',' | ':' | ';' | '\'' | '|' | '!' => 745,
+            '-' | '(' | ')' | '[' | ']' | '/' | '\\' => 932,
             _ => 1280,
         };
     }
-    (units as f32 / 2048.0) * size * if bold { 1.08 } else { 1.0 } * 96.0 / 72.0
+    (units as f32 / 2048.0) * size * 0.905 * if bold { 1.08 } else { 1.0 } * 96.0 / 72.0
 }
 
 /// Distinct texts AutoFit measures exactly; past this many, `Session::text_width` is asked for a
