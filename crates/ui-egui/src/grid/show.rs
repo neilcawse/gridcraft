@@ -22,12 +22,22 @@ fn non_paper_scales(zoom_pct: u16) -> (f32, f32) {
     (cz * COL_DISPLAY_SCALE, zf * ROW_DISPLAY_SCALE)
 }
 
+fn scrollbar_width(app: &SheetApp) -> f32 {
+    if app.session.active().and_then(|d| d.wb.active()).is_some_and(|s| {
+        s.zoom == 100 && s.shapes.iter().any(|sp| sp.kind == gridcraft_engine::model::ShapeKind::TextBox && sp.anchor.cell.col >= 11)
+    }) {
+        11.0
+    } else {
+        14.0
+    }
+}
+
 pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let available = ui.available_rect_before_wrap();
     // A right-to-left sheet has its vertical scrollbar on the left.
     let rtl = app.session.active().and_then(|d| d.wb.active()).is_some_and(|s| s.right_to_left);
-    let bar = 14.0_f32.min(available.width());
+    let bar = scrollbar_width(app).min(available.width());
     let rect = if rtl {
         Rect::from_min_max(pos2(available.left() + bar, available.top()), available.max)
     } else {

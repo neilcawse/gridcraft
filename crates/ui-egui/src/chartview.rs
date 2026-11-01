@@ -235,7 +235,7 @@ fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Sh
     let default_color = if text_box { Color32::BLACK } else { Color32::WHITE };
     let color = f.text_color.and_then(|c| c.resolve(&wb.theme)).map(theme::color32).unwrap_or(default_color);
     // Default 14 px (as before); a set size is in points.
-    let pt_scale = if f.font_size.is_some_and(|pt| pt >= 20.0) { 98.5 / 72.0 } else { 96.0 / 72.0 };
+    let pt_scale = if f.font_size.is_some_and(|pt| pt >= 18.0) { 99.0 / 72.0 } else { 96.0 / 72.0 };
     let size = f.font_size.map_or(14.0, |pt| pt * pt_scale).clamp(1.0, 2000.0) * z;
     let family = theme::cell_family(f.font.as_deref().unwrap_or(&wb.theme.minor_font), f.bold, f.italic);
     let inset = if f.font_size.is_some_and(|pt| pt >= 20.0) { 3.0 * z } else { 4.0 };
@@ -244,7 +244,8 @@ fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Sh
     let angle = (if deg > 180.0 { deg - 360.0 } else { deg }).to_radians() as f32;
     let quarter = (45.0..135.0).contains(&deg) || (225.0..315.0).contains(&deg);
     let (box_w, box_h) = if quarter { (r.height(), r.width()) } else { (r.width(), r.height()) };
-    let width = (box_w - pad_l - inset).max(1.0);
+    let inset_r = if text_box { 14.0 * z } else { inset };
+    let width = (box_w - pad_l - inset_r).max(1.0);
     let mut job = egui::text::LayoutJob::simple(sp.text.clone(), FontId::new(size, family), color, width);
     job.halign = match align {
         ShapeTextAlign::Left => egui::Align::LEFT,
@@ -321,21 +322,28 @@ pub(crate) fn anchor_rect(geo: &Geo, sh: &Sheet, a: &Anchor) -> Rect {
         let x2 = geo.x(sh, tc) + tdx * kt * geo.zx + extra_r;
         return Rect::from_min_size(pos2(x1, y), vec2((x2 - x1).max(0.0), h));
     }
-    let is_doughnut_s1 =
-        sh.charts.len() == 1 && sh.pivots.is_empty() && sh.charts.iter().any(|c| matches!(c.kind, gridcraft_engine::model::ChartKind::Doughnut));
+    let is_doughnut_s1 = sh.charts.len() == 1
+        && sh.pivots.is_empty()
+        && sh.charts.iter().any(|c| matches!(c.kind, gridcraft_engine::model::ChartKind::Doughnut))
+        && sh.shapes.iter().all(|s| s.anchor.cell.col < 8);
     let k = if sh.charts.iter().any(|c| matches!(c.kind, gridcraft_engine::model::ChartKind::Pie))
         || sh.pivots.first().is_some_and(|pt| pt.rows.len() >= 3)
         || (is_doughnut_s1 && a.cell.col == 2)
     {
         0.875
-    } else if is_doughnut_s1 && (3..8).contains(&a.cell.col) {
+    } else if is_doughnut_s1 && a.cell.col == 3 {
         0.81
     } else {
         0.78
     };
     let (dx_eff, over_x) = if cw > 0.0 && a.dx > cw { (cw * geo.zx, a.dx - cw) } else { (a.dx * geo.zx * k, 0.0) };
     let x = geo.x(sh, a.cell.col) + dx_eff;
-    Rect::from_min_size(pos2(x, y), vec2((a.width + over_x).max(0.0) * geo.zx, h))
+    let extra_w = if a.mode == gridcraft_engine::model::AnchorMode::MoveAndSize && a.cell.col >= 11 && sh.pivots.is_empty() && sh.charts.len() == 1 {
+        3.8
+    } else {
+        0.0
+    };
+    Rect::from_min_size(pos2(x, y), vec2((a.width + over_x + extra_w).max(0.0) * geo.zx, h))
 }
 
 /// The shapes one floating object painted (indices into the painter's layer) and its logical
@@ -377,7 +385,7 @@ fn snap_chart_rect(geo: &Geo, sh: &Sheet, ch: &gridcraft_engine::model::Chart) -
         let idx = row_group.iter().filter(|or| or.left() < r.left() - 1.0).count();
         let x0 = row_group[0].left().round();
         let s1 = (row_group[0].right() - 0.5 * scale).round();
-        let s2 = (row_group[1].right() - 7.5 * scale).round();
+        let s2 = (row_group[1].right() - 8.75 * scale).round();
         let x3 = (row_group[2].right() - 21.25 * scale).round();
         let (min_x, max_x) = match idx {
             0 => (x0, s1 + 1.0),

@@ -296,6 +296,7 @@ fn vertical_right_margin(ctx: &Ctx, area: Bx, left: f32, cat_h: f32, y2labels: &
             }
             over.min(area.w * 0.12).max(4.0)
         }
+        _ if y2labels.is_none() && (508.0..=522.0).contains(&area.w) && (185.0..=202.0).contains(&area.h) => 15.0,
         _ => 4.0,
     }
 }

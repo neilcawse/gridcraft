@@ -420,7 +420,7 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
                         let c = center(j);
                         let lo = pb.min(pt);
                         let len = (pb - pt).abs();
-                        if !horizontal && len < 0.75 && !ser_labels_on {
+                        if !horizontal && len < 2.0 && !ser_labels_on {
                             continue;
                         }
                         let fill = if multi_pt { super::legend::point_color(data, j) } else { s.color };
