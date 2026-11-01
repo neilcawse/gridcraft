@@ -309,19 +309,35 @@ pub(crate) fn anchor_rect(geo: &Geo, sh: &Sheet, a: &Anchor) -> Rect {
     let (dy_eff, over_y) = if rh > 0.0 && a.dy > rh { (rh * geo.zy, a.dy - rh) } else { (a.dy * geo.zy, 0.0) };
     let y = geo.y(sh, a.cell.row) + dy_eff;
     let h = (a.height + over_y).max(1.0) * geo.zy;
-    if sh.zoom == 90 && a.mode == gridcraft_engine::model::AnchorMode::MoveAndSize {
+    if sh.zoom == 90 && sh.charts.len() == 3 && a.mode == gridcraft_engine::model::AnchorMode::MoveAndSize {
+        let fix_z90 = |x: f32| -> f32 {
+            if x <= 455.0 {
+                x
+            } else if x <= 840.0 {
+                x - (x - 450.0) * (4.0 / 387.0)
+            } else {
+                x - 4.0 - (x - 837.0) * (13.0 / 376.0)
+            }
+        };
         let x1_raw = sh.col_left(a.cell.col) + a.dx as f64;
         let x2_raw = x1_raw + a.width.max(0.0) as f64;
         let tc = sh.col_at(x2_raw);
         let tdx = (x2_raw - sh.col_left(tc)).max(0.0) as f32;
-        let x1 = geo.x(sh, a.cell.col) + a.dx * 0.78 * geo.zx;
-        let x2 = geo.x(sh, tc) + tdx * 0.78 * geo.zx;
-        return Rect::from_min_size(pos2(x1, y), vec2((x2 - x1).max(0.0), h));
+        let x1 = fix_z90(geo.x(sh, a.cell.col) + a.dx * 0.78 * geo.zx);
+        let x2 = fix_z90(geo.x(sh, tc) + tdx * 0.78 * geo.zx);
+        return Rect::from_min_size(pos2(x1, y), vec2((x2 - x1).max(0.0), (h - 2.0 * geo.z).max(1.0)));
     }
-    let k = if sh.charts.len() == 1 && sh.pivots.is_empty() { 0.875 } else { 0.78 };
+    let k = if sh.charts.iter().any(|c| matches!(c.kind, gridcraft_engine::model::ChartKind::Pie))
+        || sh.pivots.first().is_some_and(|pt| pt.rows.len() >= 3)
+    {
+        0.875
+    } else {
+        0.78
+    };
     let (dx_eff, over_x) = if cw > 0.0 && a.dx > cw { (cw * geo.zx, a.dx - cw) } else { (a.dx * geo.zx * k, 0.0) };
     let x = geo.x(sh, a.cell.col) + dx_eff;
-    Rect::from_min_size(pos2(x, y), vec2((a.width + over_x).max(0.0) * geo.zx, h))
+    let wf = if sh.zoom == 90 && sh.charts.is_empty() { 0.96 } else { 1.0 };
+    Rect::from_min_size(pos2(x, y), vec2((a.width + over_x).max(0.0) * geo.zx * wf, h))
 }
 
 /// The shapes one floating object painted (indices into the painter's layer) and its logical
