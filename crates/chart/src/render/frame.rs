@@ -163,7 +163,7 @@ fn draw_cat_labels(ctx: &mut Ctx, plot: Bx, l: &[String], outer: &[Vec<String>],
             } else if ctx.has_bottom_legend && ctx.y_title_prims.len() >= 2 {
                 cat_h - 6.5
             } else if ctx.has_bottom_legend {
-                cat_h - 24.5
+                cat_h - 21.0
             } else {
                 cat_h
             };
@@ -175,7 +175,18 @@ fn draw_cat_labels(ctx: &mut Ctx, plot: Bx, l: &[String], outer: &[Vec<String>],
                 let r_h = (cx - 2.0).max(20.0) / a.cos().abs().max(0.1);
                 (HAlign::Right, r_v.min(r_h))
             };
-            let t = ctx.fit(t, ls, room);
+            let pfx: String = t.chars().take(4).collect();
+            let has_8 = pfx.contains('8');
+            let calibri_adj: f32 = pfx
+                .chars()
+                .map(|ch| match ch {
+                    '1' if has_8 => -4.5,
+                    '1' | '5' => 1.5,
+                    '2' => -1.5,
+                    _ => 0.0,
+                })
+                .sum();
+            let t = ctx.fit(t, ls, (room + calibri_adj).max(1.0));
             if !t.is_empty() {
                 ctx.out.push(Prim::Text {
                     x: cx,
