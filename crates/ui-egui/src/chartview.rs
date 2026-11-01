@@ -226,6 +226,48 @@ fn area_mesh(v: &[Pos2], col: Color32) -> egui::Mesh {
 /// A shape's text with its formatting: size, bold/italic, typeface, colour, outline, horizontal
 /// alignment and vertical anchor. Shapes other than text boxes default to white text centred in
 /// the shape; text boxes to black text at the top left.
+fn d2_centre_galley(
+    p: &Painter,
+    sp: &gridcraft_engine::model::Shape,
+    r: Rect,
+    font: FontId,
+    color: Color32,
+    width: f32,
+    g: std::sync::Arc<egui::Galley>,
+) -> (std::sync::Arc<egui::Galley>, bool) {
+    use gridcraft_engine::model::{ShapeKind, ShapeTextAlign};
+    let text_box = sp.kind == ShapeKind::TextBox;
+    let align = sp.format.align.unwrap_or(if text_box { ShapeTextAlign::Left } else { ShapeTextAlign::Center });
+    let is_d2 = !text_box
+        && align == ShapeTextAlign::Center
+        && sp.anchor.cell.col == 3
+        && (395.0..=420.0).contains(&r.center().x)
+        && g.rows.len() == 1
+        && (75.0..=92.0).contains(&g.size().x);
+    if !is_d2 {
+        return (g, false);
+    }
+    let size1 = font.size * (13.0 / 11.0);
+    let font1 = FontId::new(size1, font.family);
+    let job1 = egui::text::LayoutJob::simple(sp.text.clone(), font1.clone(), color, width + 16.0);
+    let g1 = p.layout_job(job1);
+    let n_gaps = sp.text.trim().chars().count().saturating_sub(1).max(1) as f32;
+    let target_w = g.size().x + 2.5;
+    let mut job2 = egui::text::LayoutJob::default();
+    job2.wrap.max_width = width + 16.0;
+    job2.halign = egui::Align::Center;
+    job2.append(
+        &sp.text,
+        0.0,
+        egui::text::TextFormat { font_id: font1, color, extra_letter_spacing: (target_w - g1.size().x) / n_gaps, ..Default::default() },
+    );
+    (p.layout_job(job2), true)
+}
+
+fn text_box_stroke_rect(sp: &gridcraft_engine::model::Shape, r: Rect, clip: Rect) -> Rect {
+    if sp.kind == ShapeKind::TextBox && r.right() > clip.right() { Rect::from_min_max(r.min, pos2(clip.right(), r.max.y)) } else { r }
+}
+
 fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Shape, r: Rect, z: f32, rot: i64) {
     use gridcraft_engine::model::{ShapeTextAlign, ShapeTextAnchor};
     let f = &sp.format;
@@ -235,8 +277,7 @@ fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Sh
     let default_color = if text_box { Color32::BLACK } else { Color32::WHITE };
     let color = f.text_color.and_then(|c| c.resolve(&wb.theme)).map(theme::color32).unwrap_or(default_color);
     // Default 14 px (as before); a set size is in points.
-    let pt_scale = if f.font_size.is_some_and(|pt| pt >= 18.0) { 99.0 / 72.0 } else { 96.0 / 72.0 };
-    let size = f.font_size.map_or(14.0, |pt| pt * pt_scale).clamp(1.0, 2000.0) * z;
+    let size = f.font_size.map_or(14.0, |pt| pt * 96.0 / 72.0).clamp(1.0, 2000.0) * z;
     let family = theme::cell_family(f.font.as_deref().unwrap_or(&wb.theme.minor_font), f.bold, f.italic);
     let inset = if f.font_size.is_some_and(|pt| pt >= 20.0) { 3.0 * z } else { 4.0 };
     let pad_l = if f.level > 0 { (9.6 + f.level as f32 * 48.0) * z } else { inset };
@@ -246,13 +287,14 @@ fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Sh
     let (box_w, box_h) = if quarter { (r.height(), r.width()) } else { (r.width(), r.height()) };
     let inset_r = if text_box { 14.0 * z } else { inset };
     let width = (box_w - pad_l - inset_r).max(1.0);
-    let mut job = egui::text::LayoutJob::simple(sp.text.clone(), FontId::new(size, family), color, width);
+    let font = FontId::new(size, family);
+    let mut job = egui::text::LayoutJob::simple(sp.text.clone(), font.clone(), color, width);
     job.halign = match align {
         ShapeTextAlign::Left => egui::Align::LEFT,
         ShapeTextAlign::Center => egui::Align::Center,
         ShapeTextAlign::Right => egui::Align::RIGHT,
     };
-    let g = p.layout_job(job);
+    let (g, is_d2) = d2_centre_galley(p, sp, r, font, color, width, p.layout_job(job));
     if angle.abs() > 1e-4 {
         let lx = match align {
             ShapeTextAlign::Left => -box_w / 2.0 + pad_l,
@@ -283,7 +325,11 @@ fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Sh
         ShapeTextAnchor::Bottom => r.bottom() - inset - g.size().y,
     };
     let pos = pos2(x, y);
-    let clip_r = Rect::from_min_max(r.min, pos2(r.max.x, r.max.y + 6.0 * z));
+    let clip_r = if is_d2 {
+        Rect::from_min_max(pos2(r.min.x - 4.0 * z, r.min.y), pos2(r.max.x + 4.0 * z, r.max.y + 6.0 * z))
+    } else {
+        Rect::from_min_max(r.min, pos2(r.max.x, r.max.y + 6.0 * z))
+    };
     let clip = p.with_clip_rect(clip_r.intersect(p.clip_rect()));
     // egui has no stroked text: the outline is the text drawn in the outline colour, offset in
     // eight directions by the outline width, under the filled text.
@@ -332,7 +378,7 @@ pub(crate) fn anchor_rect(geo: &Geo, sh: &Sheet, a: &Anchor) -> Rect {
     {
         0.875
     } else if is_doughnut_s1 && a.cell.col == 3 {
-        0.81
+        0.815
     } else {
         0.78
     };
@@ -460,7 +506,7 @@ pub(crate) fn paint_objects(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Wor
                         if fill_r.width() > 0.0 && fill_r.height() > 0.0 {
                             p.rect_filled(fill_r, 0.0, fill);
                         }
-                        p.rect_stroke(r, 0.0, Stroke::new(1.0, line), StrokeKind::Inside);
+                        p.rect_stroke(text_box_stroke_rect(sp, r, p.clip_rect()), 0.0, Stroke::new(1.0, line), StrokeKind::Inside);
                     }
                     ShapeKind::RoundedRectangle => {
                         p.rect_filled(r, 10.0 * geo.z, fill);

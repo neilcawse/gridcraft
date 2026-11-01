@@ -433,9 +433,7 @@ fn paint_cell(q: &QuadrantPaint<'_>, painted: &(CellRef, Rect, Look, Option<CfLo
         };
         let y = wrapped_cell_text_y(st.align.v, *rect, galley.size().y, z);
         let text_clip = wrapped_text_clip(p, *rect, &galley, y, st.align.v);
-        let is_wide_banner = sh.pivots.is_empty() && rect.width() > 180.0 * z;
-        let light_wb = !is_wide_banner
-            && sh.slicers.is_empty()
+        let light_wb = sh.slicers.is_empty()
             && (c.row == 9
                 || !sh
                     .pivots
@@ -552,9 +550,7 @@ fn paint_cell(q: &QuadrantPaint<'_>, painted: &(CellRef, Rect, Look, Option<CfLo
         shape.angle = angle;
         cp.add(shape);
     } else {
-        let is_wide_banner = sh.pivots.is_empty() && rect.width() > 180.0 * z;
-        let light_wb = !is_wide_banner
-            && sh.slicers.is_empty()
+        let light_wb = sh.slicers.is_empty()
             && (c.row == 9
                 || !sh
                     .pivots

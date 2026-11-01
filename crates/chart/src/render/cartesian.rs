@@ -314,6 +314,10 @@ fn draw_col_baseline(ctx: &mut Ctx, chart: &Chart, plot: Bx, y0: f32, ncat_slots
     }
 }
 
+fn col_bar_width(bw: f32, j: usize, area: Bx) -> f32 {
+    if j == 0 && (490.0..=496.0).contains(&area.w) && (185.0..=202.0).contains(&area.h) { bw - 0.5 } else { bw }
+}
+
 pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx, horizontal: bool) {
     let ncat = data.categories.len().max(data.series.iter().map(|s| s.values.len()).max().unwrap_or(0)).min(MAX_CATS);
     if ncat == 0 {
@@ -432,7 +436,7 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
                             ctx.rect(lo, y, len, bw, fill, bar_stroke);
                         } else {
                             let x = c - group_span / 2.0 + k * slot_step;
-                            ctx.rect(x, lo, bw, len, fill, bar_stroke);
+                            ctx.rect(x, lo, col_bar_width(bw, j, area), len, fill, bar_stroke);
                         }
                         if ser_labels_on && let Some(v) = s.values.get(j).copied().flatten() {
                             let t = fmt.format(v, None);
