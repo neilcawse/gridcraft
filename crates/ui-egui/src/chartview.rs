@@ -294,7 +294,7 @@ fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Sh
         }
     }
     if f.bold {
-        clip.galley(pos + vec2(0.45 * z, 0.0), g.clone(), color);
+        clip.galley(pos + vec2(0.55 * z, 0.0), g.clone(), color);
         if color.r() > 200 && color.g() > 200 && color.b() > 200 {
             clip.galley(pos + vec2(0.25 * z, 0.2 * z), g.clone(), color);
         }
@@ -345,9 +345,9 @@ fn snap_chart_rect(geo: &Geo, sh: &Sheet, ch: &gridcraft_engine::model::Chart) -
     for other in &sh.charts {
         if other.id != ch.id {
             let or = anchor_rect(geo, sh, &other.anchor);
-            let gap = or.left() - r.right();
+            let gap = r.left() - or.right();
             if (or.top() - r.top()).abs() <= 4.0 && (or.height() - r.height()).abs() <= 8.0 && (0.5..=12.0).contains(&gap) {
-                r.max.x = or.left();
+                r.min.x = or.right();
             }
         }
     }

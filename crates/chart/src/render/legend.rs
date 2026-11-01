@@ -175,7 +175,7 @@ pub(super) fn draw_legend(ctx: &mut Ctx, entries: &[(String, Rgba, Swatch)], pos
             let target_h = ctx.legend_h.filter(|&lh| (0.3..=1.0).contains(&lh)).map(|lh| (ctx.chart_h * lh).min(area.h));
             let (eff_row_h, max_rows) = match target_h {
                 _ if !entries.is_empty() && wraps > 0 => {
-                    let th = target_h.unwrap_or(area.h * 0.64);
+                    let th = target_h.unwrap_or(area.h * 0.87);
                     let min_rh = row_h * 1.95;
                     let mr = ((th / min_rh).round() as usize).clamp(1, entries.len().min(4));
                     ((th / mr as f32).max(min_rh), mr)
@@ -200,8 +200,13 @@ pub(super) fn draw_legend(ctx: &mut Ctx, entries: &[(String, Rgba, Swatch)], pos
                 let sx = swatch_w(e.2, s) + gap;
                 let avail = (colw - sx).max(0.0) + 0.5;
                 if eff_row_h >= size * 1.9
-                    && (ctx.tw(&e.0, size) > avail || (wraps > 0 && e.0.contains(' ')))
-                    && let Some(sp) = e.0.rfind(' ')
+                    && ctx.tw(&e.0, size) > avail
+                    && let Some(sp) =
+                        e.0.match_indices(' ')
+                            .rev()
+                            .map(|(idx, _)| idx)
+                            .find(|&idx| ctx.tw(e.0[..idx].trim_end(), size) <= avail)
+                            .or_else(|| e.0.rfind(' '))
                 {
                     let (l1, l2) = e.0.split_at(sp);
                     let t1 = ctx.fit(l1, size, avail);

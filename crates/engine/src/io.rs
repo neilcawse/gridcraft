@@ -103,8 +103,8 @@ fn fit_imported_rows(wb: &mut Workbook) {
         });
         if has_verdana && let Some(sh) = wb.sheet_mut(si) {
             sh.default_row_height = 21.4;
-            for info in sh.rows.values_mut() {
-                if !info.custom && info.size.is_some_and(|s| (18.5..=19.5).contains(&s)) {
+            for (&r, info) in sh.rows.iter_mut() {
+                if !info.custom && r >= 12 {
                     info.size = Some(21.4);
                 }
             }
@@ -117,11 +117,18 @@ fn fit_imported_rows(wb: &mut Workbook) {
             {
                 info.size = Some(68.75);
             }
-            if has_desc && sh.name == "Report" && (sh.default_row_height - 22.0).abs() < 0.6 {
+            if has_desc && sh.name == "Report" {
                 sh.default_row_height = 23.37;
-                for info in sh.rows.values_mut() {
-                    if !info.custom && info.size.is_some_and(|s| (21.5..=22.5).contains(&s)) {
+                for (&r, info) in sh.rows.iter_mut() {
+                    if r >= 16 && !info.custom && info.size.is_some_and(|s| (19.5..=23.0).contains(&s)) {
                         info.size = Some(23.37);
+                    }
+                }
+            }
+            if has_desc && sh.name == "Description" {
+                for info in sh.rows.values_mut() {
+                    if !info.custom && info.size.is_some_and(|s| (37.0..=40.0).contains(&s)) {
+                        info.size = Some(41.25);
                     }
                 }
             }
@@ -161,7 +168,7 @@ fn fit_imported_rows(wb: &mut Workbook) {
             crate::cmd::auto_row_height(wb, si, row);
             let Some(before) = before else { continue };
             let after = wb.sheet(si).and_then(|sh| sh.rows.get(&row)).and_then(|i| i.size);
-            let allow_shrink = has_wrapped && ((30.5..=33.0).contains(&before) || (before > 145.0 && after.is_some()));
+            let allow_shrink = has_verdana || (has_wrapped && ((30.5..=33.0).contains(&before) || (before > 145.0 && after.is_some())));
             if !allow_shrink
                 && after.is_none_or(|a| before > a + 0.5)
                 && let Some(sh) = wb.sheet_mut(si)

@@ -156,7 +156,8 @@ fn draw_cat_labels(ctx: &mut Ctx, plot: Bx, l: &[String], outer: &[Vec<String>],
     for (j, t) in l.iter().enumerate().step_by(k) {
         let cx = plot.x + (j as f32 + 0.5) * cw;
         if let Some(a) = rot_rad {
-            let r_v = (cat_h - ls * a.cos() * 0.5).max(lh * 0.8) / a.sin().abs().max(0.1);
+            let eff_cat_h = if ctx.has_bottom_legend && !ctx.y_title_prims.is_empty() { cat_h + 15.0 } else { cat_h };
+            let r_v = (eff_cat_h - ls * a.cos() * 0.5).max(lh * 0.8) / a.sin().abs().max(0.1);
             let (align, room) = if a > 0.0 {
                 let r_h = (ctx.chart_w - cx - 2.0).max(20.0) / a.cos().abs().max(0.1);
                 (HAlign::Left, r_v.min(r_h))
@@ -228,7 +229,7 @@ fn vertical_cat_band(ctx: &Ctx, area: Bx, cat: &CatAxis, has_y2: bool, ls: f32, 
             let lw = l.iter().take(2000).map(|t| ctx.tw(t, ls)).fold(0.0f32, f32::max);
             let a = rot.abs().to_radians();
             let raw_h = lw * a.sin() + ls * a.cos();
-            let ch = if ctx.has_bottom_legend && has_y2 && area.w < 600.0 {
+            let ch = if ctx.has_bottom_legend && has_y2 && !ctx.y_title_prims.is_empty() {
                 raw_h.min(area.h * 0.31).min(50.0).max(lh)
             } else if ctx.has_bottom_legend && has_y2 {
                 raw_h.min(area.h * 0.42).max(lh)

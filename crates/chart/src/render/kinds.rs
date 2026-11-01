@@ -186,7 +186,7 @@ pub(super) fn pie(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx, inne
     } else if inner > 0.0 {
         if area.h < 100.0 {
             0.805
-        } else if span >= 186.0 {
+        } else if chart.axis_number_formats.plot_w.is_some() {
             0.965
         } else {
             1.035
