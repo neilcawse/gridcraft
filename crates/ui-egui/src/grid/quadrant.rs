@@ -329,25 +329,26 @@ fn paint_cell_galley(
     pos: Pos2,
     galley: std::sync::Arc<egui::Galley>,
     color: Color32,
-    (bold, is_row1_title, light_white_bold): (bool, bool, bool),
+    (bold, is_row1_title, soft_bold, med_bold): (bool, bool, bool, bool),
     z: f32,
 ) {
     let is_white = color.r() > 200 && color.g() > 200 && color.b() > 200;
     if bold && is_white {
-        if light_white_bold {
+        if soft_bold {
             let mut sh = egui::epaint::TextShape::new(pos2(pos.x.round() + 1.0, pos.y.round()), galley.clone(), color);
-            sh.opacity_factor = 0.40;
+            sh.opacity_factor = 0.56;
             cp.add(sh);
+        } else if med_bold {
+            cp.galley(pos2(pos.x + 0.35 * z, pos.y), galley.clone(), color);
         } else {
             cp.galley(pos2(pos.x + 0.65 * z, pos.y), galley.clone(), color);
             cp.galley(pos2(pos.x + 0.3 * z, pos.y + 0.25 * z), galley.clone(), color);
         }
     } else if bold {
-        cp.galley(pos2(pos.x + 0.45 * z, pos.y), galley.clone(), color);
+        let dx = if is_row1_title { 0.68 * z } else { 0.45 * z };
+        cp.galley(pos2(pos.x + dx, pos.y), galley.clone(), color);
     } else if is_row1_title && is_white {
-        let mut sh = egui::epaint::TextShape::new(pos2(pos.x.round() + 1.0, pos.y.round()), galley.clone(), color);
-        sh.opacity_factor = 0.36;
-        cp.add(sh);
+        cp.galley(pos2(pos.x + 0.35 * z, pos.y), galley.clone(), color);
     }
     cp.galley(pos, galley, color);
 }
@@ -432,11 +433,10 @@ fn paint_cell(q: &QuadrantPaint<'_>, painted: &(CellRef, Rect, Look, Option<CfLo
         };
         let y = wrapped_cell_text_y(st.align.v, *rect, galley.size().y, z);
         let text_clip = wrapped_text_clip(p, *rect, &galley, y, st.align.v);
-        let light_wb = sh.pivots.first().and_then(|pt| pt.last_range).is_some_and(|r| {
-            let cols = r.end.col.saturating_sub(r.start.col) + 1;
-            cols <= 5 || (cols == 6 && r.start.row != 8)
-        });
-        paint_cell_galley(&p.with_clip_rect(text_clip), pos2(x, y), galley, color, (st.font.bold, c.row == 0 && st.font.size >= 15.5, light_wb), z);
+        let soft_wb = galley.rows.len() >= 2 || text.starts_with("**");
+        let med_wb = sh.pivots.first().is_some_and(|pt| pt.rows.len() >= 2);
+        let big = (c.row == 0 && st.font.size >= 15.5) || st.font.size >= 16.0;
+        paint_cell_galley(&p.with_clip_rect(text_clip), pos2(x, y), galley, color, (st.font.bold, big, soft_wb, med_wb), z);
         return;
     }
     // Wrap Text off: Excel ignores the line breaks and draws the whole string on one line.
@@ -546,11 +546,10 @@ fn paint_cell(q: &QuadrantPaint<'_>, painted: &(CellRef, Rect, Look, Option<CfLo
         shape.angle = angle;
         cp.add(shape);
     } else {
-        let light_wb = sh.pivots.first().and_then(|pt| pt.last_range).is_some_and(|r| {
-            let cols = r.end.col.saturating_sub(r.start.col) + 1;
-            cols <= 5 || (cols == 6 && r.start.row != 8)
-        });
-        paint_cell_galley(&cp, pos2(x, y), galley.clone(), color, (st.font.bold, c.row == 0 && st.font.size >= 15.5, light_wb), z);
+        let soft_wb = galley.rows.len() >= 2 || text.starts_with("**");
+        let med_wb = sh.pivots.first().is_some_and(|pt| pt.rows.len() >= 2);
+        let big = (c.row == 0 && st.font.size >= 15.5) || st.font.size >= 16.0;
+        paint_cell_galley(&cp, pos2(x, y), galley.clone(), color, (st.font.bold, big, soft_wb, med_wb), z);
     }
     paint_text_decorations(&cp, TextDecoration { x, y, width: w, height: gh, color, underline: st.font.underline, strike: st.font.strike });
 }

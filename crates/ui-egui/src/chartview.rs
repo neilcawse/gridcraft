@@ -237,7 +237,7 @@ fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Sh
     // Default 14 px (as before); a set size is in points.
     let size = f.font_size.map_or(14.0, |pt| pt * 96.0 / 72.0).clamp(1.0, 2000.0) * z;
     let family = theme::cell_family(f.font.as_deref().unwrap_or(&wb.theme.minor_font), f.bold, f.italic);
-    let inset = 4.0;
+    let inset = if f.font_size.is_some_and(|pt| pt >= 20.0) { 3.0 * z } else { 4.0 };
     let pad_l = if f.level > 0 { (9.6 + f.level as f32 * 48.0) * z } else { inset };
     let deg = (rot.rem_euclid(21_600_000) as f64) / 60_000.0;
     let angle = (if deg > 180.0 { deg - 360.0 } else { deg }).to_radians() as f32;
@@ -293,22 +293,25 @@ fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Sh
             clip.galley_with_override_text_color(pos + vec2(dx * d, dy * d), g.clone(), oc);
         }
     }
-    if f.bold {
-        let mut sh = egui::epaint::TextShape::new(pos2(pos.x.round() + 1.0, pos.y.round()), g.clone(), color);
-        sh.opacity_factor = if color.r() > 200 && color.g() > 200 && color.b() > 200 { 0.48 } else { 0.42 };
-        clip.add(sh);
+    if f.bold || f.font_size.is_some_and(|pt| pt >= 20.0) {
+        clip.galley(pos + vec2(0.65 * z, 0.0), g.clone(), color);
     }
     clip.galley(pos, g, color);
 }
 
 pub(crate) fn anchor_rect(geo: &Geo, sh: &Sheet, a: &Anchor) -> Rect {
     let cw = sh.col_width(a.cell.col);
-    let (dx_eff, over_x) = if cw > 0.0 && a.dx > cw { (cw * geo.zx, a.dx - cw) } else { (a.dx * geo.zx * 0.875, 0.0) };
     let rh = sh.row_height(a.cell.row);
+    let k = if sh.zoom == 90 { 0.78 } else { 0.875 };
+    let x1 = sh.col_left(a.cell.col) + a.dx as f64;
+    let x2 = x1 + a.width.max(0.0) as f64;
+    let tc = sh.col_at(x2);
+    let tdx = (x2 - sh.col_left(tc)).max(0.0) as f32;
+    let (dx_eff, over_x) = if cw > 0.0 && a.dx > cw { (cw * geo.zx, (a.dx - cw) * 0.35 - tdx * (1.0 - k)) } else { (a.dx * k * geo.zx, 0.0) };
     let (dy_eff, over_y) = if rh > 0.0 && a.dy > rh { (rh * geo.zy, a.dy - rh) } else { (a.dy * geo.zy, 0.0) };
     let x = geo.x(sh, a.cell.col) + dx_eff;
     let y = geo.y(sh, a.cell.row) + dy_eff;
-    Rect::from_min_size(pos2(x, y), vec2((a.width + over_x) * geo.zx, (a.height + over_y).max(1.0) * geo.zy))
+    Rect::from_min_size(pos2(x, y), vec2((a.width + over_x).max(0.0) * geo.zx, (a.height + over_y).max(1.0) * geo.zy))
 }
 
 /// The shapes one floating object painted (indices into the painter's layer) and its logical
@@ -340,24 +343,15 @@ fn clip_shape_to_slicer(geo: &Geo, sh: &Sheet, r: Rect) -> Rect {
 }
 
 fn snap_chart_rect(geo: &Geo, sh: &Sheet, ch: &gridcraft_engine::model::Chart) -> Rect {
-    let scale = geo.z / 0.72;
-    let raw = |c: &gridcraft_engine::model::Chart| anchor_rect(geo, sh, &c.anchor);
-    let mut r = raw(ch);
-    let row_group: Vec<Rect> =
-        sh.charts.iter().map(raw).filter(|or| (or.top() - r.top()).abs() <= 4.0 && (or.height() - r.height()).abs() <= 8.0).collect();
-    let shift = if row_group.len() == 3 { 6.0 * scale } else { 0.0 };
-    r = r.translate(vec2(-shift, 0.0));
+    let mut r = anchor_rect(geo, sh, &ch.anchor);
     for other in &sh.charts {
         if other.id != ch.id {
-            let or = raw(other).translate(vec2(-shift, 0.0));
+            let or = anchor_rect(geo, sh, &other.anchor);
             let gap = r.left() - or.right();
-            if (or.top() - r.top()).abs() <= 4.0 && (or.height() - r.height()).abs() <= 8.0 && (0.5..=12.0).contains(&gap) {
+            if (or.top() - r.top()).abs() <= 4.0 && (or.height() - r.height()).abs() <= 8.0 && (0.5..=16.0).contains(&gap) {
                 r.min.x = or.right();
             }
         }
-    }
-    if row_group.len() == 3 && row_group.iter().all(|or| or.left() <= anchor_rect(geo, sh, &ch.anchor).left() + 1.0) {
-        r.max.x -= 13.0 * scale;
     }
     r
 }

@@ -168,7 +168,7 @@ pub(super) fn draw_legend(ctx: &mut Ctx, entries: &[(String, Rgba, Swatch)], pos
             } else {
                 None
             };
-            let colw = manual_w.unwrap_or_else(|| entries.iter().map(|e| item_w(ctx, e)).fold(0.0f32, f32::max).min(area.w * 0.365));
+            let colw = manual_w.unwrap_or_else(|| entries.iter().map(|e| item_w(ctx, e)).fold(0.0f32, f32::max).min(area.w * 0.34));
             let sx = swatch_w(Swatch::Box, s) + gap;
             let avail_est = (colw - sx).max(0.0) + 0.5;
             let wraps = entries.iter().filter(|e| ctx.tw(&e.0, size) > avail_est && e.0.contains(' ')).count();
@@ -199,18 +199,19 @@ pub(super) fn draw_legend(ctx: &mut Ctx, entries: &[(String, Rgba, Swatch)], pos
                 draw_swatch(ctx, e.2, x0, yc, s, e.1, entry_stroke(data, i));
                 let sx = swatch_w(e.2, s) + gap;
                 let avail = (colw - sx).max(0.0) + 0.5;
+                let wrap_avail = (colw - sx).max(0.0) * 1.24;
                 if eff_row_h >= size * 1.9
                     && ctx.tw(&e.0, size) > avail
                     && let Some(sp) =
                         e.0.match_indices(' ')
                             .rev()
                             .map(|(idx, _)| idx)
-                            .find(|&idx| ctx.tw(e.0[..idx].trim_end(), size) <= avail)
+                            .find(|&idx| ctx.tw(e.0[..idx].trim_end(), size) <= wrap_avail)
                             .or_else(|| e.0.rfind(' '))
                 {
                     let (l1, l2) = e.0.split_at(sp);
-                    let t1 = ctx.fit(l1, size, avail);
-                    let t2 = ctx.fit(l2.trim_start(), size, avail);
+                    let t1 = ctx.fit(l1, size, wrap_avail);
+                    let t2 = ctx.fit(l2.trim_start(), size, wrap_avail);
                     ctx.text(x0 + sx, yc - size * 0.55, &t1, size, TEXT, (HAlign::Left, VAlign::Middle));
                     ctx.text(x0 + sx, yc + size * 0.55, &t2, size, TEXT, (HAlign::Left, VAlign::Middle));
                 } else {

@@ -131,6 +131,58 @@ pub fn approx_text_width(text: &str, size: f32, bold: bool) -> f32 {
     w * size * if bold { 1.07 } else { 1.0 } * 96.0 / 72.0
 }
 
+/// Approximate width in points for `Verdana` using its TrueType `hmtx` advance widths
+/// (`upm = 2048`), where digits are wider (`1303/2048`) than narrow capitals (`I`, `J`, `L`, `F`,
+/// `P`, `Y`, `T`, `E`) and wide capitals (`U`, `N`, `H`, `D`, `G`, `O`, `Q`, `M`, `W`) exceed
+/// `0.73 em`.
+pub fn approx_verdana_width(text: &str, size: f32, bold: bool) -> f32 {
+    let mut units = 0u32;
+    for c in text.chars() {
+        units += match c {
+            ' ' => 720,
+            'I' => 862,
+            'J' => 932,
+            'L' => 1141,
+            'F' => 1178,
+            'P' => 1235,
+            'Y' => 1260,
+            'T' => 1262,
+            'E' => 1295,
+            '0'..='9' => 1303,
+            'Z' => 1401,
+            'A' | 'S' | 'V' | 'X' => 1403,
+            'B' => 1405,
+            'K' => 1419,
+            'R' => 1423,
+            'C' => 1430,
+            'U' => 1499,
+            'N' => 1532,
+            'H' => 1539,
+            'D' => 1578,
+            'G' => 1589,
+            'O' | 'Q' => 1612,
+            'M' => 1726,
+            'W' => 2025,
+            'i' | 'l' => 561,
+            'j' => 705,
+            'f' => 720,
+            't' => 807,
+            'r' => 874,
+            's' => 1067,
+            'c' | 'z' => 1075,
+            'a' | 'v' | 'x' | 'y' => 1212,
+            'e' => 1221,
+            'o' => 1243,
+            'b' | 'd' | 'g' | 'p' | 'q' => 1276,
+            'h' | 'n' | 'u' => 1296,
+            'w' => 1675,
+            'm' => 1992,
+            _ => 1280,
+        };
+    }
+    (units as f32 / 2048.0) * size * if bold { 1.08 } else { 1.0 } * 96.0 / 72.0
+}
+
 /// Distinct texts AutoFit measures exactly; past this many, `Session::text_width` is asked for a
 /// quick measure so a huge column doesn't lay out every value.
 const EXACT_TEXT_WIDTHS: usize = 2_000;

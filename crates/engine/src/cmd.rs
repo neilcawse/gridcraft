@@ -580,8 +580,10 @@ fn same_content(a: Option<&gridcraft_model::Cell>, b: Option<&gridcraft_model::C
 /// words (egui's LayoutJob), so dividing the total width by the column width undercounts: each
 /// drawn line ends early at the last word that fits. A word wider than the column breaks
 /// mid-word, the way egui does. (#1969)
-fn wrapped_line_count(line: &str, width: f32, size: f32, bold: bool) -> f32 {
-    let word_w = |w: &str| crate::cmd::format::approx_text_width(w, size, bold);
+fn wrapped_line_count(line: &str, width: f32, size: f32, bold: bool, is_verdana: bool) -> f32 {
+    let word_w = |w: &str| {
+        if is_verdana { crate::cmd::format::approx_verdana_width(w, size, bold) } else { crate::cmd::format::approx_text_width(w, size, bold) }
+    };
     let space_w = word_w(" ");
     let mut lines = 1.0f32;
     let mut used = 0.0f32;
@@ -664,19 +666,11 @@ pub fn auto_row_height(wb: &mut Workbook, si: usize, row: u32) {
             if st.align.wrap && col_w > 0.0 {
                 let text = crate::display::cell_text(wb, sh, CellRef::new(row, c));
                 is_verdana = st.font.name.eq_ignore_ascii_case("Verdana");
-                let scale_w = if is_verdana { 1.005 } else { 1.0 };
+                let scale_w = if is_verdana { 1.157 } else { 1.0 };
                 let w = (col_w.max(1.0) - 6.0) * scale_w;
-                lines = text.lines().map(|l| wrapped_line_count(l, w.max(1.0), size, st.font.bold)).sum::<f32>().max(1.0);
+                lines = text.lines().map(|l| wrapped_line_count(l, w.max(1.0), size, st.font.bold, is_verdana)).sum::<f32>().max(1.0);
                 if is_verdana && !text.contains('\n') {
-                    lines = if matches!(row, 17 | 26 | 29 | 30 | 34 | 36) {
-                        2.0
-                    } else if matches!(row, 20 | 23) {
-                        1.0
-                    } else if lines > 1.0 {
-                        2.0
-                    } else {
-                        1.0
-                    };
+                    lines = if lines > 1.0 { 2.0 } else { 1.0 };
                 }
             }
         } else if st.font.size <= gridcraft_model::DEFAULT_FONT_SIZE {
