@@ -26,6 +26,8 @@ pub struct StylesIn {
     pub named: Vec<(String, Style)>,
     /// Custom number formats (`numFmts`) by id.
     pub num_fmts: HashMap<u32, String>,
+    /// Custom `<tableStyles>` definitions: style name → (`tableStyleElement` `type` → `dxf` style).
+    pub table_styles: HashMap<String, HashMap<String, Style>>,
 }
 
 pub fn read_color(e: &El, palette: &[u32]) -> Color {
@@ -359,8 +361,23 @@ pub fn read_styles(root: &El, checkboxes: &[bool], minor_font: &str) -> StylesIn
             }
         }
     }
-    let dxfs = root.child("dxfs").map(|d| d.kids("dxf").map(|x| read_dxf(x, &palette, &fmts)).collect()).unwrap_or_default();
-    StylesIn { xfs, dxfs, palette, named, num_fmts: fmts }
+    let dxfs: Vec<Style> = root.child("dxfs").map(|d| d.kids("dxf").map(|x| read_dxf(x, &palette, &fmts)).collect()).unwrap_or_default();
+    let mut table_styles: HashMap<String, HashMap<String, Style>> = HashMap::new();
+    if let Some(ts) = root.child("tableStyles") {
+        for t in ts.kids("tableStyle") {
+            let Some(name) = t.attr("name") else { continue };
+            let mut elems = HashMap::new();
+            for el in t.kids("tableStyleElement") {
+                if let (Some(kind), Some(st)) = (el.attr("type"), el.attr_u32("dxfId").and_then(|i| dxfs.get(i as usize))) {
+                    elems.insert(kind.to_string(), st.clone());
+                }
+            }
+            if !elems.is_empty() {
+                table_styles.insert(name.to_string(), elems);
+            }
+        }
+    }
+    StylesIn { xfs, dxfs, palette, named, num_fmts: fmts, table_styles }
 }
 
 /// A differential format: a `dxf` of the styles part, or an inline Excel 2010 `x14:dxf`.

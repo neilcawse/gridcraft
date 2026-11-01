@@ -7,8 +7,8 @@ const MAX_XML_PART: u64 = 64 * 1024 * 1024;
 const MAX_ENTRIES: usize = 200_000;
 
 /// Relationship kinds (lower case) whose absence after a save isn't a loss: the calculation chain is
-/// a cache Excel rebuilds, and chart style / theme-override sidecars are spelled out inline.
-pub(super) const REBUILT_KINDS: [&str; 4] = ["calcchain", "chartcolorstyle", "chartstyle", "themeoverride"];
+/// a cache Excel rebuilds, and chart style / user-shape / theme-override sidecars are spelled out inline.
+pub(super) const REBUILT_KINDS: [&str; 5] = ["calcchain", "chartcolorstyle", "chartstyle", "chartusershapes", "themeoverride"];
 
 // ---------------------------------------------------------------- package validation
 

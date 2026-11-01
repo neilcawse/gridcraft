@@ -1,4 +1,4 @@
-use super::{AXIS, AXIS_TITLE_SIZE, Chart, ChartData, Ctx, DARK_TEXT, Fmt, GRID, HAlign, LABEL_SIZE, PI, Prim, Rgba, Scale, TEXT, VAlign, WHITE};
+use super::{AXIS, AXIS_TITLE_SIZE, Chart, ChartData, Ctx, DARK_TEXT, Fmt, HAlign, LABEL_SIZE, PI, Prim, Rgba, Scale, TEXT, VAlign, WHITE};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Bx {
@@ -41,12 +41,25 @@ pub(super) fn chart_title(chart: &Chart, data: &ChartData) -> Option<String> {
 }
 
 pub(super) fn axis_titles(ctx: &mut Ctx, chart: &Chart, mut area: Bx) -> Bx {
-    let lh = AXIS_TITLE_SIZE * 1.4 + 2.0;
+    let lh = AXIS_TITLE_SIZE * 1.5 + 3.0;
+    let bold = chart.axis_number_formats.axis_title_bold;
     if let Some(t) = chart.x_title.as_deref().filter(|t| !t.is_empty()) {
         let trimmed = t.trim();
         if !trimmed.is_empty() {
             let t = ctx.fit(trimmed, AXIS_TITLE_SIZE, area.w);
-            ctx.text(area.cx(), area.bottom(), &t, AXIS_TITLE_SIZE, TEXT, (HAlign::Center, VAlign::Bottom));
+            if !t.is_empty() {
+                ctx.out.push(Prim::Text {
+                    x: area.cx(),
+                    y: area.bottom() - 1.5,
+                    text: t,
+                    size: AXIS_TITLE_SIZE,
+                    color: TEXT,
+                    bold,
+                    align: HAlign::Center,
+                    valign: VAlign::Bottom,
+                    rotation: 0.0,
+                });
+            }
         }
         area.h -= lh;
     }
@@ -61,7 +74,7 @@ pub(super) fn axis_titles(ctx: &mut Ctx, chart: &Chart, mut area: Bx) -> Bx {
                     text: t,
                     size: AXIS_TITLE_SIZE,
                     color: TEXT,
-                    bold: false,
+                    bold,
                     align: HAlign::Center,
                     valign: VAlign::Top,
                     rotation: -PI / 2.0,
@@ -74,6 +87,23 @@ pub(super) fn axis_titles(ctx: &mut Ctx, chart: &Chart, mut area: Bx) -> Bx {
             area.x += pad;
             area.w -= pad;
         }
+    }
+    if let Some(t) = chart.axis_number_formats.y2_title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        let t = ctx.fit(t, AXIS_TITLE_SIZE, area.h);
+        if !t.is_empty() {
+            ctx.out.push(Prim::Text {
+                x: area.right() - lh * 0.45,
+                y: area.cy(),
+                text: t,
+                size: AXIS_TITLE_SIZE,
+                color: TEXT,
+                bold,
+                align: HAlign::Center,
+                valign: VAlign::Middle,
+                rotation: PI / 2.0,
+            });
+        }
+        area.w -= lh;
     }
     area
 }
@@ -107,20 +137,31 @@ impl ValAxis<'_> {
 }
 
 fn draw_cat_labels(ctx: &mut Ctx, plot: Bx, l: &[String], outer: &[Vec<String>], rot: Option<f32>, cat_h: f32) {
+    if l.is_empty() || ctx.cat_axis_deleted {
+        return;
+    }
     let ls = LABEL_SIZE;
     let lh = ls * 1.4;
     let n = l.len().max(1);
     let cw = plot.w / n as f32;
     let lw = l.iter().take(2000).map(|t| ctx.tw(t, ls)).fold(0.0f32, f32::max);
-    let rot_rad = rot.filter(|r| r.is_finite() && r.abs() >= 1.0).map(|r| -r.abs().to_radians());
+    let rot_rad = rot.filter(|r| r.is_finite() && r.abs() >= 1.0).map(|r| r.to_radians());
     let k = match rot_rad {
-        Some(a) => ((ls / (cw * a.sin().abs()).max(1e-3)).ceil() as usize).clamp(1, n),
+        Some(a) => ((lh / (cw * a.sin().abs()).max(1e-3)).ceil() as usize).clamp(1, n),
         None => (((lw + 6.0) / cw.max(1e-3)).ceil() as usize).clamp(1, n),
     };
     for (j, t) in l.iter().enumerate().step_by(k) {
         let cx = plot.x + (j as f32 + 0.5) * cw;
         if let Some(a) = rot_rad {
-            let room = (cat_h / a.sin().abs().max(0.1)).min((cx - 2.0) / a.cos().abs().max(0.1));
+            let (align, room) = if a > 0.0 {
+                let r_v = cat_h / a.sin().abs().max(0.1);
+                let r_h = (ctx.chart_w - cx - 2.0).max(20.0) / a.cos().abs().max(0.1);
+                (HAlign::Left, r_v.min(r_h))
+            } else {
+                let r_v = cat_h / a.sin().abs().max(0.1);
+                let r_h = (cx - 2.0).max(20.0) / a.cos().abs().max(0.1);
+                (HAlign::Right, r_v.min(r_h))
+            };
             let t = ctx.fit(t, ls, room);
             if !t.is_empty() {
                 ctx.out.push(Prim::Text {
@@ -130,7 +171,7 @@ fn draw_cat_labels(ctx: &mut Ctx, plot: Bx, l: &[String], outer: &[Vec<String>],
                     size: ls,
                     color: TEXT,
                     bold: false,
-                    align: HAlign::Right,
+                    align,
                     valign: VAlign::Top,
                     rotation: a,
                 });
@@ -170,14 +211,19 @@ pub(super) fn frame(ctx: &mut Ctx, area: Bx, cat: CatAxis, y: &ValAxis, y2: Opti
             (None, CatAxis::Numeric(s, f)) => (ctx.tw(&f.format(s.max, Some(s.step)), ls) / 2.0).min(area.w * 0.2),
             _ => 4.0,
         };
-        let (levels, cat_h) = match &cat {
-            CatAxis::Labels(l, o, Some(rot)) if *rot != 0.0 => {
-                let lw = l.iter().take(2000).map(|t| ctx.tw(t, ls)).fold(0.0f32, f32::max);
-                let a = rot.abs().to_radians();
-                (o.len() as f32, (lw * a.sin() + ls * a.cos()).min(area.h * 0.35).max(lh))
+        let (levels, cat_h) = if ctx.cat_axis_deleted {
+            (0.0, 2.0)
+        } else {
+            match &cat {
+                CatAxis::Labels(l, o, Some(rot)) if *rot != 0.0 => {
+                    let max_lw = (area.h * 0.28).clamp(36.0, 80.0);
+                    let lw = l.iter().take(2000).map(|t| ctx.tw(t, ls)).fold(0.0f32, f32::max).min(max_lw);
+                    let a = rot.abs().to_radians();
+                    (o.len() as f32, (lw * a.sin() + ls * a.cos()).min(area.h * 0.30).max(lh))
+                }
+                CatAxis::Labels(_, o, _) => (o.len() as f32, lh),
+                CatAxis::Numeric(..) => (0.0, lh),
             }
-            CatAxis::Labels(_, o, _) => (o.len() as f32, lh),
-            CatAxis::Numeric(..) => (0.0, lh),
         };
         let plot = Bx { x: area.x + left, y: area.y + lh * 0.5, w: area.w - left - right, h: area.h - lh * 0.5 - cat_h - 4.0 - lh * levels };
         if !plot.ok() {
@@ -186,7 +232,7 @@ pub(super) fn frame(ctx: &mut Ctx, area: Bx, cat: CatAxis, y: &ValAxis, y2: Opti
         for (v, t) in &ylabels {
             let yy = plot.bottom() - y.scale.frac(*v) * plot.h;
             if grid {
-                ctx.hline(plot.x, plot.right(), yy, GRID, 0.75);
+                ctx.hline(plot.x, plot.right(), yy, ctx.grid_color, 0.75);
             }
             ctx.text(plot.x - 4.0, yy, t, ls, TEXT, (HAlign::Right, VAlign::Middle));
         }
@@ -239,7 +285,7 @@ pub(super) fn frame(ctx: &mut Ctx, area: Bx, cat: CatAxis, y: &ValAxis, y2: Opti
         for (i, (v, t)) in ylabels.iter().enumerate() {
             let xx = plot.x + y.scale.frac(*v) * plot.w;
             if grid {
-                ctx.vline(xx, plot.y, plot.bottom(), GRID, 0.75);
+                ctx.vline(xx, plot.y, plot.bottom(), ctx.grid_color, 0.75);
             }
             if i % k == 0 {
                 ctx.text(xx, plot.bottom() + 3.0, t, ls, TEXT, (HAlign::Center, VAlign::Top));

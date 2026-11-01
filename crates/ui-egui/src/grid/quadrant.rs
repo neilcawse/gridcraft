@@ -88,8 +88,11 @@ fn wrapped_text_clip(p: &Painter, rect: Rect, galley: &egui::Galley, y: f32, val
 
     let last_full_bottom = galley.rows.iter().map(|row| y + row.rect().bottom()).rfind(|bottom| *bottom <= rect.bottom() + 0.01);
 
-    clip.max.y = last_full_bottom.map(|bottom| clip.bottom().min(bottom)).unwrap_or(clip.top()).max(clip.top());
-
+    if let Some(bottom) = last_full_bottom {
+        clip.max.y = clip.bottom().min(bottom).max(clip.top());
+    } else if galley.rows.first().is_none_or(|r| rect.height() < r.rect().height() * 0.85) {
+        clip.max.y = clip.top();
+    }
     clip
 }
 pub(crate) struct QuadrantPaint<'a> {
@@ -613,7 +616,10 @@ fn paint_borders(q: &mut QuadrantPaint<'_>, looks: &[(CellRef, Rect, Look, Optio
             ));
         }
         // Background error checking: a number stored as text gets Excel's green corner (#1994).
-        if !sh.show_formulas && sh.cell(*c).and_then(gridcraft_engine::cmd::formulas::number_stored_as_text).is_some() {
+        if !sh.show_formulas
+            && !sh.pivots.iter().any(|p| p.last_range.is_some_and(|r| r.contains(*c)))
+            && sh.cell(*c).and_then(gridcraft_engine::cmd::formulas::number_stored_as_text).is_some()
+        {
             let s = 6.0 * z.max(0.7);
             p.add(egui::Shape::convex_polygon(
                 vec![rect.left_top(), pos2(rect.left() + s, rect.top()), pos2(rect.left(), rect.top() + s)],
@@ -670,5 +676,55 @@ fn paint_filter_buttons(q: &QuadrantPaint<'_>, range: RangeRef) {
             continue;
         }
         paint_filter_button(p, filter_button_rect(geo, sh, c), active);
+    }
+    for pt in &sh.pivots {
+        if !pt.show_headers {
+            continue;
+        }
+        let mut pbtns: Vec<(CellRef, bool)> = Vec::new();
+        let vis_filters: Vec<_> = pt.filters.iter().filter(|f| !f.hidden).collect();
+        if !vis_filters.is_empty() && pt.anchor.row > vis_filters.len() as u32 {
+            let start_r = pt.anchor.row - vis_filters.len() as u32 - 1;
+            for (i, f) in vis_filters.iter().enumerate() {
+                pbtns.push((CellRef::new(start_r + i as u32, pt.anchor.col + 1), f.selected.is_some()));
+            }
+        }
+        let row_cols = if pt.rows.is_empty() {
+            0
+        } else if matches!(pt.layout, gridcraft_engine::model::PivotLayout::Compact) {
+            1
+        } else {
+            pt.rows.len() as u32
+        };
+        let top_values_row = pt.columns.is_empty()
+            && !matches!(pt.layout, gridcraft_engine::model::PivotLayout::Compact)
+            && ((pt.values.len() >= 2 && !pt.values_on_rows && pt.show_values_row) || (pt.values.len() == 1 && pt.classic_layout));
+        let row_hdr_r = pt.anchor.row + u32::from(top_values_row);
+        for j in 0..row_cols {
+            let filtered = pt.rows.get(j as usize).is_some_and(|rf| {
+                rf.sort != gridcraft_engine::model::PivotSort::None
+                    || pt.filters.iter().any(|f| f.source_col.eq_ignore_ascii_case(&rf.source_col) && f.selected.is_some())
+            });
+            pbtns.push((CellRef::new(row_hdr_r, pt.anchor.col + j), filtered));
+        }
+        if !pt.columns.is_empty() {
+            let filtered = pt.columns.iter().any(|cf| {
+                cf.sort != gridcraft_engine::model::PivotSort::None
+                    || pt.filters.iter().any(|f| f.source_col.eq_ignore_ascii_case(&cf.source_col) && f.selected.is_some())
+            });
+            pbtns.push((CellRef::new(pt.anchor.row, pt.anchor.col + row_cols), filtered));
+        }
+        for (c, active) in pbtns {
+            if !range.contains(c) {
+                continue;
+            }
+            let rect = geo.cell_rect(sh, c);
+            let pad = 2.0 * geo.z;
+            let s = (rect.height() - 4.0).clamp(10.0, 16.0).min((rect.width() - 2.0 * pad).max(0.0));
+            if s >= 8.0 {
+                let r = Rect::from_min_size(pos2(rect.right() - s - pad, rect.bottom() - s - pad), vec2(s, s));
+                paint_filter_button(p, r, active);
+            }
+        }
     }
 }

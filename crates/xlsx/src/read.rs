@@ -21,6 +21,7 @@ pub struct Ctx<'a> {
     pub xf_map: Vec<StyleId>,
     pub dxfs: Vec<Style>,
     pub palette: Vec<u32>,
+    pub table_styles: std::collections::HashMap<String, std::collections::HashMap<String, Style>>,
     pub date_system: DateSystem,
     pub styles: StyleTable,
     /// Threaded-comment person id → display name.
@@ -156,8 +157,9 @@ fn read_workbook_styles(cx: &mut Ctx<'_>, wb: &mut Workbook, wb_rels: &[Rel]) ->
     }
     if let Some(r) = find_rel(wb_rels, "styles").cloned() {
         if let Some(x) = cx.optional_xml(&r.target)? {
-            let StylesIn { xfs, dxfs, palette, named, num_fmts } = read_styles(&x, &checkboxes, &wb.theme.minor_font);
+            let StylesIn { xfs, dxfs, palette, named, num_fmts, table_styles } = read_styles(&x, &checkboxes, &wb.theme.minor_font);
             cx.num_fmts = num_fmts;
+            cx.table_styles = table_styles;
             // Cell format 0 is the Normal cell format: everything on it (font, number format,
             // fill, borders, alignment, protection) is what a cell without its own format shows
             // (#1013).
@@ -238,6 +240,7 @@ pub fn read_xlsx(bytes: &[u8], functions: crate::FunctionInfo) -> Result<(Workbo
         phonetics: vec![],
         xf_map: vec![],
         dxfs: vec![],
+        table_styles: Default::default(),
         palette: crate::tables::INDEXED.to_vec(),
         date_system: DateSystem::D1900,
         styles: StyleTable::default(),
@@ -317,7 +320,7 @@ pub fn read_xlsx(bytes: &[u8], functions: crate::FunctionInfo) -> Result<(Workbo
             }
         };
         legacy_formulas.push((wb.sheets.len(), std::mem::take(&mut cx.legacy_formulas)));
-        match crate::pivot::read_pivots(&mut cx, &mut pivot_caches, &rel.target, &name) {
+        match crate::pivot::read_pivots(&mut cx, &mut pivot_caches, &rel.target, &mut sheet) {
             Ok(p) => sheet.pivots = p,
             Err(IoError::TooLarge(m)) => return Err(IoError::TooLarge(m)),
             Err(e) => cx.warn(format!("PivotTables on sheet \"{name}\" could not be read: {e}")),
@@ -343,6 +346,7 @@ pub fn read_xlsx(bytes: &[u8], functions: crate::FunctionInfo) -> Result<(Workbo
     wb.external_books = Arc::new(crate::external::read(&mut cx, &wb_xml, &wb_rels)?);
     crate::slicer::resolve(&mut cx, &wb_xml, &wb_rels, &sheet_els, &file_to_model, &pivot_caches, &mut wb);
 
+    resolve_shape_text_links(&mut wb);
     // Defined names. Chartex parts refer to their data through hidden `_xlchart.*` names.
     let mut chart_names: Vec<(String, String)> = vec![];
     if let Some(dn) = wb_xml.child("definedNames") {
@@ -443,6 +447,64 @@ pub fn read_xlsx(bytes: &[u8], functions: crate::FunctionInfo) -> Result<(Workbo
     wb.styles = cx.styles;
     wb.phonetics = cx.phonetics;
     Ok((wb, cx.report))
+}
+fn resolve_shape_text_links(wb: &mut Workbook) {
+    const MAX_LINKED_SHAPE_CHARS: usize = 32_767;
+    const MAX_LINKED_TEXT_BYTES: usize = 4 * 1024 * 1024;
+    let mut total_bytes = 0usize;
+    let mut updates: Vec<(usize, usize, String)> = Vec::new();
+    for (si, sh) in wb.sheets.iter().enumerate() {
+        for (idx, sp) in sh.shapes.iter().enumerate() {
+            if !sp.text.trim().is_empty() {
+                continue;
+            }
+            let Some(link) = sp.format.text_link.as_deref() else { continue };
+            let link = link.trim().trim_start_matches('=');
+            let (sheet_part, cell_part) = match link.rfind('!') {
+                Some(i) => {
+                    let raw = link[..i].trim();
+                    let unquoted = if raw.starts_with('\'') && raw.ends_with('\'') && raw.len() >= 2 {
+                        raw[1..raw.len() - 1].replace("''", "'")
+                    } else {
+                        raw.to_string()
+                    };
+                    (Some(unquoted), link[i + 1..].trim())
+                }
+                None => (None, link),
+            };
+            let target_si = match sheet_part.as_deref() {
+                Some(n) => wb.sheet_index(n),
+                None => Some(si),
+            };
+            let raw_cell = cell_part.replace('$', "");
+            let cell_str = raw_cell.split(':').next().unwrap_or(&raw_cell);
+            if let (Some(tsi), Some(c)) = (target_si, gridcraft_core::CellRef::parse(cell_str))
+                && let Some(tsh) = wb.sheet(tsi)
+            {
+                let v: String = match tsh.value(c).scalar() {
+                    gridcraft_core::Value::Text(s) => s.chars().take(MAX_LINKED_SHAPE_CHARS).collect(),
+                    val => val.display().chars().take(MAX_LINKED_SHAPE_CHARS).collect(),
+                };
+                if !v.is_empty() {
+                    total_bytes = total_bytes.saturating_add(v.len());
+                    if total_bytes > MAX_LINKED_TEXT_BYTES {
+                        break;
+                    }
+                    updates.push((si, idx, v));
+                }
+            }
+        }
+        if total_bytes > MAX_LINKED_TEXT_BYTES {
+            break;
+        }
+    }
+    for (si, idx, text) in updates {
+        if let Some(sh) = wb.sheet_mut(si)
+            && let Some(sp) = sh.shapes.get_mut(idx)
+        {
+            sp.text = text;
+        }
+    }
 }
 
 pub(crate) fn unique_name(wb: &Workbook, name: &str, i: usize) -> String {

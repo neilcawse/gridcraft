@@ -418,7 +418,9 @@ pub(super) fn error_check_tag(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, 
         return;
     }
     let Some(active) = app.session.active().map(|d| d.selection.active) else { return };
-    if sh.cell(active).and_then(gridcraft_engine::cmd::formulas::number_stored_as_text).is_none() {
+    if sh.pivots.iter().any(|p| p.last_range.is_some_and(|r| r.contains(active)))
+        || sh.cell(active).and_then(gridcraft_engine::cmd::formulas::number_stored_as_text).is_none()
+    {
         return;
     }
     let cell = geo.cell_rect(sh, active);

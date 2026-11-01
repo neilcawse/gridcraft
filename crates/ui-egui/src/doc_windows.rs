@@ -168,6 +168,11 @@ impl DocWindows {
         let ctx = ui.ctx().clone();
         self.sync(app, &ctx);
         let focused = self.list.active().and_then(|id| self.list.get(id).copied());
+        let root_w = self.root_window();
+        let swap_root_for_capture = (app.shots.in_flight() || app.synthetic_pending || !app.synthetic.is_empty())
+            && root_w.is_some()
+            && focused.is_some()
+            && root_w != focused;
         let titles: std::collections::HashMap<u64, String> = self.list.iter().map(|(_, w)| (*w, window_title(app, *w))).collect();
         let base = &self.base;
         // The window a command run in some window's UI activated (File › New, Switch Windows, a close).
@@ -177,7 +182,18 @@ impl DocWindows {
             &mut self.list,
             |_, w| base.clone().with_title(titles.get(w).cloned().unwrap_or_default()),
             |ui, _, w| {
-                app.show_window(*w);
+                let drawn = if swap_root_for_capture {
+                    if Some(*w) == root_w {
+                        focused.unwrap_or(*w)
+                    } else if Some(*w) == focused {
+                        root_w.unwrap_or(*w)
+                    } else {
+                        *w
+                    }
+                } else {
+                    *w
+                };
+                app.show_window(drawn);
                 // Files dropped on a window open as workbooks (the root's arrive through the app's
                 // raw input hook; a child window's input reaches only its own pass).
                 let dropped: Vec<String> = ui
@@ -187,7 +203,7 @@ impl DocWindows {
                     app.open_path(&path);
                 }
                 app.ui(ui);
-                if app.session.active_window() != Some(*w) {
+                if app.session.active_window() != Some(drawn) {
                     requested = app.session.active_window();
                 }
             },

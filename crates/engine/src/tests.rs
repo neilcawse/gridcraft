@@ -3972,6 +3972,7 @@ fn add_image(s: &mut Session, cell: &str, mode: gridcraft_model::AnchorMode) -> 
         data: tiny_png().into(),
         mime: "image/png".into(),
         alt: String::new(),
+        duotone: None,
     });
     id
 }

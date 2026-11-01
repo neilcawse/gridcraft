@@ -148,7 +148,14 @@ fn axis_scales(chart: &Chart, data: &ChartData, fams: &[Fam], sec: &[bool], span
             let code = typed.or_else(|| members.first().and_then(|i| data.series.get(*i)).map(|s| s.number_format.as_str())).unwrap_or("General");
             let (lo_eff, hi_eff) =
                 if !axis { (chart.axis_number_formats.y_min.unwrap_or(lo), chart.axis_number_formats.y_max.unwrap_or(hi)) } else { (lo, hi) };
-            let mut sc = nice_scale(lo_eff, hi_eff, force_zero);
+            let tight_top = !axis
+                && chart.axis_number_formats.y_min.is_none()
+                && chart.axis_number_formats.y_max.is_some()
+                && lo > 0.0
+                && lo < hi_eff
+                && lo >= hi_eff * 0.85;
+            let lo_in = if tight_top { lo - (hi_eff - lo) * 0.5 } else { lo_eff };
+            let mut sc = nice_scale(lo_in, hi_eff, force_zero && !tight_top);
             if !axis {
                 if let Some(mn) = chart.axis_number_formats.y_min.filter(|v| v.is_finite()) {
                     sc.min = clean(mn);
@@ -159,6 +166,9 @@ fn axis_scales(chart: &Chart, data: &ChartData, fams: &[Fam], sec: &[bool], span
                     sc.max = clean(mx);
                     if sc.min == 0.0 && sc.max == 100.0 && sc.step == 20.0 {
                         sc.step = 10.0;
+                    } else if tight_top && (sc.max - sc.min) <= 20.0 && sc.step > 2.0 {
+                        sc.step = 2.0;
+                        sc.min = (lo_in / 2.0).floor() * 2.0;
                     }
                 }
             }
@@ -221,8 +231,26 @@ fn draw_bar_label(
     horizontal: bool,
     stacked: bool,
     in_end: bool,
+    rot_deg: Option<f32>,
     fill: super::Rgba,
 ) {
+    if let Some(deg) = rot_deg.filter(|d| d.is_finite() && d.abs() >= 1.0 && !horizontal) {
+        let a = deg.to_radians();
+        let y = if in_end && v >= 0.0 { lo + len * 0.5 } else { lo - 3.0 };
+        let align = if a < 0.0 { HAlign::Left } else { HAlign::Right };
+        ctx.out.push(Prim::Text {
+            x: pos,
+            y,
+            text: t.to_string(),
+            size: LABEL_SIZE,
+            color: if in_end { super::DARK_TEXT } else { TEXT },
+            bold: false,
+            align,
+            valign: VAlign::Middle,
+            rotation: a,
+        });
+        return;
+    }
     let in_sz = if bw >= 16.0 && len >= 18.0 { 11.5 } else { LABEL_SIZE };
     let mid = (pb + pt) / 2.0;
     if horizontal {
@@ -237,8 +265,8 @@ fn draw_bar_label(
         }
     } else if stacked {
         ctx.text(pos, mid, t, LABEL_SIZE, on(fill), (HAlign::Center, VAlign::Middle));
-    } else if in_end && v >= 0.0 {
-        ctx.text(pos, lo + 2.0, t, in_sz, super::DARK_TEXT, (HAlign::Center, VAlign::Top));
+    } else if in_end && v >= 0.0 && len >= LABEL_SIZE * 1.4 {
+        ctx.text(pos, lo + 4.0, t, in_sz, super::DARK_TEXT, (HAlign::Center, VAlign::Top));
     } else if v >= 0.0 {
         ctx.text(pos, lo - 2.0, t, LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Bottom));
     } else {
@@ -288,7 +316,11 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
 
     let (slot_of, nslots) = column_slots(&fams, &sec);
     let gap = chart.axis_number_formats.gap_width.map_or(1.5, |g| (g.min(500) as f32) / 100.0);
-    let bw = cw / (nslots + gap);
+    let ov = if nslots > 1.0 { chart.axis_number_formats.bar_overlap.unwrap_or(0).clamp(-100, 100) as f32 / 100.0 } else { 0.0 };
+    let eff_slots = (1.0 + (nslots - 1.0) * (1.0 - ov)).max(1.0);
+    let bw = cw / (eff_slots + gap);
+    let slot_step = bw * (1.0 - ov);
+    let group_span = bw + (nslots - 1.0).max(0.0) * slot_step;
     let labels_on = chart.data_labels && ncat <= MAX_LABELS;
     // Area labels wait until every area is filled, so a later (stacked) area can't paint over them.
     let mut area_labels = Vec::new();
@@ -307,6 +339,12 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
             }
             let sc = scale_of(i);
             let fmt = series_label_fmt(chart, s);
+            let ser_labels_on = chart
+                .axis_number_formats
+                .series_data_labels
+                .iter()
+                .find(|(idx, _)| *idx == i as u32)
+                .map_or(labels_on, |(_, sh)| *sh && ncat <= MAX_LABELS);
             let row = match spans.get(i) {
                 Some(r) => r,
                 None => continue,
@@ -321,7 +359,7 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
                         top.push([c, vpos(t, &sc)]);
                         base.push([c, vpos(b, &sc)]);
                         // Source values (not stack totals), just above the top edge like the line labels.
-                        if labels_on
+                        if ser_labels_on
                             && sp.is_some()
                             && let Some(v) = s.values.get(j).copied().flatten()
                         {
@@ -345,25 +383,33 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
                 }
                 1 => {
                     let k = slot_of.get(i).copied().unwrap_or(0) as f32;
+                    let multi_pt = i == 0 && data.series.len() == 1 && chart.axis_number_formats.point_colors.len() > 1;
+                    let rot_deg = chart.axis_number_formats.series_label_rotations.iter().find(|(idx, _)| *idx == i as u32).map(|(_, r)| *r);
                     for (j, sp) in row.iter().enumerate() {
                         let Some((b, t)) = sp else { continue };
                         let (pb, pt) = (vpos(*b, &sc), vpos(*t, &sc));
                         let c = center(j);
                         let lo = pb.min(pt);
                         let len = (pb - pt).abs();
-                        let bar_stroke = s.stroke.map(|c| (c, 1.0));
+                        let fill = if multi_pt { super::legend::point_color(data, j) } else { s.color };
+                        let bar_stroke =
+                            s.point_strokes.iter().find(|&&(idx, _)| idx as usize == j).map(|&(_, sc)| sc).or(s.stroke).map(|c| (c, 1.0));
                         if horizontal {
-                            let y = c + nslots * bw / 2.0 - (k + 1.0) * bw;
-                            ctx.rect(lo, y, len, bw, s.color, bar_stroke);
+                            let y = c + group_span / 2.0 - k * slot_step - bw;
+                            ctx.rect(lo, y, len, bw, fill, bar_stroke);
                         } else {
-                            let x = c - nslots * bw / 2.0 + k * bw;
-                            ctx.rect(x, lo, bw, len, s.color, bar_stroke);
+                            let x = c - group_span / 2.0 + k * slot_step;
+                            ctx.rect(x, lo, bw, len, fill, bar_stroke);
                         }
-                        if labels_on && let Some(v) = s.values.get(j).copied().flatten() {
+                        if ser_labels_on && let Some(v) = s.values.get(j).copied().flatten() {
                             let t = fmt.format(v, None);
                             let in_end = chart.axis_number_formats.label_pos.as_deref() == Some("inEnd");
-                            let pos = if horizontal { c + nslots * bw / 2.0 - (k + 0.5) * bw } else { c - nslots * bw / 2.0 + (k + 0.5) * bw };
-                            draw_bar_label(ctx, &t, v, pb, pt, lo, len, bw, pos, horizontal, fam != Fam::Col, in_end, s.color);
+                            let pos = if horizontal {
+                                c + group_span / 2.0 - k * slot_step - bw * 0.5
+                            } else {
+                                c - group_span / 2.0 + k * slot_step + bw * 0.5
+                            };
+                            draw_bar_label(ctx, &t, v, pb, pt, lo, len, bw, pos, horizontal, fam != Fam::Col, in_end, rot_deg, fill);
                         }
                     }
                 }
@@ -372,12 +418,29 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
                     draw_runs(ctx, &pts, s.color, 2.25, s.smooth.then_some(plot));
                     let k = kinds.get(i).copied().unwrap_or(ChartKind::Line);
                     if k == ChartKind::LineMarkers && cw >= 3.0 {
-                        draw_markers(ctx, pts.iter().flatten().copied(), 3.5, s.color);
+                        draw_markers(ctx, pts.iter().flatten().copied(), 3.5, s.color, s.stroke);
                     }
-                    if labels_on {
+                    if ser_labels_on {
+                        let lpos = chart
+                            .axis_number_formats
+                            .series_label_positions
+                            .iter()
+                            .find(|(idx, _)| *idx == i as u32)
+                            .map(|(_, p)| p.as_str())
+                            .or_else(|| (i == 0).then_some(chart.axis_number_formats.label_pos.as_deref()).flatten());
                         for (j, p) in pts.iter().enumerate() {
                             if let (Some(p), Some(v)) = (p, s.values.get(j).copied().flatten()) {
-                                ctx.text(p[0], p[1] - 5.0, &fmt.format(v, None), LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Bottom));
+                                let txt = fmt.format(v, None);
+                                match lpos {
+                                    Some("b") => ctx.text(p[0], p[1] + 5.0, &txt, LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Top)),
+                                    Some("l") => ctx.text(p[0] - 6.0, p[1], &txt, LABEL_SIZE, TEXT, (HAlign::Right, VAlign::Middle)),
+                                    Some("r") => ctx.text(p[0] + 6.0, p[1], &txt, LABEL_SIZE, TEXT, (HAlign::Left, VAlign::Middle)),
+                                    Some("ctr") => ctx.text(p[0], p[1], &txt, LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Middle)),
+                                    None if chart.kind == ChartKind::Combo => {
+                                        ctx.text(p[0] + 6.0, p[1], &txt, LABEL_SIZE, TEXT, (HAlign::Left, VAlign::Middle));
+                                    }
+                                    _ => ctx.text(p[0], p[1] - 5.0, &txt, LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Bottom)),
+                                }
                             }
                         }
                     }
@@ -479,7 +542,7 @@ pub(super) fn scatter(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx) 
                 draw_runs(ctx, &px, s.color, 2.0, s.smooth.then_some(plot));
             }
             if !lines || px.len() <= 500 {
-                draw_markers(ctx, px.iter().flatten().copied(), 3.5, s.color);
+                draw_markers(ctx, px.iter().flatten().copied(), 3.5, s.color, s.stroke);
             }
         }
         if chart.data_labels && pts.len() <= MAX_LABELS {

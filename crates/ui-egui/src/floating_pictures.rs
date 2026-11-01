@@ -30,6 +30,7 @@ struct Key {
     doc: u64,
     id: u32,
     len: usize,
+    duotone: Option<[[u8; 3]; 2]>,
 }
 
 #[derive(Default)]
@@ -67,7 +68,19 @@ impl Cache {
     }
 
     /// The texture for picture `key` drawn with its longer side `want` pixels long.
+    #[cfg(test)]
     fn texture(&mut self, ctx: &egui::Context, key: Key, data: &[u8], want: u32) -> Option<TextureHandle> {
+        self.texture_with_duotone(ctx, key, data, want, None)
+    }
+
+    fn texture_with_duotone(
+        &mut self,
+        ctx: &egui::Context,
+        key: Key,
+        data: &[u8],
+        want: u32,
+        duotone: Option<[[u8; 3]; 2]>,
+    ) -> Option<TextureHandle> {
         let frame = ctx.cumulative_frame_nr();
         let side = texture_side(want, ctx.input(|i| i.max_texture_side));
         if let Some(entry) = self.entries.get_mut(&key) {
@@ -80,7 +93,7 @@ impl Cache {
         if let Some(old) = self.entries.remove(&key) {
             self.bytes = self.bytes.saturating_sub(old.bytes);
         }
-        let decoded = decode(data, side);
+        let decoded = decode_with_duotone(data, side, duotone);
         let bytes = decoded.as_ref().map_or(0, |(image, _)| image.pixels.len().saturating_mul(4));
         while self.entries.len() >= MAX_CACHE_ITEMS || self.bytes.saturating_add(bytes) > MAX_CACHE_BYTES {
             let oldest = self.entries.iter().filter(|(_, e)| e.used.saturating_add(1) < frame).min_by_key(|(_, e)| e.used).map(|(key, _)| *key);
@@ -121,7 +134,12 @@ fn texture_side(want: u32, gpu_max: usize) -> u32 {
 
 /// Decodes a picture to fit a `side` × `side` square, and says whether that is the whole picture
 /// (it was no larger, or `side` is as large as a texture may be).
+#[cfg(test)]
 fn decode(data: &[u8], side: u32) -> Option<(egui::ColorImage, bool)> {
+    decode_with_duotone(data, side, None)
+}
+
+fn decode_with_duotone(data: &[u8], side: u32, duotone: Option<[[u8; 3]; 2]>) -> Option<(egui::ColorImage, bool)> {
     let format = image::guess_format(data).ok()?;
     let (w, h) = image::ImageReader::with_format(Cursor::new(data), format).into_dimensions().ok()?;
     if w == 0 || h == 0 || w > MAX_SIDE || h > MAX_SIDE || u64::from(w) * u64::from(h) > MAX_PIXELS {
@@ -138,7 +156,15 @@ fn decode(data: &[u8], side: u32) -> Option<(egui::ColorImage, bool)> {
     if w.max(h) > side {
         picture = picture.thumbnail(side, side);
     }
-    let rgba = picture.into_rgba8();
+    let mut rgba = picture.into_rgba8();
+    if let Some([c0, c1]) = duotone {
+        for px in rgba.pixels_mut() {
+            let lum = (0.2126 * px[0] as f32 + 0.7152 * px[1] as f32 + 0.0722 * px[2] as f32) / 255.0;
+            for k in 0..3 {
+                px[k] = (c0[k] as f32 + (c1[k] as f32 - c0[k] as f32) * lum).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
     Some((egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw()), complete))
 }
 
@@ -156,11 +182,18 @@ pub(crate) fn forget_closed(ctx: &egui::Context, open: &[u64]) {
 
 /// The texture of picture `image` of workbook `doc`, drawn in `rect` (points); `None` when it
 /// can't be decoded or is too large to be.
-pub(crate) fn texture(ctx: &egui::Context, doc: u64, image: &Image, rect: egui::Rect) -> Option<TextureHandle> {
+pub(crate) fn texture(
+    ctx: &egui::Context,
+    doc: u64,
+    image: &Image,
+    theme: &gridcraft_engine::model::Theme,
+    rect: egui::Rect,
+) -> Option<TextureHandle> {
     let px = (rect.width().max(rect.height()) * ctx.pixels_per_point()).ceil();
     let want = if px.is_finite() && px > 0.0 { px.min(u32::MAX as f32) as u32 } else { 1 };
-    let key = Key { doc, id: image.id, len: image.data.len() };
-    cache(ctx).lock().unwrap_or_else(std::sync::PoisonError::into_inner).texture(ctx, key, &image.data, want)
+    let duotone = image.duotone.and_then(|[c0, c1]| Some([c0.resolve(theme)?, c1.resolve(theme)?]));
+    let key = Key { doc, id: image.id, len: image.data.len(), duotone };
+    cache(ctx).lock().unwrap_or_else(std::sync::PoisonError::into_inner).texture_with_duotone(ctx, key, &image.data, want, duotone)
 }
 
 #[cfg(test)]
@@ -175,7 +208,7 @@ mod tests {
     }
 
     fn key(doc: u64, id: u32, data: &[u8]) -> Key {
-        Key { doc, id, len: data.len() }
+        Key { doc, id, len: data.len(), duotone: None }
     }
 
     /// Runs one frame, so the frame number moves on as it does when the app paints.

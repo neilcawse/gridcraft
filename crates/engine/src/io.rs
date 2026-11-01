@@ -102,6 +102,19 @@ fn fit_imported_rows(wb: &mut Workbook) {
         rows.dedup();
         for row in rows {
             let before = wb.sheet(si).and_then(|sh| sh.rows.get(&row)).and_then(|i| i.size);
+            if let Some(before) = before {
+                let taller_font = wb.sheet(si).is_some_and(|sh| {
+                    sh.cells.row(row, 0, gridcraft_core::MAX_COLS - 1).any(|(_, cell)| {
+                        let size = wb.styles.get(cell.style).font.size;
+                        size > gridcraft_model::DEFAULT_FONT_SIZE
+                            && (size * 1.8).round().max(gridcraft_model::DEFAULT_ROW_HEIGHT * size / gridcraft_model::DEFAULT_FONT_SIZE)
+                                > before + 0.5
+                    })
+                });
+                if !taller_font {
+                    continue;
+                }
+            }
             crate::cmd::auto_row_height(wb, si, row);
             let Some(before) = before else { continue };
             let after = wb.sheet(si).and_then(|sh| sh.rows.get(&row)).and_then(|i| i.size);

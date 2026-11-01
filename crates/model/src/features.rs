@@ -594,6 +594,57 @@ pub struct AxisNumberFormats {
     /// Manual plot-area width fraction (`<c:plotArea><c:layout><c:manualLayout><c:w val="..."/>`).
     #[serde(default)]
     pub plot_w: Option<f32>,
+    /// Chart frame has `<c:spPr><a:ln><a:noFill/>` (no outer border).
+    #[serde(default)]
+    pub no_border: bool,
+    /// Primary category axis is hidden (`<c:catAx><c:delete val="1"/>`).
+    #[serde(default)]
+    pub cat_axis_deleted: bool,
+    /// Secondary value axis title (`<c:valAx><c:title>`).
+    #[serde(default)]
+    pub y2_title: Option<String>,
+    /// Bar/column overlap (`<c:barChart><c:overlap val="-100..=100"/>`).
+    #[serde(default)]
+    pub bar_overlap: Option<i16>,
+    /// Non-default category axis major tick mark (`<c:catAx><c:majorTickMark val="none"/>`, etc.).
+    #[serde(default)]
+    pub cat_major_tick: Option<String>,
+    /// Non-default value axis major tick mark (`<c:valAx><c:majorTickMark val="none"/>`, etc.).
+    #[serde(default)]
+    pub val_major_tick: Option<String>,
+    /// Major gridline colour (`<c:majorGridlines><c:spPr><a:ln><a:solidFill>`).
+    #[serde(default)]
+    pub gridline_color: Option<Color>,
+    /// Chart title is bold (`<c:title>...<a:defRPr b="1"/>`).
+    #[serde(default)]
+    pub title_bold: bool,
+    /// Chart title is left-aligned via `<c:manualLayout>`.
+    #[serde(default)]
+    pub title_left: bool,
+    /// Axis title is bold (`<c:title>...<a:defRPr b="1"/>`).
+    #[serde(default)]
+    pub axis_title_bold: bool,
+    /// Manual plot-area X offset fraction (`<c:plotArea><c:layout><c:manualLayout><c:x val="..."/>`).
+    #[serde(default)]
+    pub plot_x: Option<f32>,
+    /// Manual legend X offset fraction (`<c:legend><c:layout><c:manualLayout><c:x val="..."/>`).
+    #[serde(default)]
+    pub legend_x: Option<f32>,
+    /// Manual legend height fraction (`<c:legend><c:layout><c:manualLayout><c:h val="..."/>`).
+    #[serde(default)]
+    pub legend_h: Option<f32>,
+    /// Per-series data label visibility overrides in combo charts (`(series_idx, show)`).
+    #[serde(default)]
+    pub series_data_labels: Vec<(u32, bool)>,
+    /// Per-series data label placement overrides (`(series_idx, dLblPos)`).
+    #[serde(default)]
+    pub series_label_positions: Vec<(u32, String)>,
+    /// Per-series data label rotation in degrees (`(series_idx, deg)`).
+    #[serde(default)]
+    pub series_label_rotations: Vec<(u32, f32)>,
+    /// Per-series stroke / marker-outline colours (`(series_idx, color)`).
+    #[serde(default)]
+    pub series_strokes: Vec<(u32, Color)>,
 }
 impl Trendline {
     /// Longest forward / backward forecast kept from a file or a command, in x units. Excel's own
@@ -647,6 +698,9 @@ pub struct Image {
     pub data: std::sync::Arc<Vec<u8>>,
     pub mime: String,
     pub alt: String,
+    /// Optional DrawingML `<a:duotone>` two-colour luminance ramp (`[shadow, highlight]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duotone: Option<[Color; 2]>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -723,6 +777,9 @@ pub struct ShapeFormat {
     /// Paragraph indent level (`a:pPr lvl`, 0..=8).
     #[serde(default)]
     pub level: u8,
+    /// Cell reference linked to this shape (`textlink` attribute on `<xdr:sp>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_link: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

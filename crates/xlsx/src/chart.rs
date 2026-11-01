@@ -32,9 +32,14 @@ fn group_kind(g: &El) -> Option<ChartKind> {
             if stacked || pct {
                 ChartKind::LineStacked
             } else {
+                let any_ser_marker = g.kids("ser").any(|s| s.path(&["marker", "symbol"]).and_then(|m| m.attr("val")).is_some_and(|v| v != "none"));
                 let group_markers = g.child_val("marker").is_none_or(|v| v == "1" || v == "true");
                 let all_none = g.kids("ser").all(|s| s.path(&["marker", "symbol"]).and_then(|m| m.attr("val")) == Some("none"));
-                if !group_markers || (all_none && g.kids("ser").next().is_some()) { ChartKind::Line } else { ChartKind::LineMarkers }
+                if (!group_markers && !any_ser_marker) || (all_none && g.kids("ser").next().is_some()) {
+                    ChartKind::Line
+                } else {
+                    ChartKind::LineMarkers
+                }
             }
         }
         "pieChart" | "pie3DChart" | "ofPieChart" => ChartKind::Pie,
@@ -513,13 +518,24 @@ pub(crate) fn read_chart_with_budget(root: &El) -> Option<(Chart, Vec<PivotSerie
     let mut series = vec![];
     let mut caches = vec![];
     let mut budget = ChartReadBudget::new();
+    let d_active = |e: &El| e.child("dLbls").is_some_and(|d| !bool_val(d, "delete") && (bool_val(d, "showVal") || bool_val(d, "showPercent")));
+    let d_deleted = |e: &El| e.child("dLbls").is_some_and(|d| bool_val(d, "delete"));
+    let data_labels = groups
+        .iter()
+        .any(|(g, _)| g.kids("ser").any(d_active) || (d_active(g) && (g.kids("ser").next().is_none() || g.kids("ser").any(|s| !d_deleted(s)))));
+    let show_pct = |e: &El| e.child("dLbls").is_some_and(|d| !bool_val(d, "delete") && bool_val(d, "showPercent") && !bool_val(d, "showVal"));
+    let show_percent = data_labels && groups.iter().any(|(g, _)| show_pct(g) || g.kids("ser").any(show_pct));
+    let mut series_data_labels: Vec<(u32, bool)> = Vec::new();
+    let mut series_label_positions: Vec<(u32, String)> = Vec::new();
+    let mut series_label_rotations: Vec<(u32, f32)> = Vec::new();
+    let mut series_strokes: Vec<(u32, Color)> = Vec::new();
     for (gi, (g, k)) in groups.iter().enumerate() {
         let xy = matches!(k, ChartKind::Scatter | ChartKind::ScatterLines | ChartKind::Bubble);
         for s in g.kids("ser") {
+            let s_idx = series.len() as u32;
             let mut ser = read_series(s, xy, &mut budget);
             if groups.len() > 1 {
                 // Every series of a combo chart keeps its own group's kind, the first group's included.
-                ser.kind = Some(*k);
                 ser.kind = Some(*k);
             }
             if gi > 0 {
@@ -529,6 +545,32 @@ pub(crate) fn read_chart_with_budget(root: &El) -> Option<(Chart, Vec<PivotSerie
             if s.child("dLbls").is_none() {
                 ser.label_number_format = label_num_fmt(g.child("dLbls"), xy);
             }
+            let ser_show = if s.child("dLbls").is_some() { d_active(s) } else { d_active(g) };
+            if groups.len() > 1 && data_labels && ser_show != data_labels {
+                series_data_labels.push((s_idx, ser_show));
+            }
+            let dl_el = s.child("dLbls").or_else(|| g.child("dLbls"));
+            if groups.len() > 1
+                && s_idx > 0
+                && let Some(pos) = dl_el.and_then(|d| d.child_val("dLblPos")).map(str::trim).filter(|p| !p.is_empty())
+            {
+                series_label_positions.push((s_idx, pos.to_string()));
+            }
+            if let Some(rot) = dl_el
+                .and_then(|d| d.path(&["txPr", "bodyPr"]))
+                .and_then(|b| b.attr_i64("rot"))
+                .filter(|&r| r != 0 && r.abs() <= 5_400_000)
+                .map(|r| (r as f64 / 60_000.0).clamp(-90.0, 90.0) as f32)
+            {
+                series_label_rotations.push((s_idx, rot));
+            }
+            if let Some(mc) = s
+                .path(&["marker", "spPr", "ln", "solidFill"])
+                .and_then(dml_color)
+                .or_else(|| (s_idx > 0).then(|| s.path(&["spPr", "ln", "solidFill"]).and_then(dml_color)).flatten())
+            {
+                series_strokes.push((s_idx, mc));
+            }
             series.push(ser);
             if pivot.is_some() {
                 caches.push(pivot_series_cache(s, &mut budget));
@@ -536,13 +578,6 @@ pub(crate) fn read_chart_with_budget(root: &El) -> Option<(Chart, Vec<PivotSerie
         }
     }
     let kind = if groups.len() > 1 { ChartKind::Combo } else { first_kind };
-    let d_active = |e: &El| e.child("dLbls").is_some_and(|d| !bool_val(d, "delete") && (bool_val(d, "showVal") || bool_val(d, "showPercent")));
-    let d_deleted = |e: &El| e.child("dLbls").is_some_and(|d| bool_val(d, "delete"));
-    let data_labels = groups
-        .iter()
-        .any(|(g, _)| g.kids("ser").any(d_active) || (d_active(g) && (g.kids("ser").next().is_none() || g.kids("ser").any(|s| !d_deleted(s)))));
-    let show_pct = |e: &El| e.child("dLbls").is_some_and(|d| !bool_val(d, "delete") && bool_val(d, "showPercent") && !bool_val(d, "showVal"));
-    let show_percent = data_labels && groups.iter().any(|(g, _)| show_pct(g) || g.kids("ser").any(show_pct));
     let val_axes: Vec<&El> = plot.kids("valAx").collect();
     let cat_ax = plot.child("catAx").or_else(|| plot.child("dateAx"));
     let scatter = matches!(first_kind, ChartKind::Scatter | ChartKind::ScatterLines | ChartKind::Bubble);
@@ -572,8 +607,11 @@ pub(crate) fn read_chart_with_budget(root: &El) -> Option<(Chart, Vec<PivotSerie
         })
     };
     let no_fill = root.path(&["spPr", "noFill"]).is_some();
+    let no_border = !no_fill && root.path(&["spPr", "ln", "noFill"]).is_some();
     let hole_size = first.child_val("holeSize").and_then(|v| v.trim().parse::<u8>().ok()).map(|v| v.clamp(1, 90)).filter(|&v| v != 50);
     let gap_width = first.child_val("gapWidth").and_then(|v| v.trim().parse::<u16>().ok()).map(|v| v.min(500)).filter(|&v| v != 150);
+    let bar_overlap =
+        first.child_val("overlap").and_then(|v| v.trim().parse::<i16>().ok()).map(|v| v.clamp(-100, 100)).filter(|&v| v != 0 && v != 100);
     let (series_line_color, point_colors, point_line_colors) = read_series_styling(first);
     let first_dlbls = first.kids("ser").next().and_then(|s0| s0.child("dLbls")).or_else(|| first.child("dLbls"));
     let label_pos = first_dlbls.and_then(|d| d.child_val("dLblPos")).map(str::trim).filter(|s| !s.is_empty()).map(String::from);
@@ -590,9 +628,30 @@ pub(crate) fn read_chart_with_budget(root: &El) -> Option<(Chart, Vec<PivotSerie
     } else {
         None
     };
-    let plot_w =
-        plot.path(&["layout", "manualLayout"]).and_then(|m| f64_val(m, "w")).filter(|v| v.is_finite() && (0.05..=1.0).contains(v)).map(|v| v as f32);
+    let plot_manual = plot.path(&["layout", "manualLayout"]);
+    let plot_w = plot_manual.and_then(|m| f64_val(m, "w")).filter(|v| v.is_finite() && (0.05..=1.0).contains(v)).map(|v| v as f32);
+    let plot_x = plot_manual.and_then(|m| f64_val(m, "x")).filter(|v| v.is_finite() && (0.001..=0.95).contains(v)).map(|v| v as f32);
+    let leg_manual = chart.path(&["legend", "layout", "manualLayout"]);
+    let legend_x = leg_manual.and_then(|m| f64_val(m, "x")).filter(|v| v.is_finite() && (0.1..=0.95).contains(v)).map(|v| v as f32);
+    let legend_h = leg_manual.and_then(|m| f64_val(m, "h")).filter(|v| v.is_finite() && (0.2..=1.0).contains(v)).map(|v| v as f32);
     let primary_val_ax = if scatter { y_ax } else { val_ax_of(&first_axes).or(y_ax) };
+    let sec_val_ax = secondary_ids.as_ref().and_then(|ids| val_ax_of(ids));
+    let y2_title = sec_val_ax.and_then(|a| a.child("title")).and_then(rich_title);
+    let cat_axis_deleted = (!scatter) && x_ax.is_some_and(|a| bool_val(a, "delete"));
+    let cat_major_tick = (!scatter)
+        .then(|| x_ax.and_then(|a| a.child_val("majorTickMark")).filter(|v| matches!(*v, "none" | "in" | "cross")).map(str::to_string))
+        .flatten();
+    let val_major_tick =
+        primary_val_ax.and_then(|a| a.child_val("majorTickMark")).filter(|v| matches!(*v, "none" | "in" | "cross")).map(str::to_string);
+    let gridline_color = val_axes.iter().find_map(|a| a.path(&["majorGridlines", "spPr", "ln", "solidFill"]).and_then(dml_color));
+    let is_bold_tx = |e: Option<&El>| {
+        e.and_then(|t| t.child("txPr").or_else(|| t.path(&["tx", "rich"])))
+            .and_then(|r| r.kids("p").find_map(|p| p.path(&["pPr", "defRPr"])))
+            .is_some_and(|r| r.flag("b", false))
+    };
+    let title_bold = is_bold_tx(chart.child("title"));
+    let title_left = chart.path(&["title", "layout", "manualLayout"]).and_then(|m| f64_val(m, "x")).is_some_and(|x| x.is_finite() && x < 0.15);
+    let axis_title_bold = [x_ax, primary_val_ax, sec_val_ax].into_iter().flatten().any(|a| is_bold_tx(a.child("title")));
     let scaling = primary_val_ax.and_then(|a| a.child("scaling"));
     let y_min = scaling.and_then(|s| f64_val(s, "min")).filter(|v| v.is_finite());
     let y_max = scaling.and_then(|s| f64_val(s, "max")).filter(|v| v.is_finite());
@@ -607,6 +666,7 @@ pub(crate) fn read_chart_with_budget(root: &El) -> Option<(Chart, Vec<PivotSerie
             y: axis_num_fmt(y_ax),
             y2: None,
             no_fill,
+            no_border,
             hole_size,
             point_colors,
             show_percent,
@@ -619,6 +679,22 @@ pub(crate) fn read_chart_with_budget(root: &El) -> Option<(Chart, Vec<PivotSerie
             percent_format,
             label_pos,
             plot_w,
+            cat_axis_deleted: false,
+            y2_title: None,
+            bar_overlap,
+            cat_major_tick: None,
+            val_major_tick,
+            gridline_color,
+            title_bold,
+            title_left,
+            axis_title_bold,
+            plot_x,
+            legend_x,
+            legend_h,
+            series_data_labels,
+            series_label_positions,
+            series_label_rotations,
+            series_strokes,
         }
     } else {
         AxisNumberFormats {
@@ -626,6 +702,7 @@ pub(crate) fn read_chart_with_budget(root: &El) -> Option<(Chart, Vec<PivotSerie
             y: if pct_unmodelled(&first_axes) { None } else { axis_num_fmt(primary_val_ax) },
             y2: secondary_ids.filter(|ids| !pct_unmodelled(ids)).and_then(|ids| axis_num_fmt(val_ax_of(&ids))),
             no_fill,
+            no_border,
             hole_size,
             point_colors,
             show_percent,
@@ -638,6 +715,22 @@ pub(crate) fn read_chart_with_budget(root: &El) -> Option<(Chart, Vec<PivotSerie
             percent_format,
             label_pos,
             plot_w,
+            cat_axis_deleted,
+            y2_title,
+            bar_overlap,
+            cat_major_tick,
+            val_major_tick,
+            gridline_color,
+            title_bold,
+            title_left,
+            axis_title_bold,
+            plot_x,
+            legend_x,
+            legend_h,
+            series_data_labels,
+            series_label_positions,
+            series_label_rotations,
+            series_strokes,
         }
     };
     let legend = match chart.child("legend") {
@@ -1155,16 +1248,30 @@ fn dlbls(show: bool, pct: bool, fmt: Option<&str>, pos: Option<&str>) -> String 
 
 fn group_xml(g: G, series: &[(usize, &Series)], ch: &Chart, axes: (u32, u32), wb: &Workbook, si: usize) -> String {
     let sers: String = series.iter().map(|(i, s)| series_xml(s, *i, g, ch, wb, si)).collect();
+    let group_show = series
+        .first()
+        .and_then(|(i, _)| ch.axis_number_formats.series_data_labels.iter().find(|(idx, _)| *idx == *i as u32).map(|(_, sh)| *sh))
+        .unwrap_or(ch.data_labels);
+    let group_pos = series
+        .first()
+        .and_then(|(i, _)| ch.axis_number_formats.series_label_positions.iter().find(|(idx, _)| *idx == *i as u32).map(|(_, p)| p.as_str()))
+        .or(ch.axis_number_formats.label_pos.as_deref());
     let dl = dlbls(
-        ch.data_labels,
+        group_show,
         ch.axis_number_formats.show_percent,
         ch.axis_number_formats.percent_format.as_deref().filter(|_| ch.axis_number_formats.show_percent),
-        valid_dlbl_pos(g, ch.axis_number_formats.label_pos.as_deref()),
+        valid_dlbl_pos(g, group_pos),
     );
     let ax = format!("<c:axId val=\"{}\"/><c:axId val=\"{}\"/>", axes.0, axes.1);
     match g {
         G::Bar { bar, grouping } => {
-            let overlap = if grouping == "clustered" { String::new() } else { "<c:overlap val=\"100\"/>".into() };
+            let overlap = if let Some(ov) = ch.axis_number_formats.bar_overlap {
+                format!("<c:overlap val=\"{ov}\"/>")
+            } else if grouping == "clustered" {
+                String::new()
+            } else {
+                "<c:overlap val=\"100\"/>".into()
+            };
             let gw = ch.axis_number_formats.gap_width.unwrap_or(150).min(500);
             format!(
                 "<c:barChart><c:barDir val=\"{}\"/><c:grouping val=\"{grouping}\"/><c:varyColors val=\"0\"/>{sers}{dl}<c:gapWidth val=\"{gw}\"/>{overlap}{ax}</c:barChart>",
@@ -1213,6 +1320,7 @@ struct Ax<'a> {
     min: Option<f64>,
     max: Option<f64>,
     rot: Option<f32>,
+    major_tick: Option<&'a str>,
 }
 
 fn axis_xml(a: &Ax<'_>) -> String {
@@ -1242,9 +1350,10 @@ fn axis_xml(a: &Ax<'_>) -> String {
         let rot = (f64::from(deg.clamp(-90.0, 90.0)) * 60_000.0).round() as i64;
         let _ = write!(s, "<c:txPr><a:bodyPr rot=\"{rot}\"/><a:lstStyle/><a:p><a:pPr><a:defRPr/></a:pPr><a:endParaRPr/></a:p></c:txPr>");
     }
+    let mt = a.major_tick.filter(|v| matches!(*v, "none" | "in" | "cross" | "out")).unwrap_or("out");
     let _ = write!(
         s,
-        "<c:majorTickMark val=\"out\"/><c:minorTickMark val=\"none\"/><c:tickLblPos val=\"nextTo\"/><c:crossAx val=\"{}\"/><c:crosses val=\"{}\"/>",
+        "<c:majorTickMark val=\"{mt}\"/><c:minorTickMark val=\"none\"/><c:tickLblPos val=\"nextTo\"/><c:crossAx val=\"{}\"/><c:crosses val=\"{}\"/>",
         a.cross,
         if a.crosses_max { "max" } else { "autoZero" }
     );
@@ -1285,8 +1394,17 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
         Some(_) => s.push_str("<c:autoTitleDeleted val=\"1\"/>"),
         None => s.push_str("<c:autoTitleDeleted val=\"0\"/>"),
     }
-    if let Some(pw) = ch.axis_number_formats.plot_w.filter(|v| v.is_finite() && (0.05..=1.0).contains(v)) {
-        let _ = write!(s, "<c:plotArea><c:layout><c:manualLayout><c:w val=\"{}\"/></c:manualLayout></c:layout>", num(f64::from(pw)));
+    let px = ch.axis_number_formats.plot_x.filter(|v| v.is_finite() && (0.001..=0.95).contains(v));
+    let pw = ch.axis_number_formats.plot_w.filter(|v| v.is_finite() && (0.05..=1.0).contains(v));
+    if px.is_some() || pw.is_some() {
+        s.push_str("<c:plotArea><c:layout><c:manualLayout>");
+        if let Some(x) = px {
+            let _ = write!(s, "<c:x val=\"{}\"/>", num(f64::from(x)));
+        }
+        if let Some(w) = pw {
+            let _ = write!(s, "<c:w val=\"{}\"/>", num(f64::from(w)));
+        }
+        s.push_str("</c:manualLayout></c:layout>");
     } else {
         s.push_str("<c:plotArea><c:layout/>");
     }
@@ -1305,11 +1423,13 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
             s.push_str(&group_xml(primary_g, &bars, ch, (1, 2), wb, si));
         }
         if !lines.is_empty() {
-            s.push_str(&group_xml(G::Line { stacked: false, markers: false }, &lines, ch, (1, 2), wb, si));
+            let markers = lines.iter().any(|(_, x)| x.kind == Some(ChartKind::LineMarkers));
+            s.push_str(&group_xml(G::Line { stacked: false, markers }, &lines, ch, (1, 2), wb, si));
         }
         if !sec.is_empty() {
             let g = match sec.first().and_then(|(_, x)| x.kind).map(group_for) {
                 Some(b @ G::Bar { .. }) => b,
+                Some(l @ G::Line { .. }) => l,
                 _ => G::Line { stacked: false, markers: false },
             };
             s.push_str(&group_xml(g, &sec, ch, (3, 4), wb, si));
@@ -1323,6 +1443,8 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
         };
         s.push_str(&group_xml(primary_g, &all, ch, (1, 2), wb, si));
     }
+    let cat_tick = ch.axis_number_formats.cat_major_tick.as_deref();
+    let val_tick = ch.axis_number_formats.val_major_tick.as_deref();
     match primary_g {
         G::Pie | G::Doughnut => {}
         G::Scatter { .. } | G::Bubble => {
@@ -1339,6 +1461,7 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 min: None,
                 max: None,
                 rot: None,
+                major_tick: None,
             }));
             s.push_str(&axis_xml(&Ax {
                 cat: false,
@@ -1353,6 +1476,7 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 min: ch.axis_number_formats.y_min,
                 max: ch.axis_number_formats.y_max,
                 rot: None,
+                major_tick: val_tick,
             }));
         }
         G::Bar { bar: true, .. } => {
@@ -1361,7 +1485,7 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 id: 1,
                 cross: 2,
                 pos: "l",
-                delete: false,
+                delete: ch.axis_number_formats.cat_axis_deleted,
                 grid: false,
                 title: ch.x_title.as_deref(),
                 crosses_max: false,
@@ -1369,6 +1493,7 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 min: None,
                 max: None,
                 rot: ch.axis_number_formats.x_label_rotation,
+                major_tick: cat_tick,
             }));
             s.push_str(&axis_xml(&Ax {
                 cat: false,
@@ -1383,6 +1508,7 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 min: ch.axis_number_formats.y_min,
                 max: ch.axis_number_formats.y_max,
                 rot: None,
+                major_tick: val_tick,
             }));
         }
         _ => {
@@ -1391,7 +1517,7 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 id: 1,
                 cross: 2,
                 pos: "b",
-                delete: false,
+                delete: ch.axis_number_formats.cat_axis_deleted,
                 grid: false,
                 title: ch.x_title.as_deref(),
                 crosses_max: false,
@@ -1399,6 +1525,7 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 min: None,
                 max: None,
                 rot: ch.axis_number_formats.x_label_rotation,
+                major_tick: cat_tick,
             }));
             s.push_str(&axis_xml(&Ax {
                 cat: false,
@@ -1413,6 +1540,7 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 min: ch.axis_number_formats.y_min,
                 max: ch.axis_number_formats.y_max,
                 rot: None,
+                major_tick: val_tick,
             }));
         }
     }
@@ -1430,6 +1558,7 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
             min: None,
             max: None,
             rot: None,
+            major_tick: None,
         }));
         s.push_str(&axis_xml(&Ax {
             cat: false,
@@ -1438,12 +1567,13 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
             pos: "r",
             delete: false,
             grid: false,
-            title: None,
+            title: ch.axis_number_formats.y2_title.as_deref(),
             crosses_max: true,
             fmt: ch.axis_number_formats.y2.as_deref(),
             min: None,
             max: None,
             rot: None,
+            major_tick: None,
         }));
     }
     s.push_str("</c:plotArea>");
@@ -1455,11 +1585,28 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
         LegendPos::Right => Some("r"),
     };
     if let Some(p) = pos {
-        let _ = write!(s, "<c:legend><c:legendPos val=\"{p}\"/><c:overlay val=\"0\"/></c:legend>");
+        let lx = ch.axis_number_formats.legend_x.filter(|v| v.is_finite() && (0.1..=0.95).contains(v));
+        let lh = ch.axis_number_formats.legend_h.filter(|v| v.is_finite() && (0.2..=1.0).contains(v));
+        let lay = if lx.is_some() || lh.is_some() {
+            let mut m = String::from("<c:layout><c:manualLayout>");
+            if let Some(x) = lx {
+                let _ = write!(m, "<c:x val=\"{}\"/>", num(f64::from(x)));
+            }
+            if let Some(h) = lh {
+                let _ = write!(m, "<c:h val=\"{}\"/>", num(f64::from(h)));
+            }
+            m.push_str("</c:manualLayout></c:layout>");
+            m
+        } else {
+            String::new()
+        };
+        let _ = write!(s, "<c:legend><c:legendPos val=\"{p}\"/>{lay}<c:overlay val=\"0\"/></c:legend>");
     }
     s.push_str("<c:plotVisOnly val=\"1\"/><c:dispBlanksAs val=\"gap\"/></c:chart>");
     if ch.axis_number_formats.no_fill {
         s.push_str("<c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr>");
+    } else if ch.axis_number_formats.no_border {
+        s.push_str("<c:spPr><a:ln><a:noFill/></a:ln></c:spPr>");
     }
     s.push_str("</c:chartSpace>");
     s

@@ -23,7 +23,7 @@ use legend::draw_legend;
 pub use legend::{Swatch, legend_entries};
 pub use trend::supports_trendline;
 
-pub(crate) const TEXT: Rgba = [0x59, 0x59, 0x59, 0xFF];
+pub(crate) const TEXT: Rgba = [0x1A, 0x1A, 0x1A, 0xFF];
 const DARK_TEXT: Rgba = [0x00, 0x00, 0x00, 0xFF];
 const GRID: Rgba = [0xD9, 0xD9, 0xD9, 0xFF];
 const AXIS: Rgba = [0xBF, 0xBF, 0xBF, 0xFF];
@@ -33,9 +33,8 @@ pub(crate) const UP: Rgba = [0x3E, 0x9B, 0x5F, 0xFF];
 pub(crate) const DOWN: Rgba = [0xD6, 0x4F, 0x45, 0xFF];
 
 const TITLE_SIZE: f32 = 14.0;
-const LABEL_SIZE: f32 = 9.0;
-const AXIS_TITLE_SIZE: f32 = 10.0;
-/// Most categories drawn by category-axis charts.
+const LABEL_SIZE: f32 = 10.0;
+const AXIS_TITLE_SIZE: f32 = 11.0;
 const MAX_CATS: usize = 20_000;
 /// Lines with more points than this are decimated (min/max per pixel column).
 const MAX_LINE_PTS: usize = 2000;
@@ -47,6 +46,12 @@ const MAX_LABELS: usize = 300;
 struct Ctx<'a> {
     out: Vec<Prim>,
     m: &'a dyn Measure,
+    grid_color: Rgba,
+    cat_axis_deleted: bool,
+    chart_w: f32,
+    chart_h: f32,
+    legend_x: Option<f32>,
+    legend_h: Option<f32>,
 }
 
 impl Ctx<'_> {
@@ -143,21 +148,50 @@ pub fn render(chart: &Chart, data: &ChartData, w: f32, h: f32, m: &dyn Measure) 
     if data.series.is_empty() && title.is_none() {
         return vec![];
     }
-    let mut ctx = Ctx { out: Vec::new(), m };
+    let grid_color = data
+        .series
+        .first()
+        .and_then(|s| s.point_strokes.iter().find(|&&(idx, _)| idx == u32::MAX).map(|&(_, c)| c))
+        .or_else(|| {
+            chart.axis_number_formats.gridline_color.and_then(|c| c.resolve(&gridcraft_model::Theme::default())).map(|[r, g, b]| [r, g, b, 0xFF])
+        })
+        .unwrap_or(GRID);
+    let mut ctx = Ctx {
+        out: Vec::new(),
+        m,
+        grid_color,
+        cat_axis_deleted: chart.axis_number_formats.cat_axis_deleted,
+        chart_w: w,
+        chart_h: h,
+        legend_x: chart.axis_number_formats.legend_x,
+        legend_h: chart.axis_number_formats.legend_h,
+    };
     if !chart.axis_number_formats.no_fill {
-        ctx.out.push(Prim::Rect { x: 0.0, y: 0.0, w, h, fill: Some(WHITE), stroke: Some((GRID, 1.0)), radius: 0.0 });
+        let stroke = (!chart.axis_number_formats.no_border).then_some((GRID, 1.0));
+        ctx.out.push(Prim::Rect { x: 0.0, y: 0.0, w, h, fill: Some(WHITE), stroke, radius: 0.0 });
     }
     let pad = (w.min(h) * 0.04).clamp(2.0, 10.0);
     let mut area = Bx { x: pad, y: pad, w: w - 2.0 * pad, h: h - 2.0 * pad };
     if let Some(t) = title {
-        let size = TITLE_SIZE.min(h * 0.12).max(4.0);
+        let size = TITLE_SIZE.min(h * 0.14).max(4.0);
         let t = ctx.fit(&t, size, area.w);
-        ctx.text(w / 2.0, area.y, &t, size, TEXT, (HAlign::Center, VAlign::Top));
+        let (tx, align) = if chart.axis_number_formats.title_left { (area.x, HAlign::Left) } else { (w / 2.0, HAlign::Center) };
+        ctx.out.push(Prim::Text {
+            x: tx,
+            y: area.y,
+            text: t,
+            size,
+            color: TEXT,
+            bold: chart.axis_number_formats.title_bold,
+            align,
+            valign: VAlign::Top,
+            rotation: 0.0,
+        });
         let used = size * 1.3 + 4.0;
         area.y += used;
         area.h -= used;
     } else if chart.title.as_deref().is_some_and(|t| !t.is_empty() && t.trim().is_empty()) {
-        let size = TITLE_SIZE.min(h * 0.12).max(4.0);
+        let size = TITLE_SIZE.min(h * 0.14).max(4.0);
         let used = size * 1.3 + 4.0;
         area.y += used;
         area.h -= used;

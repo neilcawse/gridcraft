@@ -54,9 +54,13 @@ pub fn legend_entries(chart: &Chart, data: &ChartData) -> Vec<(String, Rgba, Swa
             let total = data.series.first().map(|s| s.color).unwrap_or(TEXT);
             vec![("Increase".into(), UP, Swatch::Box), ("Decrease".into(), DOWN, Swatch::Box), ("Total".into(), total, Swatch::Box)]
         }
+        _ if data.series.len() == 1 && chart.axis_number_formats.point_colors.len() > 1 => {
+            let n = first_len(data).min(MAX_CATS);
+            (0..n).map(|j| (cat_label(data, j), point_color(data, j), Swatch::Box)).collect()
+        }
         _ => {
             let series = data.series.iter().take(MAX_SERIES);
-            let mut out: Vec<(String, Rgba, Swatch)> = series
+            let mut out: Vec<_> = series
                 .clone()
                 .map(|s| {
                     let sw = match plot_kind(chart, s) {
@@ -91,9 +95,9 @@ fn draw_swatch(ctx: &mut Ctx, sw: Swatch, x: f32, yc: f32, s: f32, color: Rgba, 
         Swatch::Line => ctx.hline(x, x + 2.0 * s, yc, color, 2.0),
         Swatch::LineMarker => {
             ctx.hline(x, x + 2.0 * s, yc, color, 2.0);
-            ctx.out.push(Prim::Circle { cx: x + s, cy: yc, r: s * 0.35, fill: Some(color), stroke: None });
+            ctx.out.push(Prim::Circle { cx: x + s, cy: yc, r: s * 0.35, fill: Some(color), stroke: stroke.map(|c| (c, 1.25)) });
         }
-        Swatch::Marker => ctx.out.push(Prim::Circle { cx: x + s, cy: yc, r: s * 0.4, fill: Some(color), stroke: None }),
+        Swatch::Marker => ctx.out.push(Prim::Circle { cx: x + s / 2.0, cy: yc, r: s * 0.4, fill: Some(color), stroke: stroke.map(|c| (c, 1.25)) }),
     }
 }
 
@@ -154,14 +158,24 @@ pub(super) fn draw_legend(ctx: &mut Ctx, entries: &[(String, Rgba, Swatch)], pos
             if pos == LegendPos::Bottom { Bx { h: area.h - used, ..area } } else { Bx { y: area.y + used, h: area.h - used, ..area } }
         }
         LegendPos::Left | LegendPos::Right => {
-            let colw = entries.iter().map(|e| item_w(ctx, e)).fold(0.0f32, f32::max).min(area.w * 0.35);
-            let max_rows = ((area.h / row_h).floor() as usize).max(1);
+            let manual_w = if pos == LegendPos::Right {
+                ctx.legend_x.filter(|&lx| (0.45..=0.85).contains(&lx)).map(|lx| (area.right() - ctx.chart_w * lx).max(0.0))
+            } else {
+                None
+            };
+            let colw = manual_w.unwrap_or_else(|| entries.iter().map(|e| item_w(ctx, e)).fold(0.0f32, f32::max).min(area.w * 0.38));
+            let target_h = ctx.legend_h.filter(|&lh| (0.3..=1.0).contains(&lh)).map(|lh| (ctx.chart_h * lh).min(area.h));
+            let eff_row_h = match target_h {
+                Some(th) if !entries.is_empty() => (th / entries.len() as f32).clamp(row_h, row_h * 2.4),
+                _ => row_h,
+            };
+            let max_rows = ((area.h / eff_row_h).floor() as usize).max(1);
             let n = entries.len().min(max_rows);
-            let lh = n as f32 * row_h;
+            let lh = n as f32 * eff_row_h;
             let y0 = area.y + (area.h - lh).max(0.0) / 2.0;
             let x0 = if pos == LegendPos::Right { area.right() - colw } else { area.x };
             for (i, e) in entries.iter().take(n).enumerate() {
-                let yc = y0 + i as f32 * row_h + row_h / 2.0;
+                let yc = y0 + i as f32 * eff_row_h + eff_row_h / 2.0;
                 draw_swatch(ctx, e.2, x0, yc, s, e.1, entry_stroke(data, i));
                 let sx = swatch_w(e.2, s) + gap;
                 let t = ctx.fit(&e.0, size, (colw - sx).max(0.0) + 0.5);

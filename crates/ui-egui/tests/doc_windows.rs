@@ -420,3 +420,26 @@ fn arrange_all_lays_out_the_native_windows_active_first() {
     let r = |x, y, w, h| craft_window::Rect::new(x, y, w, h);
     assert_eq!(tiled, [r(0.0, 0.0, 500.0, 400.0), r(500.0, 0.0, 500.0, 400.0), r(0.0, 400.0, 1000.0, 400.0)]);
 }
+
+#[test]
+fn screenshot_captures_active_second_window_without_document_mismatch() {
+    let mut desk = Desk::new(true);
+    desk.app.run("file.new", json!({})).unwrap();
+    desk.frames(3);
+    let (w1, w2) = (desk.window_of(0), desk.window_of(1));
+    assert_eq!(desk.windows.root_window(), Some(w1));
+    assert_eq!(desk.app.session.active_window(), Some(w2));
+
+    let (req, rx) = gridcraft_ui_egui::control::ControlRequest::new("ui.screenshot", json!({}));
+    desk.app.control_rx = Some({
+        let (req_tx, req_rx) = std::sync::mpsc::channel();
+        let _ = req_tx.send(req);
+        req_rx
+    });
+    let sent = desk.frames(5);
+    assert!(rx.try_recv().is_err(), "the queued screenshot for the active 2nd window must not fail with document mismatch");
+    assert!(
+        sent.iter().any(|(vp, cmd)| *vp == ViewportId::ROOT && matches!(cmd, ViewportCommand::Screenshot(_))),
+        "ViewportCommand::Screenshot is issued on ROOT for the active 2nd window: {sent:?}"
+    );
+}

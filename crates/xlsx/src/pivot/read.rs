@@ -187,7 +187,12 @@ fn read_cache(cx: &mut Ctx<'_>, part: &str, sheet_name: &str) -> Option<CacheIn>
 }
 
 /// Reads the PivotTables related to a worksheet part.
-pub fn read_pivots(cx: &mut Ctx<'_>, caches: &mut CachesIn, sheet_part: &str, sheet_name: &str) -> Result<Vec<PivotTable>, IoError> {
+pub fn read_pivots(
+    cx: &mut Ctx<'_>,
+    caches: &mut CachesIn,
+    sheet_part: &str,
+    sheet: &mut gridcraft_model::Sheet,
+) -> Result<Vec<PivotTable>, IoError> {
     let rels = cx.pkg.rels(sheet_part)?;
     let mut out = Vec::new();
     for rel in rels.iter().filter(|r| r.kind == "pivotTable" && !r.external) {
@@ -210,7 +215,7 @@ pub fn read_pivots(cx: &mut Ctx<'_>, caches: &mut CachesIn, sheet_part: &str, sh
         let cache = match caches.parsed.get(&cache_part) {
             Some(c) => c.clone(),
             None => {
-                let c = read_cache(cx, &cache_part, sheet_name);
+                let c = read_cache(cx, &cache_part, &sheet.name);
                 caches.parsed.insert(cache_part.clone(), c.clone());
                 c
             }
@@ -218,6 +223,7 @@ pub fn read_pivots(cx: &mut Ctx<'_>, caches: &mut CachesIn, sheet_part: &str, sh
         let Some(cache) = cache else { continue };
         if let Some(pt) = read_table(cx, &x, &cache, caches.next_id) {
             caches.next_id = caches.next_id.saturating_add(1);
+            apply_pivot_style(cx, &x, &pt, sheet);
             out.push(pt);
         }
     }
@@ -592,4 +598,247 @@ fn read_table(cx: &mut Ctx<'_>, x: &El, cache: &CacheIn, id: u32) -> Option<Pivo
     let above = if pages.is_empty() { 0 } else { pages.len() as u32 + 1 };
     pt.last_range = Some(RangeRef::new(CellRef::new(loc.start.row.saturating_sub(above), loc.start.col), loc.end));
     Some(pt)
+}
+
+/// Applies the PivotTable's `pivotTableStyleInfo` (plus any custom `<tableStyle>` from `styles.xml`)
+/// to cells within the PivotTable's rendered location that don't already carry explicit formatting.
+fn apply_pivot_style(cx: &mut Ctx<'_>, x: &El, pt: &PivotTable, sheet: &mut gridcraft_model::Sheet) {
+    use gridcraft_model::{BorderLine, BorderStyle, Cell, Color, Fill, PatternType, Style, Underline};
+
+    let Some(loc_el) = x.child("location") else { return };
+    let Some(loc) = loc_el.attr("ref").and_then(|r| RangeRef::parse(&r.replace('$', ""))) else { return };
+    const MAX_PIVOT_STYLE_CELLS: u64 = 100_000;
+    if loc.count() > MAX_PIVOT_STYLE_CELLS {
+        return;
+    }
+    let loc_rows = loc.end.row.saturating_sub(loc.start.row).saturating_add(1);
+    let loc_cols = loc.end.col.saturating_sub(loc.start.col).saturating_add(1);
+    let first_data_row = loc_el.attr_u32("firstDataRow").unwrap_or(1).min(loc_rows);
+    let first_data_col = loc_el.attr_u32("firstDataCol").unwrap_or(1).min(loc_cols);
+    let si = x.child("pivotTableStyleInfo");
+    let show_row_headers = si.is_none_or(|e| e.flag("showRowHeaders", true));
+    let show_col_headers = si.is_none_or(|e| e.flag("showColHeaders", true));
+    let show_row_stripes = si.is_some_and(|e| e.flag("showRowStripes", false));
+    let style_name = pt.style.as_str();
+    let custom = cx.table_styles.get(style_name).cloned();
+
+    let rest = style_name.find("PivotStyle").map(|i| &style_name[i + 10..]).unwrap_or(style_name);
+    let (fam, n) = ["Light", "Medium", "Dark"]
+        .iter()
+        .find_map(|f| {
+            rest.strip_prefix(f).map(|num| {
+                let digits: String = num.chars().take_while(|c| c.is_ascii_digit()).collect();
+                (*f, digits.parse::<u32>().unwrap_or(16))
+            })
+        })
+        .unwrap_or(("Light", 16));
+    let k = n.saturating_sub(1) % 7;
+    let acc = if k == 0 { None } else { Some(3 + k as u8) };
+    let tone = |tint: i16| match acc {
+        Some(a) => Color::Theme(a, tint),
+        None => Color::Theme(1, tint.clamp(-1000, 1000)),
+    };
+    let light_tint = match acc {
+        Some(a) => Color::Theme(a, 800),
+        None => Color::Theme(0, -150),
+    };
+
+    let merge_dxf = |dst: &mut Style, dxf: &Style| {
+        if dxf.fill.pattern != PatternType::None {
+            dst.fill = dxf.fill;
+        }
+        if dxf.font.color != Color::Auto || dxf.dxf_stated.color {
+            dst.font.color = dxf.font.color;
+        }
+        if dxf.font.bold || dxf.dxf_stated.bold {
+            dst.font.bold = dxf.font.bold;
+        }
+        if dxf.font.italic || dxf.dxf_stated.italic {
+            dst.font.italic = dxf.font.italic;
+        }
+        if dxf.font.underline != Underline::None || dxf.dxf_stated.underline {
+            dst.font.underline = dxf.font.underline;
+        }
+        for (d, s) in [
+            (&mut dst.borders.left, dxf.borders.left),
+            (&mut dst.borders.right, dxf.borders.right),
+            (&mut dst.borders.top, dxf.borders.top),
+            (&mut dst.borders.bottom, dxf.borders.bottom),
+        ] {
+            if !s.is_none() {
+                *d = s;
+            }
+        }
+    };
+
+    let apply_cell = |cx: &mut Ctx<'_>, sheet: &mut gridcraft_model::Sheet, c: CellRef, layer: &Style| {
+        let own_id = sheet.style_id(c);
+        let own = cx.styles.get(own_id).clone();
+        let mut merged = own.clone();
+        if own.fill.pattern == PatternType::None && layer.fill.pattern != PatternType::None {
+            merged.fill = layer.fill;
+        }
+        if own.font.color == Color::Auto && layer.font.color != Color::Auto {
+            merged.font.color = layer.font.color;
+        }
+        if layer.font.bold {
+            merged.font.bold = true;
+        }
+        for (dst, own_b, lay_b) in [
+            (&mut merged.borders.left, own.borders.left, layer.borders.left),
+            (&mut merged.borders.right, own.borders.right, layer.borders.right),
+            (&mut merged.borders.top, own.borders.top, layer.borders.top),
+            (&mut merged.borders.bottom, own.borders.bottom, layer.borders.bottom),
+        ] {
+            if own_b.is_none() && !lay_b.is_none() {
+                *dst = lay_b;
+            }
+        }
+        if merged != own {
+            let id = cx.styles.intern(merged);
+            match sheet.cells.get_mut(c) {
+                Some(cell) => cell.style = id,
+                None => {
+                    let mut cell = Cell::default();
+                    cell.style = id;
+                    sheet.set_cell(c, cell);
+                }
+            }
+        }
+    };
+
+    // 1. Page filter cells above `loc.start.row`.
+    let pages_len = x.child("pageFields").map(|p| p.kids("pageField").count()).unwrap_or(0) as u32;
+    if pages_len > 0 && loc.start.row > pages_len {
+        let start_r = loc.start.row - pages_len - 1;
+        for i in 0..pages_len {
+            let r = start_r + i;
+            let mut lbl = Style::default();
+            let mut val = Style::default();
+            match fam {
+                "Dark" => {
+                    lbl.fill = Fill::solid(Color::Theme(1, 0));
+                    lbl.font.color = Color::Theme(0, 0);
+                    lbl.font.bold = true;
+                    val.fill = Fill::solid(light_tint);
+                }
+                "Medium" => {
+                    lbl.fill = Fill::solid(tone(0));
+                    lbl.font.color = Color::Theme(0, 0);
+                    lbl.font.bold = true;
+                    val.fill = Fill::solid(light_tint);
+                }
+                _ => {
+                    lbl.fill = Fill::solid(light_tint);
+                    lbl.font.bold = true;
+                    val.fill = Fill::solid(light_tint);
+                }
+            }
+            if let Some(cs) = &custom {
+                if let Some(d) = cs.get("pageFieldLabels") {
+                    merge_dxf(&mut lbl, d);
+                }
+                if let Some(d) = cs.get("pageFieldValues") {
+                    merge_dxf(&mut val, d);
+                }
+            }
+            apply_cell(cx, sheet, CellRef::new(r, loc.start.col), &lbl);
+            if loc.start.col + 1 <= gridcraft_core::MAX_COLS - 1 {
+                apply_cell(cx, sheet, CellRef::new(r, loc.start.col + 1), &val);
+            }
+        }
+    }
+
+    // 2. Body cells (`loc`).
+    let row_items: Vec<&El> = x.child("rowItems").map(|ri| ri.kids("i").collect()).unwrap_or_default();
+    let header_end = loc.start.row.saturating_add(first_data_row).min(loc.end.row.saturating_add(1));
+    let first_col_end = loc.start.col.saturating_add(first_data_col);
+    for r in loc.start.row..=loc.end.row {
+        let is_header = r < header_end;
+        let dr = r.saturating_sub(header_end) as usize;
+        let row_t = if !is_header { row_items.get(dr).and_then(|i| i.attr("t")) } else { None };
+        let is_grand = !is_header && (row_t == Some("grand") || (row_items.is_empty() && pt.grand_totals_cols && r == loc.end.row));
+        let is_subtotal = !is_header && !is_grand && row_t.is_some_and(|t| t != "data");
+
+        for col in loc.start.col..=loc.end.col {
+            let is_first_col = col < first_col_end;
+            let mut layer = Style::default();
+            if let Some(d) = custom.as_ref().and_then(|cs| cs.get("wholeTable")) {
+                merge_dxf(&mut layer, d);
+            }
+            if is_header && show_col_headers {
+                match fam {
+                    "Dark" => {
+                        layer.fill = Fill::solid(Color::Theme(1, 0));
+                        layer.font.color = Color::Theme(0, 0);
+                        layer.font.bold = true;
+                    }
+                    "Medium" => {
+                        layer.fill = Fill::solid(tone(0));
+                        layer.font.color = Color::Theme(0, 0);
+                        layer.font.bold = true;
+                        if r + 1 == header_end {
+                            layer.borders.bottom = BorderLine { style: BorderStyle::Thin, color: tone(0) };
+                        }
+                    }
+                    _ => {
+                        layer.fill = Fill::solid(light_tint);
+                        layer.font.bold = true;
+                        if r + 1 == header_end {
+                            layer.borders.bottom = BorderLine { style: BorderStyle::Thin, color: tone(400) };
+                        }
+                    }
+                }
+                if let Some(d) = custom.as_ref().and_then(|cs| cs.get("headerRow")) {
+                    merge_dxf(&mut layer, d);
+                }
+                if is_first_col && let Some(d) = custom.as_ref().and_then(|cs| cs.get("firstHeaderCell")) {
+                    merge_dxf(&mut layer, d);
+                }
+            } else if is_grand {
+                layer.font.bold = true;
+                let line_col = if fam == "Light" { tone(400) } else { tone(0) };
+                layer.borders.top = BorderLine { style: BorderStyle::Thin, color: line_col };
+                layer.borders.bottom = BorderLine { style: BorderStyle::Double, color: line_col };
+                if fam == "Medium" || fam == "Dark" {
+                    layer.fill = Fill::solid(light_tint);
+                }
+                if let Some(d) = custom.as_ref().and_then(|cs| cs.get("totalRow")) {
+                    merge_dxf(&mut layer, d);
+                }
+            } else if is_subtotal {
+                layer.font.bold = true;
+                if fam == "Medium" || fam == "Dark" {
+                    layer.fill = Fill::solid(light_tint);
+                    layer.borders.top = BorderLine { style: BorderStyle::Thin, color: tone(400) };
+                    layer.borders.bottom = BorderLine { style: BorderStyle::Thin, color: tone(400) };
+                }
+                if let Some(d) = custom.as_ref().and_then(|cs| cs.get("subtotalRow1")) {
+                    merge_dxf(&mut layer, d);
+                }
+            } else {
+                if is_first_col && show_row_headers {
+                    if fam == "Medium" && (1..=7).contains(&n) && custom.is_none() {
+                        layer.fill = Fill::solid(light_tint);
+                    }
+                    if let Some(d) = custom.as_ref().and_then(|cs| cs.get("firstColumn")) {
+                        merge_dxf(&mut layer, d);
+                    }
+                }
+                if show_row_stripes {
+                    if dr.is_multiple_of(2) {
+                        if layer.fill.pattern == PatternType::None {
+                            layer.fill = Fill::solid(light_tint);
+                        }
+                        if let Some(d) = custom.as_ref().and_then(|cs| cs.get("firstRowStripe")) {
+                            merge_dxf(&mut layer, d);
+                        }
+                    } else if let Some(d) = custom.as_ref().and_then(|cs| cs.get("secondRowStripe")) {
+                        merge_dxf(&mut layer, d);
+                    }
+                }
+            }
+            apply_cell(cx, sheet, CellRef::new(r, col), &layer);
+        }
+    }
 }

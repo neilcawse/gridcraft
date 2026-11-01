@@ -325,10 +325,11 @@ pub(crate) fn paint_objects(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Wor
     let mut done = |start: egui::layers::ShapeIdx, rect: Rect| painted.push(PaintedObject { shapes: start.0..p.add(egui::Shape::Noop).0, rect });
     // The grid paints the active workbook: its pictures are cached under it.
     let doc = app.session.active().map_or(0, |d| d.uid);
-    let mut order: Vec<(u32, u8, usize)> = Vec::with_capacity(sh.shapes.len() + sh.images.len() + sh.charts.len());
+    let mut order: Vec<(u32, u8, usize)> = Vec::with_capacity(sh.shapes.len() + sh.images.len() + sh.charts.len() + sh.slicers.len());
     order.extend(sh.shapes.iter().enumerate().map(|(i, sp)| (sp.id, 0u8, i)));
     order.extend(sh.images.iter().enumerate().map(|(i, im)| (im.id, 1u8, i)));
     order.extend(sh.charts.iter().enumerate().map(|(i, ch)| (ch.id, 2u8, i)));
+    order.extend(sh.slicers.iter().enumerate().map(|(i, sl)| (sl.id, 3u8, i)));
     order.sort_by_key(|&(id, kind, i)| (id, kind, i));
     for (_, kind, idx) in order {
         match kind {
@@ -416,7 +417,7 @@ pub(crate) fn paint_objects(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Wor
                     continue;
                 }
                 let start = p.add(egui::Shape::Noop);
-                if let Some(tex) = crate::floating_pictures::texture(p.ctx(), doc, im, r) {
+                if let Some(tex) = crate::floating_pictures::texture(p.ctx(), doc, im, &wb.theme, r) {
                     p.image(tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
                 } else {
                     p.rect_filled(r, 0.0, Tokens::get(p.ctx()).sheet_track);
@@ -426,7 +427,7 @@ pub(crate) fn paint_objects(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Wor
                 }
                 done(start, r);
             }
-            _ => {
+            2 => {
                 let ch = &sh.charts[idx];
                 if ch.series.is_empty() && ch.title.as_deref().is_none_or(str::is_empty) && app.selected_chart != Some(ch.id) {
                     continue;
@@ -438,7 +439,9 @@ pub(crate) fn paint_objects(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Wor
                 let start = p.add(egui::Shape::Noop);
                 if !ch.axis_number_formats.no_fill {
                     // Soft shadow + white card.
-                    p.rect_filled(r.translate(vec2(0.0, 1.5)), 2.0, Color32::from_black_alpha(18));
+                    if !ch.axis_number_formats.no_border {
+                        p.rect_filled(r.translate(vec2(0.0, 1.5)), 2.0, Color32::from_black_alpha(18));
+                    }
                     p.rect_filled(r, 0.0, Tokens::get(p.ctx()).grid_bg);
                 }
                 let data = gridcraft_chart::resolve(wb, si, ch);
@@ -450,6 +453,11 @@ pub(crate) fn paint_objects(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Wor
                 }
                 done(start, r);
             }
+            _ => {
+                if let Some(sl) = sh.slicers.get(idx) {
+                    paint_slicer(app, p, geo, wb, si, sh, sl);
+                }
+            }
         }
     }
     // A selected group is framed as a whole, like Excel. The early return above ensures hidden
@@ -460,7 +468,7 @@ pub(crate) fn paint_objects(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Wor
         selection_frame(p, r);
         done(start, r);
     }
-    paint_slicers(app, p, geo, wb, si, sh);
+    let _ = (si, sh);
     painted
 }
 /// The topmost object under `p`, a grouped one as itself: (kind, id, rect).
@@ -547,49 +555,75 @@ pub fn slicer_layout(rect: Rect, z: f32, n: usize, columns: u32, row_height: Opt
     SlicerLayout { header, clear, tiles }
 }
 
-fn paint_slicers(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Workbook, si: usize, sh: &Sheet) {
+fn paint_slicer(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Workbook, si: usize, sh: &Sheet, sl: &gridcraft_engine::model::Slicer) {
     let tk = theme::Tokens::get(p.ctx());
-    for sl in &sh.slicers {
-        let r = anchor_rect(geo, sh, &sl.anchor);
-        if !r.intersects(p.clip_rect()) {
-            continue;
+    let r = anchor_rect(geo, sh, &sl.anchor);
+    if !r.intersects(p.clip_rect()) {
+        return;
+    }
+    let items = cached_slicer_items(app, wb, si, sl);
+    let lay = slicer_layout(r, geo.z, items.len(), sl.columns, sl.row_height);
+    let is_dark_style = sl.style.contains("Dark");
+    let has_explicit_style = !sl.style.is_empty();
+    let style_num: usize = sl.style.chars().filter(|c| c.is_ascii_digit()).take(1).collect::<String>().parse().unwrap_or(1);
+    let theme_idx = match style_num {
+        1 => 3, // dk2 (e.g. #25477B in Geotab themes)
+        2..=7 => 2 + style_num,
+        _ => 4,
+    };
+    let style_color = gridcraft_engine::model::Color::Theme(theme_idx as u8, 0).resolve(&wb.theme).map(theme::color32).unwrap_or(tk.accent);
+    let style_soft = gridcraft_engine::model::Color::Theme(theme_idx as u8, 800).resolve(&wb.theme).map(theme::color32).unwrap_or(tk.accent_soft);
+    let radius = if is_dark_style { 0.0 } else { 4.0 * geo.z };
+    // Card + soft shadow.
+    p.rect_filled(r.translate(vec2(0.0, 1.5)), radius, Color32::from_black_alpha(18));
+    p.rect_filled(r, radius, if is_dark_style { Color32::WHITE } else { tk.window });
+    p.rect_stroke(r, radius, Stroke::new(1.0, if is_dark_style { style_color } else { tk.separator }), StrokeKind::Inside);
+    // Header.
+    let header_bg = if is_dark_style {
+        Color32::WHITE
+    } else if has_explicit_style {
+        style_soft
+    } else {
+        tk.accent_soft
+    };
+    let header_fg = if is_dark_style {
+        Color32::BLACK
+    } else if has_explicit_style {
+        style_color
+    } else {
+        tk.accent_dark
+    };
+    p.rect_filled(lay.header, radius, header_bg);
+    p.rect_filled(Rect::from_min_max(pos2(lay.header.left(), lay.header.bottom() - radius), lay.header.max), 0.0, header_bg);
+    let cap = if sl.caption.is_empty() { sl.field().to_string() } else { sl.caption.clone() };
+    p.text(lay.header.left_center() + vec2(8.0 * geo.z, 0.0), Align2::LEFT_CENTER, cap, theme::ui_bold(12.5 * geo.z), header_fg);
+    // Clear-filter button (tinted when a filter is active).
+    let filtered = items.iter().any(|t| !t.selected);
+    if let Some(icon) = crate::icons::from_name("filter") {
+        crate::icons::paint(p, lay.clear, icon, if filtered { style_color } else { tk.text_dim });
+    }
+    // Value tiles.
+    let sel_fill = if has_explicit_style { style_color } else { tk.accent };
+    let sel_fg = if has_explicit_style { Color32::WHITE } else { tk.on_accent };
+    let sel_nodata = if has_explicit_style { style_soft } else { tk.accent_soft };
+    for (tile, tr) in items.iter().zip(&lay.tiles) {
+        if !r.contains(tr.left_top()) {
+            continue; // overflowed the card; skip (no scroll yet)
         }
-        let items = cached_slicer_items(app, wb, si, sl);
-        let lay = slicer_layout(r, geo.z, items.len(), sl.columns, sl.row_height);
-        let radius = 4.0 * geo.z;
-        // Card + soft shadow.
-        p.rect_filled(r.translate(vec2(0.0, 1.5)), radius, Color32::from_black_alpha(18));
-        p.rect_filled(r, radius, tk.window);
-        p.rect_stroke(r, radius, Stroke::new(1.0, tk.separator), StrokeKind::Inside);
-        // Header.
-        p.rect_filled(lay.header, radius, tk.accent_soft);
-        p.rect_filled(Rect::from_min_max(pos2(lay.header.left(), lay.header.bottom() - radius), lay.header.max), 0.0, tk.accent_soft);
-        let cap = if sl.caption.is_empty() { sl.field().to_string() } else { sl.caption.clone() };
-        p.text(lay.header.left_center() + vec2(8.0 * geo.z, 0.0), Align2::LEFT_CENTER, cap, theme::ui_bold(12.5 * geo.z), tk.accent_dark);
-        // Clear-filter button (tinted when a filter is active).
-        let filtered = items.iter().any(|t| !t.selected);
-        if let Some(icon) = crate::icons::from_name("filter") {
-            crate::icons::paint(p, lay.clear, icon, if filtered { tk.accent } else { tk.text_dim });
-        }
-        // Value tiles.
-        for (tile, tr) in items.iter().zip(&lay.tiles) {
-            if !r.contains(tr.left_top()) {
-                continue; // overflowed the card; skip (no scroll yet)
-            }
-            // Items with no data under the PivotTables' other filters are dimmed.
-            let (fill, fg) = match (tile.selected, tile.has_data) {
-                (true, true) => (tk.accent, tk.on_accent),
-                (true, false) => (tk.accent_soft, tk.text_dim),
-                (false, true) => (tk.hover, tk.text_dim),
-                (false, false) => (tk.window, tk.text_dim),
-            };
-            p.rect_filled(*tr, 3.0 * geo.z, fill);
-            let cp = p.with_clip_rect(tr.intersect(p.clip_rect()));
-            cp.text(tr.left_center() + vec2(6.0 * geo.z, 0.0), Align2::LEFT_CENTER, &tile.label, theme::ui_font(12.0 * geo.z), fg);
-        }
-        if app.selected_chart == Some(sl.id) {
-            selection_frame(p, r);
-        }
+        // Items with no data under the PivotTables' other filters are dimmed.
+        let (fill, fg) = match (tile.selected, tile.has_data) {
+            (true, true) => (sel_fill, sel_fg),
+            (true, false) => (sel_nodata, tk.text_dim),
+            (false, true) => (tk.hover, tk.text_dim),
+            (false, false) => (tk.window, tk.text_dim),
+        };
+        p.rect_filled(*tr, if is_dark_style { 1.0 * geo.z } else { 3.0 * geo.z }, fill);
+        let cp = p.with_clip_rect(tr.intersect(p.clip_rect()));
+        let font = if is_dark_style && tile.selected { theme::ui_bold(12.0 * geo.z) } else { theme::ui_font(12.0 * geo.z) };
+        cp.text(tr.left_center() + vec2(6.0 * geo.z, 0.0), Align2::LEFT_CENTER, &tile.label, font, fg);
+    }
+    if app.selected_chart == Some(sl.id) {
+        selection_frame(p, r);
     }
 }
 

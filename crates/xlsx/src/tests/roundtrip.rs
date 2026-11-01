@@ -349,6 +349,7 @@ fn sample() -> Workbook {
         data: png.into(),
         mime: "image/png".into(),
         alt: "Logo \"x\"".into(),
+        duotone: None,
     });
     s.shapes.push(Shape {
         id: 11,
@@ -387,6 +388,7 @@ fn sample() -> Workbook {
             anchor: Some(ShapeTextAnchor::Bottom),
             rtl: true,
             level: 0,
+            text_link: None,
         },
     });
     let base_chart = Chart {

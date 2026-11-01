@@ -171,23 +171,31 @@ pub(super) fn pie(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx, inne
     if !(total.is_finite() && total > 0.0) {
         return;
     }
-    let (cx, cy) = (area.cx(), area.cy());
+    let out_end = chart.axis_number_formats.label_pos.as_deref() == Some("outEnd") && inner == 0.0;
+    let (cx, cy) = match (chart.axis_number_formats.plot_x, chart.axis_number_formats.plot_w) {
+        (Some(px), Some(pw)) if (0.0..=0.8).contains(&px) && (0.2..=1.0).contains(&pw) => {
+            let target_cx = ctx.chart_w * (px + pw * 0.5);
+            (target_cx.clamp(area.x + 20.0, area.right() - 20.0), area.cy())
+        }
+        _ => (area.cx(), area.cy()),
+    };
     let pw = chart.axis_number_formats.plot_w.filter(|&w| (0.2..=1.0).contains(&w)).map(|w| area.w * w).unwrap_or(area.w * 0.92);
-    let r = pw.min(area.h * 0.92) / 2.0;
+    let r_scale = if out_end { 0.72 } else { 0.92 };
+    let r = (pw.min(area.h) * r_scale) / 2.0;
     if r < 2.0 {
         return;
     }
     let ri = r * inner;
     let f = label_fmt(s);
     let pct_fmt = chart.axis_number_formats.percent_format.as_deref().map(Fmt::new);
-    let few_slices = vals.iter().filter(|&&x| x > 0.0).count() <= 6;
+    let few_slices = vals.iter().filter(|&&x| x > 0.0).count() <= 12;
     let mut a = 0.0f32;
     let mut labels = Vec::new();
     for (j, v) in vals.iter().enumerate() {
         let sweep = (*v / total) as f32 * TAU;
+        let pt_stroke = s.point_strokes.iter().find(|&&(idx, _)| idx as usize == j).map(|&(_, c)| c).or(s.stroke);
         if sweep > 1e-4 {
             let fill = point_color(data, j);
-            let pt_stroke = s.point_strokes.iter().find(|&&(idx, _)| idx as usize == j).map(|&(_, c)| c).or(s.stroke);
             let stroke = match pt_stroke {
                 Some(c) => Some((c, (r * 0.035).clamp(0.85, 1.25))),
                 None => Some((WHITE, 1.5)),
@@ -205,13 +213,23 @@ pub(super) fn pie(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx, inne
                     f.format(s.values.get(j).copied().flatten().unwrap_or(0.0), None)
                 };
                 let mid = a + sweep / 2.0;
-                let rr = if ri > 0.0 { (r + ri) / 2.0 } else { r * 0.65 };
-                let room = sweep * rr;
-                if !t.is_empty() && ((ctx.tw(&t, LABEL_SIZE) <= room.max(r - ri) && room >= LABEL_SIZE) || (few_slices && r >= 50.0)) {
-                    let col = if pt_stroke.is_some() { super::DARK_TEXT } else { on(fill) };
-                    labels.push((cx + rr * mid.sin(), cy - rr * mid.cos(), t, col));
+                if out_end && !t.is_empty() {
+                    let p0 = [cx + r * mid.sin(), cy - r * mid.cos()];
+                    let p1 = [cx + (r + 7.0) * mid.sin(), cy - (r + 7.0) * mid.cos()];
+                    ctx.line(vec![p0, p1], AXIS, 0.75);
+                    let lr = r + 13.0;
+                    labels.push((cx + lr * mid.sin(), cy - lr * mid.cos(), t, TEXT));
+                } else {
+                    let rr = if ri > 0.0 { (r + ri) / 2.0 } else { r * 0.65 };
+                    let room = sweep * rr;
+                    if !t.is_empty() && ((ctx.tw(&t, LABEL_SIZE) <= room.max(r - ri) && room >= LABEL_SIZE) || (few_slices && r >= 35.0)) {
+                        let col = if pt_stroke.is_some() { super::DARK_TEXT } else { on(fill) };
+                        labels.push((cx + rr * mid.sin(), cy - rr * mid.cos(), t, col));
+                    }
                 }
             }
+        } else if let Some(sc) = pt_stroke {
+            ctx.line(vec![[cx + ri * a.sin(), cy - ri * a.cos()], [cx + r * a.sin(), cy - r * a.cos()]], sc, (r * 0.035).clamp(0.85, 1.5));
         }
         a += sweep;
     }

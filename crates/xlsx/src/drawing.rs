@@ -43,6 +43,10 @@ fn read_anchor(a: &El, sheet: &Sheet) -> Option<Anchor> {
         "twoCellAnchor" => {
             let (cell, dx, dy) = marker(a.child("from")?);
             let (to, tdx, tdy) = a.child("to").map(marker).unwrap_or((cell, dx, dy));
+            let cw = sheet.col_width(to.col);
+            let rh = sheet.row_height(to.row);
+            let tdx = if to.col > cell.col && cw > 0.0 { tdx.min(cw) } else { tdx };
+            let tdy = if to.row > cell.row && rh > 0.0 { tdy.min(rh) } else { tdy };
             let x1 = sheet.col_left(cell.col) + dx as f64;
             let y1 = sheet.row_top(cell.row) + dy as f64;
             let x2 = sheet.col_left(to.col) + tdx as f64;
@@ -90,46 +94,58 @@ fn dml_tint(el: &El) -> i16 {
         ((m - 100_000.0) / 100.0).round()
     } else if let Some(t) = pct("tint") {
         (t / 100.0).round()
-    } else if let Some(s) = pct("shade") {
-        -(s / 100.0).round()
+    } else if let Some(s) = pct("shade").filter(|&v| (0.0..=100_000.0).contains(&v)) {
+        ((s - 100_000.0) / 100.0).round()
     } else {
         0.0
     };
     t.clamp(-1000.0, 1000.0) as i16
 }
 
+pub fn dml_color_choice(el: &El) -> Option<Color> {
+    match el.name.as_str() {
+        "srgbClr" => el.attr("val").and_then(Color::from_hex),
+        "sysClr" => el.attr("lastClr").and_then(Color::from_hex).or_else(|| match el.attr("val")? {
+            "window" | "btnHighlight" | "menu" => Some(Color::Rgb(0xFFFFFF)),
+            "windowText" | "windowFrame" | "btnText" | "menuText" | "captionText" => Some(Color::Rgb(0x000000)),
+            _ => None,
+        }),
+        "prstClr" => match el.attr("val")? {
+            "white" => Some(Color::Rgb(0xFFFFFF)),
+            "black" => Some(Color::Rgb(0x000000)),
+            "red" => Some(Color::Rgb(0xFF0000)),
+            "green" => Some(Color::Rgb(0x008000)),
+            "blue" => Some(Color::Rgb(0x0000FF)),
+            "yellow" => Some(Color::Rgb(0xFFFF00)),
+            "gray" | "grey" => Some(Color::Rgb(0x808080)),
+            "ltGray" | "ltGrey" | "lightGray" | "lightGrey" => Some(Color::Rgb(0xD3D3D3)),
+            "dkGray" | "dkGrey" | "darkGray" | "darkGrey" => Some(Color::Rgb(0xA9A9A9)),
+            _ => None,
+        },
+        "schemeClr" => {
+            let i = match el.attr("val")? {
+                "bg1" | "lt1" => 0,
+                "tx1" | "dk1" => 1,
+                "bg2" | "lt2" => 2,
+                "tx2" | "dk2" => 3,
+                "accent1" => 4,
+                "accent2" => 5,
+                "accent3" => 6,
+                "accent4" => 7,
+                "accent5" => 8,
+                "accent6" => 9,
+                "hlink" => 10,
+                "folHlink" => 11,
+                _ => return None,
+            };
+            Some(Color::Theme(i, dml_tint(el)))
+        }
+        _ => None,
+    }
+}
+
 pub fn dml_color(e: &El) -> Option<Color> {
-    if let Some(el) = e.child("srgbClr")
-        && let Some(c) = el.attr("val").and_then(Color::from_hex)
-    {
-        return Some(c);
-    }
-    if let Some(el) = e.child("sysClr")
-        && let Some(c) = el.attr("lastClr").and_then(Color::from_hex)
-    {
-        return Some(c);
-    }
-    if let Some(el) = e.child("schemeClr")
-        && let Some(c) = el.attr("val")
-    {
-        let i = match c {
-            "bg1" | "lt1" => 0,
-            "tx1" | "dk1" => 1,
-            "bg2" | "lt2" => 2,
-            "tx2" | "dk2" => 3,
-            "accent1" => 4,
-            "accent2" => 5,
-            "accent3" => 6,
-            "accent4" => 7,
-            "accent5" => 8,
-            "accent6" => 9,
-            "hlink" => 10,
-            "folHlink" => 11,
-            _ => return None,
-        };
-        return Some(Color::Theme(i, dml_tint(el)));
-    }
-    None
+    e.children.iter().find_map(dml_color_choice)
 }
 
 fn mime_for(name: &str) -> &'static str {
@@ -311,8 +327,12 @@ fn read_object(
                 return Ok(None);
             };
             let alt = obj.path(&["nvPicPr", "cNvPr"]).and_then(|c| c.attr("descr")).unwrap_or("").to_string();
+            let duotone = obj.path(&["blipFill", "blip", "duotone"]).and_then(|dt| {
+                let mut cs = dt.children.iter().filter_map(dml_color_choice);
+                Some([cs.next()?, cs.next()?])
+            });
             let id = cx.next_object_id();
-            sheet.images.push(Image { id, anchor, data: data.into(), mime: mime_for(&target).to_string(), alt });
+            sheet.images.push(Image { id, anchor, data: data.into(), mime: mime_for(&target).to_string(), alt, duotone });
             Ok(Some(DrawingRef::Image(id)))
         }
         "graphicFrame" => {
@@ -471,8 +491,19 @@ fn read_shape(obj: &El, anchor: Anchor, grouped: bool) -> Option<Shape> {
         "rightArrow" => ShapeKind::Arrow,
         _ => ShapeKind::Rectangle,
     };
-    let fill = sp.child("solidFill").and_then(dml_color).unwrap_or_default();
-    let line = ln.and_then(|l| l.child("solidFill")).and_then(dml_color).unwrap_or_default();
+    let fill = if sp.child("noFill").is_some() {
+        Color::Auto
+    } else {
+        sp.child("solidFill")
+            .and_then(dml_color)
+            .or_else(|| obj.path(&["style", "fillRef"]).filter(|r| r.attr_u32("idx").unwrap_or(0) > 0).and_then(dml_color))
+            .unwrap_or_default()
+    };
+    let line = ln
+        .and_then(|l| l.child("solidFill"))
+        .and_then(dml_color)
+        .or_else(|| obj.path(&["style", "lnRef"]).filter(|r| r.attr_u32("idx").unwrap_or(0) > 0).and_then(dml_color))
+        .unwrap_or_default();
     let text = obj
         .child("txBody")
         .map(|tb| {
@@ -490,7 +521,12 @@ fn read_shape(obj: &El, anchor: Anchor, grouped: bool) -> Option<Shape> {
         })
         .unwrap_or_default();
     let mut format = read_text_format(obj.child("txBody"));
-    format.no_line = ln.is_some_and(|l| l.child("noFill").is_some());
+    if format.text_color.is_none() {
+        format.text_color = obj.path(&["style", "fontRef"]).and_then(dml_color);
+    }
+    format.no_line = ln.is_some_and(|l| l.child("noFill").is_some())
+        || (ln.is_none() && obj.path(&["style", "lnRef"]).is_some_and(|r| r.attr_u32("idx").unwrap_or(0) == 0));
+    format.text_link = obj.attr("textlink").map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
     Some(Shape { id: 0, kind, anchor, fill, line, text, format })
 }
 
@@ -505,7 +541,11 @@ fn read_text_format(body: Option<&El>) -> ShapeFormat {
         "b" => ShapeTextAnchor::Bottom,
         _ => ShapeTextAnchor::Top,
     });
-    let ppr = body.kids("p").next().and_then(|p| p.child("pPr"));
+    let ppr = body
+        .kids("p")
+        .find(|p| p.children.iter().any(|c| matches!(c.name.as_str(), "r" | "fld") && c.child("t").is_some_and(|t| !t.text.trim().is_empty())))
+        .and_then(|p| p.child("pPr"))
+        .or_else(|| body.kids("p").find_map(|p| p.child("pPr")));
     f.align = ppr.and_then(|p| p.attr("algn")).map(|a| match a {
         "ctr" => ShapeTextAlign::Center,
         "r" => ShapeTextAlign::Right,
@@ -899,9 +939,13 @@ pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>]) -> String {
 fn write_obj(s: &mut String, theme: &Theme, o: &Obj<'_>, id: usize, off: (i64, i64), ext: (i64, i64), rot: i64) {
     match o {
         Obj::Image(img, rid) => {
+            let blip = match img.duotone.and_then(|[c0, c1]| Some((srgb(&c0, theme)?, srgb(&c1, theme)?))) {
+                Some((c0, c1)) => format!("<a:blip r:embed=\"{rid}\"><a:duotone>{c0}{c1}</a:duotone></a:blip>"),
+                None => format!("<a:blip r:embed=\"{rid}\"/>"),
+            };
             let _ = write!(
                 s,
-                "<xdr:pic><xdr:nvPicPr><xdr:cNvPr id=\"{id}\" name=\"Picture {}\" descr=\"{}\"/><xdr:cNvPicPr><a:picLocks noChangeAspect=\"1\"/></xdr:cNvPicPr></xdr:nvPicPr><xdr:blipFill><a:blip r:embed=\"{rid}\"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic>",
+                "<xdr:pic><xdr:nvPicPr><xdr:cNvPr id=\"{id}\" name=\"Picture {}\" descr=\"{}\"/><xdr:cNvPicPr><a:picLocks noChangeAspect=\"1\"/></xdr:cNvPicPr></xdr:nvPicPr><xdr:blipFill>{blip}<a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic>",
                 id - 1,
                 esc_attr(&img.alt),
                 xfrm("a:xfrm", off, ext, rot)
@@ -943,9 +987,10 @@ fn write_obj(s: &mut String, theme: &Theme, o: &Obj<'_>, id: usize, off: (i64, i
                 ShapeKind::TextBox => ("rect", true),
                 ShapeKind::Icon | ShapeKind::Ink => ("rect", false),
             };
+            let textlink = esc_attr(sh.format.text_link.as_deref().unwrap_or(""));
             let _ = write!(
                 s,
-                "<xdr:sp macro=\"\" textlink=\"\"><xdr:nvSpPr><xdr:cNvPr id=\"{id}\" name=\"Shape {}\"/><xdr:cNvSpPr{}/></xdr:nvSpPr><xdr:spPr>{}<a:prstGeom prst=\"{prst}\"><a:avLst/></a:prstGeom>",
+                "<xdr:sp macro=\"\" textlink=\"{textlink}\"><xdr:nvSpPr><xdr:cNvPr id=\"{id}\" name=\"Shape {}\"/><xdr:cNvSpPr{}/></xdr:nvSpPr><xdr:spPr>{}<a:prstGeom prst=\"{prst}\"><a:avLst/></a:prstGeom>",
                 id - 1,
                 if tx { " txBox=\"1\"" } else { "" },
                 xfrm("a:xfrm", off, ext, rot)

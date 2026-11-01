@@ -247,17 +247,31 @@ pub fn resolve(wb: &Workbook, sheet: usize, chart: &Chart) -> ChartData {
             .and_then(|c| c.resolve(&wb.theme))
             .map(|[r, g, b]| [r, g, b, 0xFF])
             .unwrap_or_else(|| series_color(&wb.theme, i));
-        let stroke = chart.axis_number_formats.series_line_color.as_ref().and_then(|c| c.resolve(&wb.theme)).map(|[r, g, b]| [r, g, b, 0xFF]);
-        let point_strokes = if i == 0 {
+        let stroke = chart
+            .axis_number_formats
+            .series_strokes
+            .iter()
+            .find(|(idx, _)| *idx == i as u32)
+            .map(|(_, c)| c)
+            .or_else(|| (i == 0).then_some(chart.axis_number_formats.series_line_color.as_ref()).flatten())
+            .and_then(|c| c.resolve(&wb.theme))
+            .map(|[r, g, b]| [r, g, b, 0xFF]);
+        let mut point_strokes: Vec<(u32, Rgba)> = if i == 0 {
             chart
                 .axis_number_formats
                 .point_line_colors
                 .iter()
+                .filter(|&&(idx, _)| idx != u32::MAX)
                 .filter_map(|&(idx, ref c)| c.resolve(&wb.theme).map(|[r, g, b]| (idx, [r, g, b, 0xFF])))
                 .collect()
         } else {
             Vec::new()
         };
+        if i == 0
+            && let Some([r, g, b]) = chart.axis_number_formats.gridline_color.and_then(|c| c.resolve(&wb.theme))
+        {
+            point_strokes.push((u32::MAX, [r, g, b, 0xFF]));
+        }
         let kind = effective_kind(chart.kind, s.kind, i);
         let x = match (&s.categories, numeric_x || matches!(kind, ChartKind::Scatter | ChartKind::ScatterLines | ChartKind::Bubble)) {
             // X values with text in them (labels) are ignored: the points are numbered 1..n.

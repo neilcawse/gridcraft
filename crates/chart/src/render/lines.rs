@@ -119,14 +119,15 @@ fn catmull(p0: [f32; 2], p1: [f32; 2], p2: [f32; 2], p3: [f32; 2], t: f32) -> [f
     o
 }
 
-pub(super) fn draw_markers(ctx: &mut Ctx, pts: impl Iterator<Item = [f32; 2]>, r: f32, color: Rgba) {
+pub(super) fn draw_markers(ctx: &mut Ctx, pts: impl Iterator<Item = [f32; 2]>, r: f32, color: Rgba, stroke: Option<Rgba>) {
     let mut seen = HashSet::new();
+    let st = stroke.map_or((WHITE, 0.75), |c| (c, 1.25));
     for p in pts {
         if seen.len() >= MAX_MARKERS {
             break;
         }
         if seen.insert(((p[0] * 0.5) as i32, (p[1] * 0.5) as i32)) {
-            ctx.out.push(Prim::Circle { cx: p[0], cy: p[1], r, fill: Some(color), stroke: Some((WHITE, 0.75)) });
+            ctx.out.push(Prim::Circle { cx: p[0], cy: p[1], r, fill: Some(color), stroke: Some(st) });
         }
     }
 }
