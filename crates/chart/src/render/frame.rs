@@ -219,6 +219,58 @@ fn split_two_lines(s: &str) -> Option<(&str, &str)> {
 }
 
 /// Draws gridlines, axis labels and the category axis line; returns the plot rectangle.
+fn vertical_cat_band(ctx: &Ctx, area: Bx, cat: &CatAxis, has_y2: bool, ls: f32, lh: f32) -> (f32, f32) {
+    if ctx.cat_axis_deleted {
+        return (0.0, 2.0);
+    }
+    match cat {
+        CatAxis::Labels(l, o, Some(rot)) if *rot != 0.0 => {
+            let lw = l.iter().take(2000).map(|t| ctx.tw(t, ls)).fold(0.0f32, f32::max);
+            let a = rot.abs().to_radians();
+            let raw_h = lw * a.sin() + ls * a.cos();
+            let ch = if ctx.has_bottom_legend && has_y2 {
+                raw_h.min(area.h * 0.42).max(lh)
+            } else if ctx.has_bottom_legend {
+                (raw_h + 6.0).min(area.h * 0.47).max(lh)
+            } else if area.h < 220.0 {
+                raw_h.min(area.h * 0.35).min(62.0).max(lh)
+            } else {
+                (raw_h + 4.0).min(area.h * 0.45).max(lh)
+            };
+            (o.len() as f32, ch)
+        }
+        CatAxis::Labels(l, o, _) => {
+            let cw = (area.w * 0.85) / l.len().max(1) as f32;
+            let wraps = cw >= ls * 2.4 && l.iter().take(200).any(|t| ctx.tw(t, ls) > cw - 2.0 && t.contains(' '));
+            (o.len() as f32, if wraps { lh * 1.85 } else { lh })
+        }
+        CatAxis::Numeric(..) => (0.0, lh),
+    }
+}
+
+fn vertical_right_margin(ctx: &Ctx, area: Bx, left: f32, cat_h: f32, y2labels: &Option<Vec<(f64, String)>>, cat: &CatAxis) -> f32 {
+    let ls = LABEL_SIZE;
+    let lh = ls * 1.4;
+    match (y2labels, cat) {
+        (Some(l), _) => (l.iter().map(|(_, t)| ctx.tw(t, ls)).fold(0.0f32, f32::max) + 6.0).min(area.w * 0.3),
+        (None, CatAxis::Numeric(s, f)) => (ctx.tw(&f.format(s.max, Some(s.step)), ls) / 2.0).min(area.w * 0.2),
+        (None, CatAxis::Labels(l, _, Some(rot))) if *rot > 0.0 && !l.is_empty() && !ctx.cat_axis_deleted => {
+            let a = rot.to_radians();
+            let n = l.len();
+            let cw_est = (area.w - left - 4.0).max(10.0) / n as f32;
+            let r_v = (cat_h - ls * a.cos() * 0.5).max(lh * 0.8) / a.sin().abs().max(0.1);
+            let mut over = 4.0f32;
+            for (j, t) in l.iter().enumerate().rev().take(4) {
+                let w = ctx.tw(t, ls).min(r_v) * a.cos();
+                let dist = (n as f32 - 0.5 - j as f32) * cw_est;
+                over = over.max(w - dist + 4.0);
+            }
+            over.min(area.w * 0.12).max(4.0)
+        }
+        _ => 4.0,
+    }
+}
+
 pub(super) fn frame(ctx: &mut Ctx, area: Bx, cat: CatAxis, y: &ValAxis, y2: Option<&ValAxis>, horizontal: bool, grid: bool) -> Bx {
     let ls = LABEL_SIZE;
     let lh = ls * 1.4;
@@ -227,48 +279,11 @@ pub(super) fn frame(ctx: &mut Ctx, area: Bx, cat: CatAxis, y: &ValAxis, y2: Opti
     if !horizontal {
         let left = (maxw(ctx, &ylabels) + 6.0).min(area.w * 0.4);
         let y2labels = y2.map(ValAxis::labels);
-        let (levels, cat_h) = if ctx.cat_axis_deleted {
-            (0.0, 2.0)
-        } else {
-            match &cat {
-                CatAxis::Labels(l, o, Some(rot)) if *rot != 0.0 => {
-                    let lw = l.iter().take(2000).map(|t| ctx.tw(t, ls)).fold(0.0f32, f32::max);
-                    let a = rot.abs().to_radians();
-                    let raw_h = lw * a.sin() + ls * a.cos();
-                    let ch = if ctx.has_bottom_legend || area.h < 220.0 {
-                        raw_h.min(area.h * 0.34).min(56.0).max(lh)
-                    } else {
-                        (raw_h + 6.0).min(area.h * 0.45).max(area.h * 0.35).max(lh)
-                    };
-                    (o.len() as f32, ch)
-                }
-                CatAxis::Labels(l, o, _) => {
-                    let cw = (area.w * 0.85) / l.len().max(1) as f32;
-                    let wraps = cw >= ls * 2.4 && l.iter().take(200).any(|t| ctx.tw(t, ls) > cw - 2.0 && t.contains(' '));
-                    (o.len() as f32, if wraps { lh * 1.85 } else { lh })
-                }
-                CatAxis::Numeric(..) => (0.0, lh),
-            }
-        };
-        let right = match (&y2labels, &cat) {
-            (Some(l), _) => (maxw(ctx, l) + 6.0).min(area.w * 0.3),
-            (None, CatAxis::Numeric(s, f)) => (ctx.tw(&f.format(s.max, Some(s.step)), ls) / 2.0).min(area.w * 0.2),
-            (None, CatAxis::Labels(l, _, Some(rot))) if *rot > 0.0 && !l.is_empty() && !ctx.cat_axis_deleted => {
-                let a = rot.to_radians();
-                let n = l.len();
-                let cw_est = (area.w - left - 4.0).max(10.0) / n as f32;
-                let r_v = (cat_h - ls * a.cos() * 0.5).max(lh * 0.8) / a.sin().abs().max(0.1);
-                let mut over = 4.0f32;
-                for (j, t) in l.iter().enumerate().rev().take(4) {
-                    let w = ctx.tw(t, ls).min(r_v) * a.cos();
-                    let dist = (n as f32 - 0.5 - j as f32) * cw_est;
-                    over = over.max(w - dist + 4.0);
-                }
-                over.min(area.w * 0.12).max(4.0)
-            }
-            _ => 4.0,
-        };
-        let plot = Bx { x: area.x + left, y: area.y + lh * 0.5, w: area.w - left - right, h: area.h - lh * 0.5 - cat_h - 4.0 - lh * levels };
+        let (levels, cat_h) = vertical_cat_band(ctx, area, &cat, y2.is_some(), ls, lh);
+        let right = vertical_right_margin(ctx, area, left, cat_h, &y2labels, &cat);
+        let raw_w = area.w - left - right;
+        let (px, pw) = if ctx.cat_axis_deleted { (area.x + left + raw_w * 0.14, raw_w * 0.66) } else { (area.x + left, raw_w) };
+        let plot = Bx { x: px, y: area.y + lh * 0.5, w: pw, h: area.h - lh * 0.5 - cat_h - 4.0 - lh * levels };
         if !plot.ok() {
             return plot;
         }

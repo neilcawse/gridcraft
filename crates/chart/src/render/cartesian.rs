@@ -141,6 +141,7 @@ fn axis_scales(chart: &Chart, data: &ChartData, fams: &[Fam], sec: &[bool], span
             spans.get(*i).into_iter().flatten().flatten().flat_map(move |(b, t)| if line { vec![*t] } else { vec![*b, *t] })
         }));
         let (lo, hi) = range.unwrap_or((0.0, 0.0));
+        let data_lo = members.iter().flat_map(|i| spans.get(*i).into_iter().flatten().flatten().map(|(_, t)| *t)).fold(f64::INFINITY, f64::min);
         let typed = if axis { chart.axis_number_formats.y2.as_deref() } else { chart.axis_number_formats.y.as_deref() };
         let (scale, fmt) = if all100 {
             (fixed_scale(if lo < -1e-9 { -1.0 } else { 0.0 }, if hi > 1e-9 || lo >= -1e-9 { 1.0 } else { 0.0 }, 0.2), Fmt::new(typed.unwrap_or("0%")))
@@ -151,10 +152,11 @@ fn axis_scales(chart: &Chart, data: &ChartData, fams: &[Fam], sec: &[bool], span
             let tight_top = !axis
                 && chart.axis_number_formats.y_min.is_none()
                 && force_zero
-                && lo > 0.0
-                && lo < hi_eff
-                && lo >= hi_eff * 0.80;
-            let lo_in = if tight_top { lo - (hi_eff - lo) * 0.1 } else { lo_eff };
+                && data_lo.is_finite()
+                && data_lo > 0.0
+                && data_lo < hi_eff
+                && data_lo >= hi_eff * 0.82;
+            let lo_in = if tight_top { data_lo - (hi_eff - data_lo) * 0.2 } else { lo_eff };
             let mut sc = nice_scale(lo_in, hi_eff, force_zero && !tight_top);
             if !axis {
                 if let Some(mn) = chart.axis_number_formats.y_min.filter(|v| v.is_finite()) {
@@ -168,7 +170,7 @@ fn axis_scales(chart: &Chart, data: &ChartData, fams: &[Fam], sec: &[bool], span
                         sc.step = 10.0;
                     }
                 }
-                if tight_top && (hi_eff - lo) <= 20.0 {
+                if tight_top && (hi_eff - data_lo) <= 20.0 {
                     sc.step = 2.0;
                     sc.min = (lo_in / 2.0).floor() * 2.0;
                 }
@@ -276,6 +278,42 @@ fn draw_bar_label(
     }
 }
 
+fn draw_line_series_labels(ctx: &mut Ctx, chart: &Chart, s: &SeriesData, i: usize, pts: &[Option<[f32; 2]>], fmt: &Fmt) {
+    let lpos = chart
+        .axis_number_formats
+        .series_label_positions
+        .iter()
+        .find(|(idx, _)| *idx == i as u32)
+        .map(|(_, p)| p.as_str())
+        .or_else(|| (i == 0).then_some(chart.axis_number_formats.label_pos.as_deref()).flatten());
+    for (j, p) in pts.iter().enumerate() {
+        if let (Some(p), Some(v)) = (p, s.values.get(j).copied().flatten()) {
+            let txt = fmt.format(v, None);
+            match lpos {
+                Some("b") => ctx.text(p[0], p[1] + 5.0, &txt, LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Top)),
+                Some("l") => ctx.text(p[0] - 6.0, p[1], &txt, LABEL_SIZE, TEXT, (HAlign::Right, VAlign::Middle)),
+                Some("r") => ctx.text(p[0] + 6.0, p[1], &txt, LABEL_SIZE, TEXT, (HAlign::Left, VAlign::Middle)),
+                Some("ctr") => ctx.text(p[0], p[1], &txt, LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Middle)),
+                None if chart.kind == ChartKind::Combo => {
+                    ctx.text(p[0] + 6.0, p[1], &txt, LABEL_SIZE, TEXT, (HAlign::Left, VAlign::Middle));
+                }
+                _ => ctx.text(p[0], p[1] - 5.0, &txt, LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Bottom)),
+            }
+        }
+    }
+}
+
+fn draw_col_baseline(ctx: &mut Ctx, chart: &Chart, plot: Bx, y0: f32, ncat_slots: usize, cw: f32) {
+    let ax_col = if ctx.grid_color != super::GRID { ctx.grid_color } else { super::AXIS };
+    ctx.hline(plot.x, plot.right(), y0, ax_col, 0.75);
+    if chart.axis_number_formats.cat_major_tick.as_deref() != Some("none") {
+        for j in 0..=ncat_slots {
+            let tx = plot.x + j as f32 * cw;
+            ctx.vline(tx, plot.bottom(), plot.bottom() + 4.0, ax_col, 0.75);
+        }
+    }
+}
+
 pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx, horizontal: bool) {
     let ncat = data.categories.len().max(data.series.iter().map(|s| s.values.len()).max().unwrap_or(0)).min(MAX_CATS);
     if ncat == 0 {
@@ -353,32 +391,21 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
             };
             match pass {
                 0 => {
-                    let mut top = Vec::with_capacity(ncat * 2);
-                    let mut base = Vec::with_capacity(ncat);
                     for (j, sp) in row.iter().enumerate() {
-                        let (b, t) = sp.unwrap_or((0.0, 0.0));
-                        let c = center(j);
-                        top.push([c, vpos(t, &sc)]);
-                        base.push([c, vpos(b, &sc)]);
-                        // Source values (not stack totals), just above the top edge like the line labels.
-                        if ser_labels_on
-                            && sp.is_some()
-                            && let Some(v) = s.values.get(j).copied().flatten()
-                        {
-                            area_labels.push((c, vpos(t, &sc) - 5.0, fmt.format(v, None)));
+                        if ser_labels_on && let (Some((_, t)), Some(v)) = (sp, s.values.get(j).copied().flatten()) {
+                            area_labels.push((center(j), vpos(*t, &sc) - 5.0, fmt.format(v, None)));
                         }
                     }
-                    if top.len() == 1 {
-                        // A single point: give it some width.
-                        if let (Some(t), Some(b)) = (top.first().copied(), base.first().copied()) {
-                            top = vec![[t[0] - cw * 0.3, t[1]], [t[0] + cw * 0.3, t[1]]];
-                            base = vec![[b[0] - cw * 0.3, b[1]], [b[0] + cw * 0.3, b[1]]];
-                        }
+                    let mut top: Vec<[f32; 2]> = row.iter().enumerate().map(|(j, sp)| [center(j), vpos(sp.unwrap_or((0.0, 0.0)).1, &sc)]).collect();
+                    let mut base: Vec<[f32; 2]> = row.iter().enumerate().map(|(j, sp)| [center(j), vpos(sp.unwrap_or((0.0, 0.0)).0, &sc)]).collect();
+                    if top.len() == 1
+                        && let (Some(t), Some(b)) = (top.first().copied(), base.first().copied())
+                    {
+                        top = vec![[t[0] - cw * 0.3, t[1]], [t[0] + cw * 0.3, t[1]]];
+                        base = vec![[b[0] - cw * 0.3, b[1]], [b[0] + cw * 0.3, b[1]]];
                     }
-                    let top = decimate(top, MAX_LINE_PTS * 2);
-                    let base = decimate(base, MAX_LINE_PTS * 2);
-                    let mut poly = top;
-                    poly.extend(base.into_iter().rev());
+                    let mut poly = decimate(top, MAX_LINE_PTS * 2);
+                    poly.extend(decimate(base, MAX_LINE_PTS * 2).into_iter().rev());
                     if poly.len() >= 3 {
                         ctx.out.push(Prim::Polygon { pts: poly, fill: s.color, stroke: None });
                     }
@@ -395,13 +422,8 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
                         let len = (pb - pt).abs();
                         let fill = if multi_pt { super::legend::point_color(data, j) } else { s.color };
                         let stroke_w = if bw < 6.0 { 0.75 } else { 1.0 };
-                        let bar_stroke = s
-                            .point_strokes
-                            .iter()
-                            .find(|&&(idx, _)| idx as usize == j)
-                            .map(|&(_, sc)| sc)
-                            .or(s.stroke)
-                            .map(|c| (c, stroke_w));
+                        let bar_stroke =
+                            s.point_strokes.iter().find(|&&(idx, _)| idx as usize == j).map(|&(_, sc)| sc).or(s.stroke).map(|c| (c, stroke_w));
                         if horizontal {
                             let y = c + group_span / 2.0 - k * slot_step - bw;
                             ctx.rect(lo, y, len, bw, fill, bar_stroke);
@@ -433,43 +455,14 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
                         draw_markers(ctx, pts.iter().flatten().copied(), 2.75, m_fill, m_ring);
                     }
                     if ser_labels_on {
-                        let lpos = chart
-                            .axis_number_formats
-                            .series_label_positions
-                            .iter()
-                            .find(|(idx, _)| *idx == i as u32)
-                            .map(|(_, p)| p.as_str())
-                            .or_else(|| (i == 0).then_some(chart.axis_number_formats.label_pos.as_deref()).flatten());
-                        for (j, p) in pts.iter().enumerate() {
-                            if let (Some(p), Some(v)) = (p, s.values.get(j).copied().flatten()) {
-                                let txt = fmt.format(v, None);
-                                match lpos {
-                                    Some("b") => ctx.text(p[0], p[1] + 5.0, &txt, LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Top)),
-                                    Some("l") => ctx.text(p[0] - 6.0, p[1], &txt, LABEL_SIZE, TEXT, (HAlign::Right, VAlign::Middle)),
-                                    Some("r") => ctx.text(p[0] + 6.0, p[1], &txt, LABEL_SIZE, TEXT, (HAlign::Left, VAlign::Middle)),
-                                    Some("ctr") => ctx.text(p[0], p[1], &txt, LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Middle)),
-                                    None if chart.kind == ChartKind::Combo => {
-                                        ctx.text(p[0] + 6.0, p[1], &txt, LABEL_SIZE, TEXT, (HAlign::Left, VAlign::Middle));
-                                    }
-                                    _ => ctx.text(p[0], p[1] - 5.0, &txt, LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Bottom)),
-                                }
-                            }
-                        }
+                        draw_line_series_labels(ctx, chart, s, i, &pts, &fmt);
                     }
                 }
             }
         }
         if pass == 1 && !horizontal && !ctx.cat_axis_deleted && fams.iter().copied().any(is_col) {
             let zero = if s1.min <= 0.0 && s1.max >= 0.0 { 0.0 } else { s1.min };
-            let y0 = vpos(zero, s1);
-            let ax_col = if ctx.grid_color != super::GRID { ctx.grid_color } else { super::AXIS };
-            ctx.hline(plot.x, plot.right(), y0, ax_col, 0.75);
-            if chart.axis_number_formats.cat_major_tick.as_deref() != Some("none") {
-                for j in 0..=ncat_slots {
-                    let tx = plot.x + j as f32 * cw;
-                    ctx.vline(tx, plot.bottom(), plot.bottom() + 4.0, ax_col, 0.75);
-                }
-            }
+            draw_col_baseline(ctx, chart, plot, vpos(zero, s1), ncat_slots, cw);
         }
         for (x, y, t) in area_labels.drain(..) {
             ctx.text(x, y, &t, LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Bottom));

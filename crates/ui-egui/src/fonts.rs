@@ -376,6 +376,11 @@ pub fn bind_faces(fonts: &mut egui::FontDefinitions, family: &str, faces: &[Face
                 if cfg!(target_os = "macos") && face.weight >= 600.0 {
                     fd.tweak.hinting = Some(false);
                 }
+                if face.family.eq_ignore_ascii_case("Verdana") {
+                    fd.tweak.scale = 0.923;
+                } else if face.family.eq_ignore_ascii_case("Arial") {
+                    fd.tweak.scale = 0.948;
+                }
                 fonts.font_data.insert(key.clone(), std::sync::Arc::new(fd));
             }
             chain.push(key);

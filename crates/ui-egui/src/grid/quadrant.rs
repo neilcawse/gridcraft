@@ -90,7 +90,7 @@ fn wrapped_text_clip(p: &Painter, rect: Rect, galley: &egui::Galley, y: f32, val
 
     if let Some(bottom) = last_full_bottom {
         clip.max.y = clip.bottom().min(bottom).max(clip.top());
-    } else if galley.rows.first().is_none_or(|r| rect.height() < r.rect().height() * 0.85) {
+    } else if galley.rows.len() > 1 || galley.rows.first().is_none_or(|r| rect.height() < r.rect().height() * 0.5) {
         clip.max.y = clip.top();
     }
     clip
@@ -324,6 +324,16 @@ fn should_expand_text(filter_space: f32, overflows: bool, across_end: u32, col: 
 ///
 /// Handles text layout, wrapping, alignment, overflow into neighbouring cells,
 /// and clipping, while preserving cell decoration and merged-cell constraints.
+fn paint_cell_galley(cp: &Painter, pos: Pos2, galley: std::sync::Arc<egui::Galley>, color: Color32, bold: bool, z: f32) {
+    if bold {
+        cp.galley(pos2(pos.x + 0.75 * z, pos.y), galley.clone(), color);
+        if color.r() > 200 && color.g() > 200 && color.b() > 200 {
+            cp.galley(pos2(pos.x + 0.35 * z, pos.y + 0.25 * z), galley.clone(), color);
+        }
+    }
+    cp.galley(pos, galley, color);
+}
+
 fn paint_cell(q: &QuadrantPaint<'_>, painted: &(CellRef, Rect, Look, Option<CfLook>), merges: &[RangeRef]) {
     let (cell, rect, lk, cfl) = painted;
     let c = *cell;
@@ -404,7 +414,7 @@ fn paint_cell(q: &QuadrantPaint<'_>, painted: &(CellRef, Rect, Look, Option<CfLo
         };
         let y = wrapped_cell_text_y(st.align.v, *rect, galley.size().y, z);
         let text_clip = wrapped_text_clip(p, *rect, &galley, y, st.align.v);
-        p.with_clip_rect(text_clip).galley(pos2(x, y), galley, color);
+        paint_cell_galley(&p.with_clip_rect(text_clip), pos2(x, y), galley, color, st.font.bold, z);
         return;
     }
     // Wrap Text off: Excel ignores the line breaks and draws the whole string on one line.
@@ -514,7 +524,7 @@ fn paint_cell(q: &QuadrantPaint<'_>, painted: &(CellRef, Rect, Look, Option<CfLo
         shape.angle = angle;
         cp.add(shape);
     } else {
-        cp.galley(pos2(x, y), galley.clone(), color);
+        paint_cell_galley(&cp, pos2(x, y), galley.clone(), color, st.font.bold, z);
     }
     paint_text_decorations(&cp, TextDecoration { x, y, width: w, height: gh, color, underline: st.font.underline, strike: st.font.strike });
 }
@@ -719,17 +729,14 @@ fn paint_filter_buttons(q: &QuadrantPaint<'_>, range: RangeRef) {
         for j in 0..row_cols {
             let rf = pt.rows.get(j as usize);
             let filtered = rf.is_some_and(|rf| {
-                !rf.collapsed_items.is_empty()
-                    || pt.filters.iter().any(|f| f.source_col.eq_ignore_ascii_case(&rf.source_col) && f.selected.is_some())
+                !rf.collapsed_items.is_empty() || pt.filters.iter().any(|f| f.source_col.eq_ignore_ascii_case(&rf.source_col) && f.selected.is_some())
             });
             let sort = rf.map_or(gridcraft_engine::model::PivotSort::None, |rf| rf.sort);
             pbtns.push((CellRef::new(row_hdr_r, pt.anchor.col + j), filtered, sort));
         }
         if !pt.columns.is_empty() {
-            let filtered = pt
-                .columns
-                .iter()
-                .any(|cf| pt.filters.iter().any(|f| f.source_col.eq_ignore_ascii_case(&cf.source_col) && f.selected.is_some()));
+            let filtered =
+                pt.columns.iter().any(|cf| pt.filters.iter().any(|f| f.source_col.eq_ignore_ascii_case(&cf.source_col) && f.selected.is_some()));
             let sort = pt.columns.first().map_or(gridcraft_engine::model::PivotSort::None, |cf| cf.sort);
             pbtns.push((CellRef::new(pt.anchor.row, pt.anchor.col + row_cols), filtered, sort));
         }
@@ -741,7 +748,8 @@ fn paint_filter_buttons(q: &QuadrantPaint<'_>, range: RangeRef) {
             let pad = 1.5 * geo.z;
             let s = (rect.height() - 2.0).clamp(11.0, 16.0).min((rect.width() - 2.0 * pad).max(0.0));
             if s >= 8.0 {
-                let r = Rect::from_min_size(pos2(rect.right() - s - pad, rect.center().y - s / 2.0), vec2(s, s));
+                let by = (rect.center().y - s / 2.0 - 1.5 * geo.z).max(rect.top() + 1.0);
+                let r = Rect::from_min_size(pos2(rect.right() - s - pad, by), vec2(s, s));
                 paint_pivot_button(p, r, active, sort);
             }
         }

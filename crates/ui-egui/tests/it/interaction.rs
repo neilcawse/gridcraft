@@ -1169,7 +1169,8 @@ fn the_eraser_erases_a_grouped_ink_stroke_and_leaves_the_rest_of_its_group() {
         let sheet = app.session.active().unwrap().wb.active().unwrap();
         let geo = Geo::new(sheet, app.grid.rect.unwrap(), app.view().scroll);
         let a = sheet.shapes.iter().find(|sh| sh.id == erased).unwrap().anchor;
-        egui::pos2(geo.x(sheet, a.cell.col) + a.dx * geo.zx, geo.y(sheet, a.cell.row) + a.dy * geo.zy) + egui::vec2(a.width * geo.zx, a.height * geo.zy) / 2.0
+        egui::pos2(geo.x(sheet, a.cell.col) + a.dx * geo.zx, geo.y(sheet, a.cell.row) + a.dy * geo.zy)
+            + egui::vec2(a.width * geo.zx, a.height * geo.zy) / 2.0
     };
     click(&mut h, pos);
     let sheet = h.state().session.active().unwrap().wb.active().unwrap();
@@ -1188,7 +1189,8 @@ fn hidden_objects_are_not_erased_by_the_eraser() {
         let sheet = app.session.active().unwrap().wb.active().unwrap();
         let geo = Geo::new(sheet, app.grid.rect.unwrap(), app.view().scroll);
         let a = sheet.shapes.iter().find(|sh| sh.id == stroke).unwrap().anchor;
-        egui::pos2(geo.x(sheet, a.cell.col) + a.dx * geo.zx, geo.y(sheet, a.cell.row) + a.dy * geo.zy) + egui::vec2(a.width * geo.zx, a.height * geo.zy) / 2.0
+        egui::pos2(geo.x(sheet, a.cell.col) + a.dx * geo.zx, geo.y(sheet, a.cell.row) + a.dy * geo.zy)
+            + egui::vec2(a.width * geo.zx, a.height * geo.zy) / 2.0
     };
     let wb = std::sync::Arc::make_mut(&mut h.state_mut().session.doc_mut().unwrap().wb);
     wb.show_objects = gridcraft_engine::model::ShowObjects::None;

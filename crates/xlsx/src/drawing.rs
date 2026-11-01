@@ -95,11 +95,7 @@ fn dml_tint(el: &El) -> i16 {
     } else if let Some(t) = pct("tint") {
         (t / 100.0).round()
     } else if let Some(s) = pct("shade").filter(|&v| (0.0..=100_000.0).contains(&v)) {
-        if pct("satMod").is_some() {
-            (((s / 100_000.0).powf(1.0 / 2.2) - 1.0) * 1000.0).round()
-        } else {
-            ((s - 100_000.0) / 100.0).round()
-        }
+        if pct("satMod").is_some() { (((s / 100_000.0).powf(1.0 / 2.2) - 1.0) * 1000.0).round() } else { ((s - 100_000.0) / 100.0).round() }
     } else {
         0.0
     };

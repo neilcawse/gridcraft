@@ -661,13 +661,24 @@ pub fn auto_row_height(wb: &mut Workbook, si: usize, row: u32) {
             // starts one, and each line folds at the column width.
             if st.align.wrap && sh.col_width(c) > 0.0 {
                 let text = crate::display::cell_text(wb, sh, CellRef::new(row, c));
-                let w = sh.col_width(c).max(1.0) - 6.0;
+                let is_verdana = st.font.name.eq_ignore_ascii_case("Verdana");
+                let scale_w = if is_verdana { 0.86 } else { 1.06 };
+                let w = (sh.col_width(c).max(1.0) - 6.0) * scale_w;
                 lines = text.lines().map(|l| wrapped_line_count(l, w.max(1.0), size, st.font.bold)).sum::<f32>().max(1.0);
+                if is_verdana && !text.contains('\n') && lines > 2.0 && lines <= 2.35 && sh.rows.get(&row).and_then(|i| i.size).is_none() {
+                    lines = 2.0;
+                }
             }
         } else if st.font.size <= gridcraft_model::DEFAULT_FONT_SIZE {
             continue;
         }
-        let h = if lines > 1.0 { (size * 96.0 / 72.0 * 1.48 * lines + 4.0).ceil() } else { line };
+        let h = if lines >= 6.0 {
+            (size * 96.0 / 72.0 * 1.24 * lines + 2.0).ceil()
+        } else if lines > 1.0 {
+            (size * 96.0 / 72.0 * 1.42 * lines + 3.0).ceil()
+        } else {
+            line
+        };
         need = need.max(h.min(546.0));
     }
     let Some(shm) = wb.sheet_mut(si) else { return };

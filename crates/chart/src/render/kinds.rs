@@ -182,10 +182,10 @@ pub(super) fn pie(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx, inne
     let pw = chart.axis_number_formats.plot_w.filter(|&w| (0.2..=1.0).contains(&w)).map(|w| (ctx.chart_w * w).min(area.w)).unwrap_or(area.w);
     let r_scale = if out_end {
         0.81
+    } else if inner > 0.0 {
+        if area.h < 100.0 { 0.805 } else { 1.035 }
     } else if chart.axis_number_formats.plot_w.is_some() {
         0.96
-    } else if inner > 0.0 {
-        if area.h < 100.0 { 0.86 } else { 0.96 }
     } else {
         0.84
     };
@@ -239,7 +239,13 @@ pub(super) fn pie(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx, inne
         a += sweep;
     }
     for (x, y, t, c) in labels {
-        let sz = if inner > 0.0 { 13.0 } else if c == super::DARK_TEXT { 11.5 } else { LABEL_SIZE };
+        let sz = if inner > 0.0 {
+            13.0
+        } else if c == super::DARK_TEXT {
+            11.5
+        } else {
+            LABEL_SIZE
+        };
         let align = if out_end {
             if x > cx + r * 0.15 {
                 HAlign::Left

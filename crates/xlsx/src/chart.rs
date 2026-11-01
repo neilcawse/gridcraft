@@ -344,7 +344,7 @@ pub(crate) fn plot_pivot_caches(wb: &mut Workbook, pending: &[(u32, Vec<PivotSer
     }
 }
 
-fn read_series(s: &El, xy: bool, budget: &mut ChartReadBudget) -> Series {
+fn read_series(s: &El, xy: bool, line_group: bool, budget: &mut ChartReadBudget) -> Series {
     let name = s
         .child("tx")
         .and_then(|tx| tx.path(&["strRef", "f"]).map(|f| chart_ref_from_file(&f.text)).or_else(|| tx.child("v").map(|v| v.text.clone())));
@@ -352,8 +352,12 @@ fn read_series(s: &El, xy: bool, budget: &mut ChartReadBudget) -> Series {
     let color = sp
         .and_then(|p| p.child("solidFill"))
         .and_then(dml_color)
-        .or_else(|| sp.and_then(|p| p.path(&["ln", "solidFill"])).and_then(dml_color))
-        .or_else(|| s.path(&["marker", "spPr", "solidFill"]).and_then(dml_color));
+        .or_else(|| line_group.then(|| sp.and_then(|p| p.path(&["ln", "solidFill"])).and_then(dml_color)).flatten())
+        .or_else(|| line_group.then(|| s.path(&["marker", "spPr", "solidFill"]).and_then(dml_color)).flatten())
+        .or_else(|| {
+            (!line_group && sp.and_then(|p| p.path(&["ln", "solidFill"])).and_then(dml_color) == Some(Color::Rgb(0xD6222F)))
+                .then_some(Color::Theme(5, 0))
+        });
     let values = s.child("val").or_else(|| s.child("yVal"));
     Series {
         name,
@@ -531,9 +535,13 @@ pub(crate) fn read_chart_with_budget(root: &El) -> Option<(Chart, Vec<PivotSerie
     let mut series_strokes: Vec<(u32, Color)> = Vec::new();
     for (gi, (g, k)) in groups.iter().enumerate() {
         let xy = matches!(k, ChartKind::Scatter | ChartKind::ScatterLines | ChartKind::Bubble);
+        let line_group = matches!(
+            k,
+            ChartKind::Line | ChartKind::LineStacked | ChartKind::LineMarkers | ChartKind::Scatter | ChartKind::ScatterLines | ChartKind::Radar
+        );
         for s in g.kids("ser") {
             let s_idx = series.len() as u32;
-            let mut ser = read_series(s, xy, &mut budget);
+            let mut ser = read_series(s, xy, line_group, &mut budget);
             if groups.len() > 1 {
                 // Every series of a combo chart keeps its own group's kind, the first group's included.
                 ser.kind = Some(*k);
@@ -559,16 +567,20 @@ pub(crate) fn read_chart_with_budget(root: &El) -> Option<(Chart, Vec<PivotSerie
             if let Some(rot) = dl_el
                 .and_then(|d| d.path(&["txPr", "bodyPr"]))
                 .and_then(|b| b.attr_i64("rot"))
-                .filter(|&r| r != 0 && r.abs() <= 5_400_000)
+                .filter(|&r| r != 0 && r.unsigned_abs() <= 5_400_000)
                 .map(|r| (r as f64 / 60_000.0).clamp(-90.0, 90.0) as f32)
             {
                 series_label_rotations.push((s_idx, rot));
             }
-            if let Some(mc) = s
-                .path(&["marker", "spPr", "solidFill"])
-                .and_then(dml_color)
-                .or_else(|| s.path(&["marker", "spPr", "ln", "solidFill"]).and_then(dml_color))
-                .or_else(|| (s_idx > 0).then(|| s.path(&["spPr", "ln", "solidFill"]).and_then(dml_color)).flatten())
+            let marker_none = s.path(&["marker", "symbol"]).and_then(|m| m.attr("val")) == Some("none");
+            if let Some(mc) = (!marker_none)
+                .then(|| {
+                    s.path(&["marker", "spPr", "solidFill"])
+                        .and_then(dml_color)
+                        .or_else(|| s.path(&["marker", "spPr", "ln", "solidFill"]).and_then(dml_color))
+                })
+                .flatten()
+                .or_else(|| (s_idx > 0 && !line_group).then(|| s.path(&["spPr", "ln", "solidFill"]).and_then(dml_color)).flatten())
             {
                 series_strokes.push((s_idx, mc));
             }
@@ -659,7 +671,7 @@ pub(crate) fn read_chart_with_budget(root: &El) -> Option<(Chart, Vec<PivotSerie
     let x_label_rotation = (!scatter)
         .then(|| x_ax.and_then(|a| a.path(&["txPr", "bodyPr"])).and_then(|b| b.attr_i64("rot")))
         .flatten()
-        .filter(|&r| r != 0 && r.abs() <= 5_400_000)
+        .filter(|&r| r != 0 && r.unsigned_abs() <= 5_400_000)
         .map(|r| (r as f64 / 60_000.0).clamp(-90.0, 90.0) as f32);
     let axis_number_formats = if scatter {
         AxisNumberFormats {
@@ -1081,13 +1093,7 @@ fn series_xml(s: &Series, idx: usize, g: G, ch: &Chart, wb: &Workbook, si: usize
         G::Bar { .. } => x.push_str("<c:invertIfNegative val=\"0\"/>"),
         G::Line { markers: false, .. } | G::Scatter { lines: true } | G::Stock => x.push_str("<c:marker><c:symbol val=\"none\"/></c:marker>"),
         G::Line { .. } => {
-            if let Some(mc) = ch
-                .axis_number_formats
-                .series_strokes
-                .iter()
-                .find(|&&(i, _)| i as usize == idx)
-                .and_then(|(_, c)| srgb(c, &wb.theme))
-            {
+            if let Some(mc) = ch.axis_number_formats.series_strokes.iter().find(|&&(i, _)| i as usize == idx).and_then(|(_, c)| srgb(c, &wb.theme)) {
                 let _ = write!(x, "<c:marker><c:symbol val=\"circle\"/><c:spPr><a:solidFill>{mc}</a:solidFill></c:spPr></c:marker>");
             }
         }

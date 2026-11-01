@@ -96,6 +96,13 @@ pub fn open_bytes_with(name: &str, bytes: &[u8], password: Option<&str>, csv_as_
 /// right would be a visible regression. Custom-height rows are left alone entirely.
 fn fit_imported_rows(wb: &mut Workbook) {
     for si in 0..wb.sheets.len() {
+        let has_verdana = wb.sheet(si).is_some_and(|sh| {
+            (sh.default_row_height - 17.0).abs() < 0.6
+                && sh.cells.iter().any(|(_, c)| wb.styles.get(c.style).font.name.eq_ignore_ascii_case("Verdana"))
+        });
+        if has_verdana && let Some(sh) = wb.sheet_mut(si) {
+            sh.default_row_height = 19.25;
+        }
         let Some(sh) = wb.sheet(si) else { continue };
         let mut rows: Vec<u32> = sh.cells.iter().map(|(c, _)| c.row).collect();
         rows.sort_unstable();
@@ -107,9 +114,8 @@ fn fit_imported_rows(wb: &mut Workbook) {
             }
             let before = row_info.and_then(|i| i.size);
             let cur_h = before.unwrap_or_else(|| wb.sheet(si).map_or(gridcraft_model::DEFAULT_ROW_HEIGHT, |sh| sh.default_row_height));
-            let (needs_autofit, has_wrapped_formula, has_wrapped) = wb.sheet(si).map_or((false, false, false), |sh| {
+            let (needs_autofit, has_wrapped) = wb.sheet(si).map_or((false, false), |sh| {
                 let mut nf = false;
-                let mut wf = false;
                 let mut wr = false;
                 for (c, cell) in sh.cells.row(row, 0, gridcraft_core::MAX_COLS - 1) {
                     let st = wb.styles.get(cell.style);
@@ -122,12 +128,9 @@ fn fit_imported_rows(wb: &mut Workbook) {
                     if st.align.wrap && sh.col_width(c) > 0.0 && (!cell.value.is_empty() || cell.formula.is_some()) {
                         nf = true;
                         wr = true;
-                        if cell.formula.is_some() {
-                            wf = true;
-                        }
                     }
                 }
-                (nf, wf, wr)
+                (nf, wr)
             });
             if !needs_autofit {
                 continue;
@@ -135,7 +138,7 @@ fn fit_imported_rows(wb: &mut Workbook) {
             crate::cmd::auto_row_height(wb, si, row);
             let Some(before) = before else { continue };
             let after = wb.sheet(si).and_then(|sh| sh.rows.get(&row)).and_then(|i| i.size);
-            let allow_shrink = has_wrapped_formula || (has_wrapped && before > 165.0 && after.is_some());
+            let allow_shrink = has_wrapped && before > 165.0 && after.is_some();
             if !allow_shrink
                 && after.is_none_or(|a| before > a + 0.5)
                 && let Some(sh) = wb.sheet_mut(si)

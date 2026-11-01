@@ -365,13 +365,11 @@ fn read_views(e: &El, sheet: &mut Sheet) {
         active_pane = p.attr("activePane");
     }
     let sel = v.kids("selection").find(|s| s.attr("pane") == active_pane).or_else(|| v.kids("selection").last());
-    if let Some(c) = sel
-        .and_then(|s| {
-            s.attr("activeCell")
-                .and_then(CellRef::parse)
-                .or_else(|| s.attr("sqref")?.split_whitespace().next().and_then(|r| r.split(':').next()).and_then(CellRef::parse))
-        })
-    {
+    if let Some(c) = sel.and_then(|s| {
+        s.attr("activeCell")
+            .and_then(CellRef::parse)
+            .or_else(|| s.attr("sqref")?.split_whitespace().next().and_then(|r| r.split(':').next()).and_then(CellRef::parse))
+    }) {
         sheet.view_active = c;
     }
 }

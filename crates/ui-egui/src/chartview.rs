@@ -156,12 +156,21 @@ pub fn paint_prims(p: &Painter, origin: Pos2, prims: &[Prim], z: f32) {
                 };
                 let anchor = pt(*x, *y);
                 if *rotation == 0.0 {
-                    p.galley(pos2(anchor.x - sz.x * ax, anchor.y - sz.y * ay), galley, rgba(*color));
+                    let pos = pos2(anchor.x - sz.x * ax, anchor.y - sz.y * ay);
+                    if *bold {
+                        p.galley(pos + vec2(0.75 * z, 0.0), galley.clone(), rgba(*color));
+                    }
+                    p.galley(pos, galley, rgba(*color));
                 } else {
                     // Rotate about the anchor: offset the galley origin by the rotated alignment.
                     let (s, c) = rotation.sin_cos();
                     let off = vec2(-sz.x * ax, -sz.y * ay);
                     let rot = vec2(off.x * c - off.y * s, off.x * s + off.y * c);
+                    if *bold {
+                        let mut bshape = egui::epaint::TextShape::new(anchor + rot + vec2(0.6 * z, 0.0), galley.clone(), rgba(*color));
+                        bshape.angle = *rotation;
+                        p.add(bshape);
+                    }
                     let mut shape = egui::epaint::TextShape::new(anchor + rot, galley, rgba(*color));
                     shape.angle = *rotation;
                     p.add(shape);
@@ -228,7 +237,7 @@ fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Sh
     // Default 14 px (as before); a set size is in points.
     let size = f.font_size.map_or(14.0, |pt| pt * 96.0 / 72.0).clamp(1.0, 2000.0) * z;
     let family = theme::cell_family(f.font.as_deref().unwrap_or(&wb.theme.minor_font), f.bold, f.italic);
-    let inset = 4.0;
+    let inset = 3.0 * z;
     let pad_l = if f.level > 0 { (9.6 + f.level as f32 * 48.0) * z } else { inset };
     let deg = (rot.rem_euclid(21_600_000) as f64) / 60_000.0;
     let angle = (if deg > 180.0 { deg - 360.0 } else { deg }).to_radians() as f32;
@@ -272,7 +281,8 @@ fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Sh
         ShapeTextAnchor::Bottom => r.bottom() - inset - g.size().y,
     };
     let pos = pos2(x, y);
-    let clip = p.with_clip_rect(r.intersect(p.clip_rect()));
+    let clip_r = Rect::from_min_max(r.min, pos2(r.max.x, r.max.y + 6.0 * z));
+    let clip = p.with_clip_rect(clip_r.intersect(p.clip_rect()));
     // egui has no stroked text: the outline is the text drawn in the outline colour, offset in
     // eight directions by the outline width, under the filled text.
     if let Some((c, w)) = f.text_outline
@@ -283,22 +293,20 @@ fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Sh
             clip.galley_with_override_text_color(pos + vec2(dx * d, dy * d), g.clone(), oc);
         }
     }
+    if f.bold {
+        clip.galley(pos + vec2(0.75 * z, 0.0), g.clone(), color);
+        if color.r() > 200 && color.g() > 200 && color.b() > 200 {
+            clip.galley(pos + vec2(0.35 * z, 0.25 * z), g.clone(), color);
+        }
+    }
     clip.galley(pos, g, color);
 }
 
 pub(crate) fn anchor_rect(geo: &Geo, sh: &Sheet, a: &Anchor) -> Rect {
     let cw = sh.col_width(a.cell.col);
-    let (dx_eff, over_x) = if cw > 0.0 && a.dx > cw {
-        (cw * geo.zx, a.dx - cw)
-    } else {
-        (a.dx * geo.zx * 0.875, 0.0)
-    };
+    let (dx_eff, over_x) = if cw > 0.0 && a.dx > cw { (cw * geo.zx, a.dx - cw) } else { (a.dx * geo.zx * 0.875, 0.0) };
     let rh = sh.row_height(a.cell.row);
-    let (dy_eff, over_y) = if rh > 0.0 && a.dy > rh {
-        (rh * geo.zy, a.dy - rh)
-    } else {
-        (a.dy * geo.zy, 0.0)
-    };
+    let (dy_eff, over_y) = if rh > 0.0 && a.dy > rh { (rh * geo.zy, a.dy - rh) } else { (a.dy * geo.zy, 0.0) };
     let x = geo.x(sh, a.cell.col) + dx_eff;
     let y = geo.y(sh, a.cell.row) + dy_eff;
     Rect::from_min_size(pos2(x, y), vec2((a.width + over_x) * geo.zx, (a.height + over_y).max(1.0) * geo.zy))
@@ -315,6 +323,35 @@ pub(crate) struct PaintedObject {
 /// clickable. Placeholders, which Excel no longer offers, show the objects.
 pub(crate) fn objects_hidden(wb: &Workbook) -> bool {
     wb.show_objects == gridcraft_engine::model::ShowObjects::None
+}
+
+fn clip_shape_to_slicer(geo: &Geo, sh: &Sheet, r: Rect) -> Rect {
+    let mut fill_r = r;
+    if let Some(sl) = sh.slicers.iter().find(|sl| anchor_rect(geo, sh, &sl.anchor).intersects(r)) {
+        let sr = anchor_rect(geo, sh, &sl.anchor);
+        let hdr_bot = sr.top() + 22.5 * geo.z;
+        fill_r.min.x = fill_r.min.x.max(sr.left() + 1.0);
+        fill_r.max.x = fill_r.max.x.min(sr.right() - 1.0);
+        fill_r.min.y = fill_r.min.y.max(sr.top() + 1.0);
+        if fill_r.min.y < hdr_bot {
+            fill_r.max.y = fill_r.max.y.min(hdr_bot - 1.0);
+        }
+    }
+    fill_r
+}
+
+fn snap_chart_rect(geo: &Geo, sh: &Sheet, ch: &gridcraft_engine::model::Chart) -> Rect {
+    let mut r = anchor_rect(geo, sh, &ch.anchor);
+    for other in &sh.charts {
+        if other.id != ch.id {
+            let or = anchor_rect(geo, sh, &other.anchor);
+            let gap = or.left() - r.right();
+            if (or.top() - r.top()).abs() <= 4.0 && (or.height() - r.height()).abs() <= 8.0 && (0.5..=12.0).contains(&gap) {
+                r.max.x = or.left();
+            }
+        }
+    }
+    r
 }
 
 pub(crate) fn paint_objects(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Workbook, si: usize, sh: &Sheet) -> Vec<PaintedObject> {
@@ -366,19 +403,7 @@ pub(crate) fn paint_objects(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Wor
                 };
                 match sp.kind {
                     ShapeKind::Rectangle | ShapeKind::TextBox => {
-                        let mut fill_r = r;
-                        if sp.format.no_line
-                            && let Some(sl) = sh.slicers.iter().find(|sl| anchor_rect(geo, sh, &sl.anchor).intersects(r))
-                        {
-                            let sr = anchor_rect(geo, sh, &sl.anchor);
-                            let hdr_bot = sr.top() + 22.5 * geo.z;
-                            fill_r.min.x = fill_r.min.x.max(sr.left() + 1.0);
-                            fill_r.max.x = fill_r.max.x.min(sr.right() - 1.0);
-                            fill_r.min.y = fill_r.min.y.max(sr.top() + 1.0);
-                            if fill_r.min.y < hdr_bot {
-                                fill_r.max.y = fill_r.max.y.min(hdr_bot - 1.0);
-                            }
-                        }
+                        let fill_r = if sp.format.no_line { clip_shape_to_slicer(geo, sh, r) } else { r };
                         if fill_r.width() > 0.0 && fill_r.height() > 0.0 {
                             p.rect_filled(fill_r, 0.0, fill);
                         }
@@ -464,7 +489,7 @@ pub(crate) fn paint_objects(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Wor
                 if ch.series.is_empty() && ch.title.as_deref().is_none_or(str::is_empty) && app.selected_chart != Some(ch.id) {
                     continue;
                 }
-                let r = anchor_rect(geo, sh, &ch.anchor);
+                let r = snap_chart_rect(geo, sh, ch);
                 if !r.intersects(p.clip_rect()) {
                     continue;
                 }
@@ -515,7 +540,7 @@ pub fn hit_object(geo: &Geo, sh: &Sheet, p: Pos2) -> Option<(&'static str, u32, 
         if ch.series.is_empty() && ch.title.as_deref().is_none_or(str::is_empty) {
             continue;
         }
-        let r = anchor_rect(geo, sh, &ch.anchor);
+        let r = snap_chart_rect(geo, sh, ch);
         if r.expand(4.0).contains(p) && geo.cells.contains(p) {
             return Some(("chart", ch.id, r));
         }
@@ -636,7 +661,9 @@ fn paint_slicer(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Workbook, si: u
     }
     p.rect_stroke(r, radius, Stroke::new(1.0, border_col), StrokeKind::Inside);
     let cap = if sl.caption.is_empty() { sl.field().to_string() } else { sl.caption.clone() };
-    p.text(lay.header.left_center() + vec2(8.0 * geo.z, 0.0), Align2::LEFT_CENTER, cap, theme::ui_bold(12.5 * geo.z), header_fg);
+    let hpos = lay.header.left_center() + vec2(8.0 * geo.z, 0.0);
+    p.text(hpos + vec2(0.75 * geo.z, 0.0), Align2::LEFT_CENTER, cap.clone(), theme::ui_bold(12.5 * geo.z), header_fg);
+    p.text(hpos, Align2::LEFT_CENTER, cap, theme::ui_bold(12.5 * geo.z), header_fg);
     // Clear-filter button (tinted when a filter is active).
     let filtered = items.iter().any(|t| !t.selected);
     if let Some(icon) = crate::icons::from_name("filter") {

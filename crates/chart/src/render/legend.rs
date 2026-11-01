@@ -87,20 +87,20 @@ pub fn legend_entries(chart: &Chart, data: &ChartData) -> Vec<(String, Rgba, Swa
 // ---------------------------------------------------------------- legend
 
 fn swatch_w(sw: Swatch, s: f32) -> f32 {
-    if sw == Swatch::Box { s } else { s * 2.0 }
+    if sw == Swatch::Box { s } else { s * 2.65 }
 }
 
 fn draw_swatch(ctx: &mut Ctx, sw: Swatch, x: f32, yc: f32, s: f32, color: Rgba, stroke: Option<Rgba>) {
     match sw {
         Swatch::Box => ctx.rect(x, yc - s / 2.0, s, s, color, stroke.map(|c| (c, 2.0))),
-        Swatch::Line => ctx.hline(x, x + 2.0 * s, yc, color, 2.0),
+        Swatch::Line => ctx.hline(x, x + 2.65 * s, yc, color, 2.25),
         Swatch::LineMarker => {
-            ctx.hline(x, x + 2.0 * s, yc, color, 2.0);
+            ctx.hline(x, x + 2.65 * s, yc, color, 2.25);
             let (m_fill, m_ring) = match stroke {
                 Some(mf) => (mf, Some((color, 1.25))),
                 None => (color, None),
             };
-            ctx.out.push(Prim::Circle { cx: x + s, cy: yc, r: s * 0.35, fill: Some(m_fill), stroke: m_ring });
+            ctx.out.push(Prim::Circle { cx: x + 1.325 * s, cy: yc, r: s * 0.35, fill: Some(m_fill), stroke: m_ring });
         }
         Swatch::Marker => ctx.out.push(Prim::Circle { cx: x + s / 2.0, cy: yc, r: s * 0.4, fill: Some(color), stroke: stroke.map(|c| (c, 1.25)) }),
     }
@@ -174,13 +174,17 @@ pub(super) fn draw_legend(ctx: &mut Ctx, entries: &[(String, Rgba, Swatch)], pos
             let wraps = entries.iter().filter(|e| ctx.tw(&e.0, size) > avail_est && e.0.contains(' ')).count();
             let target_h = ctx.legend_h.filter(|&lh| (0.3..=1.0).contains(&lh)).map(|lh| (ctx.chart_h * lh).min(area.h));
             let (eff_row_h, max_rows) = match target_h {
-                Some(th) if !entries.is_empty() && wraps * 2 >= entries.len() => {
+                Some(th) if !entries.is_empty() && wraps > 0 => {
                     let min_rh = row_h * 1.95;
                     let mr = ((th / min_rh).round() as usize).clamp(1, entries.len());
                     ((th / mr as f32).max(min_rh), mr)
                 }
                 Some(th) if !entries.is_empty() => {
                     let erh = (th / entries.len() as f32).clamp(row_h, row_h * 2.4);
+                    (erh, ((area.h / erh).floor() as usize).max(1))
+                }
+                _ if !entries.is_empty() && entries.len() <= 6 => {
+                    let erh = (row_h * 1.38).min(area.h / entries.len() as f32).max(row_h);
                     (erh, ((area.h / erh).floor() as usize).max(1))
                 }
                 _ => (row_h, ((area.h / row_h).floor() as usize).max(1)),
@@ -194,7 +198,10 @@ pub(super) fn draw_legend(ctx: &mut Ctx, entries: &[(String, Rgba, Swatch)], pos
                 draw_swatch(ctx, e.2, x0, yc, s, e.1, entry_stroke(data, i));
                 let sx = swatch_w(e.2, s) + gap;
                 let avail = (colw - sx).max(0.0) + 0.5;
-                if eff_row_h >= size * 1.9 && ctx.tw(&e.0, size) > avail && let Some(sp) = e.0.rfind(' ') {
+                if eff_row_h >= size * 1.9
+                    && ctx.tw(&e.0, size) > avail
+                    && let Some(sp) = e.0.rfind(' ')
+                {
                     let (l1, l2) = e.0.split_at(sp);
                     let t1 = ctx.fit(l1, size, avail);
                     let t2 = ctx.fit(l2.trim_start(), size, avail);

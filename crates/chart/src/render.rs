@@ -32,7 +32,7 @@ const STOCK: Rgba = [0x40, 0x40, 0x40, 0xFF];
 pub(crate) const UP: Rgba = [0x3E, 0x9B, 0x5F, 0xFF];
 pub(crate) const DOWN: Rgba = [0xD6, 0x4F, 0x45, 0xFF];
 
-const TITLE_SIZE: f32 = 19.5;
+const TITLE_SIZE: f32 = 17.5;
 const LABEL_SIZE: f32 = 11.5;
 const AXIS_TITLE_SIZE: f32 = 12.5;
 const MAX_CATS: usize = 20_000;
@@ -177,7 +177,13 @@ pub fn render(chart: &Chart, data: &ChartData, w: f32, h: f32, m: &dyn Measure) 
     let pad = (w.min(h) * 0.04).clamp(2.0, 10.0);
     let mut area = Bx { x: pad, y: pad, w: w - 2.0 * pad, h: h - 2.0 * pad };
     if let Some(t) = title {
-        let base_sz = if chart.axis_number_formats.title_bold { 22.0 } else { TITLE_SIZE };
+        let base_sz = if chart.axis_number_formats.title_bold {
+            22.0
+        } else if w > 600.0 && chart.y_title.is_some() {
+            20.0
+        } else {
+            TITLE_SIZE
+        };
         let size = base_sz.min(h * 0.16).max(4.0);
         let t = ctx.fit(&t, size, area.w);
         let (tx, align) = if chart.axis_number_formats.title_left { (area.x, HAlign::Left) } else { (w / 2.0, HAlign::Center) };

@@ -10,13 +10,17 @@ use super::selection::{SelectionPaintInput, paint_selection};
 use super::tables::{TableHeading, paint_filter_button, table_headings};
 use super::{
     Align2, Arc, COL_DISPLAY_SCALE, CfCache, Color32, DISPLAY_SCALE, Drag, MAX_COLS, MAX_ROWS, Painter, PaneQuad, ROW_DISPLAY_SCALE, RangeRef, Rect,
-    Sense, Sheet,
-    SheetApp, Stroke,
-    StrokeKind, Tokens, WHEEL_ZOOM_IDLE, WheelZoom, Workbook, col_to_letters, heading_font_size, json, pos2, theme, vec2, wheel_zoom_step,
-    zoom_glide_step,
+    Sense, Sheet, SheetApp, Stroke, StrokeKind, Tokens, WHEEL_ZOOM_IDLE, WheelZoom, Workbook, col_to_letters, heading_font_size, json, pos2, theme,
+    vec2, wheel_zoom_step, zoom_glide_step,
 };
 #[cfg(test)]
 use super::{CellRef, Pos2};
+
+fn non_paper_scales(zoom_pct: u16) -> (f32, f32) {
+    let zf = zoom_pct as f32 / 100.0;
+    let cz = if zoom_pct == 120 { 1.0 + (zf - 1.0) * 0.56 } else { zf };
+    (cz * COL_DISPLAY_SCALE, zf * ROW_DISPLAY_SCALE)
+}
 
 pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
@@ -94,9 +98,7 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
                 let g = make_geo(app, view.scroll);
                 (g.zx, g.zy)
             } else {
-                let zf = sh.zoom as f32 / 100.0;
-                let cz = if sh.zoom == 120 { 1.0 + (zf - 1.0) * 0.56 } else { zf };
-                (cz * COL_DISPLAY_SCALE, zf * ROW_DISPLAY_SCALE)
+                non_paper_scales(sh.zoom)
             };
             let mut d = scroll_delta;
             // A horizontal swipe moves the content the way the fingers go, which is towards
@@ -120,9 +122,7 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
             let g = make_geo(app, view.scroll);
             (g.zx, g.zy)
         } else {
-            let zf = sh.zoom as f32 / 100.0;
-            let cz = if sh.zoom == 120 { 1.0 + (zf - 1.0) * 0.56 } else { zf };
-            (cz * COL_DISPLAY_SCALE, zf * ROW_DISPLAY_SCALE)
+            non_paper_scales(sh.zoom)
         };
         let mut d = resp.drag_delta();
         if sh.right_to_left {
