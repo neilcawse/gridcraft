@@ -157,13 +157,13 @@ fn draw_cat_labels(ctx: &mut Ctx, plot: Bx, l: &[String], outer: &[Vec<String>],
         let cx = plot.x + (j as f32 + 0.5) * cw;
         if let Some(a) = rot_rad {
             let eff_cat_h = if ctx.has_bottom_legend && ctx.has_plot_w {
-                cat_h + 20.8
+                cat_h + 19.6
             } else if ctx.has_bottom_legend && ctx.y_title_prims.len() >= 2 && plot.h < 96.0 {
                 cat_h.min(50.0)
             } else if ctx.has_bottom_legend && ctx.y_title_prims.len() >= 2 {
                 cat_h - 6.5
             } else if ctx.has_bottom_legend {
-                cat_h - 21.0
+                cat_h - 24.5
             } else {
                 cat_h
             };
@@ -175,17 +175,7 @@ fn draw_cat_labels(ctx: &mut Ctx, plot: Bx, l: &[String], outer: &[Vec<String>],
                 let r_h = (cx - 2.0).max(20.0) / a.cos().abs().max(0.1);
                 (HAlign::Right, r_v.min(r_h))
             };
-            let calibri_adj: f32 = t
-                .chars()
-                .take(4)
-                .map(|ch| match ch {
-                    '1' => -4.5,
-                    '2' => -1.5,
-                    '5' => 1.5,
-                    _ => 0.0,
-                })
-                .sum();
-            let t = ctx.fit(t, ls, (room + calibri_adj).max(1.0));
+            let t = ctx.fit(t, ls, room);
             if !t.is_empty() {
                 ctx.out.push(Prim::Text {
                     x: cx,
@@ -250,9 +240,9 @@ fn vertical_cat_band(ctx: &Ctx, area: Bx, cat: &CatAxis, has_y2: bool, ls: f32, 
             let a = rot.abs().to_radians();
             let raw_h = lw * a.sin() + ls * a.cos();
             let ch = if ctx.has_bottom_legend && has_y2 && ctx.has_plot_w {
-                raw_h.min(area.h * 0.33).min(53.0).max(lh)
+                raw_h.min(area.h * 0.33).min(54.2).max(lh)
             } else if ctx.has_bottom_legend && has_y2 && ctx.y_title_prims.len() >= 2 && area.h < 193.0 {
-                raw_h.min(area.h * 0.43).max(lh)
+                raw_h.min(area.h * 0.436).max(lh)
             } else if ctx.has_bottom_legend && has_y2 {
                 raw_h.min(area.h * 0.455).max(lh)
             } else if ctx.has_bottom_legend {

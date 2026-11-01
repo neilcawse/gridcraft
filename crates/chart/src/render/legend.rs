@@ -193,7 +193,7 @@ pub(super) fn draw_legend(ctx: &mut Ctx, entries: &[(String, Rgba, Swatch)], pos
             let n = entries.len().min(max_rows);
             let lh = n as f32 * eff_row_h;
             let y0 = area.y + (area.h - lh).max(0.0) / 2.0;
-            let x0 = if pos == LegendPos::Right { area.right() - colw } else { area.x };
+            let x0 = if pos == LegendPos::Right { area.right() - colw - 1.25 } else { area.x };
             for (i, e) in entries.iter().take(n).enumerate() {
                 let yc = y0 + i as f32 * eff_row_h + eff_row_h / 2.0;
                 draw_swatch(ctx, e.2, x0, yc, s, e.1, entry_stroke(data, i));

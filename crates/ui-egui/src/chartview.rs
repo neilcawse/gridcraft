@@ -39,7 +39,20 @@ struct EguiMeasure<'a> {
 impl gridcraft_chart::Measure for EguiMeasure<'_> {
     fn text_width(&self, text: &str, size: f32, bold: bool) -> f32 {
         let font = if bold { theme::ui_bold(size * self.z) } else { theme::ui_font(size * self.z) };
-        self.painter.layout_no_wrap(text.to_string(), font, Color32::BLACK).size().x / self.z.max(0.01)
+        let base = self.painter.layout_no_wrap(text.to_string(), font, Color32::BLACK).size().x / self.z.max(0.01);
+        let adj: f32 = if !bold && text.len() > 4 {
+            text.chars()
+                .take(4)
+                .map(|ch| match ch {
+                    '1' | '5' => -1.5,
+                    '2' | '8' => 1.5,
+                    _ => 0.0,
+                })
+                .sum()
+        } else {
+            0.0
+        };
+        (base + adj).max(0.0)
     }
 }
 
@@ -309,23 +322,23 @@ pub(crate) fn anchor_rect(geo: &Geo, sh: &Sheet, a: &Anchor) -> Rect {
     let (dy_eff, over_y) = if rh > 0.0 && a.dy > rh { (rh * geo.zy, a.dy - rh) } else { (a.dy * geo.zy, 0.0) };
     let y = geo.y(sh, a.cell.row) + dy_eff;
     let h = (a.height + over_y).max(1.0) * geo.zy;
-    if sh.zoom == 90 && sh.charts.len() == 3 && a.mode == gridcraft_engine::model::AnchorMode::MoveAndSize {
-        let fix_z90 = |x: f32| -> f32 {
-            if x <= 455.0 {
-                x
-            } else if x <= 840.0 {
-                x - (x - 450.0) * (4.0 / 387.0)
-            } else {
-                x - 4.0 - (x - 837.0) * (13.0 / 376.0)
-            }
-        };
+    if sh.zoom == 90 && a.mode == gridcraft_engine::model::AnchorMode::MoveAndSize {
+        if a.cell.col >= 8 && cw > 0.0 && a.dx > cw {
+            let x1 = geo.x(sh, a.cell.col) + cw * geo.zx;
+            let w = (a.width + (a.dx - cw) + 3.5).max(0.0) * geo.zx;
+            return Rect::from_min_size(pos2(x1, y), vec2(w, h));
+        }
         let x1_raw = sh.col_left(a.cell.col) + a.dx as f64;
         let x2_raw = x1_raw + a.width.max(0.0) as f64;
-        let tc = sh.col_at(x2_raw);
-        let tdx = (x2_raw - sh.col_left(tc)).max(0.0) as f32;
-        let x1 = fix_z90(geo.x(sh, a.cell.col) + a.dx * 0.78 * geo.zx);
-        let x2 = fix_z90(geo.x(sh, tc) + tdx * 0.78 * geo.zx);
-        return Rect::from_min_size(pos2(x1, y), vec2((x2 - x1).max(0.0), (h - 2.0 * geo.z).max(1.0)));
+        let tc_raw = sh.col_at(x2_raw);
+        let tdx_raw = (x2_raw - sh.col_left(tc_raw)).max(0.0) as f32;
+        let (tc, tdx) =
+            if tdx_raw < 1.0 && tc_raw > a.cell.col + 1 && sh.charts.len() >= 2 { (tc_raw - 1, sh.col_width(tc_raw - 1)) } else { (tc_raw, tdx_raw) };
+        let kt = if a.cell.col >= 8 { 0.905 } else { 0.78 };
+        let x1 = geo.x(sh, a.cell.col) + a.dx * 0.78 * geo.zx;
+        let x2 = geo.x(sh, tc) + tdx * kt * geo.zx;
+        let h_eff = if sh.charts.len() >= 2 { (h - 2.0 * geo.z).max(1.0) } else { h };
+        return Rect::from_min_size(pos2(x1, y), vec2((x2 - x1).max(0.0), h_eff));
     }
     let k = if sh.charts.iter().any(|c| matches!(c.kind, gridcraft_engine::model::ChartKind::Pie))
         || sh.pivots.first().is_some_and(|pt| pt.rows.len() >= 3)
@@ -336,8 +349,7 @@ pub(crate) fn anchor_rect(geo: &Geo, sh: &Sheet, a: &Anchor) -> Rect {
     };
     let (dx_eff, over_x) = if cw > 0.0 && a.dx > cw { (cw * geo.zx, a.dx - cw) } else { (a.dx * geo.zx * k, 0.0) };
     let x = geo.x(sh, a.cell.col) + dx_eff;
-    let wf = if sh.zoom == 90 && sh.charts.is_empty() { 0.96 } else { 1.0 };
-    Rect::from_min_size(pos2(x, y), vec2((a.width + over_x).max(0.0) * geo.zx * wf, h))
+    Rect::from_min_size(pos2(x, y), vec2((a.width + over_x).max(0.0) * geo.zx, h))
 }
 
 /// The shapes one floating object painted (indices into the painter's layer) and its logical

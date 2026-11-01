@@ -433,10 +433,11 @@ fn paint_cell(q: &QuadrantPaint<'_>, painted: &(CellRef, Rect, Look, Option<CfLo
         };
         let y = wrapped_cell_text_y(st.align.v, *rect, galley.size().y, z);
         let text_clip = wrapped_text_clip(p, *rect, &galley, y, st.align.v);
-        let is_wide_banner = sh.pivots.is_empty() && rect.width() > 180.0 * z;
-        let light_wb = !is_wide_banner
-            && sh.slicers.is_empty()
-            && !sh.pivots.first().is_some_and(|pt| !pt.columns.is_empty() || pt.values.len() >= 5 || (!sh.charts.is_empty() && pt.rows.len() >= 3));
+        let light_wb = sh.default_row_height <= 22.0
+            && !sh
+                .pivots
+                .first()
+                .is_some_and(|pt| !pt.columns.is_empty() || (!sh.charts.is_empty() && pt.rows.len() >= 3 && rect.height() <= 30.0 * z));
         let big = (c.row == 0 && st.font.size >= 15.5) || st.font.size >= 16.0;
         paint_cell_galley(&p.with_clip_rect(text_clip), pos2(x, y), galley, color, (st.font.bold, big, light_wb), z);
         return;
@@ -548,10 +549,11 @@ fn paint_cell(q: &QuadrantPaint<'_>, painted: &(CellRef, Rect, Look, Option<CfLo
         shape.angle = angle;
         cp.add(shape);
     } else {
-        let is_wide_banner = sh.pivots.is_empty() && rect.width() > 180.0 * z;
-        let light_wb = !is_wide_banner
-            && sh.slicers.is_empty()
-            && !sh.pivots.first().is_some_and(|pt| !pt.columns.is_empty() || pt.values.len() >= 5 || (!sh.charts.is_empty() && pt.rows.len() >= 3));
+        let light_wb = sh.default_row_height <= 22.0
+            && !sh
+                .pivots
+                .first()
+                .is_some_and(|pt| !pt.columns.is_empty() || (!sh.charts.is_empty() && pt.rows.len() >= 3 && rect.height() <= 30.0 * z));
         let big = (c.row == 0 && st.font.size >= 15.5) || st.font.size >= 16.0;
         paint_cell_galley(&cp, pos2(x, y), galley.clone(), color, (st.font.bold, big, light_wb), z);
     }
