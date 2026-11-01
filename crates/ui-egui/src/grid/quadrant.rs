@@ -433,12 +433,12 @@ fn paint_cell(q: &QuadrantPaint<'_>, painted: &(CellRef, Rect, Look, Option<CfLo
         };
         let y = wrapped_cell_text_y(st.align.v, *rect, galley.size().y, z);
         let text_clip = wrapped_text_clip(p, *rect, &galley, y, st.align.v);
-        let rh_logical = rect.height() / z;
         let light_wb = sh.slicers.is_empty()
-            && (rh_logical - 40.0).abs() > 0.5
-            && !sh.pivots.first().is_some_and(|pt| {
-                !pt.columns.is_empty() || (pt.values.len() >= 5 && c.row != 9) || (!sh.charts.is_empty() && pt.rows.len() >= 3 && c.row != 9)
-            });
+            && (!sh.pivots.is_empty() || !sh.charts.is_empty())
+            && (c.row == 9
+                || !sh.pivots.first().is_some_and(|pt| {
+                    !pt.columns.is_empty() || pt.rows.len() >= 4 || pt.values.len() >= 5 || (!sh.charts.is_empty() && pt.rows.len() >= 3)
+                }));
         let big = (c.row == 0 && st.font.size >= 15.5) || st.font.size >= 16.0;
         paint_cell_galley(&p.with_clip_rect(text_clip), pos2(x, y), galley, color, (st.font.bold, big, light_wb), z);
         return;
@@ -550,12 +550,12 @@ fn paint_cell(q: &QuadrantPaint<'_>, painted: &(CellRef, Rect, Look, Option<CfLo
         shape.angle = angle;
         cp.add(shape);
     } else {
-        let rh_logical = rect.height() / z;
         let light_wb = sh.slicers.is_empty()
-            && (rh_logical - 40.0).abs() > 0.5
-            && !sh.pivots.first().is_some_and(|pt| {
-                !pt.columns.is_empty() || (pt.values.len() >= 5 && c.row != 9) || (!sh.charts.is_empty() && pt.rows.len() >= 3 && c.row != 9)
-            });
+            && (!sh.pivots.is_empty() || !sh.charts.is_empty())
+            && (c.row == 9
+                || !sh.pivots.first().is_some_and(|pt| {
+                    !pt.columns.is_empty() || pt.rows.len() >= 4 || pt.values.len() >= 5 || (!sh.charts.is_empty() && pt.rows.len() >= 3)
+                }));
         let big = (c.row == 0 && st.font.size >= 15.5) || st.font.size >= 16.0;
         paint_cell_galley(&cp, pos2(x, y), galley.clone(), color, (st.font.bold, big, light_wb), z);
     }

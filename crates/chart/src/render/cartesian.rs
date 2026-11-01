@@ -420,6 +420,9 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
                         let c = center(j);
                         let lo = pb.min(pt);
                         let len = (pb - pt).abs();
+                        if !horizontal && len < 0.75 && !ser_labels_on {
+                            continue;
+                        }
                         let fill = if multi_pt { super::legend::point_color(data, j) } else { s.color };
                         let stroke_w = if bw < 6.0 { 0.75 } else { 1.0 };
                         let bar_stroke =
