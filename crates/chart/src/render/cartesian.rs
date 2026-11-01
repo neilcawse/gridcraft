@@ -156,7 +156,7 @@ fn axis_scales(chart: &Chart, data: &ChartData, fams: &[Fam], sec: &[bool], span
                 && data_lo > 0.0
                 && data_lo < hi_eff
                 && data_lo >= hi_eff * 0.82;
-            let lo_in = if tight_top { data_lo - (hi_eff - data_lo) * 0.2 } else { lo_eff };
+            let lo_in = if tight_top { data_lo - (hi_eff - data_lo).max(4.0) * 0.5 } else { lo_eff };
             let mut sc = nice_scale(lo_in, hi_eff, force_zero && !tight_top);
             if !axis {
                 if let Some(mn) = chart.axis_number_formats.y_min.filter(|v| v.is_finite()) {
@@ -416,7 +416,7 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
                     let rot_deg = chart.axis_number_formats.series_label_rotations.iter().find(|(idx, _)| *idx == i as u32).map(|(_, r)| *r);
                     for (j, sp) in row.iter().enumerate() {
                         let Some((b, t)) = sp else { continue };
-                        let (pb, pt) = (vpos(*b, &sc), vpos(*t, &sc));
+                        let (pb, pt) = (vpos(b.clamp(sc.min, sc.max), &sc), vpos(t.clamp(sc.min, sc.max), &sc));
                         let c = center(j);
                         let lo = pb.min(pt);
                         let len = (pb - pt).abs();

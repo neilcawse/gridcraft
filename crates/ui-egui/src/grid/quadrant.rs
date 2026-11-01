@@ -325,11 +325,14 @@ fn should_expand_text(filter_space: f32, overflows: bool, across_end: u32, col: 
 /// Handles text layout, wrapping, alignment, overflow into neighbouring cells,
 /// and clipping, while preserving cell decoration and merged-cell constraints.
 fn paint_cell_galley(cp: &Painter, pos: Pos2, galley: std::sync::Arc<egui::Galley>, color: Color32, bold: bool, z: f32) {
-    if bold {
-        cp.galley(pos2(pos.x + 0.75 * z, pos.y), galley.clone(), color);
-        if color.r() > 200 && color.g() > 200 && color.b() > 200 {
-            cp.galley(pos2(pos.x + 0.35 * z, pos.y + 0.25 * z), galley.clone(), color);
+    let is_white = color.r() > 200 && color.g() > 200 && color.b() > 200;
+    if is_white {
+        cp.galley(pos2(pos.x + 0.65 * z, pos.y), galley.clone(), color);
+        if bold || galley.size().y >= 16.0 * z {
+            cp.galley(pos2(pos.x + 0.3 * z, pos.y + 0.25 * z), galley.clone(), color);
         }
+    } else if bold {
+        cp.galley(pos2(pos.x + 0.45 * z, pos.y), galley.clone(), color);
     }
     cp.galley(pos, galley, color);
 }

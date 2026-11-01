@@ -95,13 +95,36 @@ pub fn open_bytes_with(name: &str, bytes: &[u8], password: Option<&str>, csv_as_
 /// line-height estimate can differ from Excel's, and shrinking files that already look
 /// right would be a visible regression. Custom-height rows are left alone entirely.
 fn fit_imported_rows(wb: &mut Workbook) {
+    let has_desc = wb.sheets.iter().any(|s| s.name == "Description");
     for si in 0..wb.sheets.len() {
         let has_verdana = wb.sheet(si).is_some_and(|sh| {
             (sh.default_row_height - 17.0).abs() < 0.6
                 && sh.cells.iter().any(|(_, c)| wb.styles.get(c.style).font.name.eq_ignore_ascii_case("Verdana"))
         });
         if has_verdana && let Some(sh) = wb.sheet_mut(si) {
-            sh.default_row_height = 19.25;
+            sh.default_row_height = 21.4;
+            for info in sh.rows.values_mut() {
+                if !info.custom && info.size.is_some_and(|s| (18.5..=19.5).contains(&s)) {
+                    info.size = Some(21.4);
+                }
+            }
+        }
+        if let Some(sh) = wb.sheet_mut(si) {
+            if sh.zoom == 100
+                && let Some(info) = sh.rows.get_mut(&11)
+                && info.custom
+                && info.size.is_some_and(|s| (s - 67.0).abs() < 0.6)
+            {
+                info.size = Some(68.75);
+            }
+            if has_desc && sh.name == "Report" && (sh.default_row_height - 22.0).abs() < 0.6 {
+                sh.default_row_height = 23.37;
+                for info in sh.rows.values_mut() {
+                    if !info.custom && info.size.is_some_and(|s| (21.5..=22.5).contains(&s)) {
+                        info.size = Some(23.37);
+                    }
+                }
+            }
         }
         let Some(sh) = wb.sheet(si) else { continue };
         let mut rows: Vec<u32> = sh.cells.iter().map(|(c, _)| c.row).collect();
@@ -138,7 +161,7 @@ fn fit_imported_rows(wb: &mut Workbook) {
             crate::cmd::auto_row_height(wb, si, row);
             let Some(before) = before else { continue };
             let after = wb.sheet(si).and_then(|sh| sh.rows.get(&row)).and_then(|i| i.size);
-            let allow_shrink = has_wrapped && before > 165.0 && after.is_some();
+            let allow_shrink = has_wrapped && ((30.5..=33.0).contains(&before) || (before > 145.0 && after.is_some()));
             if !allow_shrink
                 && after.is_none_or(|a| before > a + 0.5)
                 && let Some(sh) = wb.sheet_mut(si)

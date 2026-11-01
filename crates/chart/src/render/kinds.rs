@@ -180,16 +180,23 @@ pub(super) fn pie(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx, inne
         _ => (area.cx(), area.cy()),
     };
     let pw = chart.axis_number_formats.plot_w.filter(|&w| (0.2..=1.0).contains(&w)).map(|w| (ctx.chart_w * w).min(area.w)).unwrap_or(area.w);
+    let span = pw.min(area.h);
     let r_scale = if out_end {
         0.81
     } else if inner > 0.0 {
-        if area.h < 100.0 { 0.805 } else { 1.035 }
+        if area.h < 100.0 {
+            0.805
+        } else if span >= 186.0 {
+            0.965
+        } else {
+            1.035
+        }
     } else if chart.axis_number_formats.plot_w.is_some() {
         0.96
     } else {
         0.84
     };
-    let r = (pw.min(area.h) * r_scale) / 2.0;
+    let r = (span * r_scale) / 2.0;
     if r < 2.0 {
         return;
     }

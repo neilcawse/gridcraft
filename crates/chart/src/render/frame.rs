@@ -228,14 +228,16 @@ fn vertical_cat_band(ctx: &Ctx, area: Bx, cat: &CatAxis, has_y2: bool, ls: f32, 
             let lw = l.iter().take(2000).map(|t| ctx.tw(t, ls)).fold(0.0f32, f32::max);
             let a = rot.abs().to_radians();
             let raw_h = lw * a.sin() + ls * a.cos();
-            let ch = if ctx.has_bottom_legend && has_y2 {
+            let ch = if ctx.has_bottom_legend && has_y2 && area.w < 600.0 {
+                raw_h.min(area.h * 0.31).min(50.0).max(lh)
+            } else if ctx.has_bottom_legend && has_y2 {
                 raw_h.min(area.h * 0.42).max(lh)
             } else if ctx.has_bottom_legend {
                 (raw_h + 6.0).min(area.h * 0.47).max(lh)
             } else if area.h < 220.0 {
                 raw_h.min(area.h * 0.35).min(62.0).max(lh)
             } else {
-                (raw_h + 4.0).min(area.h * 0.45).max(lh)
+                (raw_h + 4.0).min(area.h * 0.45).max(area.h * 0.295).max(lh)
             };
             (o.len() as f32, ch)
         }

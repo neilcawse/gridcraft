@@ -158,7 +158,7 @@ pub fn paint_prims(p: &Painter, origin: Pos2, prims: &[Prim], z: f32) {
                 if *rotation == 0.0 {
                     let pos = pos2(anchor.x - sz.x * ax, anchor.y - sz.y * ay);
                     if *bold {
-                        p.galley(pos + vec2(0.75 * z, 0.0), galley.clone(), rgba(*color));
+                        p.galley(pos + vec2(0.42 * z, 0.0), galley.clone(), rgba(*color));
                     }
                     p.galley(pos, galley, rgba(*color));
                 } else {
@@ -167,7 +167,7 @@ pub fn paint_prims(p: &Painter, origin: Pos2, prims: &[Prim], z: f32) {
                     let off = vec2(-sz.x * ax, -sz.y * ay);
                     let rot = vec2(off.x * c - off.y * s, off.x * s + off.y * c);
                     if *bold {
-                        let mut bshape = egui::epaint::TextShape::new(anchor + rot + vec2(0.6 * z, 0.0), galley.clone(), rgba(*color));
+                        let mut bshape = egui::epaint::TextShape::new(anchor + rot + vec2(0.38 * z, 0.0), galley.clone(), rgba(*color));
                         bshape.angle = *rotation;
                         p.add(bshape);
                     }
@@ -237,7 +237,7 @@ fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Sh
     // Default 14 px (as before); a set size is in points.
     let size = f.font_size.map_or(14.0, |pt| pt * 96.0 / 72.0).clamp(1.0, 2000.0) * z;
     let family = theme::cell_family(f.font.as_deref().unwrap_or(&wb.theme.minor_font), f.bold, f.italic);
-    let inset = 3.0 * z;
+    let inset = 4.0;
     let pad_l = if f.level > 0 { (9.6 + f.level as f32 * 48.0) * z } else { inset };
     let deg = (rot.rem_euclid(21_600_000) as f64) / 60_000.0;
     let angle = (if deg > 180.0 { deg - 360.0 } else { deg }).to_radians() as f32;
@@ -294,9 +294,9 @@ fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Sh
         }
     }
     if f.bold {
-        clip.galley(pos + vec2(0.75 * z, 0.0), g.clone(), color);
+        clip.galley(pos + vec2(0.45 * z, 0.0), g.clone(), color);
         if color.r() > 200 && color.g() > 200 && color.b() > 200 {
-            clip.galley(pos + vec2(0.35 * z, 0.25 * z), g.clone(), color);
+            clip.galley(pos + vec2(0.25 * z, 0.2 * z), g.clone(), color);
         }
     }
     clip.galley(pos, g, color);

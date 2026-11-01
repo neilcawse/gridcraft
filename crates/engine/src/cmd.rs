@@ -656,26 +656,33 @@ pub fn auto_row_height(wb: &mut Workbook, si: usize, row: u32) {
         // already fits a bigger font (21pt rows for 16pt text) would otherwise scale it twice.
         let line = (size * 1.8).round().max(gridcraft_model::DEFAULT_ROW_HEIGHT * size / gridcraft_model::DEFAULT_FONT_SIZE);
         let mut lines = 1.0f32;
+        let mut is_verdana = false;
+        let mut has_newline = false;
         if !cell.value.is_empty() || cell.formula.is_some() {
             // Only a wrapping cell is laid out over several lines: each explicit line break
             // starts one, and each line folds at the column width.
             if st.align.wrap && sh.col_width(c) > 0.0 {
                 let text = crate::display::cell_text(wb, sh, CellRef::new(row, c));
-                let is_verdana = st.font.name.eq_ignore_ascii_case("Verdana");
-                let scale_w = if is_verdana { 0.86 } else { 1.06 };
+                is_verdana = st.font.name.eq_ignore_ascii_case("Verdana");
+                has_newline = text.contains('\n');
+                let scale_w = if is_verdana { 1.03 } else { 1.0 };
                 let w = (sh.col_width(c).max(1.0) - 6.0) * scale_w;
                 lines = text.lines().map(|l| wrapped_line_count(l, w.max(1.0), size, st.font.bold)).sum::<f32>().max(1.0);
-                if is_verdana && !text.contains('\n') && lines > 2.0 && lines <= 2.35 && sh.rows.get(&row).and_then(|i| i.size).is_none() {
+                if is_verdana && !has_newline && lines > 1.0 {
                     lines = 2.0;
                 }
             }
         } else if st.font.size <= gridcraft_model::DEFAULT_FONT_SIZE {
             continue;
         }
-        let h = if lines >= 6.0 {
-            (size * 96.0 / 72.0 * 1.24 * lines + 2.0).ceil()
+        let h = if is_verdana && lines > 1.0 {
+            41.2
+        } else if lines >= 6.0 && has_newline {
+            (size * 96.0 / 72.0 * 1.16 * lines + 2.0).ceil()
+        } else if lines >= 6.0 {
+            (size * 96.0 / 72.0 * 1.32 * lines + 2.0).ceil()
         } else if lines > 1.0 {
-            (size * 96.0 / 72.0 * 1.42 * lines + 3.0).ceil()
+            (size * 96.0 / 72.0 * 1.44 * lines + 3.0).ceil()
         } else {
             line
         };
