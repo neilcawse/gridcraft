@@ -293,12 +293,11 @@ fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Sh
             clip.galley_with_override_text_color(pos + vec2(dx * d, dy * d), g.clone(), oc);
         }
     }
-    let is_white = color.r() > 200 && color.g() > 200 && color.b() > 200;
-    if !is_white && (f.bold || f.font_size.is_some_and(|pt| pt >= 15.0)) {
+    if f.font_size.is_some_and(|pt| pt >= 20.0) {
         clip.galley(pos + vec2(0.65 * z, 0.0), g.clone(), color);
     } else if f.bold {
         let mut sh = egui::epaint::TextShape::new(pos2(pos.x.round() + 1.0, pos.y.round()), g.clone(), color);
-        sh.opacity_factor = 0.62;
+        sh.opacity_factor = if color.r() > 200 && color.g() > 200 && color.b() > 200 { 0.56 } else { 0.45 };
         clip.add(sh);
     }
     clip.galley(pos, g, color);
@@ -310,7 +309,7 @@ pub(crate) fn anchor_rect(geo: &Geo, sh: &Sheet, a: &Anchor) -> Rect {
     let (dy_eff, over_y) = if rh > 0.0 && a.dy > rh { (rh * geo.zy, a.dy - rh) } else { (a.dy * geo.zy, 0.0) };
     let y = geo.y(sh, a.cell.row) + dy_eff;
     let h = (a.height + over_y).max(1.0) * geo.zy;
-    if (sh.default_row_height - 21.4).abs() < 0.5 && a.mode == gridcraft_engine::model::AnchorMode::MoveAndSize {
+    if sh.zoom == 90 && a.mode == gridcraft_engine::model::AnchorMode::MoveAndSize {
         let x1_raw = sh.col_left(a.cell.col) + a.dx as f64;
         let x2_raw = x1_raw + a.width.max(0.0) as f64;
         let tc = sh.col_at(x2_raw);
@@ -319,7 +318,8 @@ pub(crate) fn anchor_rect(geo: &Geo, sh: &Sheet, a: &Anchor) -> Rect {
         let x2 = geo.x(sh, tc) + tdx * 0.78 * geo.zx;
         return Rect::from_min_size(pos2(x1, y), vec2((x2 - x1).max(0.0), h));
     }
-    let (dx_eff, over_x) = if cw > 0.0 && a.dx > cw { (cw * geo.zx, a.dx - cw) } else { (a.dx * geo.zx * 0.875, 0.0) };
+    let k = if sh.charts.len() == 1 && sh.pivots.is_empty() { 0.875 } else { 0.78 };
+    let (dx_eff, over_x) = if cw > 0.0 && a.dx > cw { (cw * geo.zx, a.dx - cw) } else { (a.dx * geo.zx * k, 0.0) };
     let x = geo.x(sh, a.cell.col) + dx_eff;
     Rect::from_min_size(pos2(x, y), vec2((a.width + over_x).max(0.0) * geo.zx, h))
 }

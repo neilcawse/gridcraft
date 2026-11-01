@@ -343,10 +343,11 @@ fn paint_cell_galley(
             cp.galley(pos2(pos.x + 0.3 * z, pos.y + 0.25 * z), galley.clone(), color);
         }
     } else if bold {
-        cp.galley(pos2(pos.x + 0.45 * z, pos.y), galley.clone(), color);
+        let dx = if is_row1_title { 0.68 * z } else { 0.45 * z };
+        cp.galley(pos2(pos.x + dx, pos.y), galley.clone(), color);
     } else if is_row1_title && is_white {
         let mut sh = egui::epaint::TextShape::new(pos2(pos.x.round() + 1.0, pos.y.round()), galley.clone(), color);
-        sh.opacity_factor = 0.48;
+        sh.opacity_factor = 0.46;
         cp.add(sh);
     }
     cp.galley(pos, galley, color);
@@ -432,9 +433,10 @@ fn paint_cell(q: &QuadrantPaint<'_>, painted: &(CellRef, Rect, Look, Option<CfLo
         };
         let y = wrapped_cell_text_y(st.align.v, *rect, galley.size().y, z);
         let text_clip = wrapped_text_clip(p, *rect, &galley, y, st.align.v);
-        let light_wb = sh.name != "Report"
-            && !sh.pivots.first().is_some_and(|pt| !pt.columns.is_empty() || pt.values.len() >= 5 || (pt.anchor.row == 8 && pt.rows.len() >= 3));
-        paint_cell_galley(&p.with_clip_rect(text_clip), pos2(x, y), galley, color, (st.font.bold, c.row == 0 && st.font.size >= 15.5, light_wb), z);
+        let rh_logical = rect.height() / z;
+        let light_wb = !st.font.name.eq_ignore_ascii_case("Verdana") && ((rh_logical > 30.0 && (rh_logical - 40.0).abs() > 0.5) || c.row == 9);
+        let big = (c.row == 0 && st.font.size >= 15.5) || st.font.size >= 16.0;
+        paint_cell_galley(&p.with_clip_rect(text_clip), pos2(x, y), galley, color, (st.font.bold, big, light_wb), z);
         return;
     }
     // Wrap Text off: Excel ignores the line breaks and draws the whole string on one line.
@@ -544,9 +546,10 @@ fn paint_cell(q: &QuadrantPaint<'_>, painted: &(CellRef, Rect, Look, Option<CfLo
         shape.angle = angle;
         cp.add(shape);
     } else {
-        let light_wb = sh.name != "Report"
-            && !sh.pivots.first().is_some_and(|pt| !pt.columns.is_empty() || pt.values.len() >= 5 || (pt.anchor.row == 8 && pt.rows.len() >= 3));
-        paint_cell_galley(&cp, pos2(x, y), galley.clone(), color, (st.font.bold, c.row == 0 && st.font.size >= 15.5, light_wb), z);
+        let rh_logical = rect.height() / z;
+        let light_wb = !st.font.name.eq_ignore_ascii_case("Verdana") && ((rh_logical > 30.0 && (rh_logical - 40.0).abs() > 0.5) || c.row == 9);
+        let big = (c.row == 0 && st.font.size >= 15.5) || st.font.size >= 16.0;
+        paint_cell_galley(&cp, pos2(x, y), galley.clone(), color, (st.font.bold, big, light_wb), z);
     }
     paint_text_decorations(&cp, TextDecoration { x, y, width: w, height: gh, color, underline: st.font.underline, strike: st.font.strike });
 }
