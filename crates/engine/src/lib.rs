@@ -306,7 +306,12 @@ impl DocState {
     fn with_calc(wb: Workbook, calc: Calc, path: Option<String>, title: String, trust: Trust) -> DocState {
         let scripts_trusted = !cmd::extra::has_scripts(&wb);
         let wb = Arc::new(wb);
-        let sel = Selection::at(wb.active().map(|s| s.view_active).unwrap_or_default());
+        let sheet_sel = |sh: &gridcraft_model::Sheet| {
+            let r = sh.merge_at(sh.view_active).unwrap_or_else(|| RangeRef::cell(sh.view_active));
+            Selection { active: sh.view_active, anchor: r.start, ranges: vec![r] }
+        };
+        let sel = wb.active().map(sheet_sel).unwrap_or_default();
+        let sheet_selections = wb.sheets.iter().map(|sh| sheet_sel(sh)).collect();
         DocState {
             saved: wb.clone(),
             wb,
@@ -318,7 +323,7 @@ impl DocState {
             revision: 1,
             uid: NEXT_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             title,
-            sheet_selections: vec![],
+            sheet_selections,
             unlocked_ranges: vec![],
             content_kind: None,
             scripts_trusted,

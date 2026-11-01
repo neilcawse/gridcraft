@@ -38,7 +38,7 @@ pub fn heading_table<'a>(geo: &Geo, sh: &'a Sheet, active: CellRef) -> Option<&'
         return None;
     }
     let top = geo.cells.top() + geo.frozen_h;
-    let bottom = |r: u32| geo.y(sh, r) + sh.row_height(r) * geo.z;
+    let bottom = |r: u32| geo.y(sh, r) + sh.row_height(r) * geo.zy;
     (bottom(header) <= top + 0.5 && bottom(tb.range.end.row) > top + 0.5).then_some(tb)
 }
 
@@ -48,7 +48,7 @@ pub fn table_headings(geo: &Geo, sh: &Sheet, active: CellRef) -> Vec<TableHeadin
     let af = sh.autofilter.as_ref().filter(|af| af.range == tb.range);
     let mut out = Vec::new();
     for col in tb.range.start.col..=tb.range.end.col {
-        let w = sh.col_width(col) * geo.z;
+        let w = sh.col_width(col) * geo.zx;
         let off = col - tb.range.start.col;
         let Some(column) = tb.columns.get(off as usize) else { continue };
         if w <= 0.0 {

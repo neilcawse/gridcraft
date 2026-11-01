@@ -81,7 +81,7 @@ fn shape_rect(h: &Harness, id: u32) -> Rect {
     let sh = app.session.doc().unwrap().wb.active().unwrap();
     let geo = Geo::new(sh, app.grid.rect.unwrap(), app.view().scroll);
     let a = shape(h, id).anchor;
-    Rect::from_min_size(pos2(geo.x(sh, a.cell.col) + a.dx * geo.z, geo.y(sh, a.cell.row) + a.dy * geo.z), vec2(a.width, a.height) * geo.z)
+    Rect::from_min_size(pos2(geo.x(sh, a.cell.col) + a.dx * geo.zx, geo.y(sh, a.cell.row) + a.dy * geo.zy), vec2(a.width * geo.zx, a.height * geo.zy))
 }
 
 fn group_frame_painted(h: &Harness, group_id: u32) -> bool {
@@ -90,8 +90,8 @@ fn group_frame_painted(h: &Harness, group_id: u32) -> bool {
     let geo = Geo::new(sh, app.grid.rect.unwrap(), app.view().scroll);
     let anchor = sh.group_anchor(group_id).unwrap();
     let expected = Rect::from_min_size(
-        pos2(geo.x(sh, anchor.cell.col) + anchor.dx * geo.z, geo.y(sh, anchor.cell.row) + anchor.dy * geo.z),
-        vec2(anchor.width, anchor.height.max(1.0)) * geo.z,
+        pos2(geo.x(sh, anchor.cell.col) + anchor.dx * geo.zx, geo.y(sh, anchor.cell.row) + anchor.dy * geo.zy),
+        vec2(anchor.width * geo.zx, anchor.height.max(1.0) * geo.zy),
     );
     let border = gridcraft_ui_egui::theme::Tokens::light().sheet_control_border;
     h.output().shapes.iter().any(|s| matches!(&s.shape, EguiShape::Rect(frame) if frame.rect == expected && frame.stroke.color == border))

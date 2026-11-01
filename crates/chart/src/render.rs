@@ -23,7 +23,7 @@ use legend::draw_legend;
 pub use legend::{Swatch, legend_entries};
 pub use trend::supports_trendline;
 
-pub(crate) const TEXT: Rgba = [0x1A, 0x1A, 0x1A, 0xFF];
+pub(crate) const TEXT: Rgba = [0x00, 0x00, 0x00, 0xFF];
 const DARK_TEXT: Rgba = [0x00, 0x00, 0x00, 0xFF];
 const GRID: Rgba = [0xD9, 0xD9, 0xD9, 0xFF];
 const AXIS: Rgba = [0xBF, 0xBF, 0xBF, 0xFF];
@@ -32,9 +32,9 @@ const STOCK: Rgba = [0x40, 0x40, 0x40, 0xFF];
 pub(crate) const UP: Rgba = [0x3E, 0x9B, 0x5F, 0xFF];
 pub(crate) const DOWN: Rgba = [0xD6, 0x4F, 0x45, 0xFF];
 
-const TITLE_SIZE: f32 = 14.0;
-const LABEL_SIZE: f32 = 10.0;
-const AXIS_TITLE_SIZE: f32 = 11.0;
+const TITLE_SIZE: f32 = 17.5;
+const LABEL_SIZE: f32 = 11.5;
+const AXIS_TITLE_SIZE: f32 = 12.5;
 const MAX_CATS: usize = 20_000;
 /// Lines with more points than this are decimated (min/max per pixel column).
 const MAX_LINE_PTS: usize = 2000;
@@ -132,7 +132,7 @@ fn sanitize(d: &ChartData) -> ChartData {
                 number_format: s.number_format.clone(),
                 label_number_format: s.label_number_format.clone(),
                 stroke: s.stroke,
-                point_strokes: s.point_strokes.clone(),
+                point_strokes: s.point_strokes.iter().take(1025).copied().collect(),
             })
             .collect(),
     }
@@ -173,7 +173,8 @@ pub fn render(chart: &Chart, data: &ChartData, w: f32, h: f32, m: &dyn Measure) 
     let pad = (w.min(h) * 0.04).clamp(2.0, 10.0);
     let mut area = Bx { x: pad, y: pad, w: w - 2.0 * pad, h: h - 2.0 * pad };
     if let Some(t) = title {
-        let size = TITLE_SIZE.min(h * 0.14).max(4.0);
+        let base_sz = if chart.axis_number_formats.title_bold { 22.0 } else { TITLE_SIZE };
+        let size = base_sz.min(h * 0.16).max(4.0);
         let t = ctx.fit(&t, size, area.w);
         let (tx, align) = if chart.axis_number_formats.title_left { (area.x, HAlign::Left) } else { (w / 2.0, HAlign::Center) };
         ctx.out.push(Prim::Text {

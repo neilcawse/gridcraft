@@ -75,8 +75,8 @@ fn object_rect(h: &Harness, anchor: &Anchor) -> Rect {
     let sheet = app.session.active().unwrap().wb.active().unwrap();
     let geo = app.grid.geo.as_ref().unwrap();
     geo.mirror_rect(Rect::from_min_size(
-        pos2(geo.x(sheet, anchor.cell.col) + anchor.dx * geo.z, geo.y(sheet, anchor.cell.row) + anchor.dy * geo.z),
-        vec2(anchor.width * geo.z, anchor.height * geo.z),
+        pos2(geo.x(sheet, anchor.cell.col) + anchor.dx * geo.zx, geo.y(sheet, anchor.cell.row) + anchor.dy * geo.zy),
+        vec2(anchor.width * geo.zx, anchor.height * geo.zy),
     ))
 }
 

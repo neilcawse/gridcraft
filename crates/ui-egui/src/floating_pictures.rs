@@ -159,7 +159,7 @@ fn decode_with_duotone(data: &[u8], side: u32, duotone: Option<[[u8; 3]; 2]>) ->
     let mut rgba = picture.into_rgba8();
     if let Some([c0, c1]) = duotone {
         for px in rgba.pixels_mut() {
-            let lum = (0.2126 * px[0] as f32 + 0.7152 * px[1] as f32 + 0.0722 * px[2] as f32) / 255.0;
+            let lum = ((0.2126 * px[0] as f32 + 0.7152 * px[1] as f32 + 0.0722 * px[2] as f32) / 255.0).clamp(0.0, 1.0).powf(0.6);
             for k in 0..3 {
                 px[k] = (c0[k] as f32 + (c1[k] as f32 - c0[k] as f32) * lum).round().clamp(0.0, 255.0) as u8;
             }

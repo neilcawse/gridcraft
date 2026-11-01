@@ -39,8 +39,8 @@ fn corner(h: &Harness, id: u32) -> egui::Pos2 {
     let sh = app.session.doc().unwrap().wb.active().unwrap();
     let geo = Geo::new(sh, app.grid.rect.unwrap(), app.view().scroll);
     let a = sh.charts.iter().find(|c| c.id == id).unwrap().anchor;
-    let min = geo.cell_rect(sh, CellRef::parse("D3").unwrap()).min + vec2(a.dx, a.dy) * geo.z;
-    min + vec2(a.width, a.height) * geo.z
+    let min = geo.cell_rect(sh, CellRef::parse("D3").unwrap()).min + vec2(a.dx * geo.zx, a.dy * geo.zy);
+    min + vec2(a.width * geo.zx, a.height * geo.zy)
 }
 
 fn button(h: &mut Harness, pos: egui::Pos2, pressed: bool) {

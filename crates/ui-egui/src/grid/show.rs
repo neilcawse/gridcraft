@@ -9,7 +9,9 @@ use super::quadrant::{QuadrantPaint, mirror_painted, paint_quadrant};
 use super::selection::{SelectionPaintInput, paint_selection};
 use super::tables::{TableHeading, paint_filter_button, table_headings};
 use super::{
-    Align2, Arc, CfCache, Color32, DISPLAY_SCALE, Drag, MAX_COLS, MAX_ROWS, Painter, PaneQuad, RangeRef, Rect, Sense, Sheet, SheetApp, Stroke,
+    Align2, Arc, COL_DISPLAY_SCALE, CfCache, Color32, DISPLAY_SCALE, Drag, MAX_COLS, MAX_ROWS, Painter, PaneQuad, ROW_DISPLAY_SCALE, RangeRef, Rect,
+    Sense, Sheet,
+    SheetApp, Stroke,
     StrokeKind, Tokens, WHEEL_ZOOM_IDLE, WheelZoom, Workbook, col_to_letters, heading_font_size, json, pos2, theme, vec2, wheel_zoom_step,
     zoom_glide_step,
 };
@@ -88,7 +90,13 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
             }
             app.grid.wheel_zoom = Some(zooming);
         } else if scroll_delta != egui::Vec2::ZERO {
-            let z = if paper { make_geo(app, view.scroll).z } else { sh.zoom as f32 / 100.0 * DISPLAY_SCALE };
+            let (zx, zy) = if paper {
+                let g = make_geo(app, view.scroll);
+                (g.zx, g.zy)
+            } else {
+                let zf = sh.zoom as f32 / 100.0;
+                (zf * COL_DISPLAY_SCALE, zf * ROW_DISPLAY_SCALE)
+            };
             let mut d = scroll_delta;
             // A horizontal swipe moves the content the way the fingers go, which is towards
             // higher columns on a mirrored sheet.
@@ -98,7 +106,7 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
             if modifiers.shift && d.x == 0.0 {
                 d = vec2(d.y, 0.0);
             }
-            view.scroll -= d / z;
+            view.scroll -= vec2(d.x / zx, d.y / zy);
         }
     }
     // A one-finger touch drag pans the sheet, the content following the finger; it doesn't select.
@@ -107,12 +115,18 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
         app.grid.touch_pan = true;
     }
     if app.grid.touch_pan && resp.dragged() && ui.input(|i| i.multi_touch().is_none()) {
-        let z = if paper { make_geo(app, view.scroll).z } else { sh.zoom as f32 / 100.0 * DISPLAY_SCALE };
+        let (zx, zy) = if paper {
+            let g = make_geo(app, view.scroll);
+            (g.zx, g.zy)
+        } else {
+            let zf = sh.zoom as f32 / 100.0;
+            (zf * COL_DISPLAY_SCALE, zf * ROW_DISPLAY_SCALE)
+        };
         let mut d = resp.drag_delta();
         if sh.right_to_left {
             d.x = -d.x;
         }
-        view.scroll -= d / z;
+        view.scroll -= vec2(d.x / zx, d.y / zy);
     }
     update_zoom_glide(app, ui, place, sh.zoom, now);
     view.scroll = view.scroll.max(egui::Vec2::ZERO);
@@ -292,9 +306,9 @@ impl<F: Fn(&mut SheetApp, egui::Vec2) -> Geo> ActiveCellVisibility<'_, F> {
         let area = Rect::from_min_max(pos2(geo.cells.left() + geo.frozen_w, geo.cells.top() + geo.frozen_h), geo.cells.max);
         if target.row >= geo.fr {
             if cr.top() < area.top() {
-                view.scroll.y -= (area.top() - cr.top()) / geo.z;
+                view.scroll.y -= (area.top() - cr.top()) / geo.zy;
             } else if cr.bottom() > area.bottom() - 2.0 {
-                view.scroll.y += (cr.bottom() - area.bottom() + 2.0) / geo.z;
+                view.scroll.y += (cr.bottom() - area.bottom() + 2.0) / geo.zy;
             }
         } else if from.is_some_and(|f| f.row >= geo.fr) {
             // A move from the scrolled rows into the frozen ones (Page Up or Ctrl+Up onto a frozen
@@ -304,9 +318,9 @@ impl<F: Fn(&mut SheetApp, egui::Vec2) -> Geo> ActiveCellVisibility<'_, F> {
         }
         if target.col >= geo.fc {
             if cr.left() < area.left() {
-                view.scroll.x -= (area.left() - cr.left()) / geo.z;
+                view.scroll.x -= (area.left() - cr.left()) / geo.zx;
             } else if cr.right() > area.right() - 2.0 {
-                view.scroll.x += ((cr.right() - area.right() + 2.0) / geo.z).min(cr.left() - area.left());
+                view.scroll.x += ((cr.right() - area.right() + 2.0) / geo.zx).min(cr.left() - area.left());
             }
         } else if from.is_some_and(|f| f.col >= geo.fc) {
             view.scroll.x = 0.0;
@@ -423,7 +437,7 @@ fn vertical_scrollbar(app: &mut SheetApp, ui: &mut egui::Ui, sh: &Sheet, geo: &G
     if track.height() <= 0.0 || track.width() <= 0.0 {
         return;
     }
-    let visible = track.height() / geo.z;
+    let visible = track.height() / geo.zy;
     let scroll = app.view().scroll.y;
     let last = sh.used_range().map(|r| r.end.row.saturating_add(10)).unwrap_or(100).clamp(100, MAX_ROWS - 1);
     let content = geo.scroll_top_of(sh, last);
@@ -454,7 +468,7 @@ fn vertical_scrollbar(app: &mut SheetApp, ui: &mut egui::Ui, sh: &Sheet, geo: &G
         }
     }
     if resp.hovered() {
-        next -= ui.input(|i| i.smooth_scroll_delta.y) / geo.z;
+        next -= ui.input(|i| i.smooth_scroll_delta.y) / geo.zy;
     }
     next = next.clamp(0.0, limit);
     if next != scroll {
@@ -476,7 +490,7 @@ pub(crate) fn horizontal_scrollbar(app: &mut SheetApp, ui: &mut egui::Ui, track:
     let Some(geo) = app.grid.geo.clone() else { return };
     let Some(wb) = app.session.active().map(|d| d.wb.clone()) else { return };
     let Some(sh) = wb.active() else { return };
-    let visible = ((geo.cells.width() - geo.frozen_w) / geo.z).max(0.0);
+    let visible = ((geo.cells.width() - geo.frozen_w) / geo.zx).max(0.0);
     let scroll = app.view().scroll.x;
     let last = sh.used_range().map(|r| r.end.col.saturating_add(10)).unwrap_or(26).clamp(26, MAX_COLS - 1);
     let content = geo.scroll_left_of(sh, last);
@@ -511,7 +525,7 @@ pub(crate) fn horizontal_scrollbar(app: &mut SheetApp, ui: &mut egui::Ui, track:
     }
     if resp.hovered() {
         let d = ui.input(|i| i.smooth_scroll_delta);
-        next -= (if d.x != 0.0 { dir * d.x } else { d.y }) / geo.z;
+        next -= (if d.x != 0.0 { dir * d.x } else { d.y }) / geo.zx;
     }
     next = next.max(0.0);
     if next != scroll {
@@ -555,7 +569,7 @@ pub(crate) fn paint_headers(
                 if !done_cols.insert((c, clip.left() as i32)) {
                     continue;
                 }
-                let w = sh.col_width(c) * geo.z;
+                let w = sh.col_width(c) * geo.zx;
                 if w <= 0.0 {
                     continue;
                 }
@@ -596,7 +610,7 @@ pub(crate) fn paint_headers(
                 if !done_rows.insert((rr, clip.top() as i32)) {
                     continue;
                 }
-                let h = sh.row_height(rr) * geo.z;
+                let h = sh.row_height(rr) * geo.zy;
                 if h <= 0.0 {
                     continue;
                 }
@@ -614,7 +628,8 @@ pub(crate) fn paint_headers(
                     }
                 }
                 let color = if row_sel(rr) { t.header_sel_text } else { t.header_text };
-                pr.text(cr.center(), Align2::CENTER_CENTER, (rr as u64 + 1).to_string(), font.clone(), color);
+                let ry = (cr.bottom() - 1.5 * (geo.z / DISPLAY_SCALE).max(0.75)).max(cr.center().y);
+                pr.text(pos2(cr.center().x, ry), Align2::CENTER_BOTTOM, (rr as u64 + 1).to_string(), font.clone(), color);
             }
         }
     }

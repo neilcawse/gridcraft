@@ -39,7 +39,7 @@ pub(super) fn keyboard(app: &mut SheetApp, ctx: &egui::Context, resp: &egui::Res
         matches!(e, egui::Event::Key { pressed: true, modifiers: m, key, .. }
             if !m.alt && (m.ctrl || m.command || (m.shift && *key == egui::Key::Space)))
     });
-    let page = ((geo.cells.height() / geo.z) / sh.default_row_height).floor().max(1.0) as i64;
+    let page = ((geo.cells.height() / geo.zy) / sh.default_row_height).floor().max(1.0) as i64;
     // Alt shortcuts type their character too on Windows and Linux (Alt+= sends Text("=")): once
     // a shortcut ran, that text must not start an edit over what it just did.
     let mut shortcut_ran = false;

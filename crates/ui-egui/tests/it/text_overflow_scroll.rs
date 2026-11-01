@@ -83,7 +83,7 @@ fn right_aligned_overflow_stays_visible_when_source_cell_is_right_of_view() {
         let app = h.state_mut();
         let sheet = app.session.active().unwrap().wb.active().unwrap();
         let geo = Geo::new(sheet, app.grid.rect.unwrap(), app.view().scroll);
-        let x = sheet.col_left(25) as f32 - (geo.cells.width() - geo.frozen_w) / geo.z - 2.0;
+        let x = sheet.col_left(25) as f32 - (geo.cells.width() - geo.frozen_w) / geo.zx - 2.0;
         app.view_mut().unwrap().scroll.x = x;
     }
     h.run_steps(4);

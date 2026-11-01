@@ -54,7 +54,7 @@ pub fn legend_entries(chart: &Chart, data: &ChartData) -> Vec<(String, Rgba, Swa
             let total = data.series.first().map(|s| s.color).unwrap_or(TEXT);
             vec![("Increase".into(), UP, Swatch::Box), ("Decrease".into(), DOWN, Swatch::Box), ("Total".into(), total, Swatch::Box)]
         }
-        _ if data.series.len() == 1 && chart.axis_number_formats.point_colors.len() > 1 => {
+        _ if data.series.len() == 1 && chart.axis_number_formats.point_colors.len() > 1 && chart.series.first().is_none_or(|s| s.color.is_none()) => {
             let n = first_len(data).min(MAX_CATS);
             (0..n).map(|j| (cat_label(data, j), point_color(data, j), Swatch::Box)).collect()
         }
@@ -64,8 +64,9 @@ pub fn legend_entries(chart: &Chart, data: &ChartData) -> Vec<(String, Rgba, Swa
                 .clone()
                 .map(|s| {
                     let sw = match plot_kind(chart, s) {
-                        ChartKind::Line | ChartKind::LineStacked | ChartKind::Radar | ChartKind::ScatterLines => Swatch::Line,
-                        ChartKind::LineMarkers => Swatch::LineMarker,
+                        ChartKind::Line | ChartKind::Radar | ChartKind::ScatterLines => Swatch::Line,
+                        ChartKind::LineStacked if s.stroke.is_none() => Swatch::Line,
+                        ChartKind::LineMarkers | ChartKind::LineStacked => Swatch::LineMarker,
                         ChartKind::Scatter | ChartKind::Bubble => Swatch::Marker,
                         _ => Swatch::Box,
                     };
@@ -91,11 +92,15 @@ fn swatch_w(sw: Swatch, s: f32) -> f32 {
 
 fn draw_swatch(ctx: &mut Ctx, sw: Swatch, x: f32, yc: f32, s: f32, color: Rgba, stroke: Option<Rgba>) {
     match sw {
-        Swatch::Box => ctx.rect(x, yc - s / 2.0, s, s, color, stroke.map(|c| (c, 1.0))),
+        Swatch::Box => ctx.rect(x, yc - s / 2.0, s, s, color, stroke.map(|c| (c, 1.5))),
         Swatch::Line => ctx.hline(x, x + 2.0 * s, yc, color, 2.0),
         Swatch::LineMarker => {
             ctx.hline(x, x + 2.0 * s, yc, color, 2.0);
-            ctx.out.push(Prim::Circle { cx: x + s, cy: yc, r: s * 0.35, fill: Some(color), stroke: stroke.map(|c| (c, 1.25)) });
+            let (m_fill, m_ring) = match stroke {
+                Some(mf) => (mf, Some((color, 1.25))),
+                None => (color, None),
+            };
+            ctx.out.push(Prim::Circle { cx: x + s, cy: yc, r: s * 0.35, fill: Some(m_fill), stroke: m_ring });
         }
         Swatch::Marker => ctx.out.push(Prim::Circle { cx: x + s / 2.0, cy: yc, r: s * 0.4, fill: Some(color), stroke: stroke.map(|c| (c, 1.25)) }),
     }
@@ -178,8 +183,17 @@ pub(super) fn draw_legend(ctx: &mut Ctx, entries: &[(String, Rgba, Swatch)], pos
                 let yc = y0 + i as f32 * eff_row_h + eff_row_h / 2.0;
                 draw_swatch(ctx, e.2, x0, yc, s, e.1, entry_stroke(data, i));
                 let sx = swatch_w(e.2, s) + gap;
-                let t = ctx.fit(&e.0, size, (colw - sx).max(0.0) + 0.5);
-                ctx.text(x0 + sx, yc, &t, size, TEXT, (HAlign::Left, VAlign::Middle));
+                let avail = (colw - sx).max(0.0) + 0.5;
+                if eff_row_h >= size * 1.9 && ctx.tw(&e.0, size) > avail && let Some(sp) = e.0.rfind(' ') {
+                    let (l1, l2) = e.0.split_at(sp);
+                    let t1 = ctx.fit(l1, size, avail);
+                    let t2 = ctx.fit(l2.trim_start(), size, avail);
+                    ctx.text(x0 + sx, yc - size * 0.55, &t1, size, TEXT, (HAlign::Left, VAlign::Middle));
+                    ctx.text(x0 + sx, yc + size * 0.55, &t2, size, TEXT, (HAlign::Left, VAlign::Middle));
+                } else {
+                    let t = ctx.fit(&e.0, size, avail);
+                    ctx.text(x0 + sx, yc, &t, size, TEXT, (HAlign::Left, VAlign::Middle));
+                }
             }
             let used = colw + 8.0;
             if pos == LegendPos::Right { Bx { w: area.w - used, ..area } } else { Bx { x: area.x + used, w: area.w - used, ..area } }

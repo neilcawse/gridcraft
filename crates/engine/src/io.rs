@@ -102,18 +102,18 @@ fn fit_imported_rows(wb: &mut Workbook) {
         rows.dedup();
         for row in rows {
             let before = wb.sheet(si).and_then(|sh| sh.rows.get(&row)).and_then(|i| i.size);
-            if let Some(before) = before {
-                let taller_font = wb.sheet(si).is_some_and(|sh| {
-                    sh.cells.row(row, 0, gridcraft_core::MAX_COLS - 1).any(|(_, cell)| {
-                        let size = wb.styles.get(cell.style).font.size;
-                        size > gridcraft_model::DEFAULT_FONT_SIZE
-                            && (size * 1.8).round().max(gridcraft_model::DEFAULT_ROW_HEIGHT * size / gridcraft_model::DEFAULT_FONT_SIZE)
-                                > before + 0.5
-                    })
-                });
-                if !taller_font {
-                    continue;
-                }
+            let cur_h = before.unwrap_or_else(|| wb.sheet(si).map_or(gridcraft_model::DEFAULT_ROW_HEIGHT, |sh| sh.default_row_height));
+            let needs_autofit = wb.sheet(si).is_some_and(|sh| {
+                sh.cells.row(row, 0, gridcraft_core::MAX_COLS - 1).any(|(_, cell)| {
+                    let st = wb.styles.get(cell.style);
+                    let size = st.font.size;
+                    (size > gridcraft_model::DEFAULT_FONT_SIZE
+                        && (size * 1.8).round().max(gridcraft_model::DEFAULT_ROW_HEIGHT * size / gridcraft_model::DEFAULT_FONT_SIZE) > cur_h + 0.5)
+                        || (before.is_none() && !cell.value.is_empty() && st.align.wrap)
+                })
+            });
+            if !needs_autofit {
+                continue;
             }
             crate::cmd::auto_row_height(wb, si, row);
             let Some(before) = before else { continue };

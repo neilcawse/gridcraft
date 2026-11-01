@@ -77,10 +77,11 @@ pub fn paint_prims(p: &Painter, origin: Pos2, prims: &[Prim], z: f32) {
                 if v.len() < 2 {
                     continue;
                 }
+                let lw = (width * z).max(1.0);
                 if *dash {
-                    p.extend(egui::Shape::dashed_line(&v, Stroke::new(width * z.max(0.5), rgba(*color)), 4.0 * z, 3.0 * z));
+                    p.extend(egui::Shape::dashed_line(&v, Stroke::new(lw, rgba(*color)), 4.0 * z, 3.0 * z));
                 } else {
-                    p.add(PathShape::line(v, PathStroke::new(width * z.max(0.5), rgba(*color))));
+                    p.add(PathShape::line(v, PathStroke::new(lw, rgba(*color))));
                 }
             }
             Prim::Polygon { pts, fill, stroke } => {
@@ -224,7 +225,7 @@ fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Sh
     let size = f.font_size.map_or(14.0, |pt| pt * 96.0 / 72.0).clamp(1.0, 2000.0) * z;
     let family = theme::cell_family(f.font.as_deref().unwrap_or(""), f.bold, f.italic);
     let inset = 4.0;
-    let pad_l = inset + f.level as f32 * 40.0 * z;
+    let pad_l = if f.level > 0 { (9.6 + f.level as f32 * 48.0) * z } else { inset };
     let deg = (rot.rem_euclid(21_600_000) as f64) / 60_000.0;
     let angle = (if deg > 180.0 { deg - 360.0 } else { deg }).to_radians() as f32;
     let quarter = (45.0..135.0).contains(&deg) || (225.0..315.0).contains(&deg);
@@ -282,9 +283,9 @@ fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Sh
 }
 
 pub(crate) fn anchor_rect(geo: &Geo, sh: &Sheet, a: &Anchor) -> Rect {
-    let x = geo.x(sh, a.cell.col) + a.dx * geo.z;
-    let y = geo.y(sh, a.cell.row) + a.dy * geo.z;
-    Rect::from_min_size(pos2(x, y), vec2(a.width * geo.z, a.height.max(1.0) * geo.z))
+    let x = geo.x(sh, a.cell.col) + a.dx * geo.zx;
+    let y = geo.y(sh, a.cell.row) + a.dy * geo.zy;
+    Rect::from_min_size(pos2(x, y), vec2(a.width * geo.zx, a.height.max(1.0) * geo.zy))
 }
 
 /// The shapes one floating object painted (indices into the painter's layer) and its logical
@@ -330,7 +331,7 @@ pub(crate) fn paint_objects(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Wor
     order.extend(sh.images.iter().enumerate().map(|(i, im)| (im.id, 1u8, i)));
     order.extend(sh.charts.iter().enumerate().map(|(i, ch)| (ch.id, 2u8, i)));
     order.extend(sh.slicers.iter().enumerate().map(|(i, sl)| (sl.id, 3u8, i)));
-    order.sort_by_key(|&(id, kind, i)| (id, kind, i));
+    order.sort_by_key(|&(id, kind, i)| (u8::from(kind != 3), id, kind, i));
     for (_, kind, idx) in order {
         match kind {
             0 => {
@@ -376,7 +377,7 @@ pub(crate) fn paint_objects(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Wor
                         let w = gridcraft_engine::cmd::draw::ink_width(sp) * geo.z;
                         let pts: Vec<Pos2> = gridcraft_engine::cmd::draw::ink_points(sp)
                             .iter()
-                            .map(|q| pos2(r.left() + q[0] * geo.z, r.top() + q[1] * geo.z))
+                            .map(|q| pos2(r.left() + q[0] * geo.zx, r.top() + q[1] * geo.zy))
                             .collect();
                         if pts.len() >= 2 {
                             let col = if w > 8.0 { line.gamma_multiply(0.45) } else { line };
@@ -446,7 +447,7 @@ pub(crate) fn paint_objects(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Wor
                 }
                 let data = gridcraft_chart::resolve(wb, si, ch);
                 let m = EguiMeasure { painter: p, z: geo.z };
-                let prims = gridcraft_chart::render(ch, &data, ch.anchor.width, ch.anchor.height, &m);
+                let prims = gridcraft_chart::render(ch, &data, (r.width() / geo.z).max(1.0), (r.height() / geo.z).max(1.0), &m);
                 paint_prims(&p.with_clip_rect(r.intersect(p.clip_rect())), r.min, &prims, geo.z);
                 if app.selected_chart == Some(ch.id) {
                     selection_frame(p, r);
@@ -567,17 +568,22 @@ fn paint_slicer(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Workbook, si: u
     let has_explicit_style = !sl.style.is_empty();
     let style_num: usize = sl.style.chars().filter(|c| c.is_ascii_digit()).take(1).collect::<String>().parse().unwrap_or(1);
     let theme_idx = match style_num {
-        1 => 3, // dk2 (e.g. #25477B in Geotab themes)
+        1 => 2, // lt2 / dk2 (e.g. #25477B in Geotab themes)
         2..=7 => 2 + style_num,
         _ => 4,
     };
     let style_color = gridcraft_engine::model::Color::Theme(theme_idx as u8, 0).resolve(&wb.theme).map(theme::color32).unwrap_or(tk.accent);
     let style_soft = gridcraft_engine::model::Color::Theme(theme_idx as u8, 800).resolve(&wb.theme).map(theme::color32).unwrap_or(tk.accent_soft);
+    let border_col = if is_dark_style {
+        gridcraft_engine::model::Color::Theme(4, 0).resolve(&wb.theme).map(theme::color32).unwrap_or(style_color)
+    } else {
+        tk.separator
+    };
     let radius = if is_dark_style { 0.0 } else { 4.0 * geo.z };
     // Card + soft shadow.
     p.rect_filled(r.translate(vec2(0.0, 1.5)), radius, Color32::from_black_alpha(18));
     p.rect_filled(r, radius, if is_dark_style { Color32::WHITE } else { tk.window });
-    p.rect_stroke(r, radius, Stroke::new(1.0, if is_dark_style { style_color } else { tk.separator }), StrokeKind::Inside);
+    p.rect_stroke(r, radius, Stroke::new(1.0, border_col), StrokeKind::Inside);
     // Header.
     let header_bg = if is_dark_style {
         Color32::WHITE
@@ -595,6 +601,9 @@ fn paint_slicer(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Workbook, si: u
     };
     p.rect_filled(lay.header, radius, header_bg);
     p.rect_filled(Rect::from_min_max(pos2(lay.header.left(), lay.header.bottom() - radius), lay.header.max), 0.0, header_bg);
+    if is_dark_style {
+        p.hline(lay.header.left()..=lay.header.right(), lay.header.bottom(), Stroke::new(1.0, border_col));
+    }
     let cap = if sl.caption.is_empty() { sl.field().to_string() } else { sl.caption.clone() };
     p.text(lay.header.left_center() + vec2(8.0 * geo.z, 0.0), Align2::LEFT_CENTER, cap, theme::ui_bold(12.5 * geo.z), header_fg);
     // Clear-filter button (tinted when a filter is active).
@@ -617,7 +626,11 @@ fn paint_slicer(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Workbook, si: u
             (false, true) => (tk.hover, tk.text_dim),
             (false, false) => (tk.window, tk.text_dim),
         };
-        p.rect_filled(*tr, if is_dark_style { 1.0 * geo.z } else { 3.0 * geo.z }, fill);
+        let tr_rad = if is_dark_style { 0.0 } else { 3.0 * geo.z };
+        p.rect_filled(*tr, tr_rad, fill);
+        if is_dark_style {
+            p.rect_stroke(*tr, 0.0, Stroke::new(1.0, border_col), StrokeKind::Inside);
+        }
         let cp = p.with_clip_rect(tr.intersect(p.clip_rect()));
         let font = if is_dark_style && tile.selected { theme::ui_bold(12.0 * geo.z) } else { theme::ui_font(12.0 * geo.z) };
         cp.text(tr.left_center() + vec2(6.0 * geo.z, 0.0), Align2::LEFT_CENTER, &tile.label, font, fg);

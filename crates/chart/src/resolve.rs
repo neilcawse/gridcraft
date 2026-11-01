@@ -319,7 +319,15 @@ pub fn resolve(wb: &Workbook, sheet: usize, chart: &Chart) -> ChartData {
     }
     let n = series.iter().map(|s| s.values.len()).max().unwrap_or(0);
     let categories = categories.unwrap_or_else(|| (1..=n).map(|i| i.to_string()).collect());
-    let mut palette = default_palette(&wb.theme, n.clamp(1, PALETTE_CYCLE));
+    let mut palette = if !matches!(chart.kind, ChartKind::Pie | ChartKind::Doughnut | ChartKind::Sunburst | ChartKind::Treemap | ChartKind::Funnel)
+        && chart.series.len() == 1
+        && chart.series[0].color.is_some()
+        && let Some(s0) = series.first()
+    {
+        vec![s0.color; n.clamp(1, PALETTE_CYCLE)]
+    } else {
+        default_palette(&wb.theme, n.clamp(1, PALETTE_CYCLE))
+    };
     for &(idx, ref c) in &chart.axis_number_formats.point_colors {
         if let (Some(slot), Some([r, g, b])) = (palette.get_mut(idx as usize), c.resolve(&wb.theme)) {
             *slot = [r, g, b, 0xFF];

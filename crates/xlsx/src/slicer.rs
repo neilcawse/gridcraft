@@ -572,7 +572,7 @@ fn builtin_style(style: &str) -> Option<&str> {
     let ok =
         ["SlicerStyleLight", "SlicerStyleDark"].iter().any(|p| base.strip_prefix(p).is_some_and(|n| matches!(n, "1" | "2" | "3" | "4" | "5" | "6")))
             || matches!(base, "SlicerStyleOther1" | "SlicerStyleOther2");
-    ok.then_some(base)
+    ok.then_some(style.trim())
 }
 
 /// The drawing XML of a slicer frame, with a fallback shape for readers without slicers.

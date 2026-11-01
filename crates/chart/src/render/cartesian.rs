@@ -150,7 +150,7 @@ fn axis_scales(chart: &Chart, data: &ChartData, fams: &[Fam], sec: &[bool], span
                 if !axis { (chart.axis_number_formats.y_min.unwrap_or(lo), chart.axis_number_formats.y_max.unwrap_or(hi)) } else { (lo, hi) };
             let tight_top = !axis
                 && chart.axis_number_formats.y_min.is_none()
-                && chart.axis_number_formats.y_max.is_some()
+                && force_zero
                 && lo > 0.0
                 && lo < hi_eff
                 && lo >= hi_eff * 0.85;
@@ -166,10 +166,11 @@ fn axis_scales(chart: &Chart, data: &ChartData, fams: &[Fam], sec: &[bool], span
                     sc.max = clean(mx);
                     if sc.min == 0.0 && sc.max == 100.0 && sc.step == 20.0 {
                         sc.step = 10.0;
-                    } else if tight_top && (sc.max - sc.min) <= 20.0 && sc.step > 2.0 {
-                        sc.step = 2.0;
-                        sc.min = (lo_in / 2.0).floor() * 2.0;
                     }
+                }
+                if tight_top && (sc.max - sc.min) <= 20.0 && sc.step > 2.0 {
+                    sc.step = 2.0;
+                    sc.min = (lo_in / 2.0).floor() * 2.0;
                 }
             }
             (sc, Fmt::new(code))
@@ -265,10 +266,11 @@ fn draw_bar_label(
         }
     } else if stacked {
         ctx.text(pos, mid, t, LABEL_SIZE, on(fill), (HAlign::Center, VAlign::Middle));
-    } else if in_end && v >= 0.0 && len >= LABEL_SIZE * 1.4 {
-        ctx.text(pos, lo + 4.0, t, in_sz, super::DARK_TEXT, (HAlign::Center, VAlign::Top));
+    } else if in_end && v >= 0.0 && len >= LABEL_SIZE * 1.4 + 8.0 {
+        ctx.text(pos, lo + 8.0, t, in_sz, super::DARK_TEXT, (HAlign::Center, VAlign::Top));
     } else if v >= 0.0 {
-        ctx.text(pos, lo - 2.0, t, LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Bottom));
+        let col = if in_end { super::DARK_TEXT } else { TEXT };
+        ctx.text(pos, lo - 2.0, t, LABEL_SIZE, col, (HAlign::Center, VAlign::Bottom));
     } else {
         ctx.text(pos, lo + len + 2.0, t, LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Top));
     }
@@ -392,8 +394,14 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
                         let lo = pb.min(pt);
                         let len = (pb - pt).abs();
                         let fill = if multi_pt { super::legend::point_color(data, j) } else { s.color };
-                        let bar_stroke =
-                            s.point_strokes.iter().find(|&&(idx, _)| idx as usize == j).map(|&(_, sc)| sc).or(s.stroke).map(|c| (c, 1.0));
+                        let stroke_w = if (horizontal && bw < 6.0) || (!horizontal && bw < 6.0) { 0.4 } else { 1.0 };
+                        let bar_stroke = s
+                            .point_strokes
+                            .iter()
+                            .find(|&&(idx, _)| idx as usize == j)
+                            .map(|&(_, sc)| sc)
+                            .or(s.stroke)
+                            .map(|c| (c, stroke_w));
                         if horizontal {
                             let y = c + group_span / 2.0 - k * slot_step - bw;
                             ctx.rect(lo, y, len, bw, fill, bar_stroke);
@@ -412,13 +420,29 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
                             draw_bar_label(ctx, &t, v, pb, pt, lo, len, bw, pos, horizontal, fam != Fam::Col, in_end, rot_deg, fill);
                         }
                     }
+                    if !horizontal && !ctx.cat_axis_deleted {
+                        let zero = if s1.min <= 0.0 && s1.max >= 0.0 { 0.0 } else { s1.min };
+                        let y0 = vpos(zero, s1);
+                        let ax_col = if ctx.grid_color != super::GRID { ctx.grid_color } else { super::AXIS };
+                        ctx.hline(plot.x, plot.right(), y0, ax_col, 0.75);
+                        if chart.axis_number_formats.cat_major_tick.as_deref() != Some("none") {
+                            for j in 0..=ncat_slots {
+                                let tx = plot.x + j as f32 * cw;
+                                ctx.vline(tx, plot.bottom(), plot.bottom() + 4.0, ax_col, 0.75);
+                            }
+                        }
+                    }
                 }
                 _ => {
                     let pts: Vec<Option<[f32; 2]>> = row.iter().enumerate().map(|(j, sp)| sp.map(|(_, t)| [center(j), vpos(t, &sc)])).collect();
                     draw_runs(ctx, &pts, s.color, 2.25, s.smooth.then_some(plot));
                     let k = kinds.get(i).copied().unwrap_or(ChartKind::Line);
-                    if k == ChartKind::LineMarkers && cw >= 3.0 {
-                        draw_markers(ctx, pts.iter().flatten().copied(), 3.5, s.color, s.stroke);
+                    if (k == ChartKind::LineMarkers || (k == ChartKind::LineStacked && s.stroke.is_some())) && cw >= 3.0 {
+                        let (m_fill, m_ring) = match s.stroke {
+                            Some(mf) => (mf, Some(s.color)),
+                            None => (s.color, None),
+                        };
+                        draw_markers(ctx, pts.iter().flatten().copied(), 3.5, m_fill, m_ring);
                     }
                     if ser_labels_on {
                         let lpos = chart

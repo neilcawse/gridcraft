@@ -174,7 +174,17 @@ pub fn scan_dirs(dirs: &[PathBuf]) -> Vec<Face> {
             }
             let Ok(data) = std::fs::read(&path) else { continue };
             for (index, family, names, style) in file_faces(&data) {
-                out.push(Face { family, names, path: path.clone(), index, weight: style_weight(&style), italic: style_italic(&style) });
+                let mut weight = style_weight(&style);
+                if (weight - 400.0).abs() < 1.0
+                    && let Ok(f) = skrifa::FontRef::from_index(&data, index)
+                {
+                    use skrifa::MetadataProvider as _;
+                    let attr_w = f.attributes().weight.value();
+                    if attr_w >= 600.0 {
+                        weight = attr_w;
+                    }
+                }
+                out.push(Face { family, names, path: path.clone(), index, weight, italic: style_italic(&style) });
             }
         }
     }
@@ -328,6 +338,16 @@ pub fn bind_faces(fonts: &mut egui::FontDefinitions, family: &str, faces: &[Face
     for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
         let Some(primary) = pick_face(faces, bold, italic) else { continue };
         let mut chain: Vec<String> = Vec::new();
+        if bold && primary.weight < 600.0 {
+            let sys_key = if italic {
+                fonts.font_data.contains_key("sys-cell-bold-italic").then_some("sys-cell-bold-italic")
+            } else {
+                fonts.font_data.contains_key("sys-cell-bold").then_some("sys-cell-bold")
+            };
+            if let Some(k) = sys_key {
+                chain.push(k.to_string());
+            }
+        }
         for face in [Some(primary), pick_face(faces, false, false)] {
             let Some(face) = face else { continue };
             let key = face_key(face);

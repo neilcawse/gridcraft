@@ -263,7 +263,7 @@ fn object_move_and_resize_keep_their_cursors_and_update_the_object() {
         h.run_steps(2);
         let g = geo(&h);
         let min = cell(&h, "D3").min;
-        let start = if resize { min + vec2(300.0, 200.0) * g.z } else { min + vec2(40.0, 40.0) };
+        let start = if resize { min + vec2(300.0 * g.zx, 200.0 * g.zy) } else { min + vec2(40.0, 40.0) };
         press(&mut h, start);
         let target = start + vec2(60.0, 30.0);
         let cursor = if resize { CursorIcon::ResizeNwSe } else { CursorIcon::Move };

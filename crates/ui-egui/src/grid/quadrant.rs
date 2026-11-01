@@ -577,6 +577,19 @@ fn paint_borders(q: &mut QuadrantPaint<'_>, looks: &[(CellRef, Rect, Look, Optio
     let (r0, r1) = q.rows;
     let (c0, c1) = q.cols;
     // Borders (over fills and text).
+    use gridcraft_engine::model::BorderStyle;
+    let mut border_draws: Vec<(u8, i32, BorderStyle, Color32, [Pos2; 2])> = Vec::new();
+    let style_rank = |s: BorderStyle| match s {
+        BorderStyle::None => 0,
+        BorderStyle::Hair | BorderStyle::Dotted | BorderStyle::DashDotDot | BorderStyle::DashDot | BorderStyle::Dashed => 1,
+        BorderStyle::Thin => 2,
+        BorderStyle::Medium | BorderStyle::MediumDashed | BorderStyle::MediumDashDot | BorderStyle::MediumDashDotDot | BorderStyle::SlantDashDot => 3,
+        BorderStyle::Double | BorderStyle::Thick => 4,
+    };
+    let push_edge = |draws: &mut Vec<(u8, i32, BorderStyle, Color32, [Pos2; 2])>, style: BorderStyle, col: Color32, pts: [Pos2; 2]| {
+        let lum = col.r() as i32 * 299 + col.g() as i32 * 587 + col.b() as i32 * 114;
+        draws.push((style_rank(style), -lum, style, col, pts));
+    };
     for (c, rect, lk, _) in looks {
         let b = &lk.style.borders;
         let merge = merges.iter().find(|m| m.start == *c);
@@ -597,15 +610,14 @@ fn paint_borders(q: &mut QuadrantPaint<'_>, looks: &[(CellRef, Rect, Look, Optio
                 continue;
             }
             let col = col32(line.color, wb, Color32::BLACK);
-            paint_border(p, pts, line.style, col);
+            push_edge(&mut border_draws, line.style, col, pts);
         }
         if !b.diag_down.is_none() {
-            paint_border(p, [rect.left_top(), rect.right_bottom()], b.diag_down.style, col32(b.diag_down.color, wb, Color32::BLACK));
+            push_edge(&mut border_draws, b.diag_down.style, col32(b.diag_down.color, wb, Color32::BLACK), [rect.left_top(), rect.right_bottom()]);
         }
         if !b.diag_up.is_none() {
-            paint_border(p, [rect.left_bottom(), rect.right_top()], b.diag_up.style, col32(b.diag_up.color, wb, Color32::BLACK));
+            push_edge(&mut border_draws, b.diag_up.style, col32(b.diag_up.color, wb, Color32::BLACK), [rect.left_bottom(), rect.right_top()]);
         }
-        // Comment / note indicator.
         if let Some(cm) = sh.comments.get(c) {
             let tri_col = if cm.threaded { Color32::from_rgb(0x88, 0x55, 0xC8) } else { Color32::from_rgb(0xD0, 0x2E, 0x2E) };
             let s = 6.0 * z.max(0.7);
@@ -627,6 +639,10 @@ fn paint_borders(q: &mut QuadrantPaint<'_>, looks: &[(CellRef, Rect, Look, Optio
                 Stroke::NONE,
             ));
         }
+    }
+    border_draws.sort_by_key(|&(rank, neg_lum, _, _, _)| (rank, neg_lum));
+    for (_, _, style, col, pts) in border_draws {
+        paint_border(p, pts, style, col);
     }
 }
 
@@ -672,7 +688,7 @@ fn paint_filter_buttons(q: &QuadrantPaint<'_>, range: RangeRef) {
         }
     }
     for (c, active) in buttons {
-        if !range.contains(c) {
+        if !range.contains(c) || sh.is_row_hidden(c.row) || sh.is_col_hidden(c.col) {
             continue;
         }
         paint_filter_button(p, filter_button_rect(geo, sh, c), active);
@@ -696,26 +712,26 @@ fn paint_filter_buttons(q: &QuadrantPaint<'_>, range: RangeRef) {
         } else {
             pt.rows.len() as u32
         };
-        let top_values_row = pt.columns.is_empty()
-            && !matches!(pt.layout, gridcraft_engine::model::PivotLayout::Compact)
-            && ((pt.values.len() >= 2 && !pt.values_on_rows && pt.show_values_row) || (pt.values.len() == 1 && pt.classic_layout));
+        let top_values_row = !pt.columns.is_empty()
+            || (!matches!(pt.layout, gridcraft_engine::model::PivotLayout::Compact)
+                && ((pt.values.len() >= 2 && !pt.values_on_rows && pt.show_values_row) || (pt.values.len() == 1 && pt.classic_layout)));
         let row_hdr_r = pt.anchor.row + u32::from(top_values_row);
         for j in 0..row_cols {
-            let filtered = pt.rows.get(j as usize).is_some_and(|rf| {
-                rf.sort != gridcraft_engine::model::PivotSort::None
-                    || pt.filters.iter().any(|f| f.source_col.eq_ignore_ascii_case(&rf.source_col) && f.selected.is_some())
-            });
+            let filtered = pt
+                .rows
+                .get(j as usize)
+                .is_some_and(|rf| pt.filters.iter().any(|f| f.source_col.eq_ignore_ascii_case(&rf.source_col) && f.selected.is_some()));
             pbtns.push((CellRef::new(row_hdr_r, pt.anchor.col + j), filtered));
         }
         if !pt.columns.is_empty() {
-            let filtered = pt.columns.iter().any(|cf| {
-                cf.sort != gridcraft_engine::model::PivotSort::None
-                    || pt.filters.iter().any(|f| f.source_col.eq_ignore_ascii_case(&cf.source_col) && f.selected.is_some())
-            });
+            let filtered = pt
+                .columns
+                .iter()
+                .any(|cf| pt.filters.iter().any(|f| f.source_col.eq_ignore_ascii_case(&cf.source_col) && f.selected.is_some()));
             pbtns.push((CellRef::new(pt.anchor.row, pt.anchor.col + row_cols), filtered));
         }
         for (c, active) in pbtns {
-            if !range.contains(c) {
+            if !range.contains(c) || sh.is_row_hidden(c.row) || sh.is_col_hidden(c.col) {
                 continue;
             }
             let rect = geo.cell_rect(sh, c);

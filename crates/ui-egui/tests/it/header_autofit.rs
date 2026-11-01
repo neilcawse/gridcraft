@@ -43,7 +43,7 @@ fn edge(h: &egui_kittest::Harness<'_, SheetApp>, rows: bool, index: u32) -> (Pos
     } else {
         pos2(geo.x(sheet, index + 1), geo.rect.top() + geo.header_h / 2.0)
     };
-    (pos, geo.z)
+    (pos, if rows { geo.zy } else { geo.zx })
 }
 
 fn button(h: &mut egui_kittest::Harness<'_, SheetApp>, pos: Pos2, pressed: bool) {

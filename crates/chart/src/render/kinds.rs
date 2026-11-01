@@ -179,8 +179,16 @@ pub(super) fn pie(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx, inne
         }
         _ => (area.cx(), area.cy()),
     };
-    let pw = chart.axis_number_formats.plot_w.filter(|&w| (0.2..=1.0).contains(&w)).map(|w| area.w * w).unwrap_or(area.w * 0.92);
-    let r_scale = if out_end { 0.72 } else { 0.92 };
+    let pw = chart.axis_number_formats.plot_w.filter(|&w| (0.2..=1.0).contains(&w)).map(|w| (ctx.chart_w * w).min(area.w)).unwrap_or(area.w);
+    let r_scale = if out_end {
+        0.72
+    } else if chart.axis_number_formats.plot_w.is_some() {
+        0.96
+    } else if inner > 0.0 {
+        0.95
+    } else {
+        0.84
+    };
     let r = (pw.min(area.h) * r_scale) / 2.0;
     if r < 2.0 {
         return;
@@ -214,10 +222,12 @@ pub(super) fn pie(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx, inne
                 };
                 let mid = a + sweep / 2.0;
                 if out_end && !t.is_empty() {
-                    let p0 = [cx + r * mid.sin(), cy - r * mid.cos()];
-                    let p1 = [cx + (r + 7.0) * mid.sin(), cy - (r + 7.0) * mid.cos()];
-                    ctx.line(vec![p0, p1], AXIS, 0.75);
-                    let lr = r + 13.0;
+                    if sweep < 0.35 {
+                        let p0 = [cx + r * mid.sin(), cy - r * mid.cos()];
+                        let p1 = [cx + (r + 6.0) * mid.sin(), cy - (r + 6.0) * mid.cos()];
+                        ctx.line(vec![p0, p1], AXIS, 0.75);
+                    }
+                    let lr = r + 10.0;
                     labels.push((cx + lr * mid.sin(), cy - lr * mid.cos(), t, TEXT));
                 } else {
                     let rr = if ri > 0.0 { (r + ri) / 2.0 } else { r * 0.65 };
@@ -235,7 +245,18 @@ pub(super) fn pie(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx, inne
     }
     for (x, y, t, c) in labels {
         let sz = if c == super::DARK_TEXT { 11.5 } else { LABEL_SIZE };
-        ctx.text(x, y, &t, sz, c, (HAlign::Center, VAlign::Middle));
+        let align = if out_end {
+            if x > cx + r * 0.15 {
+                HAlign::Left
+            } else if x < cx - r * 0.15 {
+                HAlign::Right
+            } else {
+                HAlign::Center
+            }
+        } else {
+            HAlign::Center
+        };
+        ctx.text(x, y, &t, sz, c, (align, VAlign::Middle));
     }
 }
 

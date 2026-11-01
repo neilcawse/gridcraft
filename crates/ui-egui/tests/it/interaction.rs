@@ -85,7 +85,7 @@ fn horizontal_scrollbar_pages_and_drags_across_a_wide_sheet() {
 
     let page = {
         let geo = h.state().grid.geo.as_ref().unwrap();
-        (geo.cells.width() - geo.frozen_w) / geo.z
+        (geo.cells.width() - geo.frozen_w) / geo.zx
     };
     click(&mut h, egui::pos2(track.right() - 6.0, track.center().y));
     let scrolled = h.state().view().scroll.x;
@@ -150,8 +150,8 @@ fn click_chart(h: &mut egui_kittest::Harness<'static, SheetApp>, id: u32) {
     let sheet = app.session.active().unwrap().wb.active().unwrap();
     let geo = Geo::new(sheet, app.grid.rect.unwrap(), app.view().scroll);
     let anchor = sheet.charts.iter().find(|chart| chart.id == id).unwrap().anchor;
-    let pos = egui::pos2(geo.x(sheet, anchor.cell.col) + anchor.dx * geo.z, geo.y(sheet, anchor.cell.row) + anchor.dy * geo.z)
-        + egui::vec2(anchor.width, anchor.height) * geo.z / 2.0;
+    let pos = egui::pos2(geo.x(sheet, anchor.cell.col) + anchor.dx * geo.zx, geo.y(sheet, anchor.cell.row) + anchor.dy * geo.zy)
+        + egui::vec2(anchor.width * geo.zx, anchor.height * geo.zy) / 2.0;
     h.input_mut().events.extend([
         Event::PointerMoved(pos),
         Event::PointerButton { pos, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
@@ -1169,7 +1169,7 @@ fn the_eraser_erases_a_grouped_ink_stroke_and_leaves_the_rest_of_its_group() {
         let sheet = app.session.active().unwrap().wb.active().unwrap();
         let geo = Geo::new(sheet, app.grid.rect.unwrap(), app.view().scroll);
         let a = sheet.shapes.iter().find(|sh| sh.id == erased).unwrap().anchor;
-        egui::pos2(geo.x(sheet, a.cell.col) + a.dx * geo.z, geo.y(sheet, a.cell.row) + a.dy * geo.z) + egui::vec2(a.width, a.height) * geo.z / 2.0
+        egui::pos2(geo.x(sheet, a.cell.col) + a.dx * geo.zx, geo.y(sheet, a.cell.row) + a.dy * geo.zy) + egui::vec2(a.width * geo.zx, a.height * geo.zy) / 2.0
     };
     click(&mut h, pos);
     let sheet = h.state().session.active().unwrap().wb.active().unwrap();
@@ -1188,7 +1188,7 @@ fn hidden_objects_are_not_erased_by_the_eraser() {
         let sheet = app.session.active().unwrap().wb.active().unwrap();
         let geo = Geo::new(sheet, app.grid.rect.unwrap(), app.view().scroll);
         let a = sheet.shapes.iter().find(|sh| sh.id == stroke).unwrap().anchor;
-        egui::pos2(geo.x(sheet, a.cell.col) + a.dx * geo.z, geo.y(sheet, a.cell.row) + a.dy * geo.z) + egui::vec2(a.width, a.height) * geo.z / 2.0
+        egui::pos2(geo.x(sheet, a.cell.col) + a.dx * geo.zx, geo.y(sheet, a.cell.row) + a.dy * geo.zy) + egui::vec2(a.width * geo.zx, a.height * geo.zy) / 2.0
     };
     let wb = std::sync::Arc::make_mut(&mut h.state_mut().session.doc_mut().unwrap().wb);
     wb.show_objects = gridcraft_engine::model::ShowObjects::None;

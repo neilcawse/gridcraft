@@ -76,7 +76,7 @@ fn the_editor_measures_the_text_at_the_fields_wrap_width() {
     let sheet = app.session.active().unwrap().wb.active().unwrap().clone();
     let st = app.session.active().unwrap().wb.styles.get(sheet.style_id(gridcraft_engine::cell(0, 0))).clone();
     // The grid draws at its zoom: the cell is the field plus the 2 px inset a side, the font scales.
-    let z = (field.width() + 4.0) / sheet.col_width(0);
+    let z = ((field.width() + 4.0) / sheet.col_width(0)) * gridcraft_ui_egui::grid::DISPLAY_SCALE / gridcraft_ui_egui::grid::COL_DISPLAY_SCALE;
     let font = egui::FontId::new(st.font.size * 96.0 / 72.0 * z, gridcraft_ui_egui::theme::cell_family(&st.font.name, st.font.bold, st.font.italic));
     let at =
         |w: f32| ctx.fonts_mut(|f| f.layout_job(egui::text::LayoutJob::simple(TEXT.into(), font.clone(), egui::Color32::PLACEHOLDER, w)).size().y);

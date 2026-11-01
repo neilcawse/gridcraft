@@ -36,7 +36,7 @@ fn first_scrolled_row(h: &Harness) -> u32 {
     let sheet = app.session.active().unwrap().wb.active().unwrap();
     let geo = Geo::new(sheet, app.grid.rect.unwrap(), app.view().scroll);
     let (fr, _) = sheet.freeze.unwrap_or((0, 0));
-    let top = geo.cells.top() + sheet.row_top(fr) as f32 * geo.z;
+    let top = geo.cells.top() + sheet.row_top(fr) as f32 * geo.zy;
     (fr..200).find(|r| geo.y(sheet, *r) <= top + 0.5 && geo.y(sheet, *r + 1) > top + 0.5).unwrap()
 }
 

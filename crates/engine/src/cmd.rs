@@ -659,7 +659,7 @@ pub fn auto_row_height(wb: &mut Workbook, si: usize, row: u32) {
         if !cell.value.is_empty() || cell.formula.is_some() {
             // Only a wrapping cell is laid out over several lines: each explicit line break
             // starts one, and each line folds at the column width.
-            if st.align.wrap {
+            if st.align.wrap && sh.col_width(c) > 0.0 {
                 let text = crate::display::cell_text(wb, sh, CellRef::new(row, c));
                 let w = sh.col_width(c).max(1.0) - 6.0;
                 lines = text.lines().map(|l| wrapped_line_count(l, w.max(1.0), size, st.font.bold)).sum::<f32>().max(1.0);

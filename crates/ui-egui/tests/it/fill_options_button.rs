@@ -250,7 +250,7 @@ fn b_right(h: &Harness) -> (f32, Geo) {
 
 fn scroll_b_right_to(h: &mut Harness, logical_x: f32) {
     let (now, geo) = b_right(h);
-    h.state_mut().view_mut().unwrap().scroll.x += (now - logical_x) / geo.z;
+    h.state_mut().view_mut().unwrap().scroll.x += (now - logical_x) / geo.zx;
     h.run_steps(3);
     let got = b_right(h).0;
     assert!((got - logical_x).abs() < 1.0, "setup: column B ends at logical x {got}, wanted {logical_x}");

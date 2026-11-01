@@ -145,7 +145,8 @@ pub(crate) fn wrapped_cell_text_y(valign: VAlign, rect: Rect, gh: f32, z: f32) -
 pub(crate) fn cell_text_y(valign: VAlign, rect: Rect, gh: f32, z: f32) -> f32 {
     let top_inset = 1.0 * z;
     let y_top = rect.top() - top_inset;
-    let y_bottom = (rect.bottom() - gh - 0.5 * z).max(y_top);
+    let bot_inset = ((rect.height() - gh) * 0.25).clamp(0.5 * z, 3.5 * z);
+    let y_bottom = (rect.bottom() - gh - bot_inset).max(y_top);
     match valign {
         VAlign::Top => y_top,
         VAlign::Center | VAlign::Justify | VAlign::Distributed => (y_top + y_bottom) / 2.0,

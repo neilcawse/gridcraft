@@ -43,8 +43,17 @@ impl crate::DocState {
             return;
         }
         let cur = self.wb.active_sheet();
-        if self.sheet_selections.len() < self.wb.sheets.len() {
-            self.sheet_selections.resize(self.wb.sheets.len(), crate::Selection::default());
+        while self.sheet_selections.len() < self.wb.sheets.len() {
+            let si = self.sheet_selections.len();
+            let sel = self
+                .wb
+                .sheet(si)
+                .map(|sh| {
+                    let r = sh.merge_at(sh.view_active).unwrap_or_else(|| gridcraft_core::RangeRef::cell(sh.view_active));
+                    crate::Selection { active: sh.view_active, anchor: r.start, ranges: vec![r] }
+                })
+                .unwrap_or_default();
+            self.sheet_selections.push(sel);
         }
         if let Some(slot) = self.sheet_selections.get_mut(cur) {
             *slot = self.selection.clone();

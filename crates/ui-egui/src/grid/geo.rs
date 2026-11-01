@@ -1,4 +1,4 @@
-use super::{Arc, COL_HEADER_H, CellRef, DISPLAY_SCALE, LineIndex, MAX_COLS, MAX_ROWS, Pos2, RangeRef, Rect, Sheet, pos2};
+use super::{Arc, COL_DISPLAY_SCALE, COL_HEADER_H, CellRef, DISPLAY_SCALE, LineIndex, MAX_COLS, MAX_ROWS, Pos2, ROW_DISPLAY_SCALE, RangeRef, Rect, Sheet, pos2};
 
 /// Geometry of the grid for one frame (handles zoom and frozen panes).
 #[derive(Clone)]
@@ -6,6 +6,8 @@ pub struct Geo {
     pub rect: Rect,
     pub cells: Rect,
     pub z: f32,
+    pub zx: f32,
+    pub zy: f32,
     pub header_w: f32,
     pub header_h: f32,
     /// The outline bands (grouped rows / columns): left of the row headers and above the column
@@ -35,15 +37,17 @@ impl Geo {
     pub fn new(sh: &Sheet, rect: Rect, scroll: egui::Vec2) -> Geo {
         let zoom = (sh.zoom as f32 / 100.0).clamp(0.1, 4.0);
         let z = zoom * DISPLAY_SCALE;
+        let zx = zoom * COL_DISPLAY_SCALE;
+        let zy = zoom * ROW_DISPLAY_SCALE;
         let header_h = if sh.show_headings { (COL_HEADER_H * zoom.max(0.75)).round() } else { 0.0 };
         let ri = std::sync::Arc::new(LineIndex::new(&sh.rows, sh.default_row_height, MAX_ROWS));
         let ci = std::sync::Arc::new(LineIndex::new(&sh.cols, sh.default_col_width, MAX_COLS));
-        let last_row = ri.at((scroll.y + rect.height() / z) as f64 + 200.0) + 1;
+        let last_row = ri.at((scroll.y + rect.height() / zy) as f64 + 200.0) + 1;
         let digits = (last_row as f32).log10().floor() as i32 + 1;
         let header_w = if sh.show_headings { ((digits.max(2) as f32 * 7.0 + 14.0) * zoom.max(0.75)).round() } else { 0.0 };
         let (fr, fc) = sh.freeze.unwrap_or((0, 0));
-        let frozen_w = (ci.start(fc) as f32) * z;
-        let frozen_h = (ri.start(fr) as f32) * z;
+        let frozen_w = (ci.start(fc) as f32) * zx;
+        let frozen_h = (ri.start(fr) as f32) * zy;
         let row_outline = Arc::new(crate::outline::Axis::of(sh, true));
         let col_outline = Arc::new(crate::outline::Axis::of(sh, false));
         // Show Outline Symbols off: no bands (the outline's hidden lines stay hidden).
@@ -62,6 +66,8 @@ impl Geo {
             rect,
             cells,
             z,
+            zx,
+            zy,
             header_w,
             header_h,
             band_w,
@@ -93,6 +99,7 @@ impl Geo {
         let mut g = Geo::new(sh, rect, scroll);
         let zoom = (sh.zoom as f32 / 100.0).clamp(0.1, 4.0);
         g.z = zoom * DISPLAY_SCALE * grid.scale.clamp(0.1, 4.0);
+        (g.zx, g.zy) = (g.z, g.z);
         (g.fr, g.fc, g.frozen_w, g.frozen_h) = (0, 0, 0.0, 0.0);
         g.paper = Some(grid);
         g
@@ -143,9 +150,9 @@ impl Geo {
             return self.cells.left() + (pg.col_x(col) - self.scroll.x as f64) as f32 * self.z;
         }
         if col < self.fc {
-            self.cells.left() + self.ci.start(col) as f32 * self.z
+            self.cells.left() + self.ci.start(col) as f32 * self.zx
         } else {
-            self.cells.left() + self.frozen_w + (self.ci.start(col) as f32 - self.ci.start(self.fc) as f32 - self.scroll.x) * self.z
+            self.cells.left() + self.frozen_w + (self.ci.start(col) as f32 - self.ci.start(self.fc) as f32 - self.scroll.x) * self.zx
         }
     }
     pub fn y(&self, _sh: &Sheet, row: u32) -> f32 {
@@ -153,15 +160,15 @@ impl Geo {
             return self.cells.top() + (pg.row_y(row) - self.scroll.y as f64) as f32 * self.z;
         }
         if row < self.fr {
-            self.cells.top() + self.ri.start(row) as f32 * self.z
+            self.cells.top() + self.ri.start(row) as f32 * self.zy
         } else {
-            self.cells.top() + self.frozen_h + (self.ri.start(row) as f32 - self.ri.start(self.fr) as f32 - self.scroll.y) * self.z
+            self.cells.top() + self.frozen_h + (self.ri.start(row) as f32 - self.ri.start(self.fr) as f32 - self.scroll.y) * self.zy
         }
     }
     pub fn cell_rect(&self, sh: &Sheet, c: CellRef) -> Rect {
         Rect::from_min_max(
             pos2(self.x(sh, c.col), self.y(sh, c.row)),
-            pos2(self.x(sh, c.col) + sh.col_width(c.col) * self.z, self.y(sh, c.row) + sh.row_height(c.row) * self.z),
+            pos2(self.x(sh, c.col) + sh.col_width(c.col) * self.zx, self.y(sh, c.row) + sh.row_height(c.row) * self.zy),
         )
     }
     pub fn range_rect(&self, sh: &Sheet, r: RangeRef) -> Rect {
@@ -173,22 +180,22 @@ impl Geo {
         if let Some(pg) = &self.paper {
             return pg.col_at(self.scroll.x as f64 + ((x - self.cells.left()) / self.z) as f64);
         }
-        let dx = (x - self.cells.left()) / self.z;
-        if dx < self.frozen_w / self.z {
+        let dx = (x - self.cells.left()) / self.zx;
+        if dx < self.frozen_w / self.zx {
             self.ci.at(dx.max(0.0) as f64)
         } else {
-            self.ci.at(self.ci.start(self.fc) + self.scroll.x as f64 + (dx - self.frozen_w / self.z) as f64)
+            self.ci.at(self.ci.start(self.fc) + self.scroll.x as f64 + (dx - self.frozen_w / self.zx) as f64)
         }
     }
     pub fn row_at(&self, _sh: &Sheet, y: f32) -> u32 {
         if let Some(pg) = &self.paper {
             return pg.row_at(self.scroll.y as f64 + ((y - self.cells.top()) / self.z) as f64);
         }
-        let dy = (y - self.cells.top()) / self.z;
-        if dy < self.frozen_h / self.z {
+        let dy = (y - self.cells.top()) / self.zy;
+        if dy < self.frozen_h / self.zy {
             self.ri.at(dy.max(0.0) as f64)
         } else {
-            self.ri.at(self.ri.start(self.fr) + self.scroll.y as f64 + (dy - self.frozen_h / self.z) as f64)
+            self.ri.at(self.ri.start(self.fr) + self.scroll.y as f64 + (dy - self.frozen_h / self.zy) as f64)
         }
     }
     pub fn cell_at(&self, sh: &Sheet, p: Pos2) -> CellRef {
@@ -198,13 +205,13 @@ impl Geo {
     pub(super) fn scroll_rows(&self, _sh: &Sheet) -> (u32, u32) {
         let top = self.ri.start(self.fr) + self.scroll.y as f64;
         let r0 = self.ri.at(top).max(self.fr);
-        let r1 = self.ri.at(top + ((self.cells.height() - self.frozen_h) / self.z) as f64).min(MAX_ROWS - 1);
+        let r1 = self.ri.at(top + ((self.cells.height() - self.frozen_h) / self.zy) as f64).min(MAX_ROWS - 1);
         (r0, r1)
     }
     pub(super) fn scroll_cols(&self, _sh: &Sheet) -> (u32, u32) {
         let left = self.ci.start(self.fc) + self.scroll.x as f64;
         let c0 = self.ci.at(left).max(self.fc);
-        let c1 = self.ci.at(left + ((self.cells.width() - self.frozen_w) / self.z) as f64).min(MAX_COLS - 1);
+        let c1 = self.ci.at(left + ((self.cells.width() - self.frozen_w) / self.zx) as f64).min(MAX_COLS - 1);
         (c0, c1)
     }
     /// Screen areas of the panes (frozen rows/columns or the scrolling part) that hold part of `r`.

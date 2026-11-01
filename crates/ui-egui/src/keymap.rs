@@ -332,7 +332,7 @@ pub(crate) fn dispatch(app: &mut SheetApp, ctx: &egui::Context, key: Key, physic
         }
         Shortcut::ExtendToRowStart => extend(app, anchor, active, CellRef::new(active.row, 0)),
         Shortcut::ScreenRight | Shortcut::ScreenLeft => {
-            let width = ((geo.cells.width() - geo.frozen_w) / geo.z).max(1.0);
+            let width = ((geo.cells.width() - geo.frozen_w) / geo.zx).max(1.0);
             let cols = (width / sh.default_col_width.max(1.0)).floor().max(1.0) as i64;
             let dc = if shortcut == Shortcut::ScreenRight { cols } else { -cols };
             let from = app.session.active().map(|d| if m.shift { d.selection.moving_end() } else { d.selection.active });

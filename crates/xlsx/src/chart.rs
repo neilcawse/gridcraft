@@ -565,8 +565,9 @@ pub(crate) fn read_chart_with_budget(root: &El) -> Option<(Chart, Vec<PivotSerie
                 series_label_rotations.push((s_idx, rot));
             }
             if let Some(mc) = s
-                .path(&["marker", "spPr", "ln", "solidFill"])
+                .path(&["marker", "spPr", "solidFill"])
                 .and_then(dml_color)
+                .or_else(|| s.path(&["marker", "spPr", "ln", "solidFill"]).and_then(dml_color))
                 .or_else(|| (s_idx > 0).then(|| s.path(&["spPr", "ln", "solidFill"]).and_then(dml_color)).flatten())
             {
                 series_strokes.push((s_idx, mc));
@@ -1079,6 +1080,17 @@ fn series_xml(s: &Series, idx: usize, g: G, ch: &Chart, wb: &Workbook, si: usize
     match g {
         G::Bar { .. } => x.push_str("<c:invertIfNegative val=\"0\"/>"),
         G::Line { markers: false, .. } | G::Scatter { lines: true } | G::Stock => x.push_str("<c:marker><c:symbol val=\"none\"/></c:marker>"),
+        G::Line { .. } => {
+            if let Some(mc) = ch
+                .axis_number_formats
+                .series_strokes
+                .iter()
+                .find(|&&(i, _)| i as usize == idx)
+                .and_then(|(_, c)| srgb(c, &wb.theme))
+            {
+                let _ = write!(x, "<c:marker><c:symbol val=\"circle\"/><c:spPr><a:solidFill>{mc}</a:solidFill></c:spPr></c:marker>");
+            }
+        }
         G::Bubble => x.push_str("<c:invertIfNegative val=\"0\"/>"),
         _ => {}
     }

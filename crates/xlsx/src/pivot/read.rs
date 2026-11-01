@@ -649,6 +649,7 @@ fn apply_pivot_style(cx: &mut Ctx<'_>, x: &El, pt: &PivotTable, sheet: &mut grid
         }
         if dxf.font.color != Color::Auto || dxf.dxf_stated.color {
             dst.font.color = dxf.font.color;
+            dst.dxf_stated.color = dxf.dxf_stated.color;
         }
         if dxf.font.bold || dxf.dxf_stated.bold {
             dst.font.bold = dxf.font.bold;
@@ -678,7 +679,7 @@ fn apply_pivot_style(cx: &mut Ctx<'_>, x: &El, pt: &PivotTable, sheet: &mut grid
         if own.fill.pattern == PatternType::None && layer.fill.pattern != PatternType::None {
             merged.fill = layer.fill;
         }
-        if own.font.color == Color::Auto && layer.font.color != Color::Auto {
+        if own.font.color == Color::Auto && (layer.font.color != Color::Auto || layer.dxf_stated.color) {
             merged.font.color = layer.font.color;
         }
         if layer.font.bold {
@@ -758,7 +759,7 @@ fn apply_pivot_style(cx: &mut Ctx<'_>, x: &El, pt: &PivotTable, sheet: &mut grid
         let dr = r.saturating_sub(header_end) as usize;
         let row_t = if !is_header { row_items.get(dr).and_then(|i| i.attr("t")) } else { None };
         let is_grand = !is_header && (row_t == Some("grand") || (row_items.is_empty() && pt.grand_totals_cols && r == loc.end.row));
-        let is_subtotal = !is_header && !is_grand && row_t.is_some_and(|t| t != "data");
+        let is_subtotal = !is_header && !is_grand && row_t.is_some_and(|t| t != "data" && t != "blank");
 
         for col in loc.start.col..=loc.end.col {
             let is_first_col = col < first_col_end;
@@ -797,14 +798,17 @@ fn apply_pivot_style(cx: &mut Ctx<'_>, x: &El, pt: &PivotTable, sheet: &mut grid
                 }
             } else if is_grand {
                 layer.font.bold = true;
-                let line_col = if fam == "Light" { tone(400) } else { tone(0) };
-                layer.borders.top = BorderLine { style: BorderStyle::Thin, color: line_col };
-                layer.borders.bottom = BorderLine { style: BorderStyle::Double, color: line_col };
-                if fam == "Medium" || fam == "Dark" {
-                    layer.fill = Fill::solid(light_tint);
-                }
                 if let Some(d) = custom.as_ref().and_then(|cs| cs.get("totalRow")) {
                     merge_dxf(&mut layer, d);
+                } else {
+                    let line_col = if fam == "Light" { tone(400) } else { tone(0) };
+                    layer.borders.top = BorderLine { style: BorderStyle::Thin, color: line_col };
+                    if !(fam == "Light" && (16..=21).contains(&n)) {
+                        layer.borders.bottom = BorderLine { style: BorderStyle::Double, color: line_col };
+                    }
+                    if fam == "Medium" || fam == "Dark" || (fam == "Light" && (16..=21).contains(&n)) {
+                        layer.fill = Fill::solid(light_tint);
+                    }
                 }
             } else if is_subtotal {
                 layer.font.bold = true;
@@ -813,7 +817,7 @@ fn apply_pivot_style(cx: &mut Ctx<'_>, x: &El, pt: &PivotTable, sheet: &mut grid
                     layer.borders.top = BorderLine { style: BorderStyle::Thin, color: tone(400) };
                     layer.borders.bottom = BorderLine { style: BorderStyle::Thin, color: tone(400) };
                 }
-                if let Some(d) = custom.as_ref().and_then(|cs| cs.get("subtotalRow1")) {
+                if let Some(d) = custom.as_ref().and_then(|cs| cs.get("firstSubtotalRow")) {
                     merge_dxf(&mut layer, d);
                 }
             } else {
@@ -822,6 +826,11 @@ fn apply_pivot_style(cx: &mut Ctx<'_>, x: &El, pt: &PivotTable, sheet: &mut grid
                         layer.fill = Fill::solid(light_tint);
                     }
                     if let Some(d) = custom.as_ref().and_then(|cs| cs.get("firstColumn")) {
+                        merge_dxf(&mut layer, d);
+                    }
+                    if col == loc.start.col
+                        && let Some(d) = custom.as_ref().and_then(|cs| cs.get("firstRowSubheading"))
+                    {
                         merge_dxf(&mut layer, d);
                     }
                 }

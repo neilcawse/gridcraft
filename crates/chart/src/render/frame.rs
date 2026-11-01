@@ -147,7 +147,8 @@ fn draw_cat_labels(ctx: &mut Ctx, plot: Bx, l: &[String], outer: &[Vec<String>],
     let lw = l.iter().take(2000).map(|t| ctx.tw(t, ls)).fold(0.0f32, f32::max);
     let rot_rad = rot.filter(|r| r.is_finite() && r.abs() >= 1.0).map(|r| r.to_radians());
     let k = match rot_rad {
-        Some(a) => ((lh / (cw * a.sin().abs()).max(1e-3)).ceil() as usize).clamp(1, n),
+        Some(a) => (((lh * 1.15) / (cw * a.sin().abs()).max(1e-3)).ceil() as usize).clamp(1, n),
+        None if cw >= ls * 2.4 => 1,
         None => (((lw + 6.0) / cw.max(1e-3)).ceil() as usize).clamp(1, n),
     };
     for (j, t) in l.iter().enumerate().step_by(k) {
@@ -177,8 +178,18 @@ fn draw_cat_labels(ctx: &mut Ctx, plot: Bx, l: &[String], outer: &[Vec<String>],
                 });
             }
         } else {
-            let t = ctx.fit(t, ls, cw * k as f32 - 2.0);
-            ctx.text(cx, plot.bottom() + 3.0, &t, ls, TEXT, (HAlign::Center, VAlign::Top));
+            let maxw = (cw * k as f32 - 2.0).max(1.0);
+            if ctx.tw(t, ls) > maxw
+                && let Some((a, b)) = split_two_lines(t)
+            {
+                let l1 = ctx.fit(a, ls, maxw);
+                let l2 = ctx.fit(b, ls, maxw);
+                ctx.text(cx, plot.bottom() + 3.0, &l1, ls, TEXT, (HAlign::Center, VAlign::Top));
+                ctx.text(cx, plot.bottom() + 3.0 + lh * 0.85, &l2, ls, TEXT, (HAlign::Center, VAlign::Top));
+            } else {
+                let t = ctx.fit(t, ls, maxw);
+                ctx.text(cx, plot.bottom() + 3.0, &t, ls, TEXT, (HAlign::Center, VAlign::Top));
+            }
         }
     }
     for (i, level) in outer.iter().enumerate() {
@@ -195,6 +206,14 @@ fn draw_cat_labels(ctx: &mut Ctx, plot: Bx, l: &[String], outer: &[Vec<String>],
         }
         ctx.vline(plot.right(), plot.bottom(), top + lh - 2.0, AXIS, 0.75);
     }
+}
+
+fn split_two_lines(s: &str) -> Option<(&str, &str)> {
+    let mid = s.len() / 2;
+    let pos = s.match_indices(' ').map(|(i, _)| i).min_by_key(|&i| i.abs_diff(mid))?;
+    let (a, b) = s.split_at(pos);
+    let b = b.trim_start();
+    (!a.is_empty() && !b.is_empty()).then_some((a, b))
 }
 
 /// Draws gridlines, axis labels and the category axis line; returns the plot rectangle.
@@ -216,12 +235,15 @@ pub(super) fn frame(ctx: &mut Ctx, area: Bx, cat: CatAxis, y: &ValAxis, y2: Opti
         } else {
             match &cat {
                 CatAxis::Labels(l, o, Some(rot)) if *rot != 0.0 => {
-                    let max_lw = (area.h * 0.28).clamp(36.0, 80.0);
-                    let lw = l.iter().take(2000).map(|t| ctx.tw(t, ls)).fold(0.0f32, f32::max).min(max_lw);
+                    let lw = l.iter().take(2000).map(|t| ctx.tw(t, ls)).fold(0.0f32, f32::max);
                     let a = rot.abs().to_radians();
-                    (o.len() as f32, (lw * a.sin() + ls * a.cos()).min(area.h * 0.30).max(lh))
+                    (o.len() as f32, (lw * a.sin() + ls * a.cos()).min(area.h * 0.48).max(lh))
                 }
-                CatAxis::Labels(_, o, _) => (o.len() as f32, lh),
+                CatAxis::Labels(l, o, _) => {
+                    let cw = (area.w * 0.85) / l.len().max(1) as f32;
+                    let wraps = cw >= ls * 2.4 && l.iter().take(200).any(|t| ctx.tw(t, ls) > cw - 2.0 && t.contains(' '));
+                    (o.len() as f32, if wraps { lh * 1.85 } else { lh })
+                }
                 CatAxis::Numeric(..) => (0.0, lh),
             }
         };
@@ -244,7 +266,11 @@ pub(super) fn frame(ctx: &mut Ctx, area: Bx, cat: CatAxis, y: &ValAxis, y2: Opti
         }
         let zero = if y.scale.min <= 0.0 && y.scale.max >= 0.0 { 0.0 } else { y.scale.min };
         let y0 = plot.bottom() - y.scale.frac(zero) * plot.h;
-        ctx.hline(plot.x, plot.right(), y0, AXIS, 0.75);
+        let ax_col = if ctx.grid_color != super::GRID { ctx.grid_color } else { AXIS };
+        ctx.hline(plot.x, plot.right(), y0, ax_col, 0.75);
+        if ctx.grid_color != super::GRID {
+            ctx.vline(plot.x, plot.y, plot.bottom(), ctx.grid_color, 0.75);
+        }
         match cat {
             CatAxis::Labels(l, outer, rot) => draw_cat_labels(ctx, plot, l, outer, rot, cat_h),
             CatAxis::Numeric(s, f) => {

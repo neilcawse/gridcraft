@@ -178,7 +178,7 @@ fn cell_editor_and_helper_stay_below_the_frozen_top_row() {
     app.view_mut().unwrap().scroll.y = scroll - frozen_h / 2.0;
     frames(&ctx, &mut app);
     let output = frame(&ctx, &mut app);
-    let frozen_bottom = app.grid.cells_rect.unwrap().top() + frozen_h * gridcraft_ui_egui::grid::DISPLAY_SCALE;
+    let frozen_bottom = app.grid.cells_rect.unwrap().top() + frozen_h * gridcraft_ui_egui::grid::ROW_DISPLAY_SCALE;
     let editor = output
         .shapes
         .iter()
