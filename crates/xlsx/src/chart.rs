@@ -311,10 +311,14 @@ pub(crate) fn plot_cached(wb: &Workbook, si: usize, ch: &mut Chart, caches: &[Pi
         let stale = |f: Option<&str>, p: &&CachedPoints| !f.is_some_and(|f| live_matches(wb, si, f, p));
         let categories = c.categories.as_ref().filter(|p| stale(ser.categories.as_deref(), p)).map(|p| literal(&p.points, p.numeric));
         let values = c.values.as_ref().filter(|p| stale(Some(&ser.values), p)).map(|p| literal(&p.points, p.numeric));
+        let name_stale = c.name.as_ref().is_some_and(|n| {
+            let cached = CachedPoints { points: vec![Some(n.clone())], numeric: false, multi_level: false };
+            stale(ser.name.as_deref(), &&cached)
+        });
         if categories.is_none() && c.categories.as_ref().is_some_and(|p| p.multi_level) {
             ser.innermost_categories = true;
         }
-        if categories.is_none() && values.is_none() {
+        if categories.is_none() && values.is_none() && !name_stale {
             continue;
         }
         if categories.is_some() {
@@ -324,7 +328,7 @@ pub(crate) fn plot_cached(wb: &Workbook, si: usize, ch: &mut Chart, caches: &[Pi
             ser.values = v;
             ser.number_format.clone_from(&c.number_format);
         }
-        if let Some(name) = &c.name {
+        if name_stale && let Some(name) = &c.name {
             ser.name = Some(format!("\"{}\"", name.replace('"', "\"\"")));
         }
     }

@@ -67,7 +67,7 @@ pub(super) fn decimate_area(top: Vec<[f32; 2]>, base: Vec<[f32; 2]>, max: usize)
         poly.extend(base.into_iter().take(n).rev());
         return poly;
     }
-    let mut keep = Vec::with_capacity(max * 2);
+    let mut cols: Vec<[usize; 6]> = Vec::new();
     let mut i = 0;
     while i < n {
         let col = top[i][0].floor();
@@ -88,27 +88,37 @@ pub(super) fn decimate_area(top: Vec<[f32; 2]>, base: Vec<[f32; 2]>, max: usize)
             }
             k += 1;
         }
-        let mut idx = [start, t_mn, t_mx, b_mn, b_mx, k - 1];
-        idx.sort_unstable();
-        let mut last = usize::MAX;
-        for ix in idx {
-            if ix != last {
-                keep.push(ix);
-                last = ix;
-            }
-        }
+        cols.push([start, t_mn, t_mx, b_mn, b_mx, k - 1]);
         i = k;
     }
-    if keep.len() > max * 4 {
-        let step = keep.len() / (max * 2) + 1;
-        let last = keep.last().copied();
-        let mut s: Vec<usize> = keep.into_iter().step_by(step).collect();
-        if let Some(l) = last
-            && s.last() != Some(&l)
-        {
-            s.push(l);
+    let max_cols = (max * 2 / 3).max(1);
+    let group = cols.len().div_ceil(max_cols);
+    let mut keep = Vec::with_capacity(cols.len().min(max_cols) * 6);
+    for chunk in cols.chunks(group) {
+        let start = chunk[0][0];
+        let end = chunk[chunk.len() - 1][5];
+        let (mut t_mn, mut t_mx, mut b_mn, mut b_mx) = (start, start, start, start);
+        for c in chunk {
+            if top[c[1]][1] < top[t_mn][1] {
+                t_mn = c[1];
+            }
+            if top[c[2]][1] > top[t_mx][1] {
+                t_mx = c[2];
+            }
+            if base[c[3]][1] < base[b_mn][1] {
+                b_mn = c[3];
+            }
+            if base[c[4]][1] > base[b_mx][1] {
+                b_mx = c[4];
+            }
         }
-        keep = s;
+        let mut idx = [start, t_mn, t_mx, b_mn, b_mx, end];
+        idx.sort_unstable();
+        for ix in idx {
+            if keep.last() != Some(&ix) {
+                keep.push(ix);
+            }
+        }
     }
     let mut poly = Vec::with_capacity(keep.len() * 2);
     for &ix in &keep {
@@ -234,5 +244,16 @@ mod smooth_tests {
             assert_eq!(poly[i][0], poly[poly.len() - 1 - i][0]);
             assert_eq!(poly[poly.len() - 1 - i][1], 100.0);
         }
+        // Wide plot (3,000 distinct pixel columns) with a single spike: bucket merging retains
+        // both top and baseline extrema across column groups.
+        let mut wide_top: Vec<[f32; 2]> = (0..3000).map(|i| [i as f32, 50.0]).collect();
+        let mut wide_base: Vec<[f32; 2]> = (0..3000).map(|i| [i as f32, 100.0]).collect();
+        wide_top[1777][1] = 2.0;
+        wide_base[1778][1] = 148.0;
+        let wide_poly = decimate_area(wide_top, wide_base, 64);
+        assert_eq!(wide_poly.len() % 2, 0);
+        let wh = wide_poly.len() / 2;
+        assert!(wide_poly[..wh].iter().any(|p| p[1] == 2.0), "top spike must be retained");
+        assert!(wide_poly[wh..].iter().any(|p| p[1] == 148.0), "base spike must be retained");
     }
 }

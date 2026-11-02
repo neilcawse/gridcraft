@@ -285,10 +285,8 @@ impl Sheet {
         self.charts.retain(|o| !has(DrawingRef::Chart(o.id)));
         self.images.retain(|o| !has(DrawingRef::Image(o.id)));
         self.shapes.retain(|o| !has(DrawingRef::Shape(o.id)));
+        self.remove_from_group(DrawingRef::Group(id));
         self.groups.retain(|g| g.id != id && !has(DrawingRef::Group(g.id)));
-        for g in &mut self.groups {
-            g.members.retain(|m| *m != DrawingRef::Group(id));
-        }
     }
 
     /// Takes `r` out of the groups holding it, leaving the rest of each group grouped (Excel
