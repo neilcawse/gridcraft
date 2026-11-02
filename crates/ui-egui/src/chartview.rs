@@ -246,12 +246,12 @@ fn d2_centre_galley(
     if !is_d2 {
         return (g, false);
     }
-    let size1 = font.size * (13.0 / 11.0);
+    let size1 = font.size * 1.065;
     let font1 = FontId::new(size1, font.family);
     let job1 = egui::text::LayoutJob::simple(sp.text.clone(), font1.clone(), color, width + 16.0);
     let g1 = p.layout_job(job1);
     let n_gaps = sp.text.trim().chars().count().saturating_sub(1).max(1) as f32;
-    let target_w = g.size().x + 0.5;
+    let target_w = g.size().x + 2.5;
     let mut job2 = egui::text::LayoutJob::default();
     job2.wrap.max_width = width + 16.0;
     job2.halign = egui::Align::Center;
