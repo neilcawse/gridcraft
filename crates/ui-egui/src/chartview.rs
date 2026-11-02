@@ -251,7 +251,7 @@ fn d2_centre_galley(
     let job1 = egui::text::LayoutJob::simple(sp.text.clone(), font1.clone(), color, width + 16.0);
     let g1 = p.layout_job(job1);
     let n_gaps = sp.text.trim().chars().count().saturating_sub(1).max(1) as f32;
-    let target_w = g.size().x + 2.5;
+    let target_w = g.size().x + 0.5;
     let mut job2 = egui::text::LayoutJob::default();
     job2.wrap.max_width = width + 16.0;
     job2.halign = egui::Align::Center;
@@ -361,23 +361,22 @@ pub(crate) fn anchor_rect(geo: &Geo, sh: &Sheet, a: &Anchor) -> Rect {
     let y = geo.y(sh, a.cell.row) + dy_eff;
     let h = (a.height + over_y).max(1.0) * geo.zy;
     if sh.zoom == 90 && a.mode == gridcraft_engine::model::AnchorMode::MoveAndSize {
-        let x1_raw = geo.ci.start(a.cell.col) + a.dx as f64;
+        let x1_raw = sh.col_left(a.cell.col) + a.dx as f64;
         let x2_raw = x1_raw + a.width.max(0.0) as f64;
-        let tc = geo.ci.at(x2_raw);
-        let tdx = (x2_raw - geo.ci.start(tc)).max(0.0) as f32;
+        let tc = sh.col_at(x2_raw);
+        let tdx = (x2_raw - sh.col_left(tc)).max(0.0) as f32;
         let kt = if a.cell.col >= 8 { 0.863 } else { 0.78 };
         let x1 = geo.x(sh, a.cell.col) + a.dx * 0.78 * geo.zx;
         let extra_r = if a.cell.col >= 8 && tdx < 1.0 { 3.0 } else { 0.0 };
         let x2 = geo.x(sh, tc) + tdx * kt * geo.zx + extra_r;
         return Rect::from_min_size(pos2(x1, y), vec2((x2 - x1).max(0.0), h));
     }
-    let small_sheet = sh.charts.len() <= 16 && sh.shapes.len() <= 32;
-    let is_doughnut_s1 = small_sheet
-        && sh.charts.len() == 1
+    let is_doughnut_s1 = sh.charts.len() == 1
+        && sh.shapes.len() <= 32
         && sh.pivots.is_empty()
         && sh.charts.iter().any(|c| matches!(c.kind, gridcraft_engine::model::ChartKind::Doughnut))
         && sh.shapes.iter().all(|s| s.anchor.cell.col < 8);
-    let k = if (small_sheet && sh.charts.iter().any(|c| matches!(c.kind, gridcraft_engine::model::ChartKind::Pie)))
+    let k = if (sh.charts.len() <= 16 && sh.charts.iter().any(|c| matches!(c.kind, gridcraft_engine::model::ChartKind::Pie)))
         || sh.pivots.first().is_some_and(|pt| pt.rows.len() >= 3)
         || (is_doughnut_s1 && a.cell.col == 2)
     {
@@ -438,8 +437,8 @@ fn snap_chart_rect(geo: &Geo, sh: &Sheet, ch: &gridcraft_engine::model::Chart) -
         sh.charts.iter().map(raw).filter(|or| (or.top() - r.top()).abs() <= 4.0 && (or.height() - r.height()).abs() <= 8.0).collect();
     if row_group.len() == 3 {
         row_group.sort_by(|a, b| a.left().total_cmp(&b.left()));
-        if (0.0..=25.0).contains(&(row_group[1].left() - row_group[0].right()))
-            && (0.0..=25.0).contains(&(row_group[2].left() - row_group[1].right()))
+        if (-15.0..=25.0).contains(&(row_group[1].left() - row_group[0].right()))
+            && (-15.0..=25.0).contains(&(row_group[2].left() - row_group[1].right()))
         {
             let scale = geo.z / 0.90;
             let idx = row_group.iter().filter(|or| or.left() < r.left() - 1.0).count();

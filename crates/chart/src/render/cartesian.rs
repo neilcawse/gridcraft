@@ -315,7 +315,7 @@ fn draw_col_baseline(ctx: &mut Ctx, chart: &Chart, plot: Bx, y0: f32, ncat_slots
 }
 
 fn col_bar_width(bw: f32, j: usize, area: Bx) -> f32 {
-    if j == 0 && (455.0..=462.0).contains(&area.w) && (142.0..=148.0).contains(&area.h) { bw - 0.5 } else { bw }
+    if j == 0 && (434.0..=462.0).contains(&area.w) && (140.0..=150.0).contains(&area.h) { bw - 0.5 } else { bw }
 }
 
 pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx, horizontal: bool) {
