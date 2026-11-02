@@ -136,7 +136,7 @@ pub fn approx_text_width(text: &str, size: f32, bold: bool) -> f32 {
 /// `P`, `Y`, `T`, `E`) and wide capitals (`U`, `N`, `H`, `D`, `G`, `O`, `Q`, `M`, `W`) exceed
 /// `0.73 em`.
 pub fn approx_verdana_width(text: &str, size: f32, bold: bool) -> f32 {
-    let mut units = 0u32;
+    let mut units = 0u64;
     for c in text.chars() {
         units += match c {
             ' ' => 720,

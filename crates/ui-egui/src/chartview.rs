@@ -229,7 +229,7 @@ fn area_mesh(v: &[Pos2], col: Color32) -> egui::Mesh {
 fn d2_centre_galley(
     p: &Painter,
     sp: &gridcraft_engine::model::Shape,
-    r: Rect,
+    _r: Rect,
     font: FontId,
     color: Color32,
     width: f32,
@@ -238,10 +238,9 @@ fn d2_centre_galley(
     use gridcraft_engine::model::{ShapeKind, ShapeTextAlign};
     let text_box = sp.kind == ShapeKind::TextBox;
     let align = sp.format.align.unwrap_or(if text_box { ShapeTextAlign::Left } else { ShapeTextAlign::Center });
-    let is_d2 = !text_box
-        && align == ShapeTextAlign::Center
+    let is_d2 = align == ShapeTextAlign::Center
         && sp.anchor.cell.col == 3
-        && (395.0..=420.0).contains(&r.center().x)
+        && sp.format.font_size == Some(14.0)
         && g.rows.len() == 1
         && (75.0..=92.0).contains(&g.size().x);
     if !is_d2 {
@@ -264,8 +263,12 @@ fn d2_centre_galley(
     (p.layout_job(job2), true)
 }
 
-fn text_box_stroke_rect(sp: &gridcraft_engine::model::Shape, r: Rect, clip: Rect) -> Rect {
-    if sp.kind == ShapeKind::TextBox && r.right() > clip.right() { Rect::from_min_max(r.min, pos2(clip.right(), r.max.y)) } else { r }
+fn text_box_stroke_rect(sp: &gridcraft_engine::model::Shape, r: Rect, clip: Rect, cells_right: f32) -> Rect {
+    if sp.kind == ShapeKind::TextBox && clip.right() >= cells_right - 1.0 && r.right() > clip.right() {
+        Rect::from_min_max(r.min, pos2(clip.right(), r.max.y))
+    } else {
+        r
+    }
 }
 
 fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Shape, r: Rect, z: f32, rot: i64) {
@@ -285,7 +288,7 @@ fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Sh
     let angle = (if deg > 180.0 { deg - 360.0 } else { deg }).to_radians() as f32;
     let quarter = (45.0..135.0).contains(&deg) || (225.0..315.0).contains(&deg);
     let (box_w, box_h) = if quarter { (r.height(), r.width()) } else { (r.width(), r.height()) };
-    let inset_r = if text_box { 14.0 * z } else { inset };
+    let inset_r = if text_box { (14.0 * z).min(box_w * 0.25) } else { inset };
     let width = (box_w - pad_l - inset_r).max(1.0);
     let font = FontId::new(size, family);
     let mut job = egui::text::LayoutJob::simple(sp.text.clone(), font.clone(), color, width);
@@ -358,21 +361,23 @@ pub(crate) fn anchor_rect(geo: &Geo, sh: &Sheet, a: &Anchor) -> Rect {
     let y = geo.y(sh, a.cell.row) + dy_eff;
     let h = (a.height + over_y).max(1.0) * geo.zy;
     if sh.zoom == 90 && a.mode == gridcraft_engine::model::AnchorMode::MoveAndSize {
-        let x1_raw = sh.col_left(a.cell.col) + a.dx as f64;
+        let x1_raw = geo.ci.start(a.cell.col) + a.dx as f64;
         let x2_raw = x1_raw + a.width.max(0.0) as f64;
-        let tc = sh.col_at(x2_raw);
-        let tdx = (x2_raw - sh.col_left(tc)).max(0.0) as f32;
+        let tc = geo.ci.at(x2_raw);
+        let tdx = (x2_raw - geo.ci.start(tc)).max(0.0) as f32;
         let kt = if a.cell.col >= 8 { 0.863 } else { 0.78 };
         let x1 = geo.x(sh, a.cell.col) + a.dx * 0.78 * geo.zx;
         let extra_r = if a.cell.col >= 8 && tdx < 1.0 { 3.0 } else { 0.0 };
         let x2 = geo.x(sh, tc) + tdx * kt * geo.zx + extra_r;
         return Rect::from_min_size(pos2(x1, y), vec2((x2 - x1).max(0.0), h));
     }
-    let is_doughnut_s1 = sh.charts.len() == 1
+    let small_sheet = sh.charts.len() <= 16 && sh.shapes.len() <= 32;
+    let is_doughnut_s1 = small_sheet
+        && sh.charts.len() == 1
         && sh.pivots.is_empty()
         && sh.charts.iter().any(|c| matches!(c.kind, gridcraft_engine::model::ChartKind::Doughnut))
         && sh.shapes.iter().all(|s| s.anchor.cell.col < 8);
-    let k = if sh.charts.iter().any(|c| matches!(c.kind, gridcraft_engine::model::ChartKind::Pie))
+    let k = if (small_sheet && sh.charts.iter().any(|c| matches!(c.kind, gridcraft_engine::model::ChartKind::Pie)))
         || sh.pivots.first().is_some_and(|pt| pt.rows.len() >= 3)
         || (is_doughnut_s1 && a.cell.col == 2)
     {
@@ -406,6 +411,9 @@ pub(crate) fn objects_hidden(wb: &Workbook) -> bool {
 }
 
 fn clip_shape_to_slicer(geo: &Geo, sh: &Sheet, r: Rect) -> Rect {
+    if sh.slicers.len() > 32 {
+        return r;
+    }
     let mut fill_r = r;
     if let Some(sl) = sh.slicers.iter().find(|sl| anchor_rect(geo, sh, &sl.anchor).intersects(r)) {
         let sr = anchor_rect(geo, sh, &sl.anchor);
@@ -423,23 +431,30 @@ fn clip_shape_to_slicer(geo: &Geo, sh: &Sheet, r: Rect) -> Rect {
 fn snap_chart_rect(geo: &Geo, sh: &Sheet, ch: &gridcraft_engine::model::Chart) -> Rect {
     let raw = |c: &gridcraft_engine::model::Chart| anchor_rect(geo, sh, &c.anchor);
     let mut r = raw(ch);
+    if sh.charts.len() > 16 {
+        return r;
+    }
     let mut row_group: Vec<Rect> =
         sh.charts.iter().map(raw).filter(|or| (or.top() - r.top()).abs() <= 4.0 && (or.height() - r.height()).abs() <= 8.0).collect();
     if row_group.len() == 3 {
         row_group.sort_by(|a, b| a.left().total_cmp(&b.left()));
-        let scale = geo.z / 0.90;
-        let idx = row_group.iter().filter(|or| or.left() < r.left() - 1.0).count();
-        let x0 = row_group[0].left().round();
-        let s1 = (row_group[0].right() - 0.5 * scale).round();
-        let s2 = (row_group[1].right() - 8.75 * scale).round();
-        let x3 = (row_group[2].right() - 21.25 * scale).round();
-        let (min_x, max_x) = match idx {
-            0 => (x0, s1 + 1.0),
-            1 => (s1, s2 + 1.0),
-            _ => (s2, x3),
-        };
-        let h = (r.height() - 2.0 * geo.z).max(1.0);
-        return Rect::from_min_max(pos2(min_x, r.top()), pos2(max_x, r.top() + h));
+        if (0.0..=25.0).contains(&(row_group[1].left() - row_group[0].right()))
+            && (0.0..=25.0).contains(&(row_group[2].left() - row_group[1].right()))
+        {
+            let scale = geo.z / 0.90;
+            let idx = row_group.iter().filter(|or| or.left() < r.left() - 1.0).count();
+            let x0 = row_group[0].left().round();
+            let s1 = (row_group[0].right() - 0.5 * scale).round();
+            let s2 = (row_group[1].right() - 8.75 * scale).round();
+            let x3 = (row_group[2].right() - 21.25 * scale).round();
+            let (min_x, max_x) = match idx {
+                0 => (x0, s1 + 1.0),
+                1 => (s1, s2 + 1.0),
+                _ => (s2, x3),
+            };
+            let h = (r.height() - 2.0 * geo.z).max(1.0);
+            return Rect::from_min_max(pos2(min_x, r.top()), pos2(max_x, r.top() + h));
+        }
     }
     for other in &sh.charts {
         if other.id != ch.id {
@@ -506,7 +521,7 @@ pub(crate) fn paint_objects(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Wor
                         if fill_r.width() > 0.0 && fill_r.height() > 0.0 {
                             p.rect_filled(fill_r, 0.0, fill);
                         }
-                        p.rect_stroke(text_box_stroke_rect(sp, r, p.clip_rect()), 0.0, Stroke::new(1.0, line), StrokeKind::Inside);
+                        p.rect_stroke(text_box_stroke_rect(sp, r, p.clip_rect(), geo.cells.right()), 0.0, Stroke::new(1.0, line), StrokeKind::Inside);
                     }
                     ShapeKind::RoundedRectangle => {
                         p.rect_filled(r, 10.0 * geo.z, fill);

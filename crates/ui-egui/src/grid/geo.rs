@@ -29,8 +29,8 @@ pub struct Geo {
     /// `mirror_rect`/`mirror_pos`, and pointer input back by `mirror_pos` (an involution).
     pub rtl: bool,
     /// Prefix sums over custom row heights / column widths, built once per frame.
-    pub(super) ri: std::sync::Arc<LineIndex>,
-    pub(super) ci: std::sync::Arc<LineIndex>,
+    pub(crate) ri: std::sync::Arc<LineIndex>,
+    pub(crate) ci: std::sync::Arc<LineIndex>,
     /// Page Layout view: cells sit on pages (`scroll` is then in page-layout units).
     pub paper: Option<Arc<gridcraft_engine::paper::PageGrid>>,
 }

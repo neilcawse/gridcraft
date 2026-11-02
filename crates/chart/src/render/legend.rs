@@ -202,12 +202,14 @@ pub(super) fn draw_legend(ctx: &mut Ctx, entries: &[(String, Rgba, Swatch)], pos
                 let wrap_avail = (colw - sx).max(0.0) * 1.07;
                 if eff_row_h >= size * 1.9
                     && ctx.tw(&e.0, size) > avail
-                    && let Some(sp) =
-                        e.0.match_indices(' ')
-                            .rev()
-                            .map(|(idx, _)| idx)
-                            .find(|&idx| ctx.tw(e.0[..idx].trim_end(), size) <= wrap_avail)
-                            .or_else(|| e.0.rfind(' '))
+                    && let prefix = &e.0[..e.0.floor_char_boundary(240)]
+                    && let Some(sp) = prefix
+                        .match_indices(' ')
+                        .rev()
+                        .take(32)
+                        .map(|(idx, _)| idx)
+                        .find(|&idx| ctx.tw(prefix[..idx].trim_end(), size) <= wrap_avail)
+                        .or_else(|| prefix.rfind(' '))
                 {
                     let (l1, l2) = e.0.split_at(sp);
                     let t1 = ctx.fit(l1, size, wrap_avail);

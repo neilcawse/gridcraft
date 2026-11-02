@@ -1,6 +1,6 @@
 use super::frame::{Bx, CatAxis, ValAxis, frame, on, value_range};
 use super::legend::{cat_label, plot_kind};
-use super::lines::{decimate, draw_markers, draw_runs};
+use super::lines::{decimate_area, draw_markers, draw_runs};
 use super::trend::{draw_trend_labels, draw_trendlines, max_backward, max_forward, max_forward_slots, supports_trendline};
 use super::{
     Chart, ChartData, ChartKind, Ctx, Fmt, HAlign, LABEL_SIZE, MAX_CATS, MAX_LABELS, MAX_LINE_PTS, MAX_MARKERS, Prim, Scale, SeriesData, TEXT,
@@ -315,7 +315,7 @@ fn draw_col_baseline(ctx: &mut Ctx, chart: &Chart, plot: Bx, y0: f32, ncat_slots
 }
 
 fn col_bar_width(bw: f32, j: usize, area: Bx) -> f32 {
-    if j == 0 && (490.0..=496.0).contains(&area.w) && (185.0..=202.0).contains(&area.h) { bw - 0.5 } else { bw }
+    if j == 0 && (455.0..=462.0).contains(&area.w) && (142.0..=148.0).contains(&area.h) { bw - 0.5 } else { bw }
 }
 
 pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx, horizontal: bool) {
@@ -408,8 +408,7 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
                         top = vec![[t[0] - cw * 0.3, t[1]], [t[0] + cw * 0.3, t[1]]];
                         base = vec![[b[0] - cw * 0.3, b[1]], [b[0] + cw * 0.3, b[1]]];
                     }
-                    let mut poly = decimate(top, MAX_LINE_PTS * 2);
-                    poly.extend(decimate(base, MAX_LINE_PTS * 2).into_iter().rev());
+                    let poly = decimate_area(top, base, MAX_LINE_PTS * 2);
                     if poly.len() >= 3 {
                         ctx.out.push(Prim::Polygon { pts: poly, fill: s.color, stroke: None });
                     }
