@@ -532,11 +532,12 @@ impl Host for PassHost<'_> {
     fn stack_exhausted(&mut self) {
         self.out_of_stack = true;
     }
+    fn is_cell_active(&self, sheet: usize, c: CellRef) -> bool {
+        let k = (sheet, c);
+        self.in_progress.contains(&k) || self.waiting.contains(&k)
+    }
     fn is_cell_occupied(&self, sheet: usize, c: CellRef) -> bool {
         let k = (sheet, c);
-        if self.in_progress.contains(&k) || self.waiting.contains(&k) {
-            return false;
-        }
         if let Some(v) = self.results.get(&k) {
             return !v.is_empty();
         }

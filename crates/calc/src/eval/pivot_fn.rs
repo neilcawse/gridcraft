@@ -496,7 +496,7 @@ impl<'h> Evaluator<'h> {
         let mut found_hdr = None;
         'hdr: for r in r0..=header_end {
             for c in c0..=c1 {
-                let Ok(t) = self.cell(area.sheet, CellRef::new(r, c)).to_text() else { continue };
+                let Ok(t) = self.pivot_label_cell(area.sheet, CellRef::new(r, c)).to_text() else { continue };
                 if same_label(&t, data_field)
                     || same_label(&t, &format!("Sum of {data_field}"))
                     || same_label(&t, &format!("Count of {data_field}"))
@@ -510,8 +510,9 @@ impl<'h> Evaluator<'h> {
         let (hdr_r, hdr_c) = found_hdr.ok_or(CellError::Ref)?;
         let has_col_axis = hdr_c == c0 && c1 > c0;
         let label_row = if has_col_axis { (hdr_r + 1).min(r1) } else { hdr_r };
-        let col_hdr = if has_col_axis { self.cell(area.sheet, CellRef::new(hdr_r, c0 + 1)).to_text().unwrap_or_default() } else { String::new() };
-        let row_hdr = self.cell(area.sheet, CellRef::new(label_row, c0)).to_text().unwrap_or_default();
+        let col_hdr =
+            if has_col_axis { self.pivot_label_cell(area.sheet, CellRef::new(hdr_r, c0 + 1)).to_text().unwrap_or_default() } else { String::new() };
+        let row_hdr = self.pivot_label_cell(area.sheet, CellRef::new(label_row, c0)).to_text().unwrap_or_default();
         let named_row = !row_hdr.is_empty() && !same_label(&row_hdr, "Row Labels");
         let named_col = !col_hdr.is_empty() && !same_label(&col_hdr, "Column Labels");
         let scan_r1 = self.host.used_range(area.sheet).map_or(label_row, |u| u.end.row.min(r1));
@@ -522,12 +523,12 @@ impl<'h> Evaluator<'h> {
             let can_col = has_col_axis && !(named_row && same_label(&row_hdr, &p.field)) && (!named_col || same_label(&col_hdr, &p.field));
             let can_row = !(named_col && same_label(&col_hdr, &p.field)) && (!named_row || same_label(&row_hdr, &p.field));
             let col_hit = if can_col {
-                ((c0 + 1)..=c1).find(|&c| value_matches_item(&self.cell(area.sheet, CellRef::new(label_row, c)), &p.value, &p.text))
+                ((c0 + 1)..=c1).find(|&c| value_matches_item(&self.pivot_label_cell(area.sheet, CellRef::new(label_row, c)), &p.value, &p.text))
             } else {
                 None
             };
             let row_hit = if can_row {
-                ((label_row + 1)..=scan_r1).find(|&r| value_matches_item(&self.cell(area.sheet, CellRef::new(r, c0)), &p.value, &p.text))
+                ((label_row + 1)..=scan_r1).find(|&r| value_matches_item(&self.pivot_label_cell(area.sheet, CellRef::new(r, c0)), &p.value, &p.text))
             } else {
                 None
             };
@@ -552,7 +553,7 @@ impl<'h> Evaluator<'h> {
         }
         if target_row.is_none() {
             for r in ((label_row + 1)..=scan_r1).rev() {
-                let v = self.cell(area.sheet, CellRef::new(r, c0));
+                let v = self.pivot_label_cell(area.sheet, CellRef::new(r, c0));
                 if is_grand_label(&v, Some("Total")) {
                     target_row = Some(r);
                     break;
@@ -611,5 +612,12 @@ impl<'h> Evaluator<'h> {
 
     fn is_table_cell(&self, sheet: usize, cell: CellRef) -> bool {
         (sheet, cell) != (self.sheet, self.at) && self.host.is_cell_occupied(sheet, cell)
+    }
+
+    fn pivot_label_cell(&mut self, sheet: usize, cell: CellRef) -> Value {
+        if (sheet, cell) == (self.sheet, self.at) || self.host.is_cell_active(sheet, cell) {
+            return Value::Empty;
+        }
+        self.cell(sheet, cell)
     }
 }

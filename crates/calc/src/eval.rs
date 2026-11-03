@@ -136,6 +136,10 @@ pub trait Host {
             .sheet(sheet)
             .is_some_and(|s| s.cell(c).is_some_and(|cell| cell.formula.is_some() || cell.py.is_some()) || !s.value(c).is_empty())
     }
+    /// Whether `(sheet, c)` is currently being evaluated or waiting on a precedent in this pass.
+    fn is_cell_active(&self, _sheet: usize, _c: CellRef) -> bool {
+        false
+    }
 }
 
 pub struct Evaluator<'h> {
@@ -608,7 +612,7 @@ pub fn resolve_structured(wb: &Workbook, sheet: usize, at: CellRef, s: &StructRe
         }
     } else if items.contains(&StructItem::ThisRow) {
         let Some(d) = data else { return Err(CellError::Value) };
-        if si != sheet || at.row < d.start.row || at.row > d.end.row {
+        if at.row < d.start.row || at.row > d.end.row {
             return Err(CellError::Value);
         }
         r0 = at.row;
