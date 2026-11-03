@@ -86,8 +86,8 @@ impl Rels {
 /// Shared string table being built.
 #[derive(Default)]
 pub struct Sst {
-    list: Vec<String>,
-    map: HashMap<String, u32>,
+    list: Vec<std::sync::Arc<str>>,
+    map: HashMap<std::sync::Arc<str>, u32>,
     pub count: u64,
 }
 
@@ -98,8 +98,9 @@ impl Sst {
             return i;
         }
         let i = self.list.len() as u32;
-        self.list.push(s.to_string());
-        self.map.insert(s.to_string(), i);
+        let rc: std::sync::Arc<str> = std::sync::Arc::from(s);
+        self.list.push(std::sync::Arc::clone(&rc));
+        self.map.insert(rc, i);
         i
     }
 }
@@ -369,11 +370,14 @@ pub fn write_xlsx_named_with(wb: &Workbook, kind: XlsxKind, book_name: Option<&s
     wb_rels.add("theme", "theme/theme1.xml");
     // Phonetic (furigana) data is kept per string text: the table below holds each text once, so
     // the runs of the entry with that text are written next to it (`Workbook::phonetics`).
+    out.sst.map = HashMap::new();
+    let sst_list = std::mem::take(&mut out.sst.list);
     let phonetics: HashMap<&str, &PhoneticString> = wb.phonetics.iter().map(|p| (p.text.as_str(), p)).collect();
-    let mut sst = format!("{XML_DECL}<sst xmlns=\"{NS_MAIN}\" count=\"{}\" uniqueCount=\"{}\">", out.sst.count, out.sst.list.len());
-    for t in &out.sst.list {
-        let _ = write!(sst, "<si>{}</si>", crate::xml::si_body(t, phonetics.get(t.as_str()).copied()));
+    let mut sst = format!("{XML_DECL}<sst xmlns=\"{NS_MAIN}\" count=\"{}\" uniqueCount=\"{}\">", out.sst.count, sst_list.len());
+    for t in sst_list {
+        let _ = write!(sst, "<si>{}</si>", crate::xml::si_body(&t, phonetics.get(t.as_ref()).copied()));
     }
+    drop(phonetics);
     sst.push_str("</sst>");
     out.part("xl/sharedStrings.xml", Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"), sst.into_bytes());
     wb_rels.add("sharedStrings", "sharedStrings.xml");
@@ -467,8 +471,8 @@ pub fn write_xlsx_named_with(wb: &Workbook, kind: XlsxKind, book_name: Option<&s
     };
     let mut parts = std::mem::take(&mut out.parts);
     parts.sort_by_key(|(n, _)| rank(n));
-    for (name, data) in &parts {
-        zip.add(name, data)?;
+    for (name, data) in parts {
+        zip.add(&name, &data)?;
     }
     zip.finish()
 }
