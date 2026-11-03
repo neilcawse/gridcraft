@@ -576,7 +576,7 @@ impl<'h> Evaluator<'h> {
         if self.cell(area.sheet, CellRef::new(r0, c0)).is_empty() && self.cell(area.sheet, CellRef::new(next_start_r, c0)).is_empty() {
             return Err(CellError::Ref);
         }
-        let max_probe_c = c0.saturating_add(1).min(gridcraft_core::MAX_COLS - 1);
+        let max_probe_c = c0.saturating_add(2).min(gridcraft_core::MAX_COLS - 1);
         while r1 < gridcraft_core::MAX_ROWS - 1 && r1.saturating_sub(r0) < 5_000 {
             let next_r = r1 + 1;
             let any = (c0..=max_probe_c).any(|c| self.is_table_cell(area.sheet, CellRef::new(next_r, c)));
@@ -600,17 +600,7 @@ impl<'h> Evaluator<'h> {
     }
 
     fn is_table_cell(&mut self, sheet: usize, cell: CellRef) -> bool {
-        if (sheet, cell) == (self.sheet, self.at) {
-            return false;
-        }
-        if self
-            .host
-            .workbook()
-            .sheet(sheet)
-            .and_then(|s| s.cell(cell))
-            .and_then(|c| c.formula.as_ref())
-            .is_some_and(|f| f.text.to_ascii_uppercase().contains("GETPIVOTDATA"))
-        {
+        if (sheet, cell) == (self.sheet, self.at) || self.host.is_in_progress(sheet, cell) {
             return false;
         }
         !self.cell(sheet, cell).is_empty()
