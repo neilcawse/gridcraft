@@ -496,8 +496,7 @@ impl<'h> Evaluator<'h> {
         let (r0, c0) = (bounds.start.row, bounds.start.col);
         let (r1, c1) = (bounds.end.row, bounds.end.col);
         let header_end = r0.saturating_add(3).min(r1);
-        let mut data_col = None;
-        let mut header_row = r0;
+        let mut found_hdr = None;
         'hdr: for r in r0..=header_end {
             for c in c0..=c1 {
                 let Ok(t) = self.cell(area.sheet, CellRef::new(r, c)).to_text() else { continue };
@@ -506,43 +505,55 @@ impl<'h> Evaluator<'h> {
                     || same_label(&t, &format!("Count of {data_field}"))
                     || same_label(&t, &format!("Average of {data_field}"))
                 {
-                    header_row = r;
-                    data_col = Some(if c == c0 && c1 > c0 { c1 } else { c });
+                    found_hdr = Some((r, c));
                     break 'hdr;
                 }
             }
         }
-        let mut target_col = data_col.ok_or(CellError::Ref)?;
-        let row_hdr = self.cell(area.sheet, CellRef::new(header_row, c0)).to_text().unwrap_or_default();
+        let (hdr_r, hdr_c) = found_hdr.ok_or(CellError::Ref)?;
+        let has_col_axis = hdr_c == c0 && c1 > c0;
+        let label_row = if has_col_axis { (hdr_r + 1).min(r1) } else { hdr_r };
+        let col_hdr = if has_col_axis { self.cell(area.sheet, CellRef::new(hdr_r, c0 + 1)).to_text().unwrap_or_default() } else { String::new() };
+        let row_hdr = self.cell(area.sheet, CellRef::new(label_row, c0)).to_text().unwrap_or_default();
+        let named_row = !row_hdr.is_empty() && !same_label(&row_hdr, "Row Labels");
+        let named_col = !col_hdr.is_empty() && !same_label(&col_hdr, "Column Labels");
+        let mut target_col = if has_col_axis { c1 } else { hdr_c };
         let mut target_row = None;
+        let mut col_matched = false;
         for p in pairs {
-            let mut matched = false;
-            for c in (c0 + 1)..=c1 {
-                for r in r0..=header_end {
-                    if value_matches_item(&self.cell(area.sheet, CellRef::new(r, c)), &p.value, &p.text) {
-                        target_col = c;
-                        matched = true;
-                    }
+            let can_col = has_col_axis && !(named_row && same_label(&row_hdr, &p.field)) && (!named_col || same_label(&col_hdr, &p.field));
+            let can_row = !(named_col && same_label(&col_hdr, &p.field)) && (!named_row || same_label(&row_hdr, &p.field));
+            let col_hit = if can_col {
+                ((c0 + 1)..=c1).find(|&c| value_matches_item(&self.cell(area.sheet, CellRef::new(label_row, c)), &p.value, &p.text))
+            } else {
+                None
+            };
+            let row_hit = if can_row {
+                ((label_row + 1)..=r1).find(|&r| value_matches_item(&self.cell(area.sheet, CellRef::new(r, c0)), &p.value, &p.text))
+            } else {
+                None
+            };
+            match (col_hit, row_hit) {
+                (Some(c), None) => {
+                    target_col = c;
+                    col_matched = true;
                 }
-            }
-            if !matched {
-                if !row_hdr.is_empty() && !same_label(&row_hdr, "Row Labels") && !same_label(&row_hdr, &p.field) {
-                    return Err(CellError::Ref);
+                (None, Some(r)) => {
+                    target_row = Some(r);
                 }
-                for r in (header_row + 1)..=r1 {
-                    if value_matches_item(&self.cell(area.sheet, CellRef::new(r, c0)), &p.value, &p.text) {
+                (Some(c), Some(r)) => {
+                    if col_matched && target_row.is_none() {
                         target_row = Some(r);
-                        matched = true;
-                        break;
+                    } else {
+                        target_col = c;
+                        col_matched = true;
                     }
                 }
-            }
-            if !matched {
-                return Err(CellError::Ref);
+                (None, None) => return Err(CellError::Ref),
             }
         }
-        if pairs.is_empty() {
-            for r in (r0..=r1).rev() {
+        if target_row.is_none() {
+            for r in ((label_row + 1)..=r1).rev() {
                 let v = self.cell(area.sheet, CellRef::new(r, c0));
                 if is_grand_label(&v, Some("Total")) {
                     target_row = Some(r);

@@ -2906,6 +2906,22 @@ fn getpivotdata_reads_pivot_table_and_plain_cell_reports() {
     t.set("J3", "=GETPIVOTDATA(\"Sum of Headcount\",$H$1,\"Bogus\",\"Engineering\")");
     t.set("J4", "=GETPIVOTDATA(\"Sum of Headcount\",$H$1,\"Department\",\"Missing\")");
     t.set("J5", "=GETPIVOTDATA(\"Headcount\",$XFD$1048576)");
-    assert_eq!((t.num("J1"), t.num("J2")), (140.0, 85.0));
+    // 2D plain-cell PivotTable where the same item label ("North") appears on both axes.
+    t.set("L1", "Sum of Revenue");
+    t.set("M1", "Origin");
+    t.set("L2", "Destination");
+    t.set("M2", "North");
+    t.set("N2", "South");
+    t.set("O2", "Grand Total");
+    t.set("L3", "North");
+    t.set("M3", "10");
+    t.set("N3", "25");
+    t.set("O3", "35");
+    t.set("L4", "Grand Total");
+    t.set("M4", "10");
+    t.set("N4", "25");
+    t.set("O4", "35");
+    t.set("P1", "=GETPIVOTDATA(\"Revenue\",$L$1,\"Destination\",\"North\",\"Origin\",\"South\")");
+    assert_eq!((t.num("J1"), t.num("J2"), t.num("P1")), (140.0, 85.0, 25.0));
     assert_eq!((t.get("J3"), t.get("J4"), t.get("J5")), (Value::Error(CellError::Ref), Value::Error(CellError::Ref), Value::Error(CellError::Ref)));
 }
