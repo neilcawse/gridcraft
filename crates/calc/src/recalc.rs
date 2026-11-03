@@ -16,7 +16,7 @@ use gridcraft_core::{Array, CellError, CellRef, RangeRef, Value};
 use gridcraft_formula::Expr;
 use gridcraft_model::{CalcMode, Workbook};
 
-use crate::eval::{Area, Evaluator, Host, precedents, stack_position};
+use crate::eval::{Area, Evaluator, Host, precedents_at, stack_position};
 
 /// Whether a formula reads a linked workbook (`[1]Data!B:B`, `[1]!Rates`, `[1]Data!#REF!`),
 /// directly or through defined names. LET and LAMBDA parameters are looked up as names too: one
@@ -177,7 +177,7 @@ impl Calc {
                 if let Some(f) = &cell.formula
                     && let Some(e) = f.expr()
                 {
-                    let (areas, dynamic) = precedents(wb, si, &e);
+                    let (areas, dynamic) = precedents_at(wb, si, c, &e);
                     self.graph.insert((si, c), Node { areas, dynamic });
                     if cell.value == Value::Error(CellError::Circ) {
                         circ.push((si, c));
@@ -272,7 +272,7 @@ impl Calc {
             let formula = wb.sheet(k.0).and_then(|s| s.cell(k.1)).and_then(|c| c.formula.clone());
             match formula.and_then(|f| f.expr()) {
                 Some(e) => {
-                    let (areas, dynamic) = precedents(wb, k.0, &e);
+                    let (areas, dynamic) = precedents_at(wb, k.0, k.1, &e);
                     self.graph.insert(k, Node { areas, dynamic });
                 }
                 None => {

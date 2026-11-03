@@ -8,7 +8,8 @@ const MAX_ENTRIES: usize = 200_000;
 
 /// Relationship kinds (lower case) whose absence after a save isn't a loss: the calculation chain is
 /// a cache Excel rebuilds, and chart style / user-shape / theme-override sidecars are spelled out inline.
-pub(super) const REBUILT_KINDS: [&str; 5] = ["calcchain", "chartcolorstyle", "chartstyle", "chartusershapes", "themeoverride"];
+pub(super) const REBUILT_KINDS: [&str; 7] =
+    ["calcchain", "chartcolorstyle", "chartstyle", "chartusershapes", "pivotcacherecords", "themeoverride", "workbookmetadata"];
 
 // ---------------------------------------------------------------- package validation
 
@@ -210,13 +211,16 @@ pub fn validate_package(bytes: &[u8]) -> Result<Vec<String>, String> {
                 continue;
             }
             let id = attr(&attrs, "Id").unwrap_or("");
+            let target = attr(&attrs, "Target").unwrap_or("");
+            if id.is_empty() || target.is_empty() {
+                continue;
+            }
             if !ids.insert(id.to_string()) {
                 issues.push(format!("{n}: duplicate relationship id {id}"));
             }
             if attr(&attrs, "TargetMode").is_some_and(|m| m.eq_ignore_ascii_case("External")) {
                 continue;
             }
-            let target = attr(&attrs, "Target").unwrap_or("");
             let resolved = resolve_target(src_dir, target);
             if !parts.contains(&resolved.to_ascii_lowercase()) {
                 let kind = attr(&attrs, "Type").and_then(|t| t.rsplit('/').next()).unwrap_or("?");
@@ -248,6 +252,10 @@ pub(super) fn relationship_kinds(bytes: &[u8]) -> Result<BTreeMap<String, String
         for (_, attrs) in els.iter().filter(|(el, _)| el == "Relationship") {
             let Some(kind) = attr(attrs, "Type").and_then(|t| t.rsplit('/').next()) else { continue };
             let target = attr(attrs, "Target").unwrap_or("");
+            let id = attr(attrs, "Id").unwrap_or("");
+            if id.is_empty() || target.is_empty() {
+                continue;
+            }
             if kind.eq_ignore_ascii_case("hyperlink") && target.starts_with('#') {
                 continue;
             }

@@ -27,6 +27,7 @@ pub fn round_trip(wb: &Workbook, source: &[u8], opts: &Options) -> RoundTrip {
         Ok((b, _)) => b,
         Err(e) => return RoundTrip { error: Some(format!("reading the written file failed: {e}")), categories: vec![package.done()] },
     };
+    drop(bytes);
     let mut categories = diff_workbooks(wb, &back, opts);
     categories.push(package.done());
     RoundTrip { error: None, categories }

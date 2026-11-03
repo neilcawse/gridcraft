@@ -121,17 +121,13 @@ pub fn read_sheet(cx: &mut Ctx<'_>, part: &str, name: &str) -> Result<Sheet, IoE
     let rels = cx.pkg.rels(part)?;
     let mut sheet = Sheet::new(name);
     let mut st = RowState::default();
-    let res = xml::parse_streaming(&bytes, &["row"], &mut |row| {
+    let (root, err) = xml::parse_streaming_partial(&bytes, &["row"], &mut |row| {
         read_row(cx, &mut sheet, &mut st, &row);
         Ok(())
     });
-    let root = match res {
-        Ok(r) => r,
-        Err(e) => {
-            cx.warn(format!("sheet \"{name}\" is damaged ({e}); kept {} rows", st.rows));
-            El::default()
-        }
-    };
+    if let Some(e) = err {
+        cx.warn(format!("sheet \"{name}\" is damaged ({e}); kept {} rows", st.rows));
+    }
     if st.dropped > 0 {
         cx.warn(format!("sheet \"{name}\": {} cells or rows outside the 1,048,576 × 16,384 grid were dropped", st.dropped));
     }
