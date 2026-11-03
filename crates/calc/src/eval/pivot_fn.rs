@@ -514,6 +514,7 @@ impl<'h> Evaluator<'h> {
         let row_hdr = self.cell(area.sheet, CellRef::new(label_row, c0)).to_text().unwrap_or_default();
         let named_row = !row_hdr.is_empty() && !same_label(&row_hdr, "Row Labels");
         let named_col = !col_hdr.is_empty() && !same_label(&col_hdr, "Column Labels");
+        let scan_r1 = self.host.used_range(area.sheet).map_or(label_row, |u| u.end.row.min(r1));
         let mut target_col = if has_col_axis { c1 } else { hdr_c };
         let mut target_row = None;
         let mut col_matched = false;
@@ -526,7 +527,7 @@ impl<'h> Evaluator<'h> {
                 None
             };
             let row_hit = if can_row {
-                ((label_row + 1)..=r1).find(|&r| value_matches_item(&self.cell(area.sheet, CellRef::new(r, c0)), &p.value, &p.text))
+                ((label_row + 1)..=scan_r1).find(|&r| value_matches_item(&self.cell(area.sheet, CellRef::new(r, c0)), &p.value, &p.text))
             } else {
                 None
             };
@@ -550,7 +551,7 @@ impl<'h> Evaluator<'h> {
             }
         }
         if target_row.is_none() {
-            for r in ((label_row + 1)..=r1).rev() {
+            for r in ((label_row + 1)..=scan_r1).rev() {
                 let v = self.cell(area.sheet, CellRef::new(r, c0));
                 if is_grand_label(&v, Some("Total")) {
                     target_row = Some(r);
@@ -575,10 +576,10 @@ impl<'h> Evaluator<'h> {
         if self.cell(area.sheet, CellRef::new(r0, c0)).is_empty() && self.cell(area.sheet, CellRef::new(next_start_r, c0)).is_empty() {
             return Err(CellError::Ref);
         }
-        let max_probe_c = c0.saturating_add(2).min(gridcraft_core::MAX_COLS - 1);
+        let max_probe_c = c0.saturating_add(1).min(gridcraft_core::MAX_COLS - 1);
         while r1 < gridcraft_core::MAX_ROWS - 1 && r1.saturating_sub(r0) < 5_000 {
             let next_r = r1 + 1;
-            let any = (c0..=max_probe_c).any(|c| !self.cell(area.sheet, CellRef::new(next_r, c)).is_empty());
+            let any = (c0..=max_probe_c).any(|c| self.is_table_cell(area.sheet, CellRef::new(next_r, c)));
             if any {
                 r1 = next_r;
             } else {
@@ -588,7 +589,7 @@ impl<'h> Evaluator<'h> {
         let max_probe_r = r0.saturating_add(2).min(r1);
         while c1 < gridcraft_core::MAX_COLS - 1 && c1.saturating_sub(c0) < 128 {
             let next_c = c1 + 1;
-            let any = (r0..=max_probe_r).any(|r| !self.cell(area.sheet, CellRef::new(r, next_c)).is_empty());
+            let any = (r0..=max_probe_r).any(|r| self.is_table_cell(area.sheet, CellRef::new(r, next_c)));
             if any {
                 c1 = next_c;
             } else {
@@ -596,5 +597,22 @@ impl<'h> Evaluator<'h> {
             }
         }
         Ok(RangeRef::new(CellRef::new(r0, c0), CellRef::new(r1, c1)))
+    }
+
+    fn is_table_cell(&mut self, sheet: usize, cell: CellRef) -> bool {
+        if (sheet, cell) == (self.sheet, self.at) {
+            return false;
+        }
+        if self
+            .host
+            .workbook()
+            .sheet(sheet)
+            .and_then(|s| s.cell(cell))
+            .and_then(|c| c.formula.as_ref())
+            .is_some_and(|f| f.text.to_ascii_uppercase().contains("GETPIVOTDATA"))
+        {
+            return false;
+        }
+        !self.cell(sheet, cell).is_empty()
     }
 }

@@ -40,7 +40,7 @@ pub(super) struct Node {
 }
 
 /// Ranges wider than this many columns go to the per-sheet wide index instead of per-column ones.
-const WIDE: u32 = 4;
+const WIDE: u32 = 64;
 
 /// Insertions an [`Intervals`] keeps aside (scanned by every query) before merging them in.
 const PENDING: usize = 32;

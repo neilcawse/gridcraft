@@ -267,10 +267,7 @@ impl<'h> Evaluator<'h> {
             let area = *area;
             let v0 = self.value(&args[0]);
             let v2 = self.value(&args[2]);
-            let v3 = match args.get(3) {
-                None | Some(Expr::Missing) => None,
-                Some(e) => Some(self.value(e)),
-            };
+            let v3 = args.get(3).map(|e| self.value(e));
             let max_len = if vertical { area.range.width() } else { area.range.height() } as usize;
             let eff = self.effective_range(&area);
             let key_area = Area {

@@ -153,11 +153,20 @@ pub struct Array {
     #[serde(skip)]
     #[doc(hidden)]
     pub text_index: std::sync::OnceLock<TextIndex>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub text_queries: std::sync::atomic::AtomicU32,
 }
 
 impl Clone for Array {
     fn clone(&self) -> Self {
-        Array { rows: self.rows, cols: self.cols, data: self.data.clone(), text_index: std::sync::OnceLock::new() }
+        Array {
+            rows: self.rows,
+            cols: self.cols,
+            data: self.data.clone(),
+            text_index: std::sync::OnceLock::new(),
+            text_queries: std::sync::atomic::AtomicU32::new(0),
+        }
     }
 }
 
@@ -172,26 +181,32 @@ impl Array {
         if rows == 0 || cols == 0 || rows.checked_mul(cols)? != data.len() {
             return None;
         }
-        Some(Array { rows, cols, data, text_index: std::sync::OnceLock::new() })
+        Some(Array { rows, cols, data, text_index: std::sync::OnceLock::new(), text_queries: std::sync::atomic::AtomicU32::new(0) })
     }
     pub fn filled(rows: usize, cols: usize, v: Value) -> Array {
         let (rows, cols) = (rows.max(1), cols.max(1));
-        Array { rows, cols, data: vec![v; rows.saturating_mul(cols)], text_index: std::sync::OnceLock::new() }
+        Array {
+            rows,
+            cols,
+            data: vec![v; rows.saturating_mul(cols)],
+            text_index: std::sync::OnceLock::new(),
+            text_queries: std::sync::atomic::AtomicU32::new(0),
+        }
     }
     pub fn scalar(v: Value) -> Array {
-        Array { rows: 1, cols: 1, data: vec![v], text_index: std::sync::OnceLock::new() }
+        Array { rows: 1, cols: 1, data: vec![v], text_index: std::sync::OnceLock::new(), text_queries: std::sync::atomic::AtomicU32::new(0) }
     }
     pub fn column(v: Vec<Value>) -> Array {
         if v.is_empty() {
             return Array::scalar(Value::Error(CellError::Calc));
         }
-        Array { rows: v.len(), cols: 1, data: v, text_index: std::sync::OnceLock::new() }
+        Array { rows: v.len(), cols: 1, data: v, text_index: std::sync::OnceLock::new(), text_queries: std::sync::atomic::AtomicU32::new(0) }
     }
     pub fn row(v: Vec<Value>) -> Array {
         if v.is_empty() {
             return Array::scalar(Value::Error(CellError::Calc));
         }
-        Array { rows: 1, cols: v.len(), data: v, text_index: std::sync::OnceLock::new() }
+        Array { rows: 1, cols: v.len(), data: v, text_index: std::sync::OnceLock::new(), text_queries: std::sync::atomic::AtomicU32::new(0) }
     }
     pub fn get(&self, r: usize, c: usize) -> Option<&Value> {
         if r >= self.rows || c >= self.cols {
@@ -213,15 +228,18 @@ impl Array {
                 data.push(self.get(r, c).cloned().unwrap_or(Value::Empty));
             }
         }
-        Array { rows: self.cols, cols: self.rows, data, text_index: std::sync::OnceLock::new() }
+        Array { rows: self.cols, cols: self.rows, data, text_index: std::sync::OnceLock::new(), text_queries: std::sync::atomic::AtomicU32::new(0) }
     }
     pub fn iter(&self) -> impl Iterator<Item = &Value> {
         self.data.iter()
     }
     /// Positions (0-based into `data`, ascending) whose value is `Value::Text` equal to `pat`
-    /// under [`text_eq`], or `None` when the array is too small to index.
+    /// under [`text_eq`], or `None` when the array is too small to index or only queried once.
     pub fn text_positions(&self, pat: &str) -> Option<&[u32]> {
         if self.data.len() < 64 {
+            return None;
+        }
+        if self.text_index.get().is_none() && self.text_queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
             return None;
         }
         Some(self.text_index.get_or_init(|| TextIndex::build(&self.data)).positions(pat))
