@@ -261,6 +261,10 @@ impl<'h> Evaluator<'h> {
         }
     }
 
+    pub(super) fn cell(&mut self, sheet: usize, c: CellRef) -> Value {
+        self.host.cell_value(sheet, c)
+    }
+
     pub fn area_value(&mut self, a: &Area) -> Value {
         if a.range.is_single() {
             return self.host.cell_value(a.sheet, a.range.start);
@@ -278,7 +282,6 @@ impl<'h> Evaluator<'h> {
             return Value::Error(CellError::Num);
         }
         self.host.range_array(a.sheet, range).map(Value::Array).unwrap_or(Value::Error(CellError::Value))
-        Array::new(h, w, data).map(Value::from).unwrap_or(Value::Error(CellError::Value))
     }
 
     /// Trims the bottom/right of an area to the sheet's used range (keeps the top-left so

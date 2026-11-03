@@ -103,7 +103,8 @@ impl fmt::Display for CellError {
 }
 
 #[derive(Default, Debug)]
-struct TextIndex {
+#[doc(hidden)]
+pub struct TextIndex {
     by_text: std::collections::HashMap<Box<str>, Vec<u32>>,
 }
 
@@ -144,13 +145,14 @@ fn lower_text_key(s: &str) -> String {
 }
 
 /// A 2-D array of values (row-major). Always at least 1×1.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Array {
     pub rows: usize,
     pub cols: usize,
     pub data: Vec<Value>,
     #[serde(skip)]
-    text_index: std::sync::OnceLock<TextIndex>,
+    #[doc(hidden)]
+    pub text_index: std::sync::OnceLock<TextIndex>,
 }
 
 impl Clone for Array {

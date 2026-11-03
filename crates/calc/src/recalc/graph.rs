@@ -1,7 +1,6 @@
 use super::RangeRef;
 use crate::eval::Area;
 use gridcraft_core::CellRef;
-use std::collections::BTreeSet;
 use std::hash::{BuildHasherDefault, Hasher};
 
 /// A fast, non-cryptographic hasher for cell keys (FxHash-style multiply-rotate).
@@ -41,7 +40,7 @@ pub(super) struct Node {
 }
 
 /// Ranges wider than this many columns go to the per-sheet wide index instead of per-column ones.
-const WIDE: u32 = 64;
+const WIDE: u32 = 4;
 
 /// Insertions an [`Intervals`] keeps aside (scanned by every query) before merging them in.
 const PENDING: usize = 32;
@@ -63,12 +62,12 @@ pub(super) struct Intervals<T> {
     /// `max_end.len() / 2`. Each node holds the largest end below it (dead entries included).
     max_end: Vec<u32>,
     /// Inserted since the last merge.
-    pending: BTreeSet<(u32, u32, T)>,
+    pending: Vec<(u32, u32, T)>,
 }
 
 impl<T> Default for Intervals<T> {
     fn default() -> Self {
-        Intervals { items: Vec::new(), dead: Vec::new(), dead_count: 0, max_end: Vec::new(), pending: BTreeSet::new() }
+        Intervals { items: Vec::new(), dead: Vec::new(), dead_count: 0, max_end: Vec::new(), pending: Vec::new() }
     }
 }
 
@@ -88,7 +87,10 @@ impl<T: Copy + Ord> Intervals<T> {
             }
             return;
         }
-        self.pending.insert(it);
+        if self.pending.len() <= PENDING && self.pending.contains(&it) {
+            return;
+        }
+        self.pending.push(it);
     }
 
     pub(super) fn remove(&mut self, r0: u32, r1: u32, t: T) {
@@ -102,7 +104,7 @@ impl<T: Copy + Ord> Intervals<T> {
             }
             return;
         }
-        self.pending.remove(&it);
+        self.pending.retain(|x| *x != it);
     }
 
     /// Merges pending insertions and drops dead entries when there are enough of them.
@@ -110,11 +112,10 @@ impl<T: Copy + Ord> Intervals<T> {
         if self.pending.len() <= PENDING && self.dead_count <= (self.items.len() / 2).max(PENDING) {
             return;
         }
-        let mut all: Vec<(u32, u32, T)> = Vec::with_capacity(self.items.len() - self.dead_count + self.pending.len());
+        let mut all = std::mem::take(&mut self.pending);
+        all.reserve(self.items.len() - self.dead_count);
         all.extend(self.items.iter().zip(&self.dead).filter(|(_, d)| !**d).map(|(it, _)| *it));
-        all.extend(std::mem::take(&mut self.pending));
-        // Two sorted runs: the stable sort merges them in linear time.
-        all.sort();
+        all.sort_unstable();
         all.dedup();
         let size = all.len().next_power_of_two();
         let mut max_end = vec![0; 2 * size];

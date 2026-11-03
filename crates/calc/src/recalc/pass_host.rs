@@ -13,6 +13,10 @@ const MAX_NESTED: usize = 64;
 /// evaluated again), however high Maximum Iterations is.
 const MAX_ITERATION_WORK: usize = 10_000_000;
 
+/// Maximum cells in a single range array kept in [`PassHost::range_cache`], and total cells cached
+/// across all ranges before the cache is evicted to bound pass memory.
+const MAX_SINGLE_CACHE_CELLS: usize = 524_288;
+const MAX_RANGE_CACHE_CELLS: usize = 4_000_000;
 pub(super) struct PassHost<'a> {
     wb: &'a Workbook,
     exprs: &'a HashMap<Key, std::sync::Arc<Expr>>,
@@ -27,6 +31,7 @@ pub(super) struct PassHost<'a> {
     /// Evaluated range arrays (`(sheet, range)` → `Arc<Array>`) once every cell in the range has
     /// finished evaluating; cleared if dynamic-array spills change.
     range_cache: HashMap<(usize, RangeRef), std::sync::Arc<Array>>,
+    range_cache_cells: usize,
     range_cache_spills: usize,
     rng: &'a mut u64,
     now: f64,
@@ -92,6 +97,7 @@ impl<'a> PassHost<'a> {
             spills: HashMap::default(),
             used: HashMap::default(),
             range_cache: HashMap::default(),
+            range_cache_cells: 0,
             range_cache_spills: 0,
             rng,
             now,
@@ -648,6 +654,7 @@ impl Host for PassHost<'_> {
     fn range_array(&mut self, sheet: usize, range: RangeRef) -> Option<std::sync::Arc<Array>> {
         if self.spills.len() != self.range_cache_spills {
             self.range_cache.clear();
+            self.range_cache_cells = 0;
             self.range_cache_spills = self.spills.len();
         }
         if !self.iterate
@@ -656,17 +663,25 @@ impl Host for PassHost<'_> {
             return Some(std::sync::Arc::clone(arr));
         }
         let (h, w) = (range.height() as usize, range.width() as usize);
+        let cells = h.saturating_mul(w);
         let data = self.range_values(sheet, range);
         let arr = std::sync::Arc::new(Array::new(h, w, data)?);
         if !self.iterate
+            && cells <= MAX_SINGLE_CACHE_CELLS
             && self.suspend.is_none()
             && !self.in_progress.iter().any(|&(s, c)| s == sheet && range.contains(c))
             && !self.waiting.iter().any(|&(s, c)| s == sheet && range.contains(c))
         {
             if self.spills.len() != self.range_cache_spills {
                 self.range_cache.clear();
+                self.range_cache_cells = 0;
                 self.range_cache_spills = self.spills.len();
             }
+            if self.range_cache_cells.saturating_add(cells) > MAX_RANGE_CACHE_CELLS {
+                self.range_cache.clear();
+                self.range_cache_cells = 0;
+            }
+            self.range_cache_cells = self.range_cache_cells.saturating_add(cells);
             self.range_cache.insert((sheet, range), std::sync::Arc::clone(&arr));
         }
         Some(arr)

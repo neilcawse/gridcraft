@@ -128,7 +128,7 @@ impl Calc {
         for (si, sheet) in wb.sheets.iter().enumerate() {
             for (c, cell) in sheet.cells.iter() {
                 if let Some(f) = &cell.formula
-                    && let Some(e) = f.expr()
+                    && let Some(e) = f.expr_arc()
                 {
                     let (areas, dynamic) = precedents_at(wb, si, c, &e);
                     self.graph.insert((si, c), Node { areas, dynamic });

@@ -350,6 +350,7 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], known_function: Option<&'a dyn Fn(&str) ->
         file_to_model.push(Some(wb.sheets.len()));
         wb.sheets.push(Arc::new(sheet));
     }
+    cx.sst = Vec::new();
     if wb.sheets.is_empty() {
         cx.warn("the workbook has no worksheets; added an empty sheet");
         wb.sheets.push(Arc::new(Sheet::new("Sheet1")));
