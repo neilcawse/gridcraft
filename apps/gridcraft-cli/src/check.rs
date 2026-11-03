@@ -362,6 +362,8 @@ fn check_inner(path: &str, bytes: &[u8], opts: &Options) -> FileReport {
     calc.recalc_all(&mut fresh);
     let trust_cache = !full_calc_on_load(bytes);
     report.calc = oracle(&cached, &fresh, &calc, trust_cache, opts);
+    drop(cached);
+    drop(calc);
     report.round_trip = round_trip(&fresh, bytes, opts);
     report
 }
