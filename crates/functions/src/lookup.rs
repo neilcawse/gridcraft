@@ -164,8 +164,8 @@ pub fn vh_lookup_pos(needle_val: &Value, keys_val: &Value, idx_val: &Value, appr
     }
     let idx = (idx.trunc() as usize).saturating_sub(1);
     let approx = match approx_val {
-        Some(v) if !matches!(v, Value::Empty) => v.to_bool()?,
-        _ => true,
+        Some(v) => v.to_bool()?,
+        None => true,
     };
     if idx >= max_len {
         return Err(CellError::Ref);

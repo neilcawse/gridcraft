@@ -2786,6 +2786,8 @@ fn vlookup_hlookup_and_lookup_do_not_trigger_false_circular_refs_across_unused_c
     assert_eq!((t.num("B2"), t.num("B3"), t.num("B4")), (200.0, 400.0, 600.0));
     assert_eq!((t.num("F2"), t.num("F3"), t.num("F4")), (100.0, 200.0, 300.0));
     assert_eq!((t.num("G2"), t.num("G3"), t.num("G4")), (200.0, 400.0, 600.0));
+    t.set("H2", "=VLOOKUP(\"k4\",$A$2:$C$4,3,)");
+    assert_eq!(t.get("H2"), Value::Error(CellError::NA));
 
     // Same pattern inside a structured table `T[]` where column 2 (`calc1`) looks up column 4
     // (`calc2`) across `T[]`, and `T[]` itself spans `calc1`.
@@ -2922,6 +2924,7 @@ fn getpivotdata_reads_pivot_table_and_plain_cell_reports() {
     t.set("N4", "25");
     t.set("O4", "35");
     t.set("P1", "=GETPIVOTDATA(\"Revenue\",$L$1,\"Destination\",\"North\",\"Origin\",\"South\")");
+    assert!(t.calc.circular.is_empty());
     assert_eq!((t.num("J1"), t.num("J2"), t.num("P1")), (140.0, 85.0, 25.0));
     assert_eq!((t.get("J3"), t.get("J4"), t.get("J5")), (Value::Error(CellError::Ref), Value::Error(CellError::Ref), Value::Error(CellError::Ref)));
 }

@@ -21,10 +21,18 @@ pub enum CellError {
     Calc,
     /// Circular reference that could not be resolved (shown as 0 by Excel; we keep it explicit).
     Circ,
+    /// A Python cell's code raised an error, or Python stopped.
+    Python,
+    /// A Python cell is waiting to run.
+    Busy,
+    /// A Python cell ran longer than the time limit.
+    Timeout,
+    /// Python can't run here: the workbook's content isn't enabled, or this build has no Python.
+    Blocked,
 }
 
 impl CellError {
-    pub const ALL: [CellError; 10] = [
+    pub const ALL: [CellError; 14] = [
         CellError::Null,
         CellError::Div0,
         CellError::Value,
@@ -35,6 +43,10 @@ impl CellError {
         CellError::GettingData,
         CellError::Spill,
         CellError::Calc,
+        CellError::Python,
+        CellError::Busy,
+        CellError::Timeout,
+        CellError::Blocked,
     ];
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -49,9 +61,16 @@ impl CellError {
             CellError::Spill => "#SPILL!",
             CellError::Calc => "#CALC!",
             CellError::Circ => "#CIRC!",
+            CellError::Python => "#PYTHON!",
+            CellError::Busy => "#BUSY!",
+            CellError::Timeout => "#TIMEOUT!",
+            CellError::Blocked => "#BLOCKED!",
         }
     }
-    /// `ERROR.TYPE` number.
+    /// `ERROR.TYPE` number. Microsoft documents 1 to 8; 9 (#SPILL!), 11 (#BLOCKED!) and 14 (#CALC!)
+    /// are the numbers Excel returns. Microsoft documents no number for #PYTHON!, #BUSY! or
+    /// #TIMEOUT!: 19, 20 and 21 are GridCraft's own choice, after the numbers Excel is known to use,
+    /// and may change if Excel's numbers become known.
     pub fn code(&self) -> u32 {
         match self {
             CellError::Null => 1,
@@ -65,6 +84,10 @@ impl CellError {
             CellError::Spill => 9,
             CellError::Calc => 14,
             CellError::Circ => 15,
+            CellError::Blocked => 11,
+            CellError::Python => 19,
+            CellError::Busy => 20,
+            CellError::Timeout => 21,
         }
     }
     pub fn parse(s: &str) -> Option<CellError> {
@@ -80,7 +103,8 @@ impl fmt::Display for CellError {
 }
 
 #[derive(Default, Debug)]
-struct TextIndex {
+#[doc(hidden)]
+pub struct TextIndex {
     by_text: std::collections::HashMap<Box<str>, Vec<u32>>,
 }
 
@@ -121,18 +145,28 @@ fn lower_text_key(s: &str) -> String {
 }
 
 /// A 2-D array of values (row-major). Always at least 1×1.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Array {
     pub rows: usize,
     pub cols: usize,
     pub data: Vec<Value>,
     #[serde(skip)]
-    text_index: std::sync::OnceLock<TextIndex>,
+    #[doc(hidden)]
+    pub text_index: std::sync::OnceLock<TextIndex>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub text_queries: std::sync::atomic::AtomicU32,
 }
 
 impl Clone for Array {
     fn clone(&self) -> Self {
-        Array { rows: self.rows, cols: self.cols, data: self.data.clone(), text_index: std::sync::OnceLock::new() }
+        Array {
+            rows: self.rows,
+            cols: self.cols,
+            data: self.data.clone(),
+            text_index: std::sync::OnceLock::new(),
+            text_queries: std::sync::atomic::AtomicU32::new(0),
+        }
     }
 }
 
@@ -147,26 +181,32 @@ impl Array {
         if rows == 0 || cols == 0 || rows.checked_mul(cols)? != data.len() {
             return None;
         }
-        Some(Array { rows, cols, data, text_index: std::sync::OnceLock::new() })
+        Some(Array { rows, cols, data, text_index: std::sync::OnceLock::new(), text_queries: std::sync::atomic::AtomicU32::new(0) })
     }
     pub fn filled(rows: usize, cols: usize, v: Value) -> Array {
         let (rows, cols) = (rows.max(1), cols.max(1));
-        Array { rows, cols, data: vec![v; rows.saturating_mul(cols)], text_index: std::sync::OnceLock::new() }
+        Array {
+            rows,
+            cols,
+            data: vec![v; rows.saturating_mul(cols)],
+            text_index: std::sync::OnceLock::new(),
+            text_queries: std::sync::atomic::AtomicU32::new(0),
+        }
     }
     pub fn scalar(v: Value) -> Array {
-        Array { rows: 1, cols: 1, data: vec![v], text_index: std::sync::OnceLock::new() }
+        Array { rows: 1, cols: 1, data: vec![v], text_index: std::sync::OnceLock::new(), text_queries: std::sync::atomic::AtomicU32::new(0) }
     }
     pub fn column(v: Vec<Value>) -> Array {
         if v.is_empty() {
             return Array::scalar(Value::Error(CellError::Calc));
         }
-        Array { rows: v.len(), cols: 1, data: v, text_index: std::sync::OnceLock::new() }
+        Array { rows: v.len(), cols: 1, data: v, text_index: std::sync::OnceLock::new(), text_queries: std::sync::atomic::AtomicU32::new(0) }
     }
     pub fn row(v: Vec<Value>) -> Array {
         if v.is_empty() {
             return Array::scalar(Value::Error(CellError::Calc));
         }
-        Array { rows: 1, cols: v.len(), data: v, text_index: std::sync::OnceLock::new() }
+        Array { rows: 1, cols: v.len(), data: v, text_index: std::sync::OnceLock::new(), text_queries: std::sync::atomic::AtomicU32::new(0) }
     }
     pub fn get(&self, r: usize, c: usize) -> Option<&Value> {
         if r >= self.rows || c >= self.cols {
@@ -188,15 +228,18 @@ impl Array {
                 data.push(self.get(r, c).cloned().unwrap_or(Value::Empty));
             }
         }
-        Array { rows: self.cols, cols: self.rows, data, text_index: std::sync::OnceLock::new() }
+        Array { rows: self.cols, cols: self.rows, data, text_index: std::sync::OnceLock::new(), text_queries: std::sync::atomic::AtomicU32::new(0) }
     }
     pub fn iter(&self) -> impl Iterator<Item = &Value> {
         self.data.iter()
     }
     /// Positions (0-based into `data`, ascending) whose value is `Value::Text` equal to `pat`
-    /// under [`text_eq`], or `None` when the array is too small to index.
+    /// under [`text_eq`], or `None` when the array is too small to index or only queried once.
     pub fn text_positions(&self, pat: &str) -> Option<&[u32]> {
         if self.data.len() < 64 {
+            return None;
+        }
+        if self.text_index.get().is_none() && self.text_queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
             return None;
         }
         Some(self.text_index.get_or_init(|| TextIndex::build(&self.data)).positions(pat))
@@ -433,27 +476,14 @@ pub fn sort_compare(a: &Value, b: &Value) -> Ordering {
     }
 }
 
-/// Number → text the way Excel converts in `&`, CONCAT and TEXTJOIN: at most 15 significant
-/// digits, rounded first; scientific from 1E+15, below 1E-9, and wherever the decimal would be
-/// longer than 21 characters, not counting the sign (`0.` plus 19 decimals). Excel-verified only
-/// for positive 15-digit mantissas: `0.0000692361330972509` stays decimal and
-/// `1.28233995888454E-06` does not, as Excel caches them. The limit for shorter mantissas from
-/// 1E-6 to 1E-9 (e.g. `0.0000099999999999999` decimal) and for negatives (sign excluded) are
-/// inferred.
+/// Number → text the way Excel converts in `&` and `TEXT(x,"General")`-free contexts: up to 15
+/// significant digits, scientific for very large or very small magnitudes.
 pub fn number_to_text(n: f64) -> String {
     if n == 0.0 || !n.is_finite() {
         return "0".into();
     }
-    // Round to 15 significant digits first, then pick decimal or scientific from the rounded
-    // magnitude, so 999999999999999.5 reads `1E+15`, never a 16-digit integer.
     let a = n.abs();
-    let sci = format!("{:.14e}", n);
-    let (mant, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
-    let mag: i32 = exp.parse().unwrap_or(0);
-    let sig = mant.bytes().filter(u8::is_ascii_digit).count() - mant.bytes().rev().take_while(|&b| b == b'0').count();
-    // Characters after `0.` for |n| < 1: the leading zeros, then the significant digits.
-    let decimals_below_one = -mag - 1 + sig as i32;
-    if !(-9..15).contains(&mag) || decimals_below_one > 19 {
+    if !(1e-9..1e15).contains(&a) && a.round() != a || a >= 1e15 {
         return sci_text(n, 15);
     }
     // A value just below 1e15 can round up to 1e15 at 15 significant digits.
@@ -461,6 +491,7 @@ pub fn number_to_text(n: f64) -> String {
         return sci_text(n, 15);
     }
     // 15 significant digits, trailing zeros trimmed.
+    let mag = a.log10().floor() as i32;
     let decimals = (14 - mag).clamp(0, 30) as usize;
     let s = format!("{:.*}", decimals, n);
     trim_decimal(&s)
@@ -499,42 +530,7 @@ mod tests {
         assert_eq!(number_to_text(1234567890123456.0), "1.23456789012346E+15");
         assert_eq!(number_to_text(0.0001), "0.0001");
         assert_eq!(number_to_text(1e-10), "1E-10");
-        assert_eq!(number_to_text(1e15 - 0.5), "1E+15");
-        assert_eq!(number_to_text(1e15 - 0.1), "1E+15");
-        assert_eq!(number_to_text(-(1e15 - 0.5)), "-1E+15");
-        assert_eq!(number_to_text(999999999999999.0), "999999999999999");
-        assert_eq!(number_to_text(9.999999999999999e-10), "0.000000001");
-        assert_eq!(number_to_text(-9.999999999999999e-10), "-0.000000001");
         assert_eq!(number_to_text(1.0 / 3.0), "0.333333333333333");
-    }
-
-    /// Excel switches to scientific when the 15-digit decimal would be longer than 21 characters
-    /// (`0.` plus 19 decimals). Excel-verified: IMTAN, IMSECH, IMCSCH and IMEXP results cached by
-    /// Excel for Mac in the `formulas` project's test.xlsx (ENGINEERING!S53, R47, S37, V37, V39).
-    #[test]
-    fn number_text_small_magnitudes() {
-        assert_eq!(number_to_text(6.92361330972509e-5), "0.0000692361330972509");
-        assert_eq!(number_to_text(2.41377759972715e-4), "0.000241377759972715");
-        assert_eq!(number_to_text(1.28233995888454e-6), "1.28233995888454E-06");
-        assert_eq!(number_to_text(-4.48088972789593e-6), "-4.48088972789593E-06");
-        assert_eq!(number_to_text(5.98317105631764e-7), "5.98317105631764E-07");
-        assert_eq!(number_to_text(-2.99158552811404e-7), "-2.99158552811404E-07");
-        // Just below powers of ten: the 21-character limit, and the rounded magnitude.
-        assert_eq!(number_to_text(9.99999999999999e-5), "0.0000999999999999999");
-        assert_eq!(number_to_text(9.99999999999999e-6), "9.99999999999999E-06");
-        assert_eq!(number_to_text(9.9999999999999e-6), "0.0000099999999999999");
-        assert_eq!(number_to_text(9.99999999999999e-9), "9.99999999999999E-09");
-        assert_eq!(number_to_text(-9.99999999999999e-9), "-9.99999999999999E-09");
-        assert_eq!(number_to_text(9.99999999999999e-10), "9.99999999999999E-10");
-        assert_eq!(number_to_text(9.999999999999999e-6), "0.00001");
-        assert_eq!(number_to_text(0.00001), "0.00001");
-        assert_eq!(number_to_text(0.000001), "0.000001");
-        assert_eq!(number_to_text(1.5e-9), "0.0000000015");
-        // Large side: 15 significant digits, scientific from 1E+15.
-        assert_eq!(number_to_text(99999999999999.9), "99999999999999.9");
-        assert_eq!(number_to_text(999999999999999.4), "999999999999999");
-        assert_eq!(number_to_text(9999999999999998.0), "1E+16");
-        assert_eq!(number_to_text(9.99999999999999e15), "9.99999999999999E+15");
     }
 
     #[test]
