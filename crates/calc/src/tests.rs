@@ -2645,6 +2645,20 @@ fn getpivotdata_reads_pivot_table_and_plain_cell_reports() {
     t.set("N4", "25");
     t.set("O4", "35");
     t.set("P1", "=GETPIVOTDATA(\"Revenue\",$L$1,\"Destination\",\"North\",\"Origin\",\"South\")");
+    // Unrelated third-column cell (T4) outside a 2-column report (R1:S3) must not bridge into R5:S5,
+    // and a dependent formula in S3 reading an active GETPIVOTDATA cell (U1) must not record #CIRC!.
+    t.set("R1", "Department");
+    t.set("S1", "Sales");
+    t.set("R2", "Engineering");
+    t.set("S2", "85");
+    t.set("R3", "Grand Total");
+    t.set("S3", "=IF(U1>0,GETPIVOTDATA(\"Sales\",$R$1,\"Department\",\"Engineering\"),0)");
+    t.set("T4", "Note outside report");
+    t.set("R5", "Grand Total");
+    t.set("S5", "999");
+    t.set("U1", "=GETPIVOTDATA(\"Sales\",$R$1,\"Department\",\"Engineering\")");
+    t.set("U2", "=GETPIVOTDATA(\"Sales\",$R$1)");
+    assert_eq!((t.num("U1"), t.num("U2"), t.num("S3")), (85.0, 85.0, 85.0));
     assert!(t.calc.circular.is_empty());
     assert_eq!((t.num("J1"), t.num("J2"), t.num("P1")), (140.0, 85.0, 25.0));
     assert_eq!((t.get("J3"), t.get("J4"), t.get("J5")), (Value::Error(CellError::Ref), Value::Error(CellError::Ref), Value::Error(CellError::Ref)));

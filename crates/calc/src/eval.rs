@@ -129,9 +129,12 @@ pub trait Host {
     }
     /// Called when a formula's evaluation runs past the stack budget.
     fn stack_exhausted(&mut self) {}
-    /// Whether `(sheet, c)` is currently being evaluated on the active call stack.
-    fn is_in_progress(&self, _sheet: usize, _c: CellRef) -> bool {
-        false
+    /// Whether `(sheet, c)` is non-empty for table boundary probing, without evaluating
+    /// uncomputed formulas that could depend on the active cell.
+    fn is_cell_occupied(&self, sheet: usize, c: CellRef) -> bool {
+        self.workbook()
+            .sheet(sheet)
+            .is_some_and(|s| s.cell(c).is_some_and(|cell| cell.formula.is_some() || cell.py.is_some()) || !s.value(c).is_empty())
     }
 }
 
@@ -604,13 +607,17 @@ pub fn resolve_structured(wb: &Workbook, sheet: usize, at: CellRef, s: &StructRe
             None => return Err(CellError::Ref),
         }
     } else if items.contains(&StructItem::ThisRow) {
-        if at.row < t.range.start.row || at.row > t.range.end.row {
+        let Some(d) = data else { return Err(CellError::Value) };
+        if si != sheet || at.row < d.start.row || at.row > d.end.row {
             return Err(CellError::Value);
         }
         r0 = at.row;
         r1 = at.row;
     } else if !items.contains(&StructItem::All) {
         let has = |i: StructItem| items.contains(&i);
+        if has(StructItem::Headers) && has(StructItem::Totals) && !has(StructItem::Data) {
+            return Err(CellError::Ref);
+        }
         let hdr = t.header_row.then_some(t.range.start.row);
         let tot = t.totals_row.then_some(t.range.end.row);
         let mut lo = u32::MAX;

@@ -573,10 +573,20 @@ impl<'h> Evaluator<'h> {
         let mut r1 = area.range.end.row.min(gridcraft_core::MAX_ROWS - 1);
         let mut c1 = area.range.end.col.min(gridcraft_core::MAX_COLS - 1);
         let next_start_r = r0.saturating_add(1).min(gridcraft_core::MAX_ROWS - 1);
-        if self.cell(area.sheet, CellRef::new(r0, c0)).is_empty() && self.cell(area.sheet, CellRef::new(next_start_r, c0)).is_empty() {
+        if !self.is_table_cell(area.sheet, CellRef::new(r0, c0)) && !self.is_table_cell(area.sheet, CellRef::new(next_start_r, c0)) {
             return Err(CellError::Ref);
         }
-        let max_probe_c = c0.saturating_add(2).min(gridcraft_core::MAX_COLS - 1);
+        let header_probe_r = r0.saturating_add(1).min(gridcraft_core::MAX_ROWS - 1);
+        while c1 < gridcraft_core::MAX_COLS - 1 && c1.saturating_sub(c0) < 128 {
+            let next_c = c1 + 1;
+            let any = (r0..=header_probe_r).any(|r| self.is_table_cell(area.sheet, CellRef::new(r, next_c)));
+            if any {
+                c1 = next_c;
+            } else {
+                break;
+            }
+        }
+        let max_probe_c = c0.saturating_add(2).min(c1);
         while r1 < gridcraft_core::MAX_ROWS - 1 && r1.saturating_sub(r0) < 5_000 {
             let next_r = r1 + 1;
             let any = (c0..=max_probe_c).any(|c| self.is_table_cell(area.sheet, CellRef::new(next_r, c)));
@@ -599,10 +609,7 @@ impl<'h> Evaluator<'h> {
         Ok(RangeRef::new(CellRef::new(r0, c0), CellRef::new(r1, c1)))
     }
 
-    fn is_table_cell(&mut self, sheet: usize, cell: CellRef) -> bool {
-        if (sheet, cell) == (self.sheet, self.at) || self.host.is_in_progress(sheet, cell) {
-            return false;
-        }
-        !self.cell(sheet, cell).is_empty()
+    fn is_table_cell(&self, sheet: usize, cell: CellRef) -> bool {
+        (sheet, cell) != (self.sheet, self.at) && self.host.is_cell_occupied(sheet, cell)
     }
 }

@@ -233,12 +233,12 @@ pub struct Graph {
     cell_deps: HashMap<Key, HashSet<Key>>,
     /// (sheet, col) → row intervals of the ranges (up to `WIDE` columns) that cover the column
     col_deps: HashMap<(usize, u32), Intervals<Key>>,
-    /// sheet → row intervals of wider ranges, with their columns: (first, last, dependent)
-    wide_deps: HashMap<usize, Intervals<(u32, u32, Key)>>,
+    /// sheet → (first_col, last_col) → row intervals of wider ranges
+    wide_deps: HashMap<usize, HashMap<(u32, u32), Intervals<Key>>>,
     pub(super) dynamic: HashSet<Key>,
     /// Range indexes changed since the last [`Graph::settle`].
     unsettled_cols: HashSet<(usize, u32)>,
-    unsettled_wide: HashSet<usize>,
+    unsettled_wide: HashSet<(usize, u32, u32)>,
 }
 
 /// A formula's precedents split by shape: single cells, column intervals and wide ranges.
@@ -287,8 +287,9 @@ impl Graph {
             self.unsettled_cols.insert((s, c));
         }
         for (s, r) in wide {
-            self.wide_deps.entry(s).or_default().insert(r.start.row, r.end.row, (r.start.col, r.end.col, k));
-            self.unsettled_wide.insert(s);
+            let span = (r.start.col, r.end.col);
+            self.wide_deps.entry(s).or_default().entry(span).or_default().insert(r.start.row, r.end.row, k);
+            self.unsettled_wide.insert((s, span.0, span.1));
         }
         if node.dynamic {
             self.dynamic.insert(k);
@@ -314,9 +315,12 @@ impl Graph {
             }
         }
         for (s, r) in wide {
-            if let Some(v) = self.wide_deps.get_mut(&s) {
-                v.remove(r.start.row, r.end.row, (r.start.col, r.end.col, k));
-                self.unsettled_wide.insert(s);
+            let span = (r.start.col, r.end.col);
+            if let Some(spans) = self.wide_deps.get_mut(&s)
+                && let Some(v) = spans.get_mut(&span)
+            {
+                v.remove(r.start.row, r.end.row, k);
+                self.unsettled_wide.insert((s, span.0, span.1));
             }
         }
         self.dynamic.remove(&k);
@@ -333,11 +337,16 @@ impl Graph {
                 }
             }
         }
-        for key in std::mem::take(&mut self.unsettled_wide) {
-            if let Some(v) = self.wide_deps.get_mut(&key) {
-                v.settle();
-                if v.is_empty() {
-                    self.wide_deps.remove(&key);
+        for (s, c0, c1) in std::mem::take(&mut self.unsettled_wide) {
+            if let Some(spans) = self.wide_deps.get_mut(&s) {
+                if let Some(v) = spans.get_mut(&(c0, c1)) {
+                    v.settle();
+                    if v.is_empty() {
+                        spans.remove(&(c0, c1));
+                    }
+                }
+                if spans.is_empty() {
+                    self.wide_deps.remove(&s);
                 }
             }
         }
@@ -351,12 +360,12 @@ impl Graph {
         if let Some(v) = self.col_deps.get(&(sheet, c.col)) {
             v.query(c.row, c.row, &mut |k| out.push(*k));
         }
-        if let Some(v) = self.wide_deps.get(&sheet) {
-            v.query(c.row, c.row, &mut |(c0, c1, k)| {
-                if *c0 <= c.col && c.col <= *c1 {
-                    out.push(*k);
+        if let Some(spans) = self.wide_deps.get(&sheet) {
+            for (&(c0, c1), v) in spans {
+                if c0 <= c.col && c.col <= c1 {
+                    v.query(c.row, c.row, &mut |k| out.push(*k));
                 }
-            });
+            }
         }
     }
 
@@ -415,12 +424,12 @@ impl Graph {
                 }
             }
         }
-        if let Some(v) = self.wide_deps.get(&sheet) {
-            v.query(r0, r1, &mut |(c0, c1, k)| {
-                if *c0 <= range.end.col && range.start.col <= *c1 {
-                    out.push(*k);
+        if let Some(spans) = self.wide_deps.get(&sheet) {
+            for (&(c0, c1), v) in spans {
+                if c0 <= range.end.col && range.start.col <= c1 {
+                    v.query(r0, r1, &mut |k| out.push(*k));
                 }
-            });
+            }
         }
     }
 
