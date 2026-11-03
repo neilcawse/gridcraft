@@ -39,8 +39,10 @@ pub(super) struct Node {
     pub(super) dynamic: bool,
 }
 
-/// Ranges wider than this many columns go to the per-sheet wide index instead of per-column ones.
-const WIDE: u32 = 64;
+/// Ranges wider than this many columns go to the per-sheet wide index instead of duplicating
+/// each formula's row interval across every covered column's tree (which bloats RSS on 50k-row
+/// multi-column `VLOOKUP` sheets).
+const WIDE: u32 = 2;
 
 /// Insertions an [`Intervals`] keeps aside (scanned by every query) before merging them in.
 const PENDING: usize = 32;
