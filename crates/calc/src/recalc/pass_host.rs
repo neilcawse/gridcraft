@@ -463,6 +463,10 @@ impl Host for PassHost<'_> {
     fn stack_exhausted(&mut self) {
         self.out_of_stack = true;
     }
+    fn is_in_progress(&self, sheet: usize, c: CellRef) -> bool {
+        let k = (sheet, c);
+        self.in_progress.contains(&k) || self.waiting.contains(&k)
+    }
     fn spill_range(&mut self, sheet: usize, anchor: CellRef) -> Option<RangeRef> {
         let k = (sheet, anchor);
         if !(self.pending.contains(&k) || self.results.contains_key(&k)) {

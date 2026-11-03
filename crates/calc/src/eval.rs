@@ -147,6 +147,10 @@ pub trait Host {
     }
     /// Called when a formula's evaluation runs past the stack budget.
     fn stack_exhausted(&mut self) {}
+    /// Whether `(sheet, c)` is currently being evaluated on the active call stack.
+    fn is_in_progress(&self, _sheet: usize, _c: CellRef) -> bool {
+        false
+    }
 }
 
 pub struct Evaluator<'h> {
