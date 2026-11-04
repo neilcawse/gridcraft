@@ -38,8 +38,12 @@ pub fn start() {
             create.instance_descriptor.backends = eframe::wgpu::Backends::GL;
         }
         // `?host=parent`: a same-origin page framing GridCraft (such as a Nextcloud app) opens
-        // workbooks in it and stores what it saves (`host`).
-        let bridge = if query_param("host").as_deref() == Some("parent") { crate::host::Bridge::new() } else { None };
+        // workbooks in it and stores what it saves (`host`); `&ack=1` when it confirms each save.
+        let bridge = if query_param("host").as_deref() == Some("parent") {
+            crate::host::Bridge::new(query_param("ack").as_deref() == Some("1"))
+        } else {
+            None
+        };
         let app_bridge = bridge.clone();
         let result = eframe::WebRunner::new()
             .start(
@@ -57,7 +61,7 @@ pub fn start() {
                     }
                     let mut services = services(inbox.clone(), cc.egui_ctx.clone());
                     if let Some(bridge) = &app_bridge {
-                        bridge.connect(&mut services, inbox.clone(), cc.egui_ctx.clone());
+                        bridge.connect(&mut services, cc.egui_ctx.clone());
                     }
                     let mut app = SheetApp::new(session, services);
                     app.ui.system_theme = true;
@@ -178,7 +182,7 @@ impl eframe::App for WebShell {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.app.ui(ui);
         if let Some(bridge) = &self.bridge {
-            bridge.sync(&mut self.app);
+            bridge.sync(&mut self.app, &self.inbox, ui.ctx());
         }
     }
 }

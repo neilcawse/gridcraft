@@ -560,6 +560,10 @@ impl Session {
     pub fn document_index(&self, uid: u64) -> Option<usize> {
         self.docs.iter().position(|d| d.uid == uid)
     }
+    /// The open workbook with this [`DocState::uid`].
+    pub fn document_mut(&mut self, uid: u64) -> Option<&mut DocState> {
+        self.docs.iter_mut().find(|d| d.uid == uid)
+    }
     pub fn active_mut(&mut self) -> Option<&mut DocState> {
         self.docs.get_mut(self.active)
     }
