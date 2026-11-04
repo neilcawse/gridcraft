@@ -81,6 +81,7 @@ impl SheetApp {
             parked: HashMap::new(),
             native_windows: false,
             arrange_windows: None,
+            host_saves_sent: 0,
             #[cfg(not(target_arch = "wasm32"))]
             updates_rt: Default::default(),
         }

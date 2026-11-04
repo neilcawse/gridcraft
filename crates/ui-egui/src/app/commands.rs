@@ -324,14 +324,17 @@ impl SheetApp {
                         let path = if std::path::Path::new(&path).extension().is_none() { format!("{path}.xlsx") } else { path };
                         self.run_or_alert("file.save", json!({"path": path}));
                     }
-                } else if self.services.download.is_some()
+                } else if (self.services.download.is_some() || self.services.host_save.is_some())
                     && let Ok(r) = self.run("file.saveBytes", json!({"format": "xlsx"}))
-                    && let Some(dl) = &self.services.download
                     && let Some(b) = r.get("base64").and_then(Json::as_str).and_then(gridcraft_engine::io::base64_decode)
                 {
                     let name = r.get("name").and_then(Json::as_str).unwrap_or("Book.xlsx").to_string();
-                    dl(&name, &b);
+                    // Save of a workbook with no file (the web keeps none) asks with `save`: that is
+                    // not Save As, so a host page writes it back to the file it came from.
+                    let save_as = params.get("save").and_then(Json::as_bool) != Some(true);
+                    self.deliver_file(&name, &b, save_as, true);
                 }
+            }
             }
             // File › Options (`file.options`) and the File tab itself open the Backstage view.
             "options" => self.open_backstage(backstage::Page::Options),

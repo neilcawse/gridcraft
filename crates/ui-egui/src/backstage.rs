@@ -253,12 +253,13 @@ pub fn show(app: &mut SheetApp, ui: &mut Ui) {
 }
 
 /// Save: saves a workbook that has a file and returns to the sheet; a new workbook goes to the
-/// Save As page first, like Excel's.
+/// Save As page first, like Excel's. In a page that keeps the files ([`crate::Services::host_save`])
+/// Save always saves: the page writes the workbook back to its file, or asks where.
 fn save(app: &mut SheetApp, out: &mut Outcome) {
     if !app.commit_edit(0, 0, false, false) {
         return;
     }
-    if app.session.active().is_some_and(|d| d.path.is_some()) {
+    if app.services.host_save.is_some() || app.session.active().is_some_and(|d| d.path.is_some()) {
         app.run_or_alert("file.save", json!({}));
         out.close = true;
     } else {
@@ -695,8 +696,9 @@ fn save_as(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &mut Outcom
             .labelled_by(label.id);
     });
     ui.add_space(14.0);
-    // Desktop: the system Save dialog. Web: the file downloads.
-    let web = app.services.pick_save.is_none() && app.services.download.is_some();
+    // Desktop: the system Save dialog. Web: the file downloads (or goes to the page that keeps
+    // the files, as a new file).
+    let web = app.services.pick_save.is_none() && (app.services.download.is_some() || app.services.host_save.is_some());
     let label = if web { format!("{} (.{fmt})", lang.tr("Download")) } else { lang.tr("Browse…").to_string() };
     if square_button(ui, Icon::OpenFolder, &label).clicked() && app.commit_edit(0, 0, false, false) {
         if fmt == "xlsx" {
@@ -759,7 +761,7 @@ pub fn export_as(app: &mut SheetApp, fmt: &str) -> bool {
             }
         };
     }
-    if app.services.download.is_none() {
+    if app.services.download.is_none() && app.services.host_save.is_none() {
         app.message = Some(("GridCraft".into(), "Exporting needs a file picker, which this window doesn't have.".into()));
         return false;
     }
@@ -778,13 +780,8 @@ pub fn export_as(app: &mut SheetApp, fmt: &str) -> bool {
         Ok(r) => {
             let bytes = r.get("base64").and_then(Json::as_str).and_then(gridcraft_engine::io::base64_decode);
             let name = r.get("name").and_then(Json::as_str).map_or_else(|| format!("{stem}.{fmt}"), str::to_string);
-            match (bytes, &app.services.download) {
-                (Some(b), Some(dl)) => {
-                    dl(&name, &b);
-                    true
-                }
-                _ => false,
-            }
+            // A copy in another format, under a name of its own: never the workbook's file.
+            bytes.is_some_and(|b| app.deliver_file(&name, &b, true, false))
         }
         Err(e) => {
             app.message = Some(("GridCraft".into(), crate::clean_error(&e)));

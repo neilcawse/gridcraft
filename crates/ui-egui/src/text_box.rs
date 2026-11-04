@@ -18,6 +18,13 @@ pub struct EditState {
     selection: Option<u32>,
 }
 
+impl EditState {
+    /// The user changed the text since the edit began: unentered work.
+    pub fn changed(&self) -> bool {
+        self.text != self.original
+    }
+}
+
 /// Returns the stable id for the text-box editor.
 pub(crate) fn editor_id() -> egui::Id {
     egui::Id::unique("gridcraft.text_box_editor")

@@ -5,17 +5,27 @@
 //! - `gridcraft:open` (from the parent): `{ name, bytes }`, bytes an `ArrayBuffer` or
 //!   `Uint8Array`. It opens like a workbook picked with File › Open or dropped on the window.
 //! - `gridcraft:opened` (to the parent): `{ name, docId }` once a sent file has opened: `docId`
-//!   is the workbook it became, or `null` when it didn't open (or waits behind a password
-//!   prompt, after which it counts as a workbook the user opened).
-//! - `gridcraft:save` (to the parent): `{ name, bytes, docId, saveId }` (`bytes` a transferred
-//!   `ArrayBuffer`) for every file GridCraft would otherwise download: Save and Save As (an .xlsx
-//!   workbook) and Export as PDF. `docId` is the workbook it came from (`null` when none is
-//!   open), the same number `gridcraft:opened` gave for a sent file, so the parent writes it
-//!   back only to that file. `saveId` numbers the saves.
+//!   is the workbook it became, or `null` when saving it must not replace the sent file: it
+//!   didn't open, waits behind a password prompt (after which it counts as a workbook the user
+//!   opened), was imported (.ods, .xls, .xlsb) or decrypted, which Save never writes over the
+//!   file they came from ([`SentFile::in_place`]).
+//! - `gridcraft:save` (to the parent): `{ name, bytes, docId, saveId, saveAs }` (`bytes` a
+//!   transferred `ArrayBuffer`) for every file GridCraft would otherwise download: Save and Save
+//!   As (an .xlsx workbook) and the exports (PDF, CSV, web page). `docId` is the workbook it came
+//!   from, taken when the bytes were made (a Save Changes prompt that then closes it can't give
+//!   the file to another workbook), the same number `gridcraft:opened` gave for a sent file, so
+//!   the parent writes it back only to that file. `saveId` numbers the saves. `saveAs` is true
+//!   when the user asked for a new name or place (Save As, Download, an export), false for Save.
 //! - `gridcraft:saved` (from the parent, with `?ack=1`): `{ saveId, name }`, the save is stored
-//!   as `name`. Only then does the workbook count as saved, as it was when it was saved. Without
-//!   `?ack=1` a workbook counts as saved once it is handed over.
-//! - `gridcraft:dirty` (to the parent): `{ dirty }` whenever unsaved changes appear or go away.
+//!   as `name`. Only then does the workbook count as saved, as it was when it was saved, and a
+//!   Save Changes prompt's Save leaves it open until then. Without `?ack=1` a workbook counts as
+//!   saved once it is handed over.
+//! - `gridcraft:discard` (from the parent, with `?ack=1`): `{ saveId }`, that save will never be
+//!   stored (the picker was cancelled, the write failed, a newer save replaced it): the workbook
+//!   stays unsaved.
+//! - `gridcraft:dirty` (to the parent): `{ dirty }` whenever unsaved work appears or goes away:
+//!   a workbook with unsaved changes or a draft not yet entered (a cell being typed in, a text
+//!   box or header being edited).
 //! - `gridcraft:request-save` (from the parent): save the active workbook as File › Save would,
 //!   so a parent's own Save button or shortcut gets a `gridcraft:save` back.
 //! - `gridcraft:failed` (to the parent): `{ error }` when the app couldn't start.
@@ -24,36 +34,22 @@
 //! starts with an empty workbook instead of a sample, and the parent guards leaving the page.
 
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gridcraft_engine::model::Workbook;
-use gridcraft_ui_egui::{Inbox, Services, SheetApp};
+use gridcraft_ui_egui::{HostSave, SentFile, Services, SheetApp};
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
 
-/// Saving one of these hands the whole workbook to the parent, which stores it: the workbook
-/// counts as saved under that name, as it would after Save on the desktop.
-const WORKBOOK_EXTS: &[&str] = &["xlsx"];
+use crate::pending_saves::PendingSaves;
 
 /// The longest user name taken from `?author=`.
 const MAX_AUTHOR_CHARS: usize = 200;
 
 /// Files with their bytes, in the order they came.
-type Files = Rc<RefCell<VecDeque<(String, Vec<u8>)>>>;
-
-/// A sent file given to the app, and the workbooks open before it.
-type Opening = (String, Vec<u64>);
-
-/// A workbook handed to the parent and not yet acknowledged: the workbook it came from and its
-/// content then.
-struct Unacked {
-    save_id: u64,
-    doc: u64,
-    content: Arc<Workbook>,
-}
+type Files = Rc<RefCell<Vec<(String, Vec<u8>)>>>;
 
 #[derive(Clone)]
 pub struct Bridge {
@@ -63,20 +59,16 @@ pub struct Bridge {
     /// `?ack=1`: a workbook counts as saved when the parent says it stored it (`gridcraft:saved`),
     /// not when it is handed over.
     ack: bool,
-    /// Files GridCraft saved since the last frame, posted after it with the workbook they came
-    /// from.
-    saves: Files,
-    /// Files the parent sent that the app hasn't been given yet.
+    /// Files the parent sent that the app hasn't opened yet.
     sent: Files,
-    /// The sent file the app was given last frame, and the workbooks open before it.
-    opening: Rc<RefCell<Option<Opening>>>,
     /// Saves the parent stored since the last frame: `(saveId, name)`.
     stored: Rc<RefCell<Vec<(u64, String)>>>,
-    unacked: Rc<RefCell<Vec<Unacked>>>,
+    /// Workbook saves handed over and not yet stored or discarded (`?ack=1`).
+    unacked: Rc<RefCell<PendingSaves<Arc<Workbook>>>>,
     next_save_id: Rc<Cell<u64>>,
     /// The parent asked for a save (`gridcraft:request-save`) since the last frame.
     save_requested: Rc<Cell<bool>>,
-    /// The unsaved-changes state last reported to the parent.
+    /// The unsaved-work state last reported to the parent.
     reported: Rc<Cell<Option<bool>>>,
 }
 
@@ -94,9 +86,7 @@ impl Bridge {
             parent,
             origin,
             ack,
-            saves: Rc::default(),
             sent: Rc::default(),
-            opening: Rc::default(),
             stored: Rc::default(),
             unacked: Rc::default(),
             next_save_id: Rc::new(Cell::new(1)),
@@ -108,12 +98,10 @@ impl Bridge {
     /// Send saved and exported files to the parent instead of downloading them, and hear files
     /// from it.
     pub fn connect(&self, services: &mut Services, ctx: egui::Context) {
-        self.listen(ctx.clone());
-        let saves = Rc::clone(&self.saves);
-        services.download = Some(Box::new(move |name: &str, bytes: &[u8]| {
-            saves.borrow_mut().push_back((name.to_string(), bytes.to_vec()));
-            ctx.request_repaint();
-        }));
+        self.listen(ctx);
+        let bridge = self.clone();
+        services.host_save = Some(Box::new(move |save: &HostSave<'_>| bridge.post_save(save)));
+        services.host_confirms_saves = self.ack;
     }
 
     /// `?author=`: the host's name for the user signs new notes and comments.
@@ -132,57 +120,49 @@ impl Bridge {
         self.send(&[("type", "gridcraft:failed".into()), ("error", error.into())]);
     }
 
-    /// After each frame: a save the parent asked for runs, saves go to the parent with the
-    /// workbook they came from, stored saves mark their workbook saved, the parent hears which
-    /// workbook the file it sent became, the next sent file goes to the app, and the parent hears
-    /// when unsaved changes appear or go away.
-    pub fn sync(&self, app: &mut SheetApp, inbox: &Inbox, ctx: &egui::Context) {
+    /// After each frame: a save the parent asked for runs, stored saves mark their workbook saved,
+    /// files the parent sent open and the parent hears which workbook each became, and the parent
+    /// hears when unsaved work appears or goes away.
+    pub fn sync(&self, app: &mut SheetApp, ctx: &egui::Context) {
         if self.save_requested.take() && app.session.active().is_some() {
             app.run_or_alert("file.save", serde_json::json!({}));
         }
-        self.post_saves(app);
         self.apply_stored(app);
-        if let Some((name, before)) = self.opening.take() {
-            let docs = app.session.documents();
-            let doc = crate::doc_ids::opened_doc(&before, docs.iter().map(|d| (d.uid, d.title.as_str())), &name);
+        let sent = std::mem::take(&mut *self.sent.borrow_mut());
+        for (name, bytes) in sent {
+            let doc = app.open_sent(&name, &bytes).filter(|f: &SentFile| f.in_place).map(|f| f.doc);
             self.send(&[("type", "gridcraft:opened".into()), ("name", name.as_str().into()), ("docId", id_value(doc))]);
-        }
-        if let Some((name, bytes)) = self.sent.borrow_mut().pop_front() {
-            let before = app.session.documents().iter().map(|d| d.uid).collect();
-            inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((name.clone(), bytes));
-            *self.opening.borrow_mut() = Some((name, before));
             ctx.request_repaint();
         }
-        let dirty = app.session.documents().iter().any(|d| d.is_dirty());
+        let dirty = app.has_unsaved_work();
         if self.reported.get() != Some(dirty) && self.send(&[("type", "gridcraft:dirty".into()), ("dirty", dirty.into())]) {
             self.reported.set(Some(dirty));
         }
     }
 
-    fn post_saves(&self, app: &mut SheetApp) {
-        let saves = std::mem::take(&mut *self.saves.borrow_mut());
-        for (path, bytes) in saves {
-            let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or(path);
-            let save_id = self.next_save_id.get();
-            self.next_save_id.set(save_id + 1);
-            let doc = app.session.active().map(|d| d.uid);
-            if let Err(e) = self.post_save(&name, &bytes, doc, save_id) {
-                log::error!("couldn't hand {name} to the page: {e}");
-                continue;
-            }
-            if !is_workbook(&name) {
-                continue;
-            }
-            let Some(active) = app.session.active_mut() else { continue };
-            if self.ack {
-                self.unacked.borrow_mut().push(Unacked { save_id, doc: active.uid, content: Arc::clone(&active.wb) });
-            } else {
-                active.saved = Arc::clone(&active.wb);
-                if active.path.is_none() {
-                    active.title = name;
-                }
-            }
+    /// [`Services::host_save`]: posts the file with the workbook it came from; with `?ack=1` a
+    /// workbook save waits for `gridcraft:saved` with that content.
+    fn post_save(&self, save: &HostSave<'_>) -> Result<(), String> {
+        let name = std::path::Path::new(save.name).file_name().map_or_else(|| save.name.to_string(), |n| n.to_string_lossy().to_string());
+        let save_id = self.next_save_id.get();
+        self.next_save_id.set(save_id + 1);
+        let buffer = js_sys::Uint8Array::from(save.bytes).buffer();
+        let message = message(&[
+            ("type", "gridcraft:save".into()),
+            ("name", name.as_str().into()),
+            ("bytes", buffer.clone().into()),
+            ("docId", id_value(Some(save.document))),
+            ("saveId", id_value(Some(save_id))),
+            ("saveAs", save.save_as.into()),
+        ])
+        .ok_or_else(|| "couldn't build the message".to_string())?;
+        self.parent
+            .post_message_with_transfer(&message, &self.origin, &js_sys::Array::of1(&buffer))
+            .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))?;
+        if self.ack && save.marks_saved {
+            self.unacked.borrow_mut().push(save_id, save.document, Arc::clone(&save.content));
         }
+        Ok(())
     }
 
     /// A stored save marks its workbook saved as it was then (later edits stay unsaved) and
@@ -192,32 +172,15 @@ impl Bridge {
         let stored = std::mem::take(&mut *self.stored.borrow_mut());
         let mut unacked = self.unacked.borrow_mut();
         for (save_id, name) in stored {
-            let Some(at) = unacked.iter().position(|u| u.save_id == save_id) else { continue };
-            let save = unacked.remove(at);
-            unacked.retain(|u| u.doc != save.doc || u.save_id > save_id);
-            let Some(doc) = app.session.document_mut(save.doc) else { continue };
-            doc.saved = save.content;
+            let Some((doc, content)) = unacked.stored(save_id) else { continue };
+            let Some(doc) = app.session.document_mut(doc) else { continue };
+            doc.saved = content;
             if doc.path.is_none() {
                 doc.title = name;
             }
         }
         let open: Vec<u64> = app.session.documents().iter().map(|d| d.uid).collect();
-        unacked.retain(|u| open.contains(&u.doc));
-    }
-
-    fn post_save(&self, name: &str, bytes: &[u8], doc: Option<u64>, save_id: u64) -> Result<(), String> {
-        let buffer = js_sys::Uint8Array::from(bytes).buffer();
-        let message = message(&[
-            ("type", "gridcraft:save".into()),
-            ("name", name.into()),
-            ("bytes", buffer.clone().into()),
-            ("docId", id_value(doc)),
-            ("saveId", id_value(Some(save_id))),
-        ])
-        .ok_or_else(|| "couldn't build the message".to_string())?;
-        self.parent
-            .post_message_with_transfer(&message, &self.origin, &js_sys::Array::of1(&buffer))
-            .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))
+        unacked.keep_open(&open);
     }
 
     fn listen(&self, ctx: egui::Context) {
@@ -226,6 +189,7 @@ impl Bridge {
         let save_requested = Rc::clone(&self.save_requested);
         let sent = Rc::clone(&self.sent);
         let stored = Rc::clone(&self.stored);
+        let unacked = Rc::clone(&self.unacked);
         let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
             if event.origin() != origin || !event.source().is_some_and(|s| js_sys::Object::is(&s, &parent)) {
                 return;
@@ -235,12 +199,17 @@ impl Bridge {
                 Some("gridcraft:open") => {
                     let name = string(&data, "name").filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Book.xlsx".to_string());
                     let Some(bytes) = bytes(&data) else { return };
-                    sent.borrow_mut().push_back((name, bytes));
+                    sent.borrow_mut().push((name, bytes));
                 }
                 Some("gridcraft:saved") => {
                     let Some(save_id) = number(&data, "saveId") else { return };
                     let Some(name) = string(&data, "name").filter(|n| !n.trim().is_empty()) else { return };
                     stored.borrow_mut().push((save_id, name));
+                }
+                Some("gridcraft:discard") => {
+                    let Some(save_id) = number(&data, "saveId") else { return };
+                    unacked.borrow_mut().discard(save_id);
+                    return;
                 }
                 Some("gridcraft:request-save") => save_requested.set(true),
                 _ => return,
@@ -257,10 +226,6 @@ impl Bridge {
     fn send(&self, fields: &[(&str, JsValue)]) -> bool {
         message(fields).is_some_and(|m| self.parent.post_message(&m, &self.origin).is_ok())
     }
-}
-
-fn is_workbook(name: &str) -> bool {
-    name.rsplit_once('.').is_some_and(|(_, ext)| WORKBOOK_EXTS.iter().any(|e| ext.eq_ignore_ascii_case(e)))
 }
 
 /// A workbook id or save number as a JS number (ids stay far below 2^53), `null` for none.

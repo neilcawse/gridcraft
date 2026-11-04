@@ -2932,7 +2932,9 @@ fn xlsx_roundtrip_through_engine() {
     s.execute("cell.set", json!({"cell": "B3", "input": "=SUM(B1:B2)"})).unwrap();
     let r = s.execute("file.saveBytes", json!({"format": "xlsx"})).unwrap();
     let b64 = r["base64"].as_str().unwrap().to_string();
-    s.execute("file.open", json!({"name": "x.xlsx", "base64": b64})).unwrap();
+    let r = s.execute("file.open", json!({"name": "x.xlsx", "base64": b64})).unwrap();
+    assert_eq!(r["doc"], s.doc().unwrap().uid, "the result names the workbook it opened");
+    assert_eq!(r["inPlace"], true, "Save may write an opened .xlsx back over its file");
     assert_eq!(v(&s, "B3"), Value::Number(3.0));
 }
 
@@ -2967,6 +2969,8 @@ fn ods_import_keeps_cached_values_and_reports_limits() {
         assert!(!r["warnings"].as_array().unwrap().is_empty());
         assert!(s.take_ui_requests().iter().any(|r| matches!(r, crate::UiRequest::Message(_))));
         assert!(s.doc().unwrap().path.is_none());
+        assert_eq!(r["inPlace"], false, "{name}: an import is never saved over the file it came from");
+        assert_eq!(r["doc"], s.doc().unwrap().uid);
         assert!(s.doc().unwrap().display_title().ends_with(".xlsx"));
         assert_eq!(v(&s, "A1"), Value::Number(42.0));
         assert_eq!(v(&s, "B1"), Value::from("Original data"));
@@ -5224,6 +5228,7 @@ fn encrypted_workbooks_open_with_their_password() {
     assert_eq!(r["title"], "Secret.xlsx");
     assert_eq!(v(&s, "A1"), Value::Number(42.0));
     assert_eq!(s.doc().unwrap().path, None);
+    assert_eq!(r["inPlace"], false, "a decrypted copy is never saved over the encrypted original");
     // The notice belongs in the info bar, not a message box.
     assert!(!s.take_ui_requests().iter().any(|r| matches!(r, crate::UiRequest::Message(_))));
     let journal = serde_json::to_string(&s.journal).unwrap();

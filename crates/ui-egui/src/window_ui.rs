@@ -149,4 +149,24 @@ impl SheetApp {
     pub fn parked_window_with_draft(&self) -> Option<u64> {
         self.parked.iter().filter(|(_, w)| w.editor.is_some() || w.text_box_editor.is_some()).map(|(id, _)| *id).min()
     }
+
+    /// Unsaved work the user would lose if the app went away now (a browser tab closing): a
+    /// workbook with unsaved changes, or a draft not yet entered in any window. Nothing is
+    /// committed to find out.
+    pub fn has_unsaved_work(&self) -> bool {
+        self.session.documents().iter().any(|d| d.is_dirty()) || self.has_unsaved_drafts()
+    }
+
+    /// A draft in any window that entering would change something with: a cell or formula-bar
+    /// edit with text, a text box or header/footer edit that changed, unsaved macro steps.
+    pub fn has_unsaved_drafts(&self) -> bool {
+        let drafts = |editor: &Option<editor::EditState>, text_box: &Option<text_box::EditState>, grid: &grid::GridState| {
+            editor.as_ref().is_some_and(editor::EditState::changes_cell)
+                || text_box.as_ref().is_some_and(text_box::EditState::changed)
+                || grid.hf_edit.as_ref().is_some_and(crate::paper_view::HfEdit::changed)
+        };
+        drafts(&self.editor, &self.text_box_editor, &self.grid)
+            || self.parked.values().any(|w| drafts(&w.editor, &w.text_box_editor, &w.grid))
+            || self.macros.editor.as_ref().is_some_and(|ed| ed.dirty)
+    }
 }

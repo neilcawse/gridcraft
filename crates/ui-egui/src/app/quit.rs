@@ -1,4 +1,4 @@
-use super::{SaveAnswer, SheetApp, json};
+use super::{SaveAnswer, SheetApp, json, now_ms};
 
 impl SheetApp {
     /// Holds back a window close (the close button, Alt+F4, the OS quitting the app) while a
@@ -69,12 +69,17 @@ impl SheetApp {
                 if !self.commit_edit(0, 0, false, false) {
                     return false;
                 }
+                let sent = self.host_saves_sent;
                 self.run_or_alert("file.save", json!({}));
                 if self.session.active().is_some_and(|x| !x.is_dirty()) {
                     self.run_or_alert("file.close", json!({"force": true, "document": true}));
                     if quitting {
                         self.continue_quit(ctx);
                     }
+                } else if self.host_saves_sent != sent {
+                    // A host page that confirms its saves hasn't stored the file yet: the workbook
+                    // stays open, unsaved, until it has; Close again then closes it.
+                    self.toast = Some(("Waiting for the save to finish…".into(), now_ms()));
                 }
             }
         }

@@ -72,7 +72,7 @@ mod services;
 mod state;
 
 pub use clock::{monotonic_ms, now_ms};
-pub use services::{Chrome, Inbox, Services};
+pub use services::{Chrome, HostSave, HostSaveFn, Inbox, SentFile, Services};
 pub use state::{NoticeKind, OpenWindow, SaveAnswer, SheetView};
 pub mod desktop_theme;
 
@@ -302,6 +302,9 @@ pub struct SheetApp {
     pub native_windows: bool,
     /// View › Arrange All's layout and windows, waiting for the native windows to move.
     pub arrange_windows: Option<(String, Vec<u64>)>,
+    /// Workbook saves handed to a host page that confirms its saves ([`Services::host_save`]),
+    /// counted so the Save Changes prompt can tell that its Save is waiting for the host.
+    host_saves_sent: u64,
     /// The update check, the startup prompt and a running self-update (desktop only).
     #[cfg(not(target_arch = "wasm32"))]
     updates_rt: updates_ui::Runtime,

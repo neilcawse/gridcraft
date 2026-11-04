@@ -1,4 +1,5 @@
 use super::{Json, Notice, NoticeKind, OpenWindow, SheetApp, clean_error, json};
+use crate::SentFile;
 
 impl SheetApp {
     pub fn open_path(&mut self, path: &str) {
@@ -84,21 +85,73 @@ impl SheetApp {
             .map(|i| std::mem::take(&mut *i.lock().unwrap_or_else(std::sync::PoisonError::into_inner)))
             .unwrap_or_default();
         for (name, bytes) in arrived {
-            let b64 = gridcraft_engine::io::base64_encode(&bytes);
-            match self.run("file.open", json!({"name": &name, "base64": &b64})) {
-                // A file picked from File › Open (web) arrives here: show it, not the Backstage.
-                Ok(r) => {
-                    self.backstage = None;
-                    self.show_open_warnings(&r);
-                }
-                Err(e) if e.contains(gridcraft_engine::io::PASSWORD_REQUIRED) => {
-                    self.backstage = None;
-                    self.open_dialog("openPassword", json!({"name": name, "base64": b64}));
-                }
-                Err(e) => self.message = Some(("GridCraft".into(), clean_error(&e))),
-            }
-            self.after_engine();
+            self.open_bytes(&name, &bytes);
         }
+    }
+
+    /// Web: opens a file the host page sent (`?host=parent`), as a dropped file opens. Returns
+    /// the workbook it became, or `None` when it didn't open (refused, or waiting behind the
+    /// password prompt, after which it counts as a workbook the user opened).
+    pub fn open_sent(&mut self, name: &str, bytes: &[u8]) -> Option<SentFile> {
+        let r = self.open_bytes(name, bytes)?;
+        let doc = r.get("doc").and_then(Json::as_u64)?;
+        Some(SentFile { doc, in_place: r.get("inPlace").and_then(Json::as_bool) == Some(true) })
+    }
+
+    /// Opens `bytes` named `name` as File › Open would; the `file.open` result once it opened.
+    fn open_bytes(&mut self, name: &str, bytes: &[u8]) -> Option<Json> {
+        let b64 = gridcraft_engine::io::base64_encode(bytes);
+        let opened = match self.run("file.open", json!({"name": name, "base64": &b64})) {
+            // A file picked from File › Open (web) arrives here: show it, not the Backstage.
+            Ok(r) => {
+                self.backstage = None;
+                self.show_open_warnings(&r);
+                Some(r)
+            }
+            Err(e) if e.contains(gridcraft_engine::io::PASSWORD_REQUIRED) => {
+                self.backstage = None;
+                self.open_dialog("openPassword", json!({"name": name, "base64": b64}));
+                None
+            }
+            Err(e) => {
+                self.message = Some(("GridCraft".into(), clean_error(&e)));
+                None
+            }
+        };
+        self.after_engine();
+        opened
+    }
+
+    /// Web: hands a file the user saved or exported to them. A host page that keeps the files
+    /// ([`crate::Services::host_save`]) gets it with the active workbook, which the bytes were
+    /// just made from, and its content now; otherwise the browser downloads it. `save_as`: the
+    /// user asked for a new name or place; `marks_saved`: the file is the whole workbook, so
+    /// storing it saves the workbook (at once, unless the host confirms its saves). Returns
+    /// whether the file was handed over; a host that couldn't take it is reported.
+    pub(crate) fn deliver_file(&mut self, name: &str, bytes: &[u8], save_as: bool, marks_saved: bool) -> bool {
+        let Some(host) = &self.services.host_save else {
+            let Some(download) = &self.services.download else { return false };
+            download(name, bytes);
+            return true;
+        };
+        let Some(d) = self.session.active() else { return false };
+        let (document, content) = (d.uid, std::sync::Arc::clone(&d.wb));
+        let handed = host(&crate::HostSave { name, bytes, save_as, marks_saved, document, content: std::sync::Arc::clone(&content) });
+        if let Err(e) = handed {
+            self.alert(format!("Couldn't save {name}: {e}"));
+            return false;
+        }
+        if marks_saved {
+            if self.services.host_confirms_saves {
+                self.host_saves_sent += 1;
+            } else if let Some(d) = self.session.document_mut(document) {
+                d.saved = content;
+                if d.path.is_none() {
+                    d.title = name.to_string();
+                }
+            }
+        }
+        true
     }
 
     /// AutoSave: save workbooks that have a file shortly after they change. This decision lives in

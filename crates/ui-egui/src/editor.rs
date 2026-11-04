@@ -78,6 +78,15 @@ impl EditState {
         }
     }
 
+    /// Entering the draft would change the cell: an F2-style edit whose text changed, or one
+    /// started by typing that has text. Such a draft is work the user would lose.
+    pub fn changes_cell(&self) -> bool {
+        match &self.original {
+            Some(original) => *original != self.text,
+            None => !self.text.is_empty(),
+        }
+    }
+
     pub fn is_formula(&self) -> bool {
         self.text.starts_with('=')
             || (self.text.starts_with('+') && self.text.len() > 1)

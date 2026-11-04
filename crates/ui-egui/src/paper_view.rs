@@ -54,6 +54,13 @@ pub struct HfEdit {
     prev_tab: String,
 }
 
+impl HfEdit {
+    /// The user changed a section since the edit began: unentered work.
+    pub fn changed(&self) -> bool {
+        self.texts != self.original
+    }
+}
+
 /// Rulers measure in inches for English, centimetres otherwise.
 fn metric(app: &SheetApp) -> bool {
     !matches!(app.ui.language, crate::i18n::Language::En)
