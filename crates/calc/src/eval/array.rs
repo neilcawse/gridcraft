@@ -107,10 +107,10 @@ fn try_zip2(a: &Value, b: &Value, mut f: impl FnMut(&Value, &Value) -> Option<Va
                     data.push(f(&x.get_broadcast(r, c), &y.get_broadcast(r, c))?);
                 }
             }
-            Value::from(Array { rows, cols, data })
+            Value::from(Array::new(rows, cols, data)?)
         }
-        (Value::Array(x), s) => Value::from(Array { rows: x.rows, cols: x.cols, data: x.data.iter().map(|v| f(v, s)).collect::<Option<_>>()? }),
-        (s, Value::Array(y)) => Value::from(Array { rows: y.rows, cols: y.cols, data: y.data.iter().map(|v| f(s, v)).collect::<Option<_>>()? }),
+        (Value::Array(x), s) => Value::from(Array::new(x.rows, x.cols, x.data.iter().map(|v| f(v, s)).collect::<Option<_>>()?)?),
+        (s, Value::Array(y)) => Value::from(Array::new(y.rows, y.cols, y.data.iter().map(|v| f(s, v)).collect::<Option<_>>()?)?),
         (x, y) => f(x, y)?,
     })
 }
@@ -248,7 +248,7 @@ mod tests {
     #[test]
     fn a_refused_cell_stops_the_broadcast() {
         let col = Value::from(Array::column((0..4_000).map(|i| Value::number(i as f64)).collect()));
-        let row = Value::from(Array { rows: 1, cols: 4_000, data: (0..4_000).map(|i| Value::number(i as f64)).collect() });
+        let row = Value::from(Array::new(1, 4_000, (0..4_000).map(|i| Value::number(i as f64)).collect()).unwrap());
         let mut calls = 0;
         let r = try_zip2(&col, &row, |a, _| {
             calls += 1;

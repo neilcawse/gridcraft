@@ -223,7 +223,7 @@ impl<T: Copy + Ord> Intervals<T> {
 #[derive(Default)]
 pub(super) struct Taken {
     cols: HashMap<(usize, u32), Vec<bool>>,
-    wide: HashMap<usize, Vec<bool>>,
+    wide: HashMap<(usize, u32, u32), Vec<bool>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -383,15 +383,15 @@ impl Graph {
                 true
             });
         }
-        if let Some(v) = self.wide_deps.get(&sheet) {
-            // A wide entry is taken once it covers the cell's column too.
-            v.query_untaken(c.row, c.row, taken.wide.entry(sheet).or_default(), &mut |(c0, c1, k)| {
-                let hit = *c0 <= c.col && c.col <= *c1;
-                if hit {
-                    out.push(*k);
+        if let Some(spans) = self.wide_deps.get(&sheet) {
+            for (&(c0, c1), v) in spans {
+                if c0 <= c.col && c.col <= c1 {
+                    v.query_untaken(c.row, c.row, taken.wide.entry((sheet, c0, c1)).or_default(), &mut |k| {
+                        out.push(*k);
+                        true
+                    });
                 }
-                hit
-            });
+            }
         }
     }
 
