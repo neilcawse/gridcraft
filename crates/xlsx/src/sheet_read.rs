@@ -120,10 +120,13 @@ fn settle_python_spills_past_budget(st: &RowState, sheet: &mut Sheet) {
     }
 }
 
-const MAX_HYPERLINK_CELLS: u64 = 10_000;
+const MAX_HYPERLINK_CELLS: u64 = 250_000;
 /// Target and tooltip bytes kept for hyperlinks of one sheet, over all cells: the same URL is
 /// copied for every cell of its range, so length × cells must stay bounded whatever the file.
-const MAX_HYPERLINK_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_HYPERLINK_BYTES: u64 = 32 * 1024 * 1024;
+/// A single hyperlink range is capped independently so a full-sheet ref cannot consume the
+/// workbook-wide budget before later, useful hyperlink elements are read.
+const MAX_HYPERLINK_RANGE_CELLS: u64 = 10_000;
 const MAX_COLUMN_ASSIGNMENTS: u64 = 1_000_000;
 /// Most dynamic-array and legacy-array ranges of one sheet.
 const MAX_DYNAMIC_RANGES: usize = 65_536;

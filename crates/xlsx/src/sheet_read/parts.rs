@@ -1,6 +1,6 @@
 use super::{
-    AutoFilter, CellRef, Comment, Ctx, El, FilterCriterion, HashMap, Hyperlink, MAX_COLS, MAX_HYPERLINK_BYTES, MAX_HYPERLINK_CELLS, MAX_ROWS,
-    NoteBox, NoteCorner, RangeRef, Rel, Sheet, Table, TableColumn, TotalsFn, XmlColumnPr, from_file, xml,
+    AutoFilter, CellRef, Comment, Ctx, El, FilterCriterion, HashMap, Hyperlink, MAX_COLS, MAX_HYPERLINK_BYTES, MAX_HYPERLINK_CELLS,
+    MAX_HYPERLINK_RANGE_CELLS, MAX_ROWS, NoteBox, NoteCorner, RangeRef, Rel, Sheet, Table, TableColumn, TotalsFn, XmlColumnPr, from_file, xml,
 };
 
 pub(super) fn read_hyperlinks(cx: &mut Ctx<'_>, name: &str, e: &El, rels: &[Rel], sheet: &mut Sheet) {
@@ -8,6 +8,10 @@ pub(super) fn read_hyperlinks(cx: &mut Ctx<'_>, name: &str, e: &El, rels: &[Rel]
     let mut bytes = 0u64;
     for h in e.kids("hyperlink") {
         let Some(range) = h.attr("ref").and_then(RangeRef::parse) else { continue };
+        let range_count = range.count();
+        if range_count > MAX_HYPERLINK_RANGE_CELLS {
+            cx.warn(format!("sheet \"{name}\": hyperlink range {range_count} cells exceeds the per-range limit of {MAX_HYPERLINK_RANGE_CELLS}; excess cells were dropped"));
+        }
         let mut target = h.attr("id").and_then(|id| rels.iter().find(|r| r.id == id)).map(|r| r.target.clone()).unwrap_or_default();
         // A relationship is a file or web page; a bare `location` is a place in this workbook.
         let external = !target.is_empty();
@@ -23,7 +27,7 @@ pub(super) fn read_hyperlinks(cx: &mut Ctx<'_>, name: &str, e: &El, rels: &[Rel]
         }
         let link = Hyperlink { target: target.clone(), tooltip: h.attr("tooltip").map(str::to_string), external };
         let link_bytes = (target.len() + link.tooltip.as_ref().map_or(0, |t| t.len())) as u64;
-        for c in range.iter() {
+        for c in range.iter().take(MAX_HYPERLINK_RANGE_CELLS as usize) {
             if cells >= MAX_HYPERLINK_CELLS {
                 cx.warn(format!("sheet \"{name}\": hyperlinks past the first {MAX_HYPERLINK_CELLS} cells were dropped"));
                 return;

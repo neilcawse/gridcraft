@@ -73,9 +73,9 @@ fn huge_coordinates_and_dimensions() {
     let s = wb.sheet(0).unwrap();
     assert_eq!(s.value(gridcraft_core::CellRef::parse("XFD3").unwrap()), gridcraft_core::Value::Number(7.0));
     assert!(s.cells.len() <= 4);
-    assert!(s.hyperlinks.len() <= 10_000);
+    assert_eq!(s.hyperlinks.len(), 10_000);
     assert_eq!(s.zoom, 400);
-    assert!(rep.warnings.iter().any(|w| w.contains("dropped")));
+    assert!(rep.warnings.iter().any(|w| w.contains("per-range limit") || w.contains("dropped")));
     // Still writable.
     let out = write_xlsx(&wb).unwrap();
     read_xlsx(&out).unwrap();
@@ -243,7 +243,12 @@ fn hyperlinks_past_the_cell_cap_are_reported() {
     let body = r#"<sheetData/><hyperlinks><hyperlink ref="A1:A12000" location="x"/></hyperlinks>"#;
     let (wb, rep) = read_xlsx(&minimal(body, &parts, rels, "")).unwrap();
     assert_eq!(wb.sheet(0).unwrap().hyperlinks.len(), 10_000);
-    assert!(rep.warnings.iter().any(|w| w.contains("hyperlinks past the first 10000 cells were dropped")), "{:?}", rep.warnings);
+    assert!(rep.warnings.iter().any(|w| w.contains("per-range limit")), "{:?}", rep.warnings);
+    // The workbook-wide budget now permits many hyperlink elements beyond the old 10,000 cap.
+    let body = r#"<sheetData/><hyperlinks><hyperlink ref="A1:A10000" location="x"/><hyperlink ref="B1:B10000" location="y"/></hyperlinks>"#;
+    let (wb, rep) = read_xlsx(&minimal(body, &parts, rels, "")).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().hyperlinks.len(), 20_000);
+    assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
     // A small list reads in full with no warning.
     let body = r#"<sheetData/><hyperlinks><hyperlink ref="A1:A3" location="x"/></hyperlinks>"#;
     let (wb, rep) = read_xlsx(&minimal(body, &parts, rels, "")).unwrap();
