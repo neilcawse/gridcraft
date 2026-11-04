@@ -335,7 +335,6 @@ impl SheetApp {
                     self.deliver_file(&name, &b, save_as, true);
                 }
             }
-            }
             // File › Options (`file.options`) and the File tab itself open the Backstage view.
             "options" => self.open_backstage(backstage::Page::Options),
             "backstage" => {
