@@ -157,7 +157,8 @@ fn a_sent_file_reports_whether_saves_may_replace_it() {
     let sent = app.open_sent("Report.xlsx", &bytes).unwrap();
     assert_eq!(sent.doc, app.session.active().unwrap().uid);
     assert!(sent.in_place);
-    assert!(app.open_sent("Broken.xlsx", b"not a workbook").is_none(), "a file that didn't open is no workbook");
+    // Plain text opens (as delimited text, whatever the name); a broken zip doesn't.
+    assert!(app.open_sent("Broken.xlsx", b"PK\x03\x04 not a workbook").is_none(), "a file that didn't open is no workbook");
 }
 
 #[test]
