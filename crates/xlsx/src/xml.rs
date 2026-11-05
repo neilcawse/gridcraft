@@ -372,7 +372,6 @@ pub fn parse_streaming_partial(xml: &[u8], split: &[&str], cb: &mut dyn FnMut(El
         Some(r) => (r, err),
         None => (El::default(), Some(err.unwrap_or_else(|| IoError::Xml("no root element".into())))),
     }
-
 }
 
 // ---------------------------------------------------------------- writing helpers

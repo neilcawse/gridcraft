@@ -167,7 +167,7 @@ pub fn read_sheet(cx: &mut Ctx<'_>, part: &str, name: &str) -> Result<(Sheet, cr
     let rels = cx.pkg.rels(part)?;
     let mut sheet = Sheet::new(name);
     let mut st = RowState::default();
-    let (mut root, err) = xml::parse_streaming_partial(&bytes, &["row"], &mut |row| {
+    let (root, err) = xml::parse_streaming_partial(&bytes, &["row"], &mut |row| {
         read_row(cx, &mut sheet, &mut st, &row);
         Ok(())
     });
@@ -180,11 +180,10 @@ pub fn read_sheet(cx: &mut Ctx<'_>, part: &str, name: &str) -> Result<(Sheet, cr
     settle_python_spills_past_budget(&st, &mut sheet);
     drop(bytes);
 
-    let mut fit_to_page = root.child("sheetPr").and_then(|p| p.child("pageSetUpPr")).is_some_and(|p| p.flag("fitToPage", false));
+    let mut fit_to_page = false;
     let mut column_assignments_left = MAX_COLUMN_ASSIGNMENTS;
     cx.cf_ext_ids.clear();
-    for e in std::mem::take(&mut root.children) {
-        let e = &e;
+    for e in &root.children {
         match e.name.as_str() {
             "sheetPr" => {
                 if let Some(t) = e.child("tabColor") {
@@ -244,7 +243,7 @@ pub fn read_sheet(cx: &mut Ctx<'_>, part: &str, name: &str) -> Result<(Sheet, cr
                 if let Some(s) = e.attr_u32("scale") {
                     sheet.print.scale = s.clamp(10, 400) as u16;
                 }
-                if fit_to_page {
+                if fit_to_page || root.child("sheetPr").and_then(|p| p.child("pageSetUpPr")).is_some_and(|p| p.flag("fitToPage", false)) {
                     let w = e.attr_u32("fitToWidth").unwrap_or(1).min(32767) as u16;
                     let h = e.attr_u32("fitToHeight").unwrap_or(1).min(32767) as u16;
                     sheet.print.fit_to = Some((w, h));
