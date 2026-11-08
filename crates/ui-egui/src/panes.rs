@@ -54,7 +54,10 @@ pub fn show(app: &mut SheetApp, ui: &mut Ui) {
 fn comments(app: &mut SheetApp, ui: &mut Ui) {
     let Some(d) = app.session.active() else { return };
     let Some(sh) = d.wb.active() else { return };
+    let (uid, sheet) = (d.uid, d.wb.active_sheet());
     let list: Vec<(String, gridcraft_engine::model::Comment)> = sh.comments.iter().map(|(c, m)| (c.a1(), m.clone())).collect();
+    // A reply under a comment that is gone (deleted here or by a command) goes with it.
+    app.reply_drafts.retain(|(doc, s, cell), _| *doc != uid || *s != sheet || list.iter().any(|(c, _)| c == cell));
     if list.is_empty() {
         ui.label(egui::RichText::new("No comments on this sheet yet. Select a cell and choose New Comment.").italics());
     }
@@ -81,8 +84,8 @@ fn comments(app: &mut SheetApp, ui: &mut Ui) {
                 for (a, txt) in &c.replies {
                     ui.label(egui::RichText::new(format!("↳ {a}: {txt}")).color(t.text));
                 }
-                let key = egui::Id::unique(("reply", &cell));
-                let mut draft: String = ui.ctx().data_mut(|m| m.get_temp(key)).unwrap_or_default();
+                let key = (uid, sheet, cell.clone());
+                let mut draft = app.reply_drafts.get(&key).cloned().unwrap_or_default();
                 // Buttons first, right to left, so the reply field gets exactly the width they leave:
                 // a field sized by a guess wider than the row pushes the resizable pane wider every frame.
                 ui.horizontal(|ui| {
@@ -101,7 +104,11 @@ fn comments(app: &mut SheetApp, ui: &mut Ui) {
                         }
                     });
                 });
-                ui.ctx().data_mut(|m| m.insert_temp(key, draft));
+                if draft.is_empty() {
+                    app.reply_drafts.remove(&key);
+                } else {
+                    app.reply_drafts.insert(key, draft);
+                }
             });
         ui.add_space(6.0);
     }

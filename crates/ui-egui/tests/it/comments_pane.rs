@@ -103,3 +103,54 @@ fn review_has_a_single_show_comments_button() {
     assert_eq!(buttons_with_tip(&mut h, "New Comment"), 1);
     assert_eq!(buttons_with_tip(&mut h, "Comments pane"), 1);
 }
+
+/// The Comments pane's reply field, by its hint. A field keeps its hint while it holds text,
+/// though only an empty one exposes it as its placeholder.
+fn reply_field(h: &Harness) -> egui_kittest::Node<'_> {
+    use egui_kittest::kittest::NodeT;
+    h.query_all_by_role(egui::accesskit::Role::TextInput)
+        .find(|n| n.accesskit_node().data().placeholder() == Some("Reply…"))
+        .expect("the reply field is drawn")
+}
+
+/// A reply typed under a comment and not sent is unsaved work whether or not the pane is drawn:
+/// the app keeps it (the pane shows it again), and sending it ends the draft.
+#[test]
+fn a_reply_not_sent_is_unsaved_work_with_the_pane_hidden() {
+    use egui_kittest::kittest::NodeT;
+    let mut h = harness();
+    h.state_mut().run("review.newComment", json!({"cell": "B2", "text": "Check the figures"})).unwrap();
+    h.state_mut().run("review.showComments", json!({"on": true})).unwrap();
+    let saved = std::sync::Arc::clone(&h.state().session.active().unwrap().wb);
+    h.state_mut().session.active_mut().unwrap().saved = saved;
+    h.run_steps(3);
+    assert!(!h.state().has_unsaved_work());
+
+    reply_field(&h).click();
+    h.run_steps(1);
+    h.event(Event::Text("Will do".into()));
+    h.run_steps(2);
+    assert!(h.state().has_unsaved_work(), "the typed reply would be lost");
+    assert!(!h.state().session.active().unwrap().is_dirty(), "it is not in the workbook");
+
+    // With the pane hidden nothing draws the reply, but it is still there to come back.
+    h.state_mut().run("review.showComments", json!({"on": false})).unwrap();
+    h.run_steps(3);
+    assert!(
+        h.query_all_by_role(egui::accesskit::Role::TextInput).all(|n| n.accesskit_node().data().placeholder() != Some("Reply…")),
+        "the pane is not drawn"
+    );
+    assert!(h.state().has_unsaved_work(), "hiding the pane doesn't drop the reply");
+    h.state_mut().run("review.showComments", json!({"on": true})).unwrap();
+    h.run_steps(3);
+    assert_eq!(reply_field(&h).value().as_deref(), Some("Will do"), "the pane shows the reply again");
+
+    // Sending it puts the reply in the workbook and ends the draft.
+    h.get_by_label("Send").click();
+    h.run_steps(3);
+    let replies = h.state().session.active().unwrap().wb.active().unwrap().comments.values().next().unwrap().replies.len();
+    assert_eq!(replies, 1);
+    let saved = std::sync::Arc::clone(&h.state().session.active().unwrap().wb);
+    h.state_mut().session.active_mut().unwrap().saved = saved;
+    assert!(!h.state().has_unsaved_work(), "nothing is left to lose");
+}

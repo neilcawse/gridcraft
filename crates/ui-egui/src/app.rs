@@ -33,6 +33,7 @@ impl SheetApp {
             views: HashMap::new(),
             editor: None,
             text_box_editor: None,
+            reply_drafts: std::collections::BTreeMap::new(),
             dialog: None,
             backstage: None,
             message: None,

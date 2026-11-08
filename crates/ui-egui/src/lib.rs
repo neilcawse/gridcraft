@@ -209,6 +209,11 @@ pub struct SheetApp {
     pub views: HashMap<(u64, usize), SheetView>,
     pub editor: Option<editor::EditState>,
     pub text_box_editor: Option<text_box::EditState>,
+    /// Replies typed under a comment in the Comments pane and not sent: (workbook uid, sheet
+    /// index, cell) → text. The app keeps them, not egui's temporary data, so they come back with
+    /// the pane and count as unsaved work ([`SheetApp::has_unsaved_work`]) whether or not the pane
+    /// is drawn.
+    pub(crate) reply_drafts: std::collections::BTreeMap<(u64, usize, String), String>,
     pub dialog: Option<dialogs::Dialog>,
     /// The File tab's Backstage view, when open (UI-only; replaces the ribbon, grid and tabs).
     pub backstage: Option<backstage::Backstage>,

@@ -158,7 +158,9 @@ impl SheetApp {
     }
 
     /// A draft in any window that entering would change something with: a cell or formula-bar
-    /// edit with text, a text box or header/footer edit that changed, unsaved macro steps.
+    /// edit with text, a text box or header/footer edit that changed, unsaved macro steps, or a
+    /// comment reply typed and not sent (the app keeps it, so it counts whether or not the
+    /// Comments pane is drawn).
     pub fn has_unsaved_drafts(&self) -> bool {
         let drafts = |editor: &Option<editor::EditState>, text_box: &Option<text_box::EditState>, grid: &grid::GridState| {
             editor.as_ref().is_some_and(editor::EditState::changes_cell)
@@ -168,5 +170,6 @@ impl SheetApp {
         drafts(&self.editor, &self.text_box_editor, &self.grid)
             || self.parked.values().any(|w| drafts(&w.editor, &w.text_box_editor, &w.grid))
             || self.macros.editor.as_ref().is_some_and(|ed| ed.dirty)
+            || self.reply_drafts.iter().any(|((doc, _, _), text)| !text.trim().is_empty() && self.session.documents().iter().any(|d| d.uid == *doc))
     }
 }
