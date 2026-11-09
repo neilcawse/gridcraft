@@ -1,6 +1,6 @@
 use super::{
-    AutoFilter, CellRef, Comment, Ctx, El, FilterCriterion, HashMap, Hyperlink, MAX_COLS, MAX_HYPERLINK_BYTES, MAX_HYPERLINK_CELLS, MAX_ROWS,
-    NoteBox, NoteCorner, RangeRef, Rel, Sheet, Table, TableColumn, TotalsFn, XmlColumnPr, from_file, xml,
+    AutoFilter, CellRef, Comment, CommentId, Ctx, El, FilterCriterion, HashMap, Hyperlink, MAX_COLS, MAX_HYPERLINK_BYTES, MAX_HYPERLINK_CELLS,
+    MAX_ROWS, NoteBox, NoteCorner, RangeRef, Rel, Sheet, Table, TableColumn, TotalsFn, XmlColumnPr, from_file, xml,
 };
 
 pub(super) fn read_hyperlinks(cx: &mut Ctx<'_>, name: &str, e: &El, rels: &[Rel], sheet: &mut Sheet) {
@@ -175,9 +175,20 @@ pub(super) fn read_comments(x: &El, sheet: &mut Sheet) {
         {
             text = rest.strip_prefix('\n').unwrap_or(rest).to_string();
         }
-        sheet
-            .comments
-            .insert(cell, Comment { author, text, replies: vec![], threaded: false, resolved: false, visible: false, dates: vec![], note_box: None });
+        sheet.comments.insert(
+            cell,
+            Comment {
+                author,
+                text,
+                replies: vec![],
+                threaded: false,
+                resolved: false,
+                visible: false,
+                dates: vec![],
+                note_box: None,
+                id: CommentId::new(),
+            },
+        );
     }
 }
 
@@ -249,7 +260,17 @@ pub(super) fn read_threaded(cx: &Ctx<'_>, x: &El, sheet: &mut Sheet) {
                 let dates = if date.is_empty() { vec![] } else { vec![date] };
                 sheet.comments.insert(
                     cell,
-                    Comment { author, text, replies: vec![], threaded: true, resolved: t.flag("done", false), visible: false, dates, note_box: None },
+                    Comment {
+                        author,
+                        text,
+                        replies: vec![],
+                        threaded: true,
+                        resolved: t.flag("done", false),
+                        visible: false,
+                        dates,
+                        note_box: None,
+                        id: CommentId::new(),
+                    },
                 );
             }
         }

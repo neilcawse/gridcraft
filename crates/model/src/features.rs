@@ -1,6 +1,8 @@
 //! Sheet features beyond cells: tables, conditional formatting, data validation, comments,
 //! hyperlinks, charts, images, autofilter, print settings.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use gridcraft_core::{CellRef, RangeRef};
 use serde::{Deserialize, Serialize};
 
@@ -335,6 +337,64 @@ pub struct Comment {
     /// here, or a file without the shape) writes the default box next to the cell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note_box: Option<NoteBox>,
+    /// Which comment this is while the program runs. Never saved: a comment made, read from a file
+    /// or deserialized gets a new one. `clone` keeps it (an undo version or a copied workbook holds
+    /// the same comments); [`Comment::duplicate`] makes another comment. See [`CommentId`].
+    #[serde(skip)]
+    pub id: CommentId,
+}
+
+impl Comment {
+    /// Another comment that says what this one says: a copy with an id of its own.
+    ///
+    /// `clone` is the *same* comment and keeps the id. Use `duplicate` wherever a comment is written
+    /// into a second place while the first stays (copy and paste), or a reply typed under one would
+    /// show under both. Anything that only moves a comment, or keeps a version of it (insert and
+    /// delete, sort, cut and paste, undo), keeps the id.
+    pub fn duplicate(&self) -> Comment {
+        Comment { id: CommentId::new(), ..self.clone() }
+    }
+}
+
+/// Which [`Comment`] a comment is, for as long as the program runs.
+///
+/// A comment gets its id when it is made or read, and keeps it wherever it goes: the id rides with
+/// the comment through inserting and deleting rows, columns and cells, sorting, cut and paste, undo
+/// and redo. What must follow one comment and no other (a reply typed under it and not sent) keys
+/// on the id, not on the cell, which another comment can take over.
+///
+/// The id is not part of what a comment says. It is never saved, and any two ids compare equal, so
+/// comparing comments (file round trips, snapshots) compares what they say. To tell ids apart, use
+/// [`get`](CommentId::get).
+#[derive(Clone, Copy, Debug)]
+pub struct CommentId(u64);
+
+/// The next number [`CommentId::new`] hands out.
+static NEXT_COMMENT_ID: AtomicU64 = AtomicU64::new(1);
+
+impl CommentId {
+    /// An id no other comment has had in this run of the program.
+    pub fn new() -> CommentId {
+        CommentId(NEXT_COMMENT_ID.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// The number, for telling ids apart: `==` on two ids is always true.
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for CommentId {
+    /// A new id, as for a comment read from a file: it is a comment of its own.
+    fn default() -> CommentId {
+        CommentId::new()
+    }
+}
+
+impl PartialEq for CommentId {
+    fn eq(&self, _: &CommentId) -> bool {
+        true
+    }
 }
 
 /// A note box's place and size, from the note's VML shape: Excel's `<x:Anchor>` with its corners
@@ -945,5 +1005,74 @@ mod trendline_forecast_tests {
         assert_eq!(Trendline::clamp_forecast(f64::INFINITY), 0.0);
         assert_eq!(Trendline::clamp_forecast(f64::NEG_INFINITY), 0.0);
         assert_eq!(Trendline::clamp_forecast(1e300), Trendline::MAX_FORECAST);
+    }
+}
+
+#[cfg(test)]
+mod comment_id_tests {
+    use super::{Comment, CommentId};
+
+    /// A threaded comment by Ann with one reply; each call is a comment of its own.
+    fn comment(text: &str) -> Comment {
+        Comment {
+            author: "Ann".into(),
+            text: text.into(),
+            replies: vec![("Bob".into(), "reply".into())],
+            threaded: true,
+            resolved: false,
+            visible: false,
+            dates: vec![],
+            note_box: None,
+            id: CommentId::new(),
+        }
+    }
+
+    #[test]
+    fn a_clone_is_the_same_comment_and_every_other_way_to_get_a_comment_is_a_new_one() {
+        let a = comment("a");
+        assert_eq!(a.clone().id.get(), a.id.get(), "a clone keeps the id: an undo version holds the same comment");
+        assert_eq!(a.clone().clone().id.get(), a.id.get());
+        let ids = [a.id.get(), CommentId::new().get(), CommentId::default().get(), a.duplicate().id.get(), comment("a").id.get()];
+        for (i, x) in ids.iter().enumerate() {
+            for y in &ids[i + 1..] {
+                assert_ne!(x, y, "every id differs: {ids:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_duplicate_says_what_the_original_says() {
+        let a = comment("a");
+        let b = a.duplicate();
+        assert_ne!(b.id.get(), a.id.get());
+        assert_eq!((&b.author, &b.text, &b.replies, b.threaded), (&a.author, &a.text, &a.replies, a.threaded));
+        assert_eq!(b, a);
+    }
+
+    #[test]
+    fn comments_compare_by_what_they_say_not_by_id() {
+        let (x, y) = (comment("a"), comment("a"));
+        assert_ne!(x.id.get(), y.id.get());
+        assert_eq!(x.id, y.id, "ids are equal to every id, so they never decide a comparison");
+        assert_eq!(x, y, "equal comments with different ids are equal");
+        assert_ne!(x, comment("b"), "the content still decides");
+        let mut z = comment("a");
+        z.replies.clear();
+        assert_ne!(x, z);
+    }
+
+    #[test]
+    fn an_id_is_never_saved_and_a_comment_read_back_is_a_new_comment() -> Result<(), Box<dyn std::error::Error>> {
+        let a = comment("a");
+        let json = serde_json::to_string(&a)?;
+        let saved: serde_json::Value = serde_json::from_str(&json)?;
+        let keys: Vec<&String> = saved.as_object().map(|o| o.keys().collect()).unwrap_or_default();
+        assert!(!keys.is_empty() && !keys.iter().any(|k| k.as_str() == "id"), "the id is not in the file: {json}");
+
+        let (b, c): (Comment, Comment) = (serde_json::from_str(&json)?, serde_json::from_str(&json)?);
+        assert_eq!((&b, &c), (&a, &a), "what the comment says survives");
+        let ids = [a.id.get(), b.id.get(), c.id.get()];
+        assert!(ids[0] != ids[1] && ids[0] != ids[2] && ids[1] != ids[2], "each comment read is a comment of its own: {ids:?}");
+        Ok(())
     }
 }

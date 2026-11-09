@@ -288,3 +288,157 @@ fn deleting_the_sheet_takes_its_unsent_reply_with_it() {
     h.run_steps(3);
     assert!(replies_on(&h, "Beta").is_empty(), "nothing was sent to Beta's comment");
 }
+
+/// The reply field drawn under the thread whose comment says `thread`: the nearest one below its
+/// text. The pane lists the threads in cell order, which an insertion above doesn't change, so a
+/// thread is told apart by what it says and not by its place.
+fn reply_field_under<'a>(h: &'a Harness, thread: &str) -> egui_kittest::Node<'a> {
+    use egui_kittest::kittest::NodeT;
+    let below = h.get_by_label(thread).rect().bottom();
+    h.query_all_by_role(egui::accesskit::Role::TextInput)
+        .filter(|n| n.accesskit_node().data().placeholder() == Some("Reply…") && n.rect().top() >= below)
+        .min_by(|a, b| a.rect().top().total_cmp(&b.rect().top()))
+        .unwrap_or_else(|| panic!("a reply field is drawn under {thread:?}"))
+}
+
+/// What the reply field under `thread` holds.
+fn reply_under(h: &Harness, thread: &str) -> String {
+    reply_field_under(h, thread).value().unwrap_or_default()
+}
+
+/// Types `text` into the reply field under `thread`.
+fn type_reply_under(h: &mut Harness, thread: &str, text: &str) {
+    reply_field_under(h, thread).click();
+    h.run_steps(1);
+    h.event(Event::Text(text.into()));
+    h.run_steps(2);
+}
+
+/// Clicks the Send button in the row of the reply field under `thread`.
+fn send_under(h: &mut Harness, thread: &str) {
+    let y = reply_field_under(h, thread).rect().center().y;
+    h.get_all_by_label("Send")
+        .min_by(|a, b| (a.rect().center().y - y).abs().total_cmp(&(b.rect().center().y - y).abs()))
+        .expect("a Send button is drawn")
+        .click();
+    h.run_steps(3);
+}
+
+/// The replies under the comment at `cell` of the shown sheet.
+fn replies_at(h: &Harness, cell: &str) -> Vec<String> {
+    let at = gridcraft_engine::core::CellRef::parse(cell).unwrap();
+    let sheet = h.state().session.active().unwrap().wb.active().unwrap();
+    sheet.comments.get(&at).map(|c| c.replies.iter().map(|(_, text)| text.clone()).collect()).unwrap_or_default()
+}
+
+/// Sheet Alpha with the comments "First thread" at `first` and "Second thread" at `second`, saved,
+/// with the Comments pane open.
+fn two_threads(h: &mut Harness, first: &str, second: &str) {
+    let state = h.state_mut();
+    state.run("sheet.rename", json!({"name": "Alpha"})).unwrap();
+    state.run("review.newComment", json!({"cell": first, "text": "First thread"})).unwrap();
+    state.run("review.newComment", json!({"cell": second, "text": "Second thread"})).unwrap();
+    state.run("review.showComments", json!({"on": true})).unwrap();
+    mark_saved(state);
+    h.run_steps(3);
+}
+
+/// Runs `command`, leaves the workbook saved so that only the reply can be unsaved work, and draws.
+fn edit_and_settle(h: &mut Harness, command: &str, params: serde_json::Value) {
+    h.state_mut().run(command, params).unwrap();
+    mark_saved(h.state_mut());
+    h.run_steps(3);
+}
+
+/// The reviewer's repro (AI-9882, M1). A reply is typed under the second thread and the pane is
+/// hidden. `command` then moves the second thread from `second` to `second_after` and the first from
+/// `first` to `first_after`, so that the first now sits at the address the reply was typed at. With
+/// the pane back, the reply is under the thread it was typed under and the other thread has none,
+/// also after undo and redo; Send posts to the thread that moved and to no other.
+fn the_reply_stays_with_its_thread(first: &str, second: &str, command: &str, params: serde_json::Value, first_after: &str, second_after: &str) {
+    let mut h = harness();
+    two_threads(&mut h, first, second);
+    type_reply_under(&mut h, "Second thread", "Will do");
+    assert!(h.state().has_unsaved_work(), "the typed reply would be lost");
+    h.state_mut().run("review.showComments", json!({"on": false})).unwrap();
+    h.run_steps(3);
+    assert!(h.state().has_unsaved_work(), "hiding the pane doesn't drop the reply");
+
+    edit_and_settle(&mut h, command, params);
+    assert!(h.state().has_unsaved_work(), "{command}: the reply is unsent work, and the workbook is saved");
+    h.state_mut().run("review.showComments", json!({"on": true})).unwrap();
+    h.run_steps(3);
+    assert_eq!(reply_under(&h, "Second thread"), "Will do", "{command}: the reply is under the thread it was typed under");
+    assert_eq!(reply_under(&h, "First thread"), "", "{command}: the thread now at {second} has no reply typed under it");
+    assert!(h.state().has_unsaved_work(), "{command}: showing the pane doesn't change that");
+
+    // Undo puts both threads back, redo moves them again: the reply stays with its thread.
+    edit_and_settle(&mut h, "edit.undo", json!({}));
+    assert_eq!(reply_under(&h, "Second thread"), "Will do", "{command}, undone");
+    assert_eq!(reply_under(&h, "First thread"), "", "{command}, undone");
+    assert!(h.state().has_unsaved_work(), "{command}, undone");
+    edit_and_settle(&mut h, "edit.redo", json!({}));
+    assert_eq!(reply_under(&h, "Second thread"), "Will do", "{command}, redone");
+    assert_eq!(reply_under(&h, "First thread"), "", "{command}, redone");
+    assert!(h.state().has_unsaved_work(), "{command}, redone");
+
+    // Sending a blank field posts nothing; sending the reply posts it to the thread it is for.
+    send_under(&mut h, "First thread");
+    assert!(replies_at(&h, first_after).is_empty() && replies_at(&h, second_after).is_empty(), "{command}: an empty field sends nothing");
+    send_under(&mut h, "Second thread");
+    assert_eq!(replies_at(&h, second_after), ["Will do"], "{command}: the reply is in the thread it was typed under");
+    assert!(replies_at(&h, first_after).is_empty(), "{command}: the thread now at {second} got none");
+    mark_saved(h.state_mut());
+    assert!(!h.state().has_unsaved_work(), "{command}: sending it leaves nothing to lose");
+    assert_eq!(reply_under(&h, "Second thread"), "", "{command}: and the field is empty again");
+}
+
+#[test]
+fn a_reply_not_sent_stays_with_its_thread_when_a_row_is_inserted_above() {
+    the_reply_stays_with_its_thread("B1", "B2", "home.insertRows", json!({"rows": "1:1"}), "B2", "B3");
+}
+
+#[test]
+fn a_reply_not_sent_stays_with_its_thread_when_a_column_is_inserted_to_the_left() {
+    the_reply_stays_with_its_thread("A2", "B2", "home.insertColumns", json!({"cols": "A:A"}), "B2", "C2");
+}
+
+#[test]
+fn a_reply_not_sent_stays_with_its_thread_when_cells_are_inserted_shifting_down() {
+    the_reply_stays_with_its_thread("B1", "B2", "home.insertCells", json!({"range": "B1:B1", "shift": "down"}), "B2", "B3");
+}
+
+/// A comment written over the one a reply was typed under is another comment, though it sits at the
+/// same cell and says the same: it has no reply, and the old reply is no longer unsaved work. The
+/// same when the comment is edited in place (it is the same comment, but no longer what the reply
+/// answers).
+#[test]
+fn a_comment_written_over_another_does_not_inherit_its_unsent_reply() {
+    for how in ["delete and write again", "edit in place"] {
+        let mut h = harness();
+        h.state_mut().run("review.newComment", json!({"cell": "B2", "text": "Check the figures"})).unwrap();
+        h.state_mut().run("review.showComments", json!({"on": true})).unwrap();
+        mark_saved(h.state_mut());
+        h.run_steps(3);
+        type_reply_under(&mut h, "Check the figures", "Will do");
+        h.state_mut().run("review.showComments", json!({"on": false})).unwrap();
+        h.run_steps(3);
+        assert!(h.state().has_unsaved_work(), "{how}: setup: the reply is pending");
+
+        let thread = if how == "edit in place" {
+            edit_and_settle(&mut h, "review.newComment", json!({"cell": "B2", "text": "Check the other figures"}));
+            "Check the other figures"
+        } else {
+            h.state_mut().run("review.deleteComment", json!({"cell": "B2"})).unwrap();
+            edit_and_settle(&mut h, "review.newComment", json!({"cell": "B2", "text": "Check the figures"}));
+            "Check the figures"
+        };
+        assert!(!h.state().has_unsaved_work(), "{how}: the reply was for a comment that is not there any more");
+        h.state_mut().run("review.showComments", json!({"on": true})).unwrap();
+        h.run_steps(3);
+        assert_eq!(reply_under(&h, thread), "", "{how}: the comment at B2 has no reply");
+        send_under(&mut h, thread);
+        assert!(replies_at(&h, "B2").is_empty(), "{how}: nothing was sent to it");
+        assert!(!h.state().has_unsaved_work(), "{how}");
+    }
+}

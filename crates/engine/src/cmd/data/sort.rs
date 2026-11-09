@@ -144,7 +144,8 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
         let lanes: Vec<u32> = if by_cols { (body.start.row..=body.end.row).collect() } else { (body.start.col..=body.end.col).collect() };
         // Notes and hyperlinks hang off a cell, not a row, so they travel with the row they
         // describe — the way cell pictures and row heights do. Collect them before inserting,
-        // so a swap can't resurrect one from a destination that is also a source.
+        // so a swap can't resurrect one from a destination that is also a source. Every note is
+        // placed once (the body is a permutation), so a clone is the same comment: it keeps its id.
         let side: Vec<(CellRef, Comment)> = order
             .iter()
             .enumerate()

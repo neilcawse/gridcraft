@@ -4,9 +4,9 @@
 use gridcraft_core::{CellRef, MAX_ROWS, RangeRef};
 use gridcraft_formula::adjust::{Axis, Edit};
 use gridcraft_model::{
-    Anchor, BorderLine, BorderStyle, Borders, Cell, CellPicture, CfOperator, CfRule, CfValueKind, Chart, ChartKind, Color, Comment, CondFormat,
-    DrawingRef, Fill, Formula, Hyperlink, Image, LegendPos, Series, Shape, ShapeKind, Sheet, Sparkline, SparklineKind, Style, Table, TableColumn,
-    TotalsFn, Underline, Workbook,
+    Anchor, BorderLine, BorderStyle, Borders, Cell, CellPicture, CfOperator, CfRule, CfValueKind, Chart, ChartKind, Color, Comment, CommentId,
+    CondFormat, DrawingRef, Fill, Formula, Hyperlink, Image, LegendPos, Series, Shape, ShapeKind, Sheet, Sparkline, SparklineKind, Style, Table,
+    TableColumn, TotalsFn, Underline, Workbook,
 };
 use serde_json::{Value as Json, json};
 
@@ -1411,7 +1411,8 @@ fn comment(s: &mut Session, p: &Json, threaded: bool) -> Result<Json> {
     edit(s, |cx| {
         let comments = &mut cx.sheet_mut(sheet)?.comments;
         // Writing a note on a cell that has one edits it, as Excel's Edit Note does: the box, the
-        // replies, the dates and who wrote it stay. A note replaces a comment and vice versa.
+        // replies, the dates, who wrote it and which comment it is (its id) stay. A note replaces a
+        // comment and vice versa: that is another comment, with an id of its own.
         if let Some(c) = comments.get_mut(&at).filter(|c| c.threaded == threaded) {
             c.text = text.clone();
             if let Some(author) = named.clone() {
@@ -1430,6 +1431,7 @@ fn comment(s: &mut Session, p: &Json, threaded: bool) -> Result<Json> {
                 visible: false,
                 dates: vec![],
                 note_box: None,
+                id: CommentId::new(),
             },
         );
         Ok(json!({"cell": at.a1()}))

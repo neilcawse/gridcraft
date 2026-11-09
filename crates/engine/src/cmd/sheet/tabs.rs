@@ -192,6 +192,12 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
             sh.name = name;
             sh.tables.clear(); // table names must be unique
             sh.preserved = None; // kept file content (form controls, OLE objects…) stays with the original
+            // The copy's comments are other comments that say what the originals say. With ids of
+            // their own, a reply typed under one is never found under the other, whatever the two
+            // sheets are called later (a rename can hand one's name to the other).
+            for comment in sh.comments.values_mut() {
+                comment.id = gridcraft_model::CommentId::new();
+            }
             let at = to.min(n);
             // The copy gets its own copies of the sheet's names, referring to the copy.
             let copies: Vec<gridcraft_model::DefinedName> = cx

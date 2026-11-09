@@ -141,7 +141,7 @@ fn zip_bomb_is_rejected() {
 #[test]
 fn hostile_threaded_comments_persons_and_note_vml() {
     use gridcraft_core::CellRef;
-    use gridcraft_model::{Comment, Workbook};
+    use gridcraft_model::{Comment, CommentId, Workbook};
     let mut wb = Workbook::new();
     let s = std::sync::Arc::make_mut(&mut wb.sheets[0]);
     let c = |threaded| Comment {
@@ -153,6 +153,7 @@ fn hostile_threaded_comments_persons_and_note_vml() {
         visible: false,
         dates: vec![],
         note_box: None,
+        id: CommentId::new(),
     };
     s.comments.insert(CellRef::new(0, 0), c(true));
     s.comments.insert(CellRef::new(1, 1), c(false));

@@ -23,7 +23,7 @@ pub fn deserialize<'de, D: Deserializer<'de>, V: Deserialize<'de>>(d: D) -> Resu
 
 #[cfg(test)]
 mod tests {
-    use crate::{Comment, Hyperlink, Sheet};
+    use crate::{Comment, CommentId, Hyperlink, Sheet};
     use gridcraft_core::CellRef;
 
     #[test]
@@ -42,6 +42,7 @@ mod tests {
                 visible: false,
                 dates: vec![],
                 note_box: None,
+                id: CommentId::new(),
             },
         );
         s.hyperlinks.insert(c3, Hyperlink { target: "Sheet1!A1".into(), tooltip: Some("jump".into()), external: false });

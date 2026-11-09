@@ -3,7 +3,7 @@
 use std::io::Read;
 
 use gridcraft_core::CellRef;
-use gridcraft_model::{Comment, NoteBox, NoteCorner, Workbook};
+use gridcraft_model::{Comment, CommentId, NoteBox, NoteCorner, Workbook};
 
 use super::minimal;
 use crate::{read_xlsx, write_xlsx};
@@ -95,6 +95,7 @@ fn a_new_note_gets_the_default_box() {
         visible: false,
         dates: vec![],
         note_box: None,
+        id: CommentId::new(),
     };
     wb.sheet_mut(0).unwrap().comments.insert(b2(), note);
     let vml = written_vml(&write_xlsx(&wb).unwrap());

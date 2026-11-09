@@ -83,7 +83,7 @@ fn comments(app: &mut SheetApp, ui: &mut Ui) {
                 for (a, txt) in &c.replies {
                     ui.label(egui::RichText::new(format!("↳ {a}: {txt}")).color(t.text));
                 }
-                let mut draft = app.reply_drafts.get(uid, &sheet, at);
+                let mut draft = app.reply_drafts.get(uid, &sheet, &c);
                 // Buttons first, right to left, so the reply field gets exactly the width they leave:
                 // a field sized by a guess wider than the row pushes the resizable pane wider every frame.
                 ui.horizontal(|ui| {
@@ -102,7 +102,7 @@ fn comments(app: &mut SheetApp, ui: &mut Ui) {
                         }
                     });
                 });
-                app.reply_drafts.set(uid, &sheet, at, draft);
+                app.reply_drafts.set(uid, &sheet, &c, draft);
             });
         ui.add_space(6.0);
     }

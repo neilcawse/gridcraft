@@ -7,8 +7,8 @@ use gridcraft_core::date::{serial_from_ymd, time_fraction};
 use gridcraft_core::{CellError, CellRef, DateSystem, MAX_COLS, MAX_ROWS, RangeRef, Value};
 use gridcraft_formula::Expr;
 use gridcraft_model::{
-    AutoFilter, Cell, CfOperator, CfRule, CfValueKind, Comment, CondFormat, EditRange, ErrorStyle, FilterCriterion, Formula, Hyperlink, LineInfo,
-    NoteBox, NoteCorner, Orientation, PasswordHash, Sheet, SheetProtection, Sparkline, SparklineKind, Style, Table, TableColumn, TotalsFn,
+    AutoFilter, Cell, CfOperator, CfRule, CfValueKind, Comment, CommentId, CondFormat, EditRange, ErrorStyle, FilterCriterion, Formula, Hyperlink,
+    LineInfo, NoteBox, NoteCorner, Orientation, PasswordHash, Sheet, SheetProtection, Sparkline, SparklineKind, Style, Table, TableColumn, TotalsFn,
     Validation, ValidationKind, XmlColumnPr,
 };
 

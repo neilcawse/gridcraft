@@ -8,6 +8,15 @@ fn tiled_cells(rows: u32, cols: u32, tiles_r: u32, tiles_c: u32) -> impl Iterato
     (0..tiles_r).flat_map(move |tr| (0..tiles_c).flat_map(move |tc| (0..rows).flat_map(move |r| (0..cols).map(move |c| (tr, tc, r, c)))))
 }
 
+/// The comment pasted at a destination cell, from the clipboard's copy of the source cell's.
+///
+/// A cut takes the comment out of the source sheet before the paste, so the first tile is that same
+/// comment arriving, once, and keeps its id. Every other paste (a copy, a further tile) leaves the
+/// original where it is and writes another comment, which gets an id of its own.
+fn pasted_comment(source: &gridcraft_model::Comment, cut_move: bool, tile: (u32, u32)) -> gridcraft_model::Comment {
+    if cut_move && tile == (0, 0) { source.clone() } else { source.duplicate() }
+}
+
 fn apply_operation(op: &str, old: &Cell, new: &mut Cell) {
     let operand = new.value.clone();
     if let (Ok(x), Ok(y)) = (old.value.to_number(), operand.to_number())
@@ -261,8 +270,9 @@ pub(super) fn paste_special(s: &mut Session, p: &Json) -> Result<Json> {
             }
             match what {
                 What::Comments => {
-                    if let Some(cm) = src_sheet.comments.get(&sc).cloned() {
-                        cx.sheet_mut(dest_sheet)?.comments.insert(dest, cm);
+                    // Pasting notes never clears the source, even from a cut: another comment.
+                    if let Some(cm) = src_sheet.comments.get(&sc) {
+                        cx.sheet_mut(dest_sheet)?.comments.insert(dest, cm.duplicate());
                     }
                 }
                 What::ColumnWidths => {
@@ -271,8 +281,8 @@ pub(super) fn paste_special(s: &mut Session, p: &Json) -> Result<Json> {
                     }
                 }
                 What::All => {
-                    if let Some(cm) = src_sheet.comments.get(&sc).cloned() {
-                        cx.sheet_mut(dest_sheet)?.comments.insert(dest, cm);
+                    if let Some(cm) = src_sheet.comments.get(&sc) {
+                        cx.sheet_mut(dest_sheet)?.comments.insert(dest, pasted_comment(cm, cut_move, (tr, tc)));
                     }
                     if let Some(h) = src_sheet.hyperlinks.get(&sc).cloned() {
                         cx.sheet_mut(dest_sheet)?.hyperlinks.insert(dest, h);

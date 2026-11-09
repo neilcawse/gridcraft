@@ -1,6 +1,6 @@
 use super::{
-    Cell, Color, Comment, EngineError, Hyperlink, Json, RangeRef, Result, Session, Underline, Workbook, bool_param, cell_param_on, edit, json, ok,
-    split_sheet, str_param, target_ranges, target_sheet,
+    Cell, Color, Comment, CommentId, EngineError, Hyperlink, Json, RangeRef, Result, Session, Underline, Workbook, bool_param, cell_param_on, edit,
+    json, ok, split_sheet, str_param, target_ranges, target_sheet,
 };
 
 // ---------------------------------------------------------------- links & comments
@@ -90,7 +90,8 @@ pub(super) fn comment(s: &mut Session, p: &Json, threaded: bool) -> Result<Json>
     edit(s, |cx| {
         let comments = &mut cx.sheet_mut(sheet)?.comments;
         // Writing a note on a cell that has one edits it, as Excel's Edit Note does: the box, the
-        // replies, the dates and who wrote it stay. A note replaces a comment and vice versa.
+        // replies, the dates, who wrote it and which comment it is (its id) stay. A note replaces a
+        // comment and vice versa: that is another comment, with an id of its own.
         if let Some(c) = comments.get_mut(&at).filter(|c| c.threaded == threaded) {
             c.text = text.clone();
             if let Some(author) = named.clone() {
@@ -109,6 +110,7 @@ pub(super) fn comment(s: &mut Session, p: &Json, threaded: bool) -> Result<Json>
                 visible: false,
                 dates: vec![],
                 note_box: None,
+                id: CommentId::new(),
             },
         );
         Ok(json!({"cell": at.a1()}))

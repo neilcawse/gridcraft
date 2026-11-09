@@ -97,6 +97,8 @@ fn slide_together(wb: &gridcraft_model::Workbook, sheet: usize, areas: &[RangeRe
                 dst.cell_pictures.insert(to, picture.clone());
             }
         }
+        // The packed copy is the clipboard's own workbook and each comment lands in it once, so a
+        // clone is fine; pasting from it writes another comment (`paste_special`).
         for (c, comment) in src.comments.iter().filter(|(c, _)| a.contains(**c)) {
             if let Some(to) = c.offset(dr, dc) {
                 dst.comments.insert(to, comment.clone());

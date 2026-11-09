@@ -50,7 +50,8 @@ pub(super) fn remove_duplicates(s: &mut Session, p: &Json) -> Result<Json> {
             })
             .collect();
         // Rows a filter keeps are compacted to `start + i`, so the notes and hyperlinks that
-        // describe them move with them; the ones on removed rows are dropped with the row.
+        // describe them move with them (a moved note is the same comment, with its id); the ones on
+        // removed rows are dropped with the row.
         let notes: Vec<_> = keep
             .iter()
             .enumerate()
