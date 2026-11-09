@@ -8,7 +8,7 @@ use super::updates_ui;
 use super::{
     CellRef, HashMap, INTERFACE_SCALE_MAX, INTERFACE_SCALE_MIN, Json, Notice, Perf, RangeRef, Session, SheetApp, UiRequest, UiState, backstage,
     clamp_interface_scale, clean_error, control, desktop_theme, dialogs, editor, floating_pictures, formula_bar, formula_locale, grid, i18n, json,
-    keytips, macro_ui, panes, pivot_pane, printing, ribbon, tabs, text_box, theme, widgets,
+    keytips, macro_ui, panes, pivot_pane, printing, reply_drafts, ribbon, tabs, text_box, theme, widgets,
 };
 
 mod clipboard;
@@ -33,7 +33,7 @@ impl SheetApp {
             views: HashMap::new(),
             editor: None,
             text_box_editor: None,
-            reply_drafts: std::collections::BTreeMap::new(),
+            reply_drafts: reply_drafts::ReplyDrafts::default(),
             dialog: None,
             backstage: None,
             message: None,
@@ -109,6 +109,9 @@ impl SheetApp {
         // A keytip control request lives one frame: the ribbon consumes it during `ui`, and
         // anything that never reached a control (collapsed ribbon, tab switch) is dropped.
         self.ui.keytip_invoke = None;
+        // Replies under comments that are gone (a deleted comment or sheet, a closed workbook) go
+        // with them, whichever pane is drawn.
+        self.reply_drafts.forget_stale(&self.session);
         // Floating pictures' textures go with their workbook, even when no sheet is painted.
         let open: Vec<u64> = self.session.documents().iter().map(|d| d.uid).collect();
         floating_pictures::forget_closed(ctx, &open);

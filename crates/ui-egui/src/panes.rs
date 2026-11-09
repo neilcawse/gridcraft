@@ -54,15 +54,14 @@ pub fn show(app: &mut SheetApp, ui: &mut Ui) {
 fn comments(app: &mut SheetApp, ui: &mut Ui) {
     let Some(d) = app.session.active() else { return };
     let Some(sh) = d.wb.active() else { return };
-    let (uid, sheet) = (d.uid, d.wb.active_sheet());
-    let list: Vec<(String, gridcraft_engine::model::Comment)> = sh.comments.iter().map(|(c, m)| (c.a1(), m.clone())).collect();
-    // A reply under a comment that is gone (deleted here or by a command) goes with it.
-    app.reply_drafts.retain(|(doc, s, cell), _| *doc != uid || *s != sheet || list.iter().any(|(c, _)| c == cell));
+    let (uid, sheet) = (d.uid, sh.name.clone());
+    let list: Vec<(gridcraft_engine::core::CellRef, gridcraft_engine::model::Comment)> = sh.comments.iter().map(|(c, m)| (*c, m.clone())).collect();
     if list.is_empty() {
         ui.label(egui::RichText::new("No comments on this sheet yet. Select a cell and choose New Comment.").italics());
     }
     let t = crate::theme::Tokens::get(ui.ctx());
-    for (cell, c) in list {
+    for (at, c) in list {
+        let cell = at.a1();
         egui::Frame::NONE
             .fill(if c.resolved { t.window } else { t.menu_bg })
             .corner_radius(6.0)
@@ -84,8 +83,7 @@ fn comments(app: &mut SheetApp, ui: &mut Ui) {
                 for (a, txt) in &c.replies {
                     ui.label(egui::RichText::new(format!("↳ {a}: {txt}")).color(t.text));
                 }
-                let key = (uid, sheet, cell.clone());
-                let mut draft = app.reply_drafts.get(&key).cloned().unwrap_or_default();
+                let mut draft = app.reply_drafts.get(uid, &sheet, at);
                 // Buttons first, right to left, so the reply field gets exactly the width they leave:
                 // a field sized by a guess wider than the row pushes the resizable pane wider every frame.
                 ui.horizontal(|ui| {
@@ -104,11 +102,7 @@ fn comments(app: &mut SheetApp, ui: &mut Ui) {
                         }
                     });
                 });
-                if draft.is_empty() {
-                    app.reply_drafts.remove(&key);
-                } else {
-                    app.reply_drafts.insert(key, draft);
-                }
+                app.reply_drafts.set(uid, &sheet, at, draft);
             });
         ui.add_space(6.0);
     }
