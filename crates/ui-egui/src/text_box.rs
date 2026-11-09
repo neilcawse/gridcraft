@@ -135,15 +135,7 @@ pub(crate) fn show(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, sh: &gridcr
         app.session.mode = Mode::Ready;
         return;
     };
-    let save = ui.input_mut(|i| {
-        if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::S) {
-            Some("file.saveAs")
-        } else if i.consume_key(Modifiers::COMMAND, Key::S) {
-            Some("file.save")
-        } else {
-            None
-        }
-    });
+    let save = crate::keymap::take_save_shortcut(ui);
     let rect = geo.mirror_rect(crate::chartview::anchor_rect(geo, sh, &shape.anchor).shrink(4.0).intersect(geo.cells));
     if !rect.is_positive() {
         ed.rect = None;

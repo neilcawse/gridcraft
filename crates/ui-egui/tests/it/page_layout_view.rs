@@ -1,13 +1,18 @@
 //! Page Layout view through real pointer and keyboard input: cells are hit through the page
-//! transform, and headers are edited in place, committed on a click elsewhere, and undoable.
+//! transform, and headers are edited in place, committed on a click elsewhere, and undoable. A
+//! header still being typed is unsaved work: Save, the File tab and Close all enter it first.
+
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::Arc;
 
 use egui::{Event, Key, Modifiers, PointerButton, Pos2, pos2, vec2};
 use egui_kittest::kittest::Queryable;
 use gridcraft_engine::Session;
 use gridcraft_engine::core::CellRef;
-use gridcraft_engine::model::SheetViewMode;
-use gridcraft_ui_egui::SheetApp;
+use gridcraft_engine::model::{SheetViewMode, Workbook};
 use gridcraft_ui_egui::grid::Geo;
+use gridcraft_ui_egui::{HostSave, Services, SheetApp};
 use serde_json::json;
 
 type Harness = egui_kittest::Harness<'static, SheetApp>;
@@ -18,6 +23,11 @@ fn fixture() -> Harness {
 
 /// `rtl` mirrors the sheet; `setup` is extra `pageLayout.pageSetup` params.
 fn fixture_with(rtl: bool, setup: Option<serde_json::Value>) -> Harness {
+    harness_of(crate::common::app(page_layout_session(rtl, setup)))
+}
+
+/// Sixty numbers in column A and the header "Left" on the left, shown in Page Layout view.
+fn page_layout_session(rtl: bool, setup: Option<serde_json::Value>) -> Session {
     let mut session = Session::new();
     session.new_workbook();
     if rtl {
@@ -32,9 +42,13 @@ fn fixture_with(rtl: bool, setup: Option<serde_json::Value>) -> Harness {
     }
     session.execute("pageLayout.headerFooter", json!({"header": "&LLeft"})).unwrap();
     session.execute("view.pageLayout", json!({})).unwrap();
+    session
+}
+
+fn harness_of(app: SheetApp) -> Harness {
     crate::common::harness_with(
         crate::common::builder().with_size(vec2(1200.0, 900.0)).with_step_dt(1.0 / 60.0).with_os(egui::os::OperatingSystem::Mac),
-        crate::common::app(session),
+        app,
         4,
     )
 }
@@ -384,4 +398,209 @@ fn header_distance_cannot_be_dragged_past_the_top_margin() {
     let after = margins(&h);
     assert!((after[4] - start[2]).abs() < 0.011, "header {} should stop at the top margin {}", after[4], start[2]);
     assert_eq!(after[2], start[2]);
+}
+
+// ---------------------------------------------------------------- a header being typed is unsaved work
+
+/// The workbooks a page that keeps the files was handed, in order ([`Services::host_save`]).
+type Handed = Rc<RefCell<Vec<Arc<Workbook>>>>;
+
+/// The fixture in a page that keeps the files, as the extension is: a save hands the workbook over
+/// and counts as done (no `?ack=1`). The workbook is saved, so only typing is unsaved work.
+fn hosted() -> (Harness, Handed) {
+    let handed = Handed::default();
+    let sink = Rc::clone(&handed);
+    let services = Services {
+        host_save: Some(Box::new(move |save: &HostSave<'_>| {
+            sink.borrow_mut().push(Arc::clone(&save.content));
+            Ok(())
+        })),
+        ..Default::default()
+    };
+    let mut app = crate::common::prepare(SheetApp::new(page_layout_session(false, None), services));
+    let d = app.session.active_mut().unwrap();
+    d.saved = Arc::clone(&d.wb);
+    (harness_of(app), handed)
+}
+
+/// Clicks the first page's top margin and types `text` into its centre header: a draft, not yet
+/// in the workbook.
+fn type_header(h: &mut Harness, text: &str) {
+    let g = geo(h);
+    let pg = g.paper.clone().unwrap();
+    let (px, py, w, _) = pg.page_rect(0, 0);
+    click(h, screen(&g, px + w / 2.0, py + pg.margins[2] / 2.0));
+    h.input_mut().events.push(Event::Text(text.into()));
+    h.run_steps(2);
+    let e = h.state().grid.hf_edit.as_ref().expect("clicking the top margin edits the header");
+    assert_eq!(e.texts[1], text, "setup: the header is typed");
+    assert_eq!(header(h), "&LLeft", "setup: and not in the workbook");
+    assert!(h.state().has_unsaved_work(), "setup: the typed header would be lost");
+    assert!(!h.state().session.active().unwrap().is_dirty(), "setup: it is not in the workbook yet");
+}
+
+fn button(h: &mut Harness, label: &str) {
+    h.get_by_role_and_label(egui::accesskit::Role::Button, label).click();
+    h.run_steps(3);
+}
+
+/// Save (the extension's button and Ctrl/Cmd+S, which ask the page for `file.save`) writes the
+/// header that is being typed, and nothing else is left to lose.
+#[test]
+fn save_enters_the_header_being_typed_and_leaves_the_tab_clean() {
+    let (mut h, handed) = hosted();
+    type_header(&mut h, "Q3 report");
+
+    h.state_mut().run_or_alert("file.save", json!({}));
+    h.run_steps(3);
+    let files = handed.borrow();
+    assert_eq!(files.len(), 1, "the page was handed the file");
+    assert_eq!(files[0].sheet(0).unwrap().print.header, "&LLeft&CQ3 report", "the file has what was typed");
+    assert!(h.state().grid.hf_edit.is_none(), "the header is entered, not left open");
+    assert!(!h.state().session.active().unwrap().is_dirty());
+    assert!(!h.state().has_unsaved_work(), "the tab reports clean: nothing else is pending");
+}
+
+/// Save in the File view: the File tab enters the header, which the view hides along with the
+/// sheet, and Save then hands the file over with it.
+#[test]
+fn the_file_tab_enters_the_header_being_typed_and_its_save_writes_it() {
+    let (mut h, handed) = hosted();
+    type_header(&mut h, "Q3 report");
+
+    h.get_by_label("File").click();
+    h.run_steps(3);
+    assert!(h.state().backstage.is_some(), "the File view is open");
+    assert!(h.state().grid.hf_edit.is_none(), "the sheet is hidden: the header is entered, not left open behind it");
+    assert_eq!(header(&h), "&LLeft&CQ3 report");
+    assert_ne!(h.state().ui.ribbon_tab, "Header & Footer", "the Header & Footer tab goes with the edit");
+
+    button(&mut h, "Save");
+    let files = handed.borrow();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].sheet(0).unwrap().print.header, "&LLeft&CQ3 report");
+    assert!(!h.state().has_unsaved_work(), "nothing is left to lose");
+}
+
+/// Save, Cmd/Ctrl+S with the header section holding the keyboard: the editor answers the key (the
+/// grid's shortcuts stand aside), as the text box does, and the file has what was typed.
+#[test]
+fn the_save_shortcut_in_the_header_being_typed_writes_it() {
+    for (modifiers, command) in [(Modifiers::COMMAND, "Save"), (Modifiers::COMMAND | Modifiers::SHIFT, "Save As")] {
+        let (mut h, handed) = hosted();
+        type_header(&mut h, "Q3 report");
+        let m = modifiers;
+        h.input_mut().events.push(Event::Key { key: Key::S, physical_key: Some(Key::S), pressed: true, repeat: false, modifiers: m });
+        h.input_mut().events.push(Event::Key { key: Key::S, physical_key: Some(Key::S), pressed: false, repeat: false, modifiers: m });
+        h.run_steps(3);
+        let files = handed.borrow();
+        assert_eq!(files.len(), 1, "{command}: the page was handed the file");
+        assert_eq!(files[0].sheet(0).unwrap().print.header, "&LLeft&CQ3 report", "{command}: the file has what was typed");
+        assert!(h.state().grid.hf_edit.is_none(), "{command}: the header is entered");
+        assert!(!h.state().has_unsaved_work(), "{command}: nothing is left to lose");
+    }
+}
+
+/// File › Close with a header being typed: the header is entered, which leaves the workbook with
+/// an unsaved change, so Close asks. Cancel keeps both; Don't Save closes the workbook.
+#[test]
+fn closing_with_a_header_being_typed_asks_to_save_it() {
+    for route in ["File view", "command"] {
+        let (mut h, _) = hosted();
+        type_header(&mut h, "Q3 report");
+        let typed_in = h.state().session.active().unwrap().uid;
+        if route == "File view" {
+            h.get_by_label("File").click();
+            h.run_steps(3);
+            button(&mut h, "Close");
+        } else {
+            h.state_mut().run_or_alert("file.close", json!({}));
+            h.run_steps(3);
+        }
+        let open = |h: &Harness| h.state().session.documents().iter().any(|d| d.uid == typed_in);
+        assert!(open(&h), "{route}: the workbook is still open");
+        assert_eq!(h.state().dialog.as_ref().map(|d| d.name()), Some("saveChanges"), "{route}: Close asks");
+        assert_eq!(header(&h), "&LLeft&CQ3 report", "{route}: the typed header is in the workbook the question is about");
+
+        button(&mut h, "Cancel");
+        assert!(h.state().dialog.is_none());
+        assert!(open(&h), "{route}: Cancel keeps the workbook");
+        assert_eq!(header(&h), "&LLeft&CQ3 report", "{route}: and the header");
+        assert!(h.state().has_unsaved_work(), "{route}: still unsaved");
+
+        h.state_mut().run_or_alert("file.close", json!({}));
+        h.run_steps(3);
+        button(&mut h, "Don't Save");
+        assert!(!open(&h), "{route}: Don't Save closes the workbook");
+        assert!(!h.state().has_unsaved_work(), "{route}: and nothing of it is left");
+    }
+}
+
+/// The header typed in a workbook that closes goes with it: the workbooks made next, in the same
+/// window, are untouched, in Page Layout view or not. No header edit is left behind to be entered
+/// into them. (Closing the only workbook shows a blank one at once, and File › New another.)
+#[test]
+fn a_header_being_typed_in_a_closed_workbook_never_reaches_the_next_one() {
+    let (mut h, _) = hosted();
+    type_header(&mut h, "Q3 report");
+    let typed_in = h.state().session.active().unwrap().uid;
+    h.state_mut().run_or_alert("file.close", json!({"force": true, "document": true}));
+    h.run_steps(3);
+    assert!(h.state().grid.hf_edit.is_none(), "the edit closed with its window");
+    h.state_mut().run_or_alert("file.new", json!({}));
+    h.run_steps(4);
+    assert!(h.state().grid.hf_edit.is_none());
+
+    let docs: Vec<_> = h.state().session.documents().iter().map(|d| (d.uid, d.wb.sheet(0).unwrap().print.header.clone(), d.is_dirty())).collect();
+    assert!(docs.len() >= 2 && docs.iter().all(|(uid, ..)| *uid != typed_in), "the closed workbook is gone and others took its place: {docs:?}");
+    assert!(docs.iter().all(|(_, header, dirty)| header.is_empty() && !dirty), "the new workbooks have no header and no change: {docs:?}");
+    assert!(!h.state().has_unsaved_work(), "nothing of the closed workbook is left to lose");
+    for index in 0..docs.len() {
+        h.state_mut().run("window.activate", json!({"index": index})).unwrap();
+        h.state_mut().run("view.pageLayout", json!({})).unwrap();
+        h.run_steps(4);
+        assert_eq!(header(&h), "", "workbook {index}: also in Page Layout view");
+    }
+}
+
+/// A header edit belongs to the workbook it was typed in: if the engine's active workbook is
+/// another one when it is entered (a script switched windows between frames), it is not written
+/// there.
+#[test]
+fn a_header_edit_is_never_entered_into_another_workbook() {
+    let (mut h, _) = hosted();
+    type_header(&mut h, "Q3 report");
+    let typed_in = h.state().session.active().unwrap().uid;
+    h.state_mut().session.run("file.new", json!({})).unwrap();
+    let other = h.state().session.active().unwrap().uid;
+    assert_ne!(other, typed_in, "setup: another workbook is the active one");
+
+    gridcraft_ui_egui::paper_view::commit(h.state_mut());
+    let doc = |uid: u64| h.state().session.documents().iter().find(|d| d.uid == uid).unwrap().wb.sheet(0).unwrap().print.header.clone();
+    assert_eq!(doc(other), "", "the other workbook has no header");
+    assert!(h.state().grid.hf_edit.is_none(), "the edit is over");
+    assert!(!h.state().session.documents().iter().find(|d| d.uid == other).unwrap().is_dirty(), "the other workbook is untouched");
+}
+
+/// Quit enters a header being typed in a window that is not showing, as it does a cell: the
+/// workbook then has an unsaved change and Quit asks about it.
+#[test]
+fn quit_asks_about_a_header_being_typed_in_another_window() {
+    let (mut h, _) = hosted();
+    let first = h.state().session.active_window().unwrap();
+    h.state_mut().run("view.newWindow", json!({})).unwrap();
+    h.run_steps(4);
+    assert_ne!(h.state().session.active_window(), Some(first), "setup: the second window is showing");
+    type_header(&mut h, "Q3 report");
+    // The first window comes forward without a command (which would enter the header first).
+    h.state_mut().enter_window(first);
+    h.run_steps(3);
+    assert!(h.state().grid.hf_edit.is_none(), "setup: the header edit is the second window's");
+    assert!(h.state().has_unsaved_work(), "the parked header would be lost");
+
+    let ctx = h.ctx.clone();
+    h.state_mut().request_quit(&ctx);
+    h.run_steps(3);
+    assert_eq!(h.state().dialog.as_ref().map(|d| d.name()), Some("saveChanges"), "Quit asks about the workbook");
+    assert_eq!(header(&h), "&LLeft&CQ3 report", "the typed header is in the workbook");
 }

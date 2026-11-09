@@ -105,6 +105,17 @@ impl ReplyDrafts {
     pub(crate) fn pending(&self, session: &Session) -> bool {
         self.drafts.iter().any(|d| !d.text.trim().is_empty() && d.has_comment(session))
     }
+
+    /// [`Self::pending`] for the replies of workbook `doc` alone.
+    pub(crate) fn pending_in(&self, session: &Session, doc: u64) -> bool {
+        self.drafts.iter().any(|d| d.doc == doc && !d.text.trim().is_empty() && d.has_comment(session))
+    }
+
+    /// Throws away the replies of workbook `doc` (Don't Save when it closes); other workbooks'
+    /// replies stay.
+    pub(crate) fn discard(&mut self, doc: u64) {
+        self.drafts.retain(|d| d.doc != doc);
+    }
 }
 
 #[cfg(test)]

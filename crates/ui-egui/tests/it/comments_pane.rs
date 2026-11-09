@@ -1,9 +1,15 @@
-//! The Comments pane: one Show Comments button, and a pane that keeps its width (#710).
+//! The Comments pane: one Show Comments button, and a pane that keeps its width (#710). A reply
+//! typed and not sent is unsaved work: closing or quitting asks about it, workbook by workbook.
 
-use egui::{Event, Modifiers, PointerButton, Pos2, pos2, vec2};
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::Arc;
+
+use egui::{Event, Key, Modifiers, PointerButton, Pos2, pos2, vec2};
 use egui_kittest::kittest::Queryable;
 use gridcraft_engine::Session;
-use gridcraft_ui_egui::SheetApp;
+use gridcraft_engine::model::Workbook;
+use gridcraft_ui_egui::{HostSave, Services, SheetApp};
 use serde_json::json;
 
 type Harness = egui_kittest::Harness<'static, SheetApp>;
@@ -13,12 +19,16 @@ const WIDTH: f32 = 1200.0;
 fn harness() -> Harness {
     let mut session = Session::new();
     session.new_workbook();
+    harness_of(crate::common::app(session))
+}
+
+fn harness_of(app: SheetApp) -> Harness {
     let mut h = crate::common::builder().with_step_dt(1.0 / 60.0).with_size(vec2(WIDTH, 800.0)).build_ui_state(
         |ui, app: &mut SheetApp| {
             app.logic(ui.ctx());
             app.ui(ui);
         },
-        crate::common::app(session),
+        app,
     );
     h.run_steps(4);
     h
@@ -440,5 +450,282 @@ fn a_comment_written_over_another_does_not_inherit_its_unsent_reply() {
         send_under(&mut h, thread);
         assert!(replies_at(&h, "B2").is_empty(), "{how}: nothing was sent to it");
         assert!(!h.state().has_unsaved_work(), "{how}");
+    }
+}
+
+// ---------------------------------------------------------------- closing a workbook with a reply not sent
+
+// A reply is in no file and no Save puts it there (only Send does), and the engine can't see it:
+// it asks about unsaved changes. So the app asks, for the workbook alone, whenever one closes.
+
+/// The workbooks a page that keeps the files was handed, in order ([`Services::host_save`]).
+type Handed = Rc<RefCell<Vec<Arc<Workbook>>>>;
+
+/// The app in a page that keeps the files, as the extension is: a save hands the workbook over and
+/// counts as done.
+fn hosted() -> (Harness, Handed) {
+    let handed = Handed::default();
+    let sink = Rc::clone(&handed);
+    let services = Services {
+        host_save: Some(Box::new(move |save: &HostSave<'_>| {
+            sink.borrow_mut().push(Arc::clone(&save.content));
+            Ok(())
+        })),
+        ..Default::default()
+    };
+    let mut session = Session::new();
+    session.new_workbook();
+    (harness_of(crate::common::prepare(SheetApp::new(session, services))), handed)
+}
+
+/// A comment `thread` at B2 of the shown workbook and `reply` typed under it and not sent, with
+/// the workbook saved and the pane hidden: the reply is all there is to lose.
+fn type_unsent_reply(h: &mut Harness, thread: &str, reply: &str) {
+    h.state_mut().run("review.newComment", json!({"cell": "B2", "text": thread})).unwrap();
+    h.state_mut().run("review.showComments", json!({"on": true})).unwrap();
+    mark_saved(h.state_mut());
+    h.run_steps(3);
+    type_reply_under(h, thread, reply);
+    h.state_mut().run("review.showComments", json!({"on": false})).unwrap();
+    h.run_steps(3);
+}
+
+fn active_uid(h: &Harness) -> u64 {
+    h.state().session.active().unwrap().uid
+}
+
+fn is_open(h: &Harness, uid: u64) -> bool {
+    h.state().session.documents().iter().any(|d| d.uid == uid)
+}
+
+fn question(h: &Harness) -> Option<&str> {
+    h.state().dialog.as_ref().map(|d| d.name())
+}
+
+fn button(h: &mut Harness, label: &str) {
+    h.get_by_role_and_label(egui::accesskit::Role::Button, label).click();
+    h.run_steps(3);
+}
+
+fn press(h: &mut Harness, key: Key, modifiers: Modifiers) {
+    for pressed in [true, false] {
+        h.input_mut().events.push(Event::Key { key, physical_key: Some(key), pressed, repeat: false, modifiers });
+    }
+    h.run_steps(3);
+}
+
+/// Asks to close the shown workbook the way a user does: File › Close in the File view, Cmd/Ctrl+W
+/// on the grid, or the commands behind them.
+fn close(h: &mut Harness, route: &str) {
+    match route {
+        "File view" => {
+            h.get_by_label("File").click();
+            h.run_steps(3);
+            button(h, "Close");
+        }
+        "Cmd+W" => press(h, Key::W, Modifiers::COMMAND),
+        command => {
+            h.state_mut().run_or_alert(command, json!({}));
+            h.run_steps(3);
+        }
+    }
+}
+
+/// Closing a saved workbook with a reply typed under a comment and not sent asks first, however
+/// the close is asked for, though no file would change. There is nothing to save, so the question
+/// has no Save; Cancel keeps the workbook and the reply, Don't Save closes the workbook and the
+/// reply goes with it.
+#[test]
+fn closing_a_workbook_with_a_reply_not_sent_asks_first() {
+    for route in ["file.close", "window.close", "File view", "Cmd+W"] {
+        let mut h = harness();
+        type_unsent_reply(&mut h, "Check the figures", "Will do");
+        let uid = active_uid(&h);
+        assert!(!h.state().session.active().unwrap().is_dirty(), "{route}: setup: the workbook is saved");
+        assert!(h.state().document_has_unsaved_work(uid), "{route}: setup: the reply would be lost");
+
+        close(&mut h, route);
+        assert_eq!(question(&h), Some("saveChanges"), "{route}: Close asks about the reply");
+        assert!(is_open(&h, uid), "{route}: the workbook is still open");
+        assert!(
+            h.query_by_role_and_label(egui::accesskit::Role::Button, "Save").is_none(),
+            "{route}: a question about a reply alone has no Save, which would put nothing in the file"
+        );
+        h.get_by_label_contains("isn't sent");
+
+        button(&mut h, "Cancel");
+        assert!(question(&h).is_none());
+        assert!(is_open(&h, uid), "{route}: Cancel keeps the workbook");
+        assert!(h.state().has_unsaved_work(), "{route}: and the reply");
+        h.state_mut().run("review.showComments", json!({"on": true})).unwrap();
+        h.run_steps(3);
+        assert_eq!(reply_under(&h, "Check the figures"), "Will do", "{route}: the pane still has it");
+        h.state_mut().run("review.showComments", json!({"on": false})).unwrap();
+        h.run_steps(3);
+
+        close(&mut h, "file.close");
+        button(&mut h, "Don't Save");
+        assert!(!is_open(&h, uid), "{route}: Don't Save closes the workbook");
+        assert!(!h.state().has_unsaved_work(), "{route}: and the reply went with it");
+    }
+}
+
+/// What closing asks about is the workbook it closes: its own reply, never another workbook's.
+#[test]
+fn closing_asks_about_the_replies_of_that_workbook_only() {
+    // Book1 has a reply. Book2, made next and shown, has none: it closes at once, Book1 keeps its reply.
+    let mut h = harness();
+    type_unsent_reply(&mut h, "Thread in Book1", "Reply in Book1");
+    let first = active_uid(&h);
+    h.state_mut().run("file.new", json!({})).unwrap();
+    h.run_steps(3);
+    let second = active_uid(&h);
+    assert_ne!(first, second, "setup: Book2 is the shown workbook");
+    assert!(h.state().has_unsaved_work() && !h.state().document_has_unsaved_work(second), "setup: only Book1 has a reply");
+
+    close(&mut h, "file.close");
+    assert!(question(&h).is_none(), "Book2 has nothing to lose: Book1's reply is no part of closing it");
+    assert!(!is_open(&h, second) && is_open(&h, first));
+    assert_eq!(active_uid(&h), first, "Book1 comes forward");
+    assert!(h.state().document_has_unsaved_work(first), "and still has its reply");
+
+    // Both have a reply. Cancel keeps both; Don't Save closes the one asked about and the other keeps its reply.
+    let mut h = harness();
+    type_unsent_reply(&mut h, "Thread in Book1", "Reply in Book1");
+    let first = active_uid(&h);
+    h.state_mut().run("file.new", json!({})).unwrap();
+    h.run_steps(3);
+    type_unsent_reply(&mut h, "Thread in Book2", "Reply in Book2");
+    let second = active_uid(&h);
+    assert!(h.state().document_has_unsaved_work(first) && h.state().document_has_unsaved_work(second));
+
+    close(&mut h, "file.close");
+    assert_eq!(question(&h), Some("saveChanges"));
+    assert_eq!(active_uid(&h), second, "the question is about the shown workbook");
+    button(&mut h, "Cancel");
+    assert!(is_open(&h, first) && is_open(&h, second), "Cancel keeps both workbooks");
+    assert!(h.state().document_has_unsaved_work(first) && h.state().document_has_unsaved_work(second), "and both replies");
+
+    close(&mut h, "file.close");
+    button(&mut h, "Don't Save");
+    assert!(!is_open(&h, second) && is_open(&h, first), "Don't Save closes Book2 alone");
+    assert_eq!(active_uid(&h), first);
+    assert!(h.state().document_has_unsaved_work(first), "Book1 keeps its reply: it was not the one thrown away");
+    h.state_mut().run("review.showComments", json!({"on": true})).unwrap();
+    h.run_steps(3);
+    assert_eq!(reply_under(&h, "Thread in Book1"), "Reply in Book1");
+}
+
+/// A window of a workbook that another window still shows closes without a question: nothing is
+/// lost with it. The last window of the workbook asks.
+#[test]
+fn closing_one_of_two_windows_of_a_workbook_with_a_reply_not_sent_asks_nothing() {
+    let mut h = harness();
+    type_unsent_reply(&mut h, "Check the figures", "Will do");
+    let uid = active_uid(&h);
+    h.state_mut().run("view.newWindow", json!({})).unwrap();
+    h.run_steps(3);
+    assert_eq!(h.state().session.windows().len(), 2, "setup: two windows show the workbook");
+
+    close(&mut h, "window.close");
+    assert!(question(&h).is_none(), "the workbook stays open in the other window");
+    assert_eq!(h.state().session.windows().len(), 1);
+    assert!(is_open(&h, uid) && h.state().document_has_unsaved_work(uid), "and the reply is kept");
+
+    close(&mut h, "window.close");
+    assert_eq!(question(&h), Some("saveChanges"), "the last window asks");
+    assert!(is_open(&h, uid));
+    button(&mut h, "Don't Save");
+    assert!(!is_open(&h, uid) && !h.state().has_unsaved_work());
+}
+
+/// A workbook with unsaved changes and a reply: the question offers Save and says the reply is not
+/// part of it. Save writes the changes but leaves the workbook open with a message, as the reply
+/// would be lost with it; Don't Save then closes it for good.
+#[test]
+fn save_writes_the_changes_but_keeps_a_workbook_open_while_a_reply_waits() {
+    let (mut h, handed) = hosted();
+    type_unsent_reply(&mut h, "Check the figures", "Will do");
+    let uid = active_uid(&h);
+    h.state_mut().run("cell.set", json!({"cell": "D4", "input": "42"})).unwrap();
+    h.run_steps(2);
+    assert!(h.state().session.active().unwrap().is_dirty(), "setup: the workbook has a change too");
+
+    close(&mut h, "file.close");
+    assert_eq!(question(&h), Some("saveChanges"));
+    h.get_by_label_contains("saving doesn't send it");
+    button(&mut h, "Save");
+    {
+        let files = handed.borrow();
+        assert_eq!(files.len(), 1, "the changes were saved");
+        let sent = files[0].sheet(0).unwrap().comments.values().next().unwrap().replies.len();
+        assert_eq!(sent, 0, "the file has the comment and no reply: a reply isn't sent by saving");
+    }
+    assert!(is_open(&h, uid), "the workbook stays open: closing it would lose the reply");
+    assert!(question(&h).is_none());
+    assert!(!h.state().session.active().unwrap().is_dirty(), "the changes are saved");
+    assert!(h.state().has_unsaved_work(), "the reply is still there");
+    let (_, message) = h.state().message.clone().expect("it says why the workbook was not closed");
+    assert!(message.contains("reply") && message.contains("Don't Save"), "{message}");
+    h.state_mut().message = None;
+
+    close(&mut h, "file.close");
+    assert_eq!(question(&h), Some("saveChanges"), "closing again asks about the reply alone");
+    assert!(h.query_by_role_and_label(egui::accesskit::Role::Button, "Save").is_none());
+    button(&mut h, "Don't Save");
+    assert!(!is_open(&h, uid) && !h.state().has_unsaved_work());
+    assert_eq!(handed.borrow().len(), 1, "nothing more was written");
+}
+
+/// The window's close button (or Alt+F4, or the OS quitting the app): steps until the request has
+/// been handled and returns the viewport commands the app answered with.
+fn request_window_close(h: &mut Harness) -> Vec<egui::ViewportCommand> {
+    h.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);
+    step_commands(h)
+}
+
+fn step_commands(h: &mut Harness) -> Vec<egui::ViewportCommand> {
+    let mut out = Vec::new();
+    for _ in 0..3 {
+        h.step();
+        out.extend(h.output().viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.commands.clone()).unwrap_or_default());
+    }
+    out
+}
+
+fn click_commands(h: &mut Harness, label: &str) -> Vec<egui::ViewportCommand> {
+    h.get_by_role_and_label(egui::accesskit::Role::Button, label).click();
+    step_commands(h)
+}
+
+/// Closing the window, or quitting, with a reply not sent asks about its workbook and holds the
+/// app open until it is answered: Cancel keeps it, Don't Save lets the app close.
+#[test]
+fn closing_the_window_or_quitting_asks_about_a_reply_not_sent() {
+    for how in ["close button", "quit"] {
+        let mut h = harness();
+        type_unsent_reply(&mut h, "Check the figures", "Will do");
+        let ask = |h: &mut Harness| {
+            if how == "quit" {
+                let ctx = h.ctx.clone();
+                h.state_mut().request_quit(&ctx);
+                step_commands(h)
+            } else {
+                request_window_close(h)
+            }
+        };
+
+        let sent = ask(&mut h);
+        assert!(!sent.contains(&egui::ViewportCommand::Close), "{how}: the reply holds the app open: {sent:?}");
+        assert_eq!(question(&h), Some("saveChanges"), "{how}: it asks");
+        assert!(h.query_by_role_and_label(egui::accesskit::Role::Button, "Save").is_none(), "{how}: nothing to save");
+        let sent = click_commands(&mut h, "Cancel");
+        assert!(!sent.contains(&egui::ViewportCommand::Close), "{how}: Cancel keeps the app open");
+        assert!(h.state().has_unsaved_work(), "{how}: and the reply");
+
+        ask(&mut h);
+        let sent = click_commands(&mut h, "Don't Save");
+        assert!(sent.contains(&egui::ViewportCommand::Close), "{how}: Don't Save lets the app close: {sent:?}");
+        assert!(!h.state().has_unsaved_work(), "{how}: the reply is gone");
     }
 }

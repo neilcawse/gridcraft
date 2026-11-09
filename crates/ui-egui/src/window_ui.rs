@@ -145,9 +145,10 @@ impl SheetApp {
         }
     }
 
-    /// Whether a window other than the current one has a cell or text-box draft open.
+    /// Whether a window other than the current one has a cell, text-box or header/footer draft open.
     pub fn parked_window_with_draft(&self) -> Option<u64> {
-        self.parked.iter().filter(|(_, w)| w.editor.is_some() || w.text_box_editor.is_some()).map(|(id, _)| *id).min()
+        let open = |w: &WindowUi| w.editor.is_some() || w.text_box_editor.is_some() || w.grid.hf_edit.is_some();
+        self.parked.iter().filter(|(_, w)| open(w)).map(|(id, _)| *id).min()
     }
 
     /// Unsaved work the user would lose if the app went away now (a browser tab closing): a
@@ -155,6 +156,15 @@ impl SheetApp {
     /// committed to find out.
     pub fn has_unsaved_work(&self) -> bool {
         self.session.documents().iter().any(|d| d.is_dirty()) || self.has_unsaved_drafts()
+    }
+
+    /// [`Self::has_unsaved_work`] for the open workbook `uid` alone: it has unsaved changes, or a
+    /// reply typed under one of its comments and not sent, which no Save can enter (only sending
+    /// it does). What closing that workbook must ask about; the work of the others is no part of
+    /// it. A cell, text-box or header/footer draft is entered into its workbook before a close
+    /// ([`Self::settle_drafts`]) and is then one of its unsaved changes.
+    pub fn document_has_unsaved_work(&self, uid: u64) -> bool {
+        self.session.documents().iter().any(|d| d.uid == uid && d.is_dirty()) || self.reply_drafts.pending_in(&self.session, uid)
     }
 
     /// A draft in any window that entering would change something with: a cell or formula-bar

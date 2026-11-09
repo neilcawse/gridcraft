@@ -315,12 +315,31 @@ pub fn show(app: &mut SheetApp, ctx: &egui::Context) {
                     }
                 }
                 "saveChanges" => {
-                    ui.label(format!("Do you want to save the changes you made to {}?", d.values.get("title").and_then(Json::as_str).unwrap_or("this workbook")));
+                    let title = d.values.get("title").and_then(Json::as_str).unwrap_or("this workbook");
+                    // A reply typed under a comment and not sent is in no file, and no Save puts it there
+                    // (only sending it does). A question that is only about a reply has no Save: there
+                    // is nothing to save, and Don't Save is the way to throw the reply away.
+                    let (changed, unsent) = app.session.active().map_or((true, false), |doc| {
+                        (doc.is_dirty(), app.reply_drafts.pending_in(&app.session, doc.uid))
+                    });
+                    let saveable = changed || !unsent;
+                    if saveable {
+                        ui.label(format!("Do you want to save the changes you made to {title}?"));
+                        if unsent {
+                            ui.label("A reply you typed under a comment isn't sent, and saving doesn't send it.");
+                        }
+                    } else {
+                        ui.label(format!("There is a reply in {title} that isn't sent."));
+                        ui.label("It will be lost if you don't send it.");
+                    }
                     let quitting = d.values.get("quit").and_then(Json::as_bool) == Some(true);
                     ui.horizontal(|ui| {
                         for (label, answer) in
                             [("Don't Save", crate::SaveAnswer::DontSave), ("Cancel", crate::SaveAnswer::Cancel), ("Save", crate::SaveAnswer::Save)]
                         {
+                            if answer == crate::SaveAnswer::Save && !saveable {
+                                continue;
+                            }
                             if ui.button(label).clicked() && app.answer_save_changes(answer, quitting, ui.ctx()) {
                                 open = false;
                             }

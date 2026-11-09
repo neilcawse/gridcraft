@@ -1,4 +1,4 @@
-use super::{SaveAnswer, SheetApp, json, now_ms};
+use super::{Json, SaveAnswer, SheetApp, json, now_ms};
 
 impl SheetApp {
     /// Holds back a window close (the close button, Alt+F4, the OS quitting the app) while a
@@ -7,8 +7,8 @@ impl SheetApp {
         if self.native_windows || self.allow_close || !ctx.input(|i| i.viewport().close_requested()) {
             return;
         }
-        // A cell still being edited is part of the workbook, as for File › Close.
-        if !self.commit_edit(0, 0, false, false) {
+        // A cell, header or text box still being edited is part of the workbook, as for File › Close.
+        if self.settle_drafts().is_err() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             return;
         }
@@ -19,7 +19,7 @@ impl SheetApp {
             crate::macro_editor::request_close(self, true);
             return;
         }
-        if !self.session.documents().iter().any(|d| d.is_dirty()) {
+        if !self.session.documents().iter().any(|d| self.document_has_unsaved_work(d.uid)) {
             return;
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -32,11 +32,11 @@ impl SheetApp {
         }
     }
 
-    /// Asks about the next unsaved workbook before quitting, in its window, or closes the app
-    /// once none is left.
+    /// Asks about the next workbook with unsaved work (changes, or a reply typed and not sent)
+    /// before quitting, in its window, or closes the app once none is left.
     pub(crate) fn continue_quit(&mut self, ctx: &egui::Context) {
-        let dirty = self.session.documents().iter().find(|d| d.is_dirty()).map(|d| d.uid);
-        match dirty.and_then(|uid| self.session.doc_window(uid)) {
+        let unsaved = self.session.documents().iter().map(|d| d.uid).find(|uid| self.document_has_unsaved_work(*uid));
+        match unsaved.and_then(|uid| self.session.doc_window(uid)) {
             Some(window) => {
                 // Its window comes forward (the native window too: see `doc_windows`).
                 self.enter_window(window);
@@ -51,14 +51,53 @@ impl SheetApp {
         }
     }
 
+    /// Asks the Save Changes question for a workbook that is about to close and has a reply typed
+    /// under a comment and not sent, but no unsaved changes: the engine asks only about changes
+    /// (`file.close`, `window.close`), and it can't see replies, which the app keeps. Returns what
+    /// the engine would for a workbook that asks, or `None` when the command is not one that
+    /// closes the workbook, or this workbook closes without a question (`force`, another window
+    /// still shows it, nothing to lose, or unsaved changes the engine asks about itself).
+    pub(super) fn ask_before_closing(&mut self, id: &str, p: &Json) -> Option<Json> {
+        if p.get("force").and_then(Json::as_bool).unwrap_or(false) {
+            return None;
+        }
+        let window = if id == "window.close" {
+            self.session.target_window(gridcraft_engine::Target::from_json(p).ok()?).ok()?
+        } else {
+            self.session.active_window()?
+        };
+        let doc = self.session.window(window)?.doc_uid;
+        // A window closes alone while another one shows the workbook, unless it is `file.close` of the whole workbook.
+        let whole = id == "file.close" && p.get("document").and_then(Json::as_bool).unwrap_or(false);
+        let alone = self.session.windows().iter().all(|w| w.doc_uid != doc || w.id == window);
+        if !(alone || whole)
+            || !self.reply_drafts.pending_in(&self.session, doc)
+            || self.session.documents().iter().any(|d| d.uid == doc && d.is_dirty())
+        {
+            return None;
+        }
+        // The question is about the active workbook, in its window.
+        self.enter_window(window);
+        let title = self.session.active().map(|d| d.display_title()).unwrap_or_default();
+        self.open_dialog("saveChanges", json!({"title": title}));
+        Some(json!({"closed": false, "dirty": true}))
+    }
+
     /// Answers the Save Changes question about the active workbook (its buttons). While quitting,
-    /// the next unsaved workbook is asked about once this one is answered; Cancel stops the quit.
-    /// Returns whether the question is settled: Save keeps it open when the cell being edited
-    /// can't be entered.
+    /// the next workbook with unsaved work is asked about once this one is answered; Cancel stops
+    /// the quit. Returns whether the question is settled: Save keeps it open when the cell being
+    /// edited can't be entered.
+    ///
+    /// A reply typed under a comment is not in the file, and no Save can put it there (only
+    /// sending it does): Don't Save throws it away with the workbook, Cancel keeps it, and Save
+    /// saves the changes but leaves the workbook open, saying why, while a reply waits.
     pub fn answer_save_changes(&mut self, answer: SaveAnswer, quitting: bool, ctx: &egui::Context) -> bool {
         match answer {
             SaveAnswer::Cancel => {}
             SaveAnswer::DontSave => {
+                if let Some(uid) = self.session.active().map(|d| d.uid) {
+                    self.reply_drafts.discard(uid);
+                }
                 self.run_or_alert("file.close", json!({"force": true, "document": true}));
                 if quitting {
                     self.continue_quit(ctx);
@@ -70,11 +109,22 @@ impl SheetApp {
                     return false;
                 }
                 let sent = self.host_saves_sent;
+                let (uid, title) = self.session.active().map(|d| (d.uid, d.display_title())).unzip();
                 self.run_or_alert("file.save", json!({}));
                 if self.session.active().is_some_and(|x| !x.is_dirty()) {
-                    self.run_or_alert("file.close", json!({"force": true, "document": true}));
-                    if quitting {
-                        self.continue_quit(ctx);
+                    if uid.is_some_and(|uid| self.reply_drafts.pending_in(&self.session, uid)) {
+                        self.message = Some((
+                            "GridCraft".into(),
+                            format!(
+                                "Saved. The reply you typed in {} isn't sent, and saving doesn't send it, so the workbook stays open: send the reply, or close the workbook with Don't Save to discard it.",
+                                title.unwrap_or_default()
+                            ),
+                        ));
+                    } else {
+                        self.run_or_alert("file.close", json!({"force": true, "document": true}));
+                        if quitting {
+                            self.continue_quit(ctx);
+                        }
                     }
                 } else if self.host_saves_sent != sent {
                     // A host page that confirms its saves hasn't stored the file yet: the workbook

@@ -26,6 +26,12 @@ impl SheetApp {
         if matches!(id, "file.save" | "file.saveAs" | "file.saveBytes") {
             self.store_view_state();
         }
+        // A workbook closing with a reply typed and not sent asks first, as one with unsaved changes does.
+        if matches!(id, "file.close" | "window.close")
+            && let Some(asked) = self.ask_before_closing(id, &params)
+        {
+            return Ok(asked);
+        }
         if matches!(
             id,
             "sheet.activate"
@@ -362,6 +368,9 @@ impl SheetApp {
         if !self.commit_edit(0, 0, false, false) {
             return;
         }
+        // The File view hides the sheet, and with it the header or footer being edited in place:
+        // it is entered now, as a click elsewhere would, not left open behind the view.
+        crate::paper_view::commit(self);
         match &mut self.backstage {
             Some(b) => b.page = page,
             None => self.backstage = Some(backstage::Backstage::new(page)),

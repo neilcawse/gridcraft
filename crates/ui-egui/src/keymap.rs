@@ -53,6 +53,21 @@ fn borders(preset: &str) -> Shortcut {
     Shortcut::Run("home.borders", json!({"preset": preset}))
 }
 
+/// Save (⌘S / Ctrl+S) or Save As (with Shift), pressed while an in-place editor (a text box, a
+/// header or footer) has the keyboard: the grid's shortcuts stand aside then, so the editor takes
+/// the key and returns the command. Run it once the edit is back in the app, where Save enters it.
+pub(crate) fn take_save_shortcut(ui: &egui::Ui) -> Option<&'static str> {
+    ui.input_mut(|i| {
+        if i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::S) {
+            Some("file.saveAs")
+        } else if i.consume_key(Modifiers::COMMAND, Key::S) {
+            Some("file.save")
+        } else {
+            None
+        }
+    })
+}
+
 /// The shortcut for a key press in the grid, if any. `physical` is the key's position on a US
 /// layout (as Excel matches Ctrl+Shift+4 rather than the `$` character); `mac` selects the Excel
 /// for Mac variants where they differ. Navigation keys go by the logical key: with Num Lock off

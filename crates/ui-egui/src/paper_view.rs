@@ -36,6 +36,9 @@ pub type PaperCache = ((u64, u64, usize, usize), Arc<PageGrid>);
 /// A header or footer being edited in place.
 #[derive(Clone, Debug)]
 pub struct HfEdit {
+    /// The workbook (`DocState::uid`) the edit belongs to: it is entered only there, never into
+    /// whichever workbook happens to be showing when it ends.
+    pub doc: u64,
     pub sheet: usize,
     /// Page (row band, column band) whose header/footer is shown in edit.
     pub page: (usize, usize),
@@ -322,7 +325,14 @@ pub(crate) fn interact(app: &mut SheetApp, ui: &mut egui::Ui, resp: &egui::Respo
             }
         }
     }
+    // Save and Save As (⌘S / Ctrl+S) while a section has the keyboard: the grid's shortcuts stand
+    // aside then, so the editor answers them as the text box does. The command runs once the edit
+    // is back in the app, where it is entered first and the file has what was typed.
+    let save = if app.grid.hf_edit.is_some() { crate::keymap::take_save_shortcut(ui) } else { None };
     editor(app, ui, geo, &pg);
+    if let Some(command) = save {
+        app.run_or_alert(command, json!({}));
+    }
 }
 
 /// The `pageLayout.headerFooter` parameter holding one kind of page's header or footer.
@@ -365,7 +375,9 @@ fn page_kind(sh: &Sheet, pg: &PageGrid, page: (usize, usize)) -> HfPage {
 
 /// Starts (or moves) editing a header or footer section.
 pub fn begin(app: &mut SheetApp, sheet: usize, sh: &Sheet, page: (usize, usize), zone: HfZone) {
+    let Some(doc) = app.session.active().map(|d| d.uid) else { return };
     if let Some(e) = app.grid.hf_edit.as_mut()
+        && e.doc == doc
         && e.sheet == sheet
         && e.page == page
         && e.footer == zone.footer
@@ -394,6 +406,7 @@ pub fn begin(app: &mut SheetApp, sheet: usize, sh: &Sheet, page: (usize, usize),
     let caret = texts.get(zone.section).map_or(0, |t| t.chars().count());
     let prev_tab = if app.ui.ribbon_tab == TAB { "Home".to_string() } else { app.ui.ribbon_tab.clone() };
     app.grid.hf_edit = Some(HfEdit {
+        doc,
         sheet,
         page,
         footer: zone.footer,
@@ -410,13 +423,15 @@ pub fn begin(app: &mut SheetApp, sheet: usize, sh: &Sheet, page: (usize, usize),
     app.ui.ribbon_collapsed = false;
 }
 
-/// Ends editing and writes the header or footer when it changed (one undo step).
+/// Ends editing and writes the header or footer when it changed (one undo step). It goes into the
+/// workbook it was typed in: an edit whose workbook isn't the one showing is dropped, never
+/// written into another.
 pub fn commit(app: &mut SheetApp) {
     let Some(e) = app.grid.hf_edit.take() else { return };
     if app.ui.ribbon_tab == TAB {
         app.ui.ribbon_tab = e.prev_tab.clone();
     }
-    if e.texts == e.original {
+    if !e.changed() || app.session.active().map(|d| d.uid) != Some(e.doc) {
         return;
     }
     let spec = print::join_header_footer(&e.texts.clone().map(|s| print::fields_to_codes(&s)));
