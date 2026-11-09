@@ -20,7 +20,29 @@ impl SheetApp {
         let switches_window = id.starts_with("window.")
             || matches!(id, "view.newWindow" | "view.hideWindow" | "view.unhideWindow")
             || (id == "view.switchWindows" && ["window", "doc"].iter().any(|k| params.get(*k).is_some_and(|d| !d.is_null())));
-        if id.starts_with("file.") || switches_window {
+        // A draft is typed in one sheet of one workbook. A command that moves, adds, deletes or renames
+        // sheets, or writes its result on a new sheet before the active one (a PivotTable, Show Details,
+        // a Forecast Sheet, Solver's reports), enters it first, into the sheet it was typed in, as
+        // clicking another tab does. So does one that can do any of that without naming the sheet:
+        // Undo and Redo (of an Insert Sheet or a rename), a macro, a script. Undo then takes back
+        // what was just entered, and Redo brings it back, as in Excel, where Undo ends the edit first.
+        let changes_tabs = matches!(
+            id,
+            "sheet.move"
+                | "sheet.rename"
+                | "home.insertSheet"
+                | "home.deleteSheet"
+                | "insert.pivotTable"
+                | "pivot.showDetails"
+                | "data.forecastSheet"
+                | "data.solver"
+                | "data.solverReport"
+                | "edit.undo"
+                | "edit.redo"
+                | "macro.run"
+                | "automate.runScript"
+        );
+        if id.starts_with("file.") || switches_window || changes_tabs {
             self.settle_drafts()?;
         }
         if matches!(id, "file.save" | "file.saveAs" | "file.saveBytes") {
@@ -32,21 +54,7 @@ impl SheetApp {
         {
             return Ok(asked);
         }
-        if matches!(
-            id,
-            "sheet.activate"
-                | "sheet.next"
-                | "sheet.previous"
-                | "sheet.move"
-                | "sheet.hide"
-                | "sheet.unhide"
-                | "home.insertSheet"
-                | "home.deleteSheet"
-                | "edit.undo"
-                | "edit.redo"
-                | "object.delete"
-                | "object.move"
-        ) {
+        if matches!(id, "sheet.activate" | "sheet.next" | "sheet.previous" | "sheet.hide" | "sheet.unhide" | "object.delete" | "object.move") {
             self.commit_text_box_edit()?;
         }
         if let Some(r) = self.run_ui_command(id, &params) {

@@ -81,6 +81,11 @@ pub fn title_bar(app: &mut SheetApp, ui: &mut Ui) {
                 app.run_or_alert("edit.undo", json!({}));
             }
             let undo_list = icon_button(ui, Icon::Chevron, t.text_dim, "Undo list", vec2(14.0, ch));
+            // Opening the list enters a cell or header being typed, as Undo does, so the list names the
+            // steps there are and an entry undoes through the one it names, that entry included.
+            if undo_list.clicked() {
+                let _ = app.settle_drafts();
+            }
             egui::Popup::menu(&undo_list).show(|ui| {
                 let labels: Vec<String> = if can_undo {
                     app.session.active().map(|d| d.undo.iter().rev().take(20).map(|e| e.label.clone()).collect()).unwrap_or_default()

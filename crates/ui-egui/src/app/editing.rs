@@ -86,10 +86,11 @@ impl SheetApp {
     }
 
     /// Commits the cell, header/footer and text-box drafts, as Enter or a click elsewhere would,
-    /// before a command that can show another workbook or write this one to a file, so a draft
-    /// never lands in another workbook and is never left out of the file or the Close question.
-    /// A cell draft its workbook refuses stays open with the reason shown, and the command
-    /// doesn't run.
+    /// before a command that can show another workbook, write this one to a file, move, add,
+    /// delete or rename its sheets, or undo, redo or run something that can (a macro, a script),
+    /// so a draft never lands in another workbook or sheet, is never dropped with the sheet it
+    /// was typed in, and is never left out of the file or the Close question. A cell draft its
+    /// workbook refuses stays open with the reason shown, and the command doesn't run.
     pub(crate) fn settle_drafts(&mut self) -> Result<(), String> {
         if !self.commit_edit(0, 0, false, false) {
             return Err(self.message.as_ref().map(|(_, m)| m.clone()).unwrap_or_else(|| "The cell being edited can't be entered.".into()));

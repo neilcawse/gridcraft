@@ -9,7 +9,7 @@ use std::sync::Arc;
 use egui::{Event, Key, Modifiers, PointerButton, Pos2, pos2, vec2};
 use egui_kittest::kittest::Queryable;
 use gridcraft_engine::Session;
-use gridcraft_engine::core::CellRef;
+use gridcraft_engine::core::{CellRef, Value};
 use gridcraft_engine::model::{SheetViewMode, Workbook};
 use gridcraft_ui_egui::grid::Geo;
 use gridcraft_ui_egui::{HostSave, Services, SheetApp};
@@ -408,6 +408,11 @@ type Handed = Rc<RefCell<Vec<Arc<Workbook>>>>;
 /// The fixture in a page that keeps the files, as the extension is: a save hands the workbook over
 /// and counts as done (no `?ack=1`). The workbook is saved, so only typing is unsaved work.
 fn hosted() -> (Harness, Handed) {
+    hosted_of(page_layout_session(false, None))
+}
+
+/// [`hosted`] for another session.
+fn hosted_of(session: Session) -> (Harness, Handed) {
     let handed = Handed::default();
     let sink = Rc::clone(&handed);
     let services = Services {
@@ -417,7 +422,7 @@ fn hosted() -> (Harness, Handed) {
         })),
         ..Default::default()
     };
-    let mut app = crate::common::prepare(SheetApp::new(page_layout_session(false, None), services));
+    let mut app = crate::common::prepare(SheetApp::new(session, services));
     let d = app.session.active_mut().unwrap();
     d.saved = Arc::clone(&d.wb);
     (harness_of(app), handed)
@@ -426,6 +431,11 @@ fn hosted() -> (Harness, Handed) {
 /// Clicks the first page's top margin and types `text` into its centre header: a draft, not yet
 /// in the workbook.
 fn type_header(h: &mut Harness, text: &str) {
+    type_header_over(h, text, "&LLeft");
+}
+
+/// [`type_header`] in a sheet whose header is `over` now.
+fn type_header_over(h: &mut Harness, text: &str, over: &str) {
     let g = geo(h);
     let pg = g.paper.clone().unwrap();
     let (px, py, w, _) = pg.page_rect(0, 0);
@@ -434,9 +444,25 @@ fn type_header(h: &mut Harness, text: &str) {
     h.run_steps(2);
     let e = h.state().grid.hf_edit.as_ref().expect("clicking the top margin edits the header");
     assert_eq!(e.texts[1], text, "setup: the header is typed");
-    assert_eq!(header(h), "&LLeft", "setup: and not in the workbook");
+    assert_eq!(header(h), over, "setup: and not in the workbook");
     assert!(h.state().has_unsaved_work(), "setup: the typed header would be lost");
     assert!(!h.state().session.active().unwrap().is_dirty(), "setup: it is not in the workbook yet");
+}
+
+/// Types `text` into `cell` of the sheet showing, in Normal view: a draft, not yet in the workbook.
+fn type_cell(h: &mut Harness, cell: &str, text: &str) {
+    h.state_mut().run("view.normal", json!({})).unwrap();
+    h.state_mut().run("selection.set", json!({"cell": cell})).unwrap();
+    h.run_steps(4);
+    h.input_mut().events.push(Event::Text(text.into()));
+    h.run_steps(3);
+    assert_eq!(h.state().editor.as_ref().map(|e| e.text.as_str()), Some(text), "setup: {cell} is being typed");
+}
+
+/// Save, as the tab's button does; the workbook is handed to the page.
+fn save(h: &mut Harness) {
+    h.state_mut().run_or_alert("file.save", json!({}));
+    h.run_steps(3);
 }
 
 fn button(h: &mut Harness, label: &str) {
@@ -565,7 +591,7 @@ fn a_header_being_typed_in_a_closed_workbook_never_reaches_the_next_one() {
 
 /// A header edit belongs to the workbook it was typed in: if the engine's active workbook is
 /// another one when it is entered (a script switched windows between frames), it is not written
-/// there.
+/// there, and what was typed is said, not lost unseen.
 #[test]
 fn a_header_edit_is_never_entered_into_another_workbook() {
     let (mut h, _) = hosted();
@@ -580,6 +606,8 @@ fn a_header_edit_is_never_entered_into_another_workbook() {
     assert_eq!(doc(other), "", "the other workbook has no header");
     assert!(h.state().grid.hf_edit.is_none(), "the edit is over");
     assert!(!h.state().session.documents().iter().find(|d| d.uid == other).unwrap().is_dirty(), "the other workbook is untouched");
+    let said = h.state().message.as_ref().map(|(_, m)| m.clone()).expect("what was typed is said");
+    assert!(said.contains("Q3 report") && said.contains("header"), "{said}");
 }
 
 /// Quit enters a header being typed in a window that is not showing, as it does a cell: the
@@ -603,4 +631,550 @@ fn quit_asks_about_a_header_being_typed_in_another_window() {
     h.run_steps(3);
     assert_eq!(h.state().dialog.as_ref().map(|d| d.name()), Some("saveChanges"), "Quit asks about the workbook");
     assert_eq!(header(&h), "&LLeft&CQ3 report", "the typed header is in the workbook");
+}
+
+// ---------------------------------------------------------------- a header being typed belongs to its sheet
+
+/// Alpha, showing in Page Layout view, and Beta after it, a copy of it: sixty rows, a small table
+/// to make a PivotTable of, a sum for Solver to maximise, and the header "Left" each, in a page that
+/// keeps the files.
+fn two_sheets() -> (Harness, Handed) {
+    let mut session = page_layout_session(false, None);
+    for (cell, input) in [("C1", "Region"), ("D1", "Sales"), ("C2", "North"), ("D2", "5"), ("C3", "South"), ("D3", "7"), ("E1", "=SUM(A1:A2)")] {
+        session.execute("cell.set", json!({"cell": cell, "input": input})).unwrap();
+    }
+    session.execute("sheet.rename", json!({"name": "Alpha"})).unwrap();
+    session.execute("sheet.move", json!({"sheet": 0, "to": 1, "copy": true})).unwrap();
+    session.execute("sheet.rename", json!({"sheet": 1, "name": "Beta"})).unwrap();
+    session.execute("sheet.activate", json!({"sheet": 0})).unwrap();
+    hosted_of(session)
+}
+
+/// The sheets of `wb` in tab order, each with its header.
+fn headers(wb: &Workbook) -> Vec<(String, String)> {
+    wb.sheets.iter().map(|s| (s.name.clone(), s.print.header.clone())).collect()
+}
+
+/// What the tabs show, left to right: the sheet names.
+fn tabs(h: &Harness) -> Vec<String> {
+    h.state().session.doc().unwrap().wb.sheets.iter().map(|s| s.name.clone()).collect()
+}
+
+/// The last workbook the page was handed.
+fn last_saved(handed: &Handed) -> Arc<Workbook> {
+    handed.borrow().last().cloned().expect("the page was handed the file")
+}
+
+/// Where the tab named `name` was painted on the strip.
+fn tab_centre(h: &Harness, name: &str) -> Pos2 {
+    h.output()
+        .shapes
+        .iter()
+        .find_map(|s| match &s.shape {
+            egui::Shape::Text(t) if t.galley.job.text == name => Some(t.visual_bounding_rect().center()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the {name} tab was not painted"))
+}
+
+/// Drags with the primary button from `from` to `to`, in moves, as a hand does.
+fn drag(h: &mut Harness, from: Pos2, to: Pos2) {
+    press(h, from);
+    for i in 1..=4 {
+        mouse(h, Event::PointerMoved(from + (to - from) * (i as f32 / 4.0)));
+    }
+    release(h, to);
+}
+
+/// Reordering the tabs by dragging one: the header typed in the sheet whose tab is dragged goes
+/// with that sheet, not with the one that takes its place among the tabs.
+#[test]
+fn dragging_the_tab_of_a_sheet_with_a_header_being_typed_keeps_the_header_in_that_sheet() {
+    let (mut h, handed) = two_sheets();
+    type_header(&mut h, "Only for Alpha");
+    let (from, to) = (tab_centre(&h, "Alpha"), tab_centre(&h, "Beta"));
+    drag(&mut h, from, to);
+    assert_eq!(tabs(&h), ["Beta", "Alpha"], "setup: the tab was dragged past Beta's");
+
+    h.state_mut().run_or_alert("file.save", json!({}));
+    h.run_steps(3);
+    let saved = last_saved(&handed);
+    assert_eq!(
+        headers(&saved),
+        [("Beta".to_string(), "&LLeft".to_string()), ("Alpha".to_string(), "&LLeft&COnly for Alpha".to_string())],
+        "the file has the header in the sheet it was typed in"
+    );
+    assert!(h.state().grid.hf_edit.is_none());
+    assert!(!h.state().has_unsaved_work(), "the tab reports clean: nothing else is pending");
+}
+
+/// What happens to the tabs while a draft is open: the sheet the draft is typed in, the command and
+/// its parameters. Some move, add, delete or rename sheets (the tab menu, the New sheet button,
+/// Move or Copy…, Delete); some write their result on a new sheet before the active one; the last
+/// only switch sheets, so they move nothing.
+fn tab_changes() -> Vec<(&'static str, &'static str, serde_json::Value)> {
+    let pivot = |sheet: &str| json!({"source": format!("{sheet}!C1:D3"), "rows": ["Region"], "values": ["Sales"]});
+    let forecast = json!({"timeline": "A1:A60", "values": "A1:A60"});
+    let model = json!({"objective": "E1", "variables": "A1:A2", "constraints": ["E1 <= 20"], "method": "simplex"});
+    let solve = json!({"objective": "E1", "variables": "A1:A2", "constraints": ["E1 <= 20"], "method": "simplex", "reports": ["answer"]});
+    vec![
+        ("Alpha", "sheet.move", json!({"sheet": 0, "to": 1})),
+        ("Beta", "sheet.move", json!({"sheet": 0, "to": 1})),
+        ("Alpha", "home.insertSheet", json!({"before": 0})),
+        ("Alpha", "home.insertSheet", json!({})),
+        ("Beta", "home.deleteSheet", json!({"sheet": 0})),
+        ("Alpha", "home.deleteSheet", json!({"sheet": 1})),
+        ("Alpha", "insert.pivotTable", pivot("Alpha")),
+        ("Beta", "insert.pivotTable", pivot("Beta")),
+        ("Alpha", "data.forecastSheet", forecast.clone()),
+        ("Beta", "data.forecastSheet", forecast),
+        ("Alpha", "data.solver", solve.clone()),
+        ("Beta", "data.solver", solve),
+        ("Alpha", "data.solverReport", json!({"reports": ["answer"], "model": model.clone()})),
+        ("Beta", "data.solverReport", json!({"reports": ["answer"], "model": model})),
+        ("Alpha", "sheet.activate", json!({"sheet": 1})),
+        ("Beta", "sheet.activate", json!({"sheet": 0})),
+        ("Alpha", "sheet.next", json!({})),
+        ("Beta", "sheet.previous", json!({})),
+    ]
+}
+
+/// Makes `typed_in` the sheet showing.
+fn show_sheet(h: &mut Harness, typed_in: &str) {
+    if typed_in == "Beta" {
+        h.state_mut().run("sheet.activate", json!({"sheet": 1})).unwrap();
+        h.run_steps(4);
+    }
+}
+
+/// Runs `command`, then Save, as the tab would; any reason the command was refused for.
+fn run_then_save(h: &mut Harness, command: &str, params: &serde_json::Value) -> Option<String> {
+    h.state_mut().run_or_alert(command, params.clone());
+    h.run_steps(3);
+    let refused = h.state().message.as_ref().map(|(_, m)| m.clone());
+    save(h);
+    refused
+}
+
+/// Every one of them: the header ends up in the sheet it was typed in, and the file has no other
+/// change.
+#[test]
+fn a_header_being_typed_is_entered_into_its_own_sheet_however_the_tabs_change() {
+    let mut wrong = Vec::new();
+    for (typed_in, command, params) in tab_changes() {
+        let (mut h, handed) = two_sheets();
+        show_sheet(&mut h, typed_in);
+        type_header(&mut h, "Typed");
+        if let Some(refused) = run_then_save(&mut h, command, &params) {
+            wrong.push(format!("typed in {typed_in}, then {command} {params}: refused, {refused}"));
+        }
+
+        let saved = headers(&last_saved(&handed));
+        let want = |name: &str| match name {
+            n if n == typed_in => "&LLeft&CTyped",
+            "Alpha" | "Beta" => "&LLeft",
+            _ => "",
+        };
+        if !saved.iter().any(|(name, _)| name == typed_in) || saved.iter().any(|(name, header)| header != want(name)) {
+            wrong.push(format!("typed in {typed_in}, then {command} {params}: the file has {saved:?}"));
+        }
+        if h.state().has_unsaved_work() {
+            wrong.push(format!("typed in {typed_in}, then {command} {params}: the tab is not clean after Save"));
+        }
+    }
+    assert!(wrong.is_empty(), "a header went into another sheet, or was lost: {wrong:#?}");
+}
+
+/// The same with a cell being typed, the other draft of a sheet: it is entered into the sheet it
+/// was typed in and nowhere else, whatever then changes the tabs.
+#[test]
+fn a_cell_being_typed_is_entered_into_its_own_sheet_however_the_tabs_change() {
+    let h12 = CellRef::parse("H12").unwrap();
+    let mut wrong = Vec::new();
+    for (typed_in, command, params) in tab_changes() {
+        let (mut h, handed) = two_sheets();
+        show_sheet(&mut h, typed_in);
+        type_cell(&mut h, "H12", "hello");
+        if let Some(refused) = run_then_save(&mut h, command, &params) {
+            wrong.push(format!("typed in {typed_in}, then {command} {params}: refused, {refused}"));
+        }
+
+        let saved = last_saved(&handed);
+        let entered_in: Vec<&str> =
+            saved.sheets.iter().filter(|s| s.cell(h12).is_some_and(|c| c.value == Value::text("hello"))).map(|s| s.name.as_str()).collect();
+        if entered_in != [typed_in] {
+            wrong.push(format!("typed in {typed_in}, then {command} {params}: the file has it in {entered_in:?}"));
+        }
+        if h.state().has_unsaved_work() {
+            wrong.push(format!("typed in {typed_in}, then {command} {params}: the tab is not clean after Save"));
+        }
+    }
+    assert!(wrong.is_empty(), "a cell went into another sheet, or was lost: {wrong:#?}");
+}
+
+/// Renaming the sheet through its tab's name field, with its header still being typed.
+#[test]
+fn renaming_the_sheet_of_a_header_being_typed_keeps_the_header_in_it() {
+    let (mut h, handed) = two_sheets();
+    type_header(&mut h, "Typed");
+    h.state_mut().grid.renaming_tab = Some(0);
+    h.state_mut().grid.rename_text = "Budget".into();
+    h.run_steps(3);
+    h.input_mut().events.push(Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+    h.input_mut().events.push(Event::Key { key: Key::Enter, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+    assert_eq!(tabs(&h), ["Budget", "Beta"], "setup: the sheet is renamed");
+
+    h.state_mut().run_or_alert("file.save", json!({}));
+    h.run_steps(3);
+    assert_eq!(
+        headers(&last_saved(&handed)),
+        [("Budget".to_string(), "&LLeft&CTyped".to_string()), ("Beta".to_string(), "&LLeft".to_string())],
+        "the renamed sheet has the header"
+    );
+    assert!(!h.state().has_unsaved_work());
+}
+
+/// A header edit belongs to the sheet it was typed in, not to the place that sheet had: if the tabs
+/// change under it in a way that doesn't enter it first (a script, another window), it still goes
+/// into its own sheet and never into whichever sheet now has the place.
+#[test]
+fn a_header_edit_is_never_entered_into_another_sheet() {
+    let (mut h, _) = two_sheets();
+    type_header(&mut h, "Typed");
+    h.state_mut().session.run("sheet.move", json!({"sheet": 0, "to": 1})).unwrap();
+    assert_eq!(tabs(&h), ["Beta", "Alpha"], "setup: Beta has Alpha's place");
+
+    gridcraft_ui_egui::paper_view::commit(h.state_mut());
+    assert_eq!(
+        headers(&h.state().session.doc().unwrap().wb),
+        [("Beta".to_string(), "&LLeft".to_string()), ("Alpha".to_string(), "&LLeft&CTyped".to_string())]
+    );
+}
+
+/// The same drag with a cell being typed, the other draft of a sheet: it is entered into the sheet
+/// it was typed in, not into the one that takes its place among the tabs.
+#[test]
+fn dragging_the_tab_of_a_sheet_with_a_cell_being_typed_enters_the_cell_in_that_sheet() {
+    let (mut h, handed) = two_sheets();
+    h.state_mut().run("view.normal", json!({})).unwrap();
+    h.run_steps(4);
+    h.input_mut().events.push(Event::Text("hello".into()));
+    h.run_steps(3);
+    assert_eq!(h.state().editor.as_ref().map(|e| e.text.as_str()), Some("hello"), "setup: A1 of Alpha is being typed");
+    let (from, to) = (tab_centre(&h, "Alpha"), tab_centre(&h, "Beta"));
+    drag(&mut h, from, to);
+    assert_eq!(tabs(&h), ["Beta", "Alpha"], "setup: the tab was dragged past Beta's");
+
+    h.state_mut().run_or_alert("file.save", json!({}));
+    h.run_steps(3);
+    let saved = last_saved(&handed);
+    let a1 = |sheet: &str| saved.sheets.iter().find(|s| s.name == sheet).unwrap().cell(CellRef::parse("A1").unwrap()).map(|c| c.value.clone());
+    assert_eq!(a1("Alpha"), Some(Value::text("hello")), "the file has what was typed in the sheet it was typed in");
+    assert_eq!(a1("Beta"), Some(Value::Number(1.0)), "and Beta is as it was");
+    assert!(!h.state().has_unsaved_work());
+}
+
+/// A header being typed in a window that is not showing keeps to its sheet too, when the tabs are
+/// moved in another window of the workbook.
+#[test]
+fn a_header_typed_in_another_window_stays_with_its_sheet_when_the_tabs_move() {
+    let (mut h, handed) = two_sheets();
+    let first = h.state().session.active_window().unwrap();
+    h.state_mut().run("view.newWindow", json!({})).unwrap();
+    h.run_steps(4);
+    let second = h.state().session.active_window().unwrap();
+    assert_ne!(first, second, "setup: the second window is showing");
+    type_header(&mut h, "Typed");
+    // The first window comes forward without a command (which would enter the header first) and
+    // moves Alpha's tab.
+    h.state_mut().enter_window(first);
+    h.run_steps(3);
+    assert!(h.state().grid.hf_edit.is_none(), "setup: the header edit is the second window's");
+    h.state_mut().run_or_alert("sheet.move", json!({"sheet": 0, "to": 1}));
+    h.run_steps(3);
+    assert_eq!(tabs(&h), ["Beta", "Alpha"], "setup: the tab moved");
+    assert!(h.state().has_unsaved_work(), "the parked header would be lost");
+
+    h.state_mut().enter_window(second);
+    h.run_steps(3);
+    h.state_mut().run_or_alert("file.save", json!({}));
+    h.run_steps(3);
+    assert_eq!(
+        headers(&last_saved(&handed)),
+        [("Beta".to_string(), "&LLeft".to_string()), ("Alpha".to_string(), "&LLeft&CTyped".to_string())],
+        "the header is in the sheet it was typed in"
+    );
+    assert!(!h.state().has_unsaved_work());
+}
+
+// ---------------------------------------------------------------- Undo, Redo, Show Details and macros end a draft first
+
+/// What the sheet named `sheet` of `wb` holds in `cell`.
+fn value_in(wb: &Workbook, sheet: &str, cell: &str) -> Option<Value> {
+    wb.sheets.iter().find(|s| s.name == sheet).and_then(|s| s.cell(CellRef::parse(cell).unwrap())).map(|c| c.value.clone())
+}
+
+/// Undo with a header being typed enters the header first, as a click elsewhere does, and takes
+/// that back: not the rename before it, and not the header's sheet, which it used to leave under
+/// the draft. Redo brings the header back.
+#[test]
+fn undo_enters_the_header_being_typed_first_and_takes_back_that_not_the_rename() {
+    let (mut h, handed) = two_sheets();
+    h.state_mut().run_or_alert("sheet.rename", json!({"name": "Budget"}));
+    h.run_steps(3);
+    assert_eq!(tabs(&h), ["Budget", "Beta"], "setup: the sheet is renamed");
+    save(&mut h);
+    type_header(&mut h, "Typed");
+
+    button(&mut h, "Undo");
+    assert!(h.state().grid.hf_edit.is_none(), "the header was entered");
+    assert_eq!(tabs(&h), ["Budget", "Beta"], "and the Undo took that back, not the rename");
+    assert_eq!(header(&h), "&LLeft");
+    assert!(h.state().message.is_none(), "nothing is lost: Redo has it");
+
+    button(&mut h, "Undo");
+    assert_eq!(tabs(&h), ["Alpha", "Beta"], "the next Undo takes the rename back");
+    button(&mut h, "Redo");
+    button(&mut h, "Redo");
+    assert_eq!(tabs(&h), ["Budget", "Beta"]);
+    save(&mut h);
+    assert_eq!(
+        headers(&last_saved(&handed)),
+        [("Budget".to_string(), "&LLeft&CTyped".to_string()), ("Beta".to_string(), "&LLeft".to_string())],
+        "Redo brought the typed header back into the sheet it was typed in"
+    );
+    assert!(!h.state().has_unsaved_work());
+}
+
+/// The same when the Undo is of the Insert Sheet that made the sheet the header is typed in: the
+/// sheet is not taken away under the draft (which dropped it); the header is entered, and that is
+/// what Undo takes back. The next Undo takes the sheet away, and two Redos bring both back.
+#[test]
+fn undoing_an_insert_sheet_enters_the_header_typed_in_the_new_sheet_first() {
+    let (mut h, handed) = two_sheets();
+    h.state_mut().run_or_alert("home.insertSheet", json!({}));
+    h.state_mut().run_or_alert("view.pageLayout", json!({}));
+    h.run_steps(4);
+    let new = tabs(&h)[1].clone();
+    assert_eq!(h.state().session.doc().unwrap().wb.active().unwrap().name, new, "setup: the new sheet is showing");
+    save(&mut h);
+    type_header_over(&mut h, "Typed", "");
+
+    button(&mut h, "Undo");
+    assert!(h.state().grid.hf_edit.is_none(), "the header was entered");
+    assert_eq!(tabs(&h), ["Alpha", new.as_str(), "Beta"], "the new sheet stays: the Undo took back the header");
+    assert_eq!(header(&h), "");
+    assert!(h.state().message.is_none());
+
+    button(&mut h, "Undo");
+    assert_eq!(tabs(&h), ["Alpha", "Beta"], "the next Undo takes the new sheet away");
+    button(&mut h, "Redo");
+    button(&mut h, "Redo");
+    save(&mut h);
+    assert_eq!(
+        headers(&last_saved(&handed)),
+        [("Alpha".to_string(), "&LLeft".to_string()), (new, "&CTyped".to_string()), ("Beta".to_string(), "&LLeft".to_string())],
+        "the typed header is in the new sheet"
+    );
+    assert!(!h.state().has_unsaved_work());
+}
+
+/// The same with a cell being typed: it used to go into whichever sheet had the new sheet's place.
+#[test]
+fn undoing_an_insert_sheet_enters_the_cell_typed_in_the_new_sheet_first() {
+    let (mut h, handed) = two_sheets();
+    h.state_mut().run_or_alert("home.insertSheet", json!({}));
+    h.run_steps(3);
+    let new = tabs(&h)[1].clone();
+    save(&mut h);
+    type_cell(&mut h, "H12", "hello");
+
+    button(&mut h, "Undo");
+    assert!(h.state().editor.is_none(), "the cell was entered");
+    assert_eq!(tabs(&h), ["Alpha", new.as_str(), "Beta"], "the new sheet stays: the Undo took back the cell");
+    button(&mut h, "Undo");
+    assert_eq!(tabs(&h), ["Alpha", "Beta"], "the next Undo takes the new sheet away");
+    button(&mut h, "Redo");
+    button(&mut h, "Redo");
+    save(&mut h);
+    let saved = last_saved(&handed);
+    assert_eq!(value_in(&saved, &new, "H12"), Some(Value::text("hello")), "the cell is in the sheet it was typed in");
+    assert_eq!(value_in(&saved, "Alpha", "H12"), None);
+    assert_eq!(value_in(&saved, "Beta", "H12"), None);
+    assert!(!h.state().has_unsaved_work());
+}
+
+/// Redo with a header being typed enters it, which ends what can be redone, as typing after an
+/// Undo does; the rename is not redone under it, which dropped the header.
+#[test]
+fn redo_enters_the_header_being_typed_first_instead_of_renaming_its_sheet_under_it() {
+    let (mut h, handed) = two_sheets();
+    h.state_mut().run_or_alert("sheet.rename", json!({"name": "Budget"}));
+    h.state_mut().run_or_alert("edit.undo", json!({}));
+    h.run_steps(3);
+    assert_eq!(tabs(&h), ["Alpha", "Beta"], "setup: the rename is undone, and could be redone");
+    save(&mut h);
+    type_header(&mut h, "Typed");
+
+    button(&mut h, "Redo");
+    assert!(h.state().grid.hf_edit.is_none(), "the header was entered");
+    assert_eq!(tabs(&h), ["Alpha", "Beta"], "the rename was not redone under it");
+    save(&mut h);
+    assert_eq!(
+        headers(&last_saved(&handed)),
+        [("Alpha".to_string(), "&LLeft&CTyped".to_string()), ("Beta".to_string(), "&LLeft".to_string())],
+        "the file has the header"
+    );
+    assert!(!h.state().has_unsaved_work());
+}
+
+/// The same with a cell: Redo of an Insert Sheet before the sheet the cell is typed in used to
+/// put the cell into the new sheet.
+#[test]
+fn redo_enters_the_cell_being_typed_first_instead_of_inserting_a_sheet_before_it() {
+    let (mut h, handed) = two_sheets();
+    h.state_mut().run_or_alert("home.insertSheet", json!({"before": 0}));
+    h.state_mut().run_or_alert("edit.undo", json!({}));
+    h.run_steps(3);
+    assert_eq!(tabs(&h), ["Alpha", "Beta"], "setup: the new sheet is undone, and could be redone");
+    save(&mut h);
+    type_cell(&mut h, "H12", "hello");
+
+    button(&mut h, "Redo");
+    assert!(h.state().editor.is_none(), "the cell was entered");
+    assert_eq!(tabs(&h), ["Alpha", "Beta"], "the sheet was not redone before it");
+    save(&mut h);
+    let saved = last_saved(&handed);
+    assert_eq!(value_in(&saved, "Alpha", "H12"), Some(Value::text("hello")), "the file has the cell in the sheet it was typed in");
+    assert_eq!(value_in(&saved, "Beta", "H12"), None);
+    assert!(!h.state().has_unsaved_work());
+}
+
+/// Opening the Undo list enters a header being typed, so that the list names the steps there
+/// are: choosing the rename before it undoes both, as the list says.
+#[test]
+fn the_undo_list_names_the_steps_there_are_with_a_header_being_typed_entered() {
+    let (mut h, _) = two_sheets();
+    h.state_mut().run_or_alert("sheet.rename", json!({"name": "Budget"}));
+    h.run_steps(3);
+    save(&mut h);
+    type_header(&mut h, "Typed");
+
+    h.get_by_label("Undo list").click();
+    h.run_steps(3);
+    assert!(h.state().grid.hf_edit.is_none(), "opening the list entered the header");
+    let labels: Vec<String> = h.state().session.doc().unwrap().undo.iter().rev().take(2).map(|e| e.label.clone()).collect();
+    // Earlier steps are renames too: the entry nearest the top is the one for the rename before the header.
+    let both = format!("Undo {}", labels[1]);
+    h.query_all_by_label(&both).next().unwrap_or_else(|| panic!("the list has no {both}")).click();
+    h.run_steps(3);
+    assert_eq!(tabs(&h), ["Alpha", "Beta"], "{both}: the entry and the rename before it are taken back");
+}
+
+/// Show Details puts the records on a new sheet before the PivotTable's, so a draft typed in the
+/// PivotTable's sheet is entered first, into that sheet (the cell used to land in the new one).
+#[test]
+fn show_details_enters_a_draft_in_the_pivot_sheet_before_its_new_sheet_goes_in_front_of_it() {
+    let mut wrong = Vec::new();
+    for draft in ["header", "cell"] {
+        let (mut h, handed) = two_sheets();
+        h.state_mut().run("insert.pivotTable", json!({"source": "Alpha!C1:D3", "rows": ["Region"], "values": ["Sales"]})).unwrap();
+        h.run_steps(4);
+        let (pivot, value) = {
+            let sh = h.state().session.doc().unwrap().wb.active().unwrap().clone();
+            let area = sh.pivots[0].last_range.expect("the report is laid out");
+            (sh.name.clone(), CellRef::new(area.start.row + 1, area.start.col + 1).a1())
+        };
+        save(&mut h);
+        if draft == "header" {
+            h.state_mut().run("view.pageLayout", json!({})).unwrap();
+            h.run_steps(4);
+            type_header_over(&mut h, "Typed", "");
+        } else {
+            type_cell(&mut h, "H12", "hello");
+        }
+        if let Some(refused) = run_then_save(&mut h, "pivot.showDetails", &json!({"cell": value})) {
+            wrong.push(format!("{draft}: refused, {refused}"));
+        }
+
+        let saved = last_saved(&handed);
+        if saved.sheets.len() != 4 {
+            wrong.push(format!("{draft}: the details sheet was not made: {:?}", saved.sheets.iter().map(|s| &s.name).collect::<Vec<_>>()));
+        }
+        let with_it: Vec<&str> = if draft == "header" {
+            saved.sheets.iter().filter(|s| s.print.header.contains("Typed")).map(|s| s.name.as_str()).collect()
+        } else {
+            saved.sheets.iter().filter(|s| value_in(&saved, &s.name, "H12") == Some(Value::text("hello"))).map(|s| s.name.as_str()).collect()
+        };
+        if with_it != [pivot.as_str()] {
+            wrong.push(format!("{draft}: typed in {pivot}, the file has it in {with_it:?}"));
+        }
+        if h.state().has_unsaved_work() {
+            wrong.push(format!("{draft}: the tab is not clean after Save"));
+        }
+    }
+    assert!(wrong.is_empty(), "a draft went into another sheet, or was lost: {wrong:#?}");
+}
+
+/// A macro or a script can rename a sheet or add one before it, so a draft typed in the sheet is
+/// entered into it first, as for the commands that do so by name.
+#[test]
+fn a_draft_is_entered_into_its_own_sheet_before_a_macro_or_script_changes_the_tabs() {
+    let mut wrong = Vec::new();
+    for run in ["macro.run", "automate.runScript"] {
+        for draft in ["header", "cell"] {
+            let (mut h, handed) = two_sheets();
+            let (command, params) =
+                if draft == "header" { ("sheet.rename", json!({"name": "Budget"})) } else { ("home.insertSheet", json!({"before": 0})) };
+            let step = json!({"command": command, "params": params});
+            if run == "macro.run" {
+                h.state_mut().run("macro.save", json!({"macro": {"name": "Steps", "steps": [step]}})).unwrap();
+            } else {
+                h.state_mut().run("automate.newScript", json!({"name": "Steps", "commands": [step]})).unwrap();
+            }
+            save(&mut h);
+            if draft == "header" {
+                type_header(&mut h, "Typed");
+            } else {
+                type_cell(&mut h, "H12", "hello");
+            }
+            if let Some(refused) = run_then_save(&mut h, run, &json!({"name": "Steps"})) {
+                wrong.push(format!("{draft}, then {run}: refused, {refused}"));
+            }
+
+            let saved = last_saved(&handed);
+            if draft == "header" {
+                let want = [("Budget".to_string(), "&LLeft&CTyped".to_string()), ("Beta".to_string(), "&LLeft".to_string())];
+                if headers(&saved) != want {
+                    wrong.push(format!("{draft}, then {run}: the file has {:?}", headers(&saved)));
+                }
+            } else {
+                let with_it: Vec<&str> =
+                    saved.sheets.iter().filter(|s| value_in(&saved, &s.name, "H12") == Some(Value::text("hello"))).map(|s| s.name.as_str()).collect();
+                if with_it != ["Alpha"] || saved.sheets.len() != 3 {
+                    wrong.push(format!("{draft}, then {run}: the file has it in {with_it:?} of {} sheets", saved.sheets.len()));
+                }
+            }
+            if h.state().has_unsaved_work() {
+                wrong.push(format!("{draft}, then {run}: the tab is not clean after Save"));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "a draft went into another sheet, or was lost: {wrong:#?}");
+}
+
+/// If something that doesn't enter the header first (a script in another window) takes its sheet
+/// away, the header can't be entered, and it is not dropped unseen: the message gives what was typed.
+#[test]
+fn a_header_whose_sheet_is_gone_is_said_not_dropped_unseen() {
+    let (mut h, _) = two_sheets();
+    type_header(&mut h, "Typed");
+    h.state_mut().session.run("sheet.rename", json!({"sheet": 0, "name": "Budget"})).unwrap();
+    assert!(h.state().message.is_none(), "setup: nothing has been said");
+
+    gridcraft_ui_egui::paper_view::commit(h.state_mut());
+    let said = h.state().message.as_ref().map(|(_, m)| m.clone()).expect("what was typed is said");
+    assert!(said.contains("Typed") && said.contains("Alpha") && said.contains("header"), "{said}");
+    assert!(h.state().grid.hf_edit.is_none());
 }

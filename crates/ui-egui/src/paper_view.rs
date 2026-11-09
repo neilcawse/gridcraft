@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use egui::{Align2, Color32, FontId, Key, Painter, Pos2, Rect, Stroke, StrokeKind, TextEdit, pos2, vec2};
+use gridcraft_engine::Session;
 use gridcraft_engine::cf::CfCache;
 use gridcraft_engine::cmd::print::{self, HfContext};
 use gridcraft_engine::model::{HfPage, Sheet, SheetViewMode, Workbook};
@@ -39,7 +40,12 @@ pub struct HfEdit {
     /// The workbook (`DocState::uid`) the edit belongs to: it is entered only there, never into
     /// whichever workbook happens to be showing when it ends.
     pub doc: u64,
-    pub sheet: usize,
+    /// The worksheet the edit belongs to, by name and never by its place among the tabs. The place
+    /// changes when a sheet is moved, added or deleted (a dragged tab, Insert Sheet), and a header
+    /// typed in one sheet must not be entered into the sheet that takes its place. A workbook
+    /// can't have two sheets of one name, which is how a reply typed under a comment finds its
+    /// sheet too ([`crate::reply_drafts`]).
+    pub sheet: String,
     /// Page (row band, column band) whose header/footer is shown in edit.
     pub page: (usize, usize),
     pub footer: bool,
@@ -61,6 +67,12 @@ impl HfEdit {
     /// The user changed a section since the edit began: unentered work.
     pub fn changed(&self) -> bool {
         self.texts != self.original
+    }
+
+    /// Where its worksheet is among the tabs now: `None` when the workbook showing is not the one
+    /// the edit belongs to, or the sheet is gone from it.
+    fn sheet_index(&self, session: &Session) -> Option<usize> {
+        session.active().filter(|d| d.uid == self.doc)?.wb.sheet_index(&self.sheet)
     }
 }
 
@@ -301,7 +313,7 @@ pub(crate) fn paint_headers_footers(app: &SheetApp, ui: &egui::Ui, p: &Painter, 
 pub(crate) fn interact(app: &mut SheetApp, ui: &mut egui::Ui, resp: &egui::Response, geo: &Geo, sh: &Sheet, wb: &Workbook) {
     // Leaving the sheet or the view commits.
     if let Some(e) = &app.grid.hf_edit
-        && (e.sheet != wb.active_sheet() || sh.view != SheetViewMode::PageLayout || geo.paper.is_none())
+        && (!e.sheet.eq_ignore_ascii_case(&sh.name) || sh.view != SheetViewMode::PageLayout || geo.paper.is_none())
     {
         commit(app);
     }
@@ -360,8 +372,12 @@ pub fn start_editing(app: &mut SheetApp) {
 /// now show another header).
 fn set_option(app: &mut SheetApp, key: &str, on: bool) {
     let Some(e) = app.grid.hf_edit.as_ref() else { return };
-    let (sheet, page, zone) = (e.sheet, e.page, HfZone { footer: e.footer, section: e.section });
+    let (page, zone) = (e.page, HfZone { footer: e.footer, section: e.section });
+    let sheet = e.sheet_index(&app.session);
     commit(app);
+    // Its sheet is gone, or another workbook is showing: there is nothing to set the option on
+    // (and what was typed has been said, if it couldn't be entered).
+    let Some(sheet) = sheet else { return };
     app.run_or_alert("pageLayout.headerFooter", json!({"sheet": sheet, key: on}));
     let Some(sh) = app.session.active().and_then(|d| d.wb.sheet(sheet)).cloned() else { return };
     begin(app, sheet, &sh, page, zone);
@@ -378,7 +394,7 @@ pub fn begin(app: &mut SheetApp, sheet: usize, sh: &Sheet, page: (usize, usize),
     let Some(doc) = app.session.active().map(|d| d.uid) else { return };
     if let Some(e) = app.grid.hf_edit.as_mut()
         && e.doc == doc
-        && e.sheet == sheet
+        && e.sheet.eq_ignore_ascii_case(&sh.name)
         && e.page == page
         && e.footer == zone.footer
     {
@@ -407,7 +423,7 @@ pub fn begin(app: &mut SheetApp, sheet: usize, sh: &Sheet, page: (usize, usize),
     let prev_tab = if app.ui.ribbon_tab == TAB { "Home".to_string() } else { app.ui.ribbon_tab.clone() };
     app.grid.hf_edit = Some(HfEdit {
         doc,
-        sheet,
+        sheet: sh.name.clone(),
         page,
         footer: zone.footer,
         kind,
@@ -424,19 +440,42 @@ pub fn begin(app: &mut SheetApp, sheet: usize, sh: &Sheet, page: (usize, usize),
 }
 
 /// Ends editing and writes the header or footer when it changed (one undo step). It goes into the
-/// workbook it was typed in: an edit whose workbook isn't the one showing is dropped, never
-/// written into another.
+/// sheet and workbook it was typed in, the sheet found by name wherever the tabs have put it, and
+/// never into another. One that can't be entered, its sheet gone from the workbook showing or its
+/// workbook not the one showing, is said, with what was typed ([`say_lost`]).
 pub fn commit(app: &mut SheetApp) {
     let Some(e) = app.grid.hf_edit.take() else { return };
     if app.ui.ribbon_tab == TAB {
         app.ui.ribbon_tab = e.prev_tab.clone();
     }
-    if !e.changed() || app.session.active().map(|d| d.uid) != Some(e.doc) {
+    if !e.changed() {
         return;
     }
+    let Some(sheet) = e.sheet_index(&app.session) else {
+        say_lost(app, &e);
+        return;
+    };
     let spec = print::join_header_footer(&e.texts.clone().map(|s| print::fields_to_codes(&s)));
     let key = hf_key(e.kind, e.footer);
-    app.run_or_alert("pageLayout.headerFooter", json!({"sheet": e.sheet, key: spec}));
+    app.run_or_alert("pageLayout.headerFooter", json!({"sheet": sheet, key: spec}));
+}
+
+/// A header or footer typed in a sheet that is no longer in the workbook showing (renamed or
+/// deleted by something that didn't enter the header first: a script, another window; or its
+/// workbook is open but another is showing) can't be entered anywhere. It is never lost unseen:
+/// the message gives what was typed. One whose workbook was closed went with it (Don't Save, or
+/// a forced close) and is not mentioned.
+fn say_lost(app: &mut SheetApp, e: &HfEdit) {
+    if !app.session.documents().iter().any(|d| d.uid == e.doc) {
+        return;
+    }
+    let typed: Vec<&str> = e.texts.iter().map(String::as_str).filter(|t| !t.is_empty()).collect();
+    let typed = if typed.is_empty() { "nothing (it was emptied)".to_string() } else { typed.join(" | ") };
+    let which = if e.footer { "footer" } else { "header" };
+    app.message = Some((
+        "GridCraft".into(),
+        format!("The {which} typed for the sheet \"{}\" was not entered: that sheet is no longer in the workbook showing. It read: {typed}", e.sheet),
+    ));
 }
 
 /// Ends editing without writing.
@@ -465,8 +504,10 @@ pub fn go_to(app: &mut SheetApp, footer: bool) {
     if e.footer == footer {
         return;
     }
-    let (sheet, page, section) = (e.sheet, e.page, e.section);
+    let (page, section) = (e.page, e.section);
+    let sheet = e.sheet_index(&app.session);
     commit(app);
+    let Some(sheet) = sheet else { return };
     let Some(sh) = app.session.active().and_then(|d| d.wb.sheet(sheet)).cloned() else { return };
     begin(app, sheet, &sh, page, HfZone { footer, section });
 }
@@ -877,13 +918,19 @@ fn ruler_margins(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, pg: &PageGrid
     }
 }
 
+/// The worksheet the header or footer being edited is in, as it is now.
+fn edited_sheet(app: &SheetApp) -> Option<&Sheet> {
+    let wb = &app.session.active()?.wb;
+    wb.sheet(app.grid.hf_edit.as_ref()?.sheet_index(&app.session)?)
+}
+
 /// The Header & Footer contextual ribbon tab.
 pub fn ribbon_tab(app: &mut SheetApp, ui: &mut egui::Ui) {
     use crate::widgets::big_button;
     let Some(e) = app.grid.hf_edit.as_ref() else { return };
     let (footer, kind) = (e.footer, e.kind);
-    let (sheet_name, file) =
-        app.session.active().map(|d| (d.wb.sheet(e.sheet).map(|s| s.name.clone()).unwrap_or_default(), d.display_title())).unwrap_or_default();
+    let sheet_name = edited_sheet(app).map(|s| s.name.clone()).unwrap_or_default();
+    let file = app.session.active().map(|d| d.display_title()).unwrap_or_default();
     // Header & Footer presets (shown with sample values, as the result will read).
     for (label, part) in [("Header", false), ("Footer", true)] {
         let r = big_button(ui, if part { Icon::Footer } else { Icon::Header }, label, label, true);
@@ -899,9 +946,11 @@ pub fn ribbon_tab(app: &mut SheetApp, ui: &mut egui::Ui) {
             ];
             for (text, spec) in presets {
                 if ui.button(text).clicked() {
-                    let sheet = app.grid.hf_edit.as_ref().map(|e| e.sheet).unwrap_or(0);
+                    let sheet = app.grid.hf_edit.as_ref().and_then(|e| e.sheet_index(&app.session));
                     cancel(app);
-                    app.run_or_alert("pageLayout.headerFooter", json!({"sheet": sheet, hf_key(kind, part): spec}));
+                    if let Some(sheet) = sheet {
+                        app.run_or_alert("pageLayout.headerFooter", json!({"sheet": sheet, hf_key(kind, part): spec}));
+                    }
                     ui.close();
                 }
             }
@@ -929,10 +978,9 @@ pub fn ribbon_tab(app: &mut SheetApp, ui: &mut egui::Ui) {
         go_to(app, true);
     }
     sep(ui);
-    let (first, odd_even, scale_doc, align) =
-        app.session.active().and_then(|d| d.wb.sheet(app.grid.hf_edit.as_ref().map_or(0, |e| e.sheet))).map_or((false, false, true, true), |s| {
-            (s.print.different_first, s.print.different_odd_even, s.print.hf_scale_with_doc, s.print.hf_align_with_margins)
-        });
+    let (first, odd_even, scale_doc, align) = edited_sheet(app).map_or((false, false, true, true), |s| {
+        (s.print.different_first, s.print.different_odd_even, s.print.hf_scale_with_doc, s.print.hf_align_with_margins)
+    });
     ui.vertical(|ui| {
         let (mut f, mut o) = (first, odd_even);
         if ui.checkbox(&mut f, tr(app, "Different First Page")).changed() {
