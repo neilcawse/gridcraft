@@ -3198,7 +3198,6 @@ fn getpivotdata_covers_outline_tabular_compact_multi_values_subtotals_and_grand_
     t.set("H3", "=GETPIVOTDATA(\"Count of Sales\",$A$13)");
     assert_eq!((t.num("H1"), t.num("H2"), t.num("H3")), (250.0, 5.0, 5.0));
 }
-
 #[test]
 fn full_column_match_and_sumifs_scale() {
     use gridcraft_model::{Cell, Formula, Sheet};
