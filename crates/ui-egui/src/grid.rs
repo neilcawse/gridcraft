@@ -215,8 +215,11 @@ pub struct GridState {
     pub last_fill: String,
     pub last_font_color: String,
     pub trace: Option<Trace>,
-    pub renaming_tab: Option<usize>,
-    pub rename_text: String,
+    /// A sheet's name being typed in its tab, not yet entered. Bound to its workbook and sheet, never to a tab's place.
+    pub renaming_tab: Option<crate::tabs::TabRename>,
+    /// Text typed into a field over a workbook value (a table name, a chart title or size, a document property, an
+    /// iteration setting) and not yet entered; see [`crate::field_drafts`].
+    pub field_draft: Option<crate::field_drafts::FieldDraft>,
     pub list_picker: Option<CellRef>,
     /// Open task pane: comments, watch, selection, formatChart.
     pub pane: Option<String>,

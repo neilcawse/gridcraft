@@ -817,8 +817,11 @@ fn a_cell_being_typed_is_entered_into_its_own_sheet_however_the_tabs_change() {
 fn renaming_the_sheet_of_a_header_being_typed_keeps_the_header_in_it() {
     let (mut h, handed) = two_sheets();
     type_header(&mut h, "Typed");
-    h.state_mut().grid.renaming_tab = Some(0);
-    h.state_mut().grid.rename_text = "Budget".into();
+    gridcraft_ui_egui::tabs::begin_tab_rename(h.state_mut(), 0);
+    h.run_steps(3);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.run_steps(2);
+    h.input_mut().events.push(Event::Text("Budget".into()));
     h.run_steps(3);
     h.input_mut().events.push(Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
     h.input_mut().events.push(Event::Key { key: Key::Enter, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE });

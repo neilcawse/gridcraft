@@ -171,16 +171,24 @@ fn format_chart(app: &mut SheetApp, ui: &mut Ui) {
         ui.label(egui::RichText::new("Select a chart to format it.").italics());
         return;
     };
-    let Some(chart) = app.session.active().and_then(|d| d.wb.active().and_then(|s| s.charts.iter().find(|c| c.id == id).cloned())) else {
+    let Some((sheet, chart)) = app.session.active().and_then(|d| {
+        let s = d.wb.active()?;
+        Some((s.name.clone(), s.charts.iter().find(|c| c.id == id).cloned()?))
+    }) else {
         ui.label("The chart no longer exists.");
         return;
     };
     let theme = app.session.active().map(|d| d.wb.theme.clone()).unwrap_or_default();
     ui.collapsing("Chart Title", |ui| {
         let field = egui::Id::unique(("gridcraft.chart_title", id));
-        if let Some(title) = crate::widgets::committed_text(ui, field, chart.title.as_deref().unwrap_or(""), None) {
-            app.run_or_alert("chart.set", json!({"chart": id, "title": title}));
-        }
+        crate::field_drafts::text_field(
+            app,
+            ui,
+            field,
+            crate::field_drafts::Field::ChartTitle { sheet: sheet.clone(), chart: id },
+            chart.title.as_deref().unwrap_or(""),
+            None,
+        );
     });
     ui.collapsing("Chart Type", |ui| {
         ui.horizontal_wrapped(|ui| {
@@ -230,16 +238,26 @@ fn format_chart(app: &mut SheetApp, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.label("Horizontal axis title:");
             let field = egui::Id::unique(("gridcraft.chart_x_title", id));
-            if let Some(xt) = crate::widgets::committed_text(ui, field, chart.x_title.as_deref().unwrap_or(""), None) {
-                app.run_or_alert("chart.set", json!({"chart": id, "xTitle": if xt.is_empty() { Json::Null } else { json!(xt) }}));
-            }
+            crate::field_drafts::text_field(
+                app,
+                ui,
+                field,
+                crate::field_drafts::Field::ChartXTitle { sheet: sheet.clone(), chart: id },
+                chart.x_title.as_deref().unwrap_or(""),
+                None,
+            );
         });
         ui.horizontal(|ui| {
             ui.label("Vertical axis title:");
             let field = egui::Id::unique(("gridcraft.chart_y_title", id));
-            if let Some(yt) = crate::widgets::committed_text(ui, field, chart.y_title.as_deref().unwrap_or(""), None) {
-                app.run_or_alert("chart.set", json!({"chart": id, "yTitle": if yt.is_empty() { Json::Null } else { json!(yt) }}));
-            }
+            crate::field_drafts::text_field(
+                app,
+                ui,
+                field,
+                crate::field_drafts::Field::ChartYTitle { sheet: sheet.clone(), chart: id },
+                chart.y_title.as_deref().unwrap_or(""),
+                None,
+            );
         });
     });
     ui.collapsing("Series", |ui| {
@@ -282,20 +300,8 @@ fn format_chart(app: &mut SheetApp, ui: &mut Ui) {
         });
     });
     ui.collapsing("Size", |ui| {
-        // Keep the value being typed or dragged between frames; reloading it from the chart every frame threw the edit away.
-        let draft = egui::Id::unique(("gridcraft.chart_size_draft", id));
-        let (mut w, mut h) = ui.data_mut(|d| d.get_temp::<(f32, f32)>(draft)).unwrap_or((chart.anchor.width, chart.anchor.height));
-        let a = ui.add(egui::DragValue::new(&mut w).prefix("Width ").range(40.0..=4000.0));
-        let b = ui.add(egui::DragValue::new(&mut h).prefix("Height ").range(40.0..=4000.0));
-        if a.drag_stopped() || a.lost_focus() || b.drag_stopped() || b.lost_focus() {
-            ui.data_mut(|d| d.remove::<(f32, f32)>(draft));
-            if !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                app.run_or_alert("chart.set", json!({"chart": id, "width": w, "height": h}));
-            }
-        } else if a.dragged() || a.has_focus() || b.dragged() || b.has_focus() {
-            ui.data_mut(|d| d.insert_temp(draft, (w, h)));
-        } else {
-            ui.data_mut(|d| d.remove::<(f32, f32)>(draft));
-        }
+        // The value being typed or dragged is kept between frames (reloading it from the chart every frame threw the edit away) and
+        // counts as unsaved work until it is entered.
+        crate::field_drafts::size_fields(app, ui, &sheet, id, (chart.anchor.width, chart.anchor.height));
     });
 }

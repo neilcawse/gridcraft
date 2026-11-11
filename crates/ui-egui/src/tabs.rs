@@ -16,6 +16,73 @@ fn rename_needs_focus(has_focus: bool, lost_focus: bool) -> bool {
     !has_focus && !lost_focus
 }
 
+/// A sheet's name being typed in its tab and not yet entered. It belongs to its workbook (by uid) and its sheet by name, never to
+/// the sheet's place among the tabs: that changes when a tab is dragged or a sheet is added or deleted, and a name typed for one
+/// sheet must not be entered into the sheet that takes its place. A workbook can't have two sheets of one name.
+#[derive(Clone, Debug)]
+pub struct TabRename {
+    /// The workbook ([`DocState::uid`](gridcraft_engine::DocState)) the sheet is in.
+    pub doc: u64,
+    /// The sheet's name when the rename began.
+    pub sheet: String,
+    /// What has been typed.
+    pub text: String,
+}
+
+impl TabRename {
+    /// The name typed differs from the sheet's: unentered work.
+    pub fn changed(&self) -> bool {
+        self.text.trim() != self.sheet
+    }
+}
+
+/// Opens the name field on the tab of workbook sheet `sheet`. A draft typed before (a cell, another tab's name…) is entered first,
+/// as clicking another tab does; one the workbook refuses stays open with the reason shown, and the field doesn't open.
+pub fn begin_tab_rename(app: &mut SheetApp, sheet: usize) {
+    if app.settle_drafts().is_err() {
+        return;
+    }
+    let Some(d) = app.session.active() else { return };
+    let Some(s) = d.wb.sheets.get(sheet) else { return };
+    app.grid.renaming_tab = Some(TabRename { doc: d.uid, sheet: s.name.clone(), text: s.name.clone() });
+}
+
+/// Ends the rename and enters the name typed, as Enter does: into the sheet it was typed for, found by name wherever the tabs have
+/// put it, in the workbook it was typed in, and never into another. Nothing changes when the name wasn't changed.
+///
+/// A name the workbook refuses (blank, taken, too long, a character sheets can't have, a protected workbook) is not entered and
+/// not dropped: the draft stays, the reason is shown (`message`), and `Err` tells the command waiting for it (Save, Close…) not
+/// to go on with a wrong name. A draft whose sheet is gone from the workbook showing, or whose workbook isn't the one showing, can't
+/// be entered anywhere: it is dropped, and what was typed is said. One whose workbook was closed went with it.
+pub fn commit_rename(app: &mut SheetApp) -> Result<(), String> {
+    let Some(draft) = app.grid.renaming_tab.take() else { return Ok(()) };
+    if !draft.changed() || !app.session.documents().iter().any(|d| d.uid == draft.doc) {
+        return Ok(());
+    }
+    let name = draft.text.trim().to_string();
+    let checked = app.session.active().filter(|d| d.uid == draft.doc).and_then(|d| {
+        let i = d.wb.sheet_index(&draft.sheet)?;
+        Some(d.wb.check_sheet_name(&name, Some(i)))
+    });
+    let result = match checked {
+        None => {
+            app.message = Some((
+                "GridCraft".into(),
+                format!("The name \"{name}\" typed for the sheet \"{}\" was not entered: that sheet is not in the workbook showing.", draft.sheet),
+            ));
+            return Ok(());
+        }
+        Some(Err(e)) => Err(e),
+        // By name: the engine's sheet argument takes a name, so the tabs can't have moved it from under the draft.
+        Some(Ok(())) => app.run("sheet.rename", json!({"sheet": draft.sheet, "name": name})).map(|_| ()).map_err(|e| crate::clean_error(&e)),
+    };
+    if let Err(e) = &result {
+        app.message = Some(("GridCraft".into(), e.clone()));
+        app.grid.renaming_tab = Some(draft);
+    }
+    result
+}
+
 /// Rows of the All Sheets navigator as `(workbook index, name)`. Hidden sheets stay out, like on the tab strip:
 /// Unhide is the way to reach them.
 fn navigator_items(sheets: &[Arc<Sheet>]) -> Vec<(String, String)> {
@@ -179,7 +246,7 @@ pub fn sheet_tabs(app: &mut SheetApp, ui: &mut Ui) {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 0.0;
                             for (i, name, color, active) in sheets {
-                                let renaming = app.grid.renaming_tab == Some(i);
+                                let renaming = app.grid.renaming_tab.as_ref().is_some_and(|r| r.doc == uid && r.sheet.eq_ignore_ascii_case(&name));
                                 let font = if active { theme::ui_bold(13.0) } else { theme::ui_font(13.0) };
                                 let tw = ui.painter().layout_no_wrap(name.clone(), font.clone(), t.text).size().x;
                                 let w = (tw + 32.0).max(72.0);
@@ -207,20 +274,35 @@ pub fn sheet_tabs(app: &mut SheetApp, ui: &mut Ui) {
                                     ui.painter().rect_filled(band, 1.0, t.accent);
                                 }
                                 if renaming {
-                                    let mut text = app.grid.rename_text.clone();
+                                    let mut text = app.grid.renaming_tab.as_ref().map(|r| r.text.clone()).unwrap_or_default();
                                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r.shrink2(vec2(6.0, 5.0))));
                                     let ed = child
                                         .add(egui::TextEdit::singleline(&mut text).font(theme::ui_font(13.0)).desired_width(r.width() - 12.0))
                                         .accessible_name(app.ui.language.tr("Sheet Name"));
-                                    app.grid.rename_text = text.clone();
-                                    if rename_needs_focus(ed.has_focus(), ed.lost_focus()) {
+                                    if let Some(draft) = app.grid.renaming_tab.as_mut() {
+                                        draft.text = text;
+                                    }
+                                    // Save pressed in the field saves the file with the name that was typed: the grid's shortcuts
+                                    // stand aside while a field has the keyboard, so the field answers the key (as a text box does).
+                                    let save = if ed.has_focus() { crate::keymap::take_save_shortcut(ui) } else { None };
+                                    // While a message about the name is up, the field lets go of the keyboard and keeps its text.
+                                    let blocked = app.message.is_some();
+                                    if !blocked && rename_needs_focus(ed.has_focus(), ed.lost_focus()) {
                                         ed.request_focus();
                                     }
-                                    if ed.lost_focus() {
-                                        if !ui.input(|i| i.key_pressed(egui::Key::Escape)) && text != name {
-                                            app.run_or_alert("sheet.rename", json!({"sheet": i, "name": text}));
+                                    if !blocked && ed.lost_focus() {
+                                        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                            app.grid.renaming_tab = None;
+                                        } else {
+                                            // Enter or a click elsewhere. A name the workbook refuses stays in the field, with the reason
+                                            // shown; the Enter that raised it must not also dismiss it in the same frame.
+                                            if commit_rename(app).is_err() {
+                                                ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                                            }
                                         }
-                                        app.grid.renaming_tab = None;
+                                    }
+                                    if let Some(command) = save {
+                                        app.run_or_alert(command, json!({}));
                                     }
                                 } else {
                                     ui.painter().text(r.center(), Align2::CENTER_CENTER, &name, font, if active { t.accent } else { t.text });
@@ -231,8 +313,7 @@ pub fn sheet_tabs(app: &mut SheetApp, ui: &mut Ui) {
                                     activate_sheet(app, i);
                                 }
                                 if resp.double_clicked() {
-                                    app.grid.renaming_tab = Some(i);
-                                    app.grid.rename_text = name.clone();
+                                    begin_tab_rename(app, i);
                                 }
                                 // Drag to reorder; with the copy modifier held, drop a copy instead.
                                 let copy = drop_copies_sheet(ui.input(|inp| inp.modifiers), ui.ctx().os() == egui::os::OperatingSystem::Mac);
@@ -257,8 +338,7 @@ pub fn sheet_tabs(app: &mut SheetApp, ui: &mut Ui) {
                                         app.run_or_alert("home.deleteSheet", json!({"sheet": i}));
                                     }
                                     if ui.button(app.ui.language.tr("Rename")).clicked() {
-                                        app.grid.renaming_tab = Some(i);
-                                        app.grid.rename_text = name.clone();
+                                        begin_tab_rename(app, i);
                                     }
                                     if ui.button(app.ui.language.tr("Move or Copy…")).clicked() {
                                         app.open_dialog("moveSheet", json!({"sheet": i}));

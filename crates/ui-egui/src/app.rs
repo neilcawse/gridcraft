@@ -112,6 +112,8 @@ impl SheetApp {
         // Replies under comments that are gone (a deleted comment or sheet, a closed workbook) go
         // with them, whichever pane is drawn.
         self.reply_drafts.forget_stale(&self.session);
+        // So do a sheet name or field value typed in a workbook that has closed.
+        self.forget_closed_drafts();
         // Floating pictures' textures go with their workbook, even when no sheet is painted.
         let open: Vec<u64> = self.session.documents().iter().map(|d| d.uid).collect();
         floating_pictures::forget_closed(ctx, &open);

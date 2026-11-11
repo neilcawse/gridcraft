@@ -20,7 +20,7 @@ use crate::i18n::{self, Language};
 use crate::icons::{self, Icon};
 use crate::theme::{self, Tokens};
 
-mod options;
+pub(crate) mod options;
 mod print;
 
 use options::{options, platform};
@@ -112,8 +112,6 @@ const PROPERTIES: [(&str, &str); 6] = [
 #[derive(Clone, Debug)]
 pub struct Backstage {
     pub page: Page,
-    /// Info: property drafts while a field is being edited (committed when it loses focus).
-    props: [String; 6],
     /// Focus at the end of the previous frame, before egui clears it on Esc.
     text_edit_focused: bool,
     /// Print: the whole workbook rather than the active sheet.
@@ -139,7 +137,6 @@ impl Backstage {
     pub fn new(page: Page) -> Backstage {
         Backstage {
             page,
-            props: Default::default(),
             text_edit_focused: false,
             print_all: false,
             fit_to_page: false,
@@ -222,7 +219,7 @@ pub fn show(app: &mut SheetApp, ui: &mut Ui) {
                     Page::Home => home(app, ui, &mut bs, &mut out),
                     Page::New => new_page(app, ui, &mut out),
                     Page::Open => open_page(app, ui, &mut bs, &mut out),
-                    Page::Info => info(app, ui, &mut bs),
+                    Page::Info => info(app, ui),
                     Page::SaveAs => save_as(app, ui, &mut bs, &mut out),
                     Page::Print => print(app, ui, &mut bs, &mut out),
                     Page::Export => export(app, ui, &mut out),
@@ -602,7 +599,7 @@ pub fn protect_workbook(app: &mut SheetApp) {
 }
 
 /// Shows the workbook title, path, sheet count and structure protection, plus editable document properties. Committing a changed field after it loses focus runs `file.properties`.
-fn info(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage) {
+fn info(app: &mut SheetApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     let lang = app.ui.language;
     let Some(d) = app.session.active() else {
@@ -655,19 +652,12 @@ fn info(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage) {
         ui.label(sheets.to_string());
         ui.end_row();
         for (i, (key, label)) in PROPERTIES.iter().enumerate() {
-            let (Some(draft), Some(saved)) = (bs.props.get_mut(i), current.get(i)) else { continue };
+            let Some(saved) = current.get(i) else { continue };
             let label = ui.label(RichText::new(lang.tr(label)).color(t.text_dim));
             let id = ui.make_persistent_id(("backstage_prop", *key));
-            // Show the workbook's value unless the field is being edited (undo, another window).
-            if !ui.ctx().memory(|m| m.has_focus(id)) {
-                draft.clone_from(saved);
-            }
-            let resp = ui.add(egui::TextEdit::singleline(draft).id(id).desired_width(360.0)).labelled_by(label.id);
-            if resp.lost_focus() && draft != saved {
-                let mut params = serde_json::Map::new();
-                params.insert((*key).to_string(), json!(draft.clone()));
-                app.run_or_alert("file.properties", Json::Object(params));
-            }
+            // The workbook's value is shown unless the field is being edited (undo, another window); what is typed counts as
+            // unsaved work until the field loses focus, and Save enters it.
+            crate::field_drafts::text_field(app, ui, id, crate::field_drafts::Field::Property(key), saved, Some(360.0)).labelled_by(label.id);
             ui.end_row();
         }
     });

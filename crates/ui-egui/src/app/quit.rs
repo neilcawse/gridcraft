@@ -104,8 +104,8 @@ impl SheetApp {
                 }
             }
             SaveAnswer::Save => {
-                // File operations include the cell still being edited, as File › Save does.
-                if !self.commit_edit(0, 0, false, false) {
+                // File operations include everything still being typed (the cell, a header, a sheet name…), as File › Save does.
+                if self.settle_drafts().is_err() {
                     return false;
                 }
                 let sent = self.host_saves_sent;

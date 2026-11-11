@@ -1,4 +1,4 @@
-use super::{Key, Language, Modifiers, SheetApp, Ui, dim, i18n, json, section, vec2};
+use super::{Language, SheetApp, Ui, dim, i18n, json, section, vec2};
 
 /// Excel's File › Options page: General (display theme, interface language and Show formula bar),
 /// Editing (AutoComplete) and Save (the autosave checkbox toggling `app.ui.autosave`), plus Formulas
@@ -100,64 +100,35 @@ fn calc_options(app: &mut SheetApp, ui: &mut Ui, lang: Language, calc: &gridcraf
 
 /// Maximum Iterations and Maximum Change, live only while iterative calculation is on.
 fn iteration_options(app: &mut SheetApp, ui: &mut Ui, lang: Language, calc: &gridcraft_engine::model::CalcSettings, iterative: bool) {
+    use crate::field_drafts::{Field, text_field};
     ui.add_enabled_ui(iterative, |ui| {
         ui.horizontal(|ui| {
             ui.add_space(24.0);
             egui::Grid::new("backstage_options_iteration").num_columns(2).spacing(vec2(12.0, 6.0)).show(ui, |ui| {
+                // A value typed and not entered counts as unsaved work. Text left in the field when iteration is switched off
+                // (it loses focus) is dropped; a value that is refused is reported and kept in the field.
                 let label = ui.label(lang.tr("Maximum Iterations:"));
                 let id = ui.make_persistent_id("backstage_max_iterations");
-                // Text left in the field when iteration is switched off (it loses focus) is dropped.
-                let committed = crate::widgets::committed_text(ui, id, &calc.max_iterations.to_string(), Some(80.0));
-                if let Some(response) = ui.ctx().read_response(id) {
-                    response.labelled_by(label.id);
-                }
-                if let Some(text) = committed.filter(|_| iterative) {
-                    match parse_max_iterations(&text) {
-                        Some(n) if n != calc.max_iterations => {
-                            app.run_or_alert("formulas.calculationOptions", json!({"maxIterations": n}));
-                        }
-                        Some(_) => {}
-                        None => refuse(app, ui, "Maximum Iterations must be a whole number from 1 to 32767."),
-                    }
-                }
+                text_field(app, ui, id, Field::MaxIterations, &calc.max_iterations.to_string(), Some(80.0)).labelled_by(label.id);
                 ui.end_row();
                 let label = ui.label(lang.tr("Maximum Change:"));
                 let id = ui.make_persistent_id("backstage_max_change");
-                let committed = crate::widgets::committed_text(ui, id, &calc.max_change.to_string(), Some(80.0));
-                if let Some(response) = ui.ctx().read_response(id) {
-                    response.labelled_by(label.id);
-                }
-                if let Some(text) = committed.filter(|_| iterative) {
-                    match parse_max_change(&text, lang.formula_locale()) {
-                        Some(d) if d != calc.max_change => {
-                            app.run_or_alert("formulas.calculationOptions", json!({"maxChange": d}));
-                        }
-                        Some(_) => {}
-                        None => refuse(app, ui, "Maximum Change must be a number of 0 or more."),
-                    }
-                }
+                text_field(app, ui, id, Field::MaxChange, &calc.max_change.to_string(), Some(80.0)).labelled_by(label.id);
                 ui.end_row();
             });
         });
     });
 }
 
-/// Refuses a typed setting with a message, leaving the workbook as it was. The Enter that
-/// committed the field is consumed so it doesn't also dismiss the message box in this frame.
-fn refuse(app: &mut SheetApp, ui: &mut Ui, text: &str) {
-    ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
-    app.message = Some(("GridCraft".into(), app.ui.language.tr(text).into()));
-}
-
 /// Maximum Iterations as typed: a whole number from 1 to 32767, or `None` (Excel refuses others).
-fn parse_max_iterations(text: &str) -> Option<u32> {
+pub(crate) fn parse_max_iterations(text: &str) -> Option<u32> {
     let n = text.trim().parse::<u32>().ok()?;
     (1..=gridcraft_engine::model::CalcSettings::MAX_ITERATIONS).contains(&n).then_some(n)
 }
 
 /// Maximum Change as typed: a finite number of 0 or more, or `None`. The interface's decimal
 /// separator is accepted as well as a dot.
-fn parse_max_change(text: &str, locale: gridcraft_engine::formula::FormulaLocale) -> Option<f64> {
+pub(crate) fn parse_max_change(text: &str, locale: gridcraft_engine::formula::FormulaLocale) -> Option<f64> {
     let d = text.trim().replace(locale.decimal_separator(), ".").parse::<f64>().ok()?;
     (d.is_finite() && d >= 0.0).then_some(d)
 }

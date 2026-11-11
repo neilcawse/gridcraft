@@ -20,9 +20,13 @@ fn harness() -> egui_kittest::Harness<'static, SheetApp> {
     h
 }
 
+/// Opens the first tab's name field and types `new_name` over its name, as a person does.
 fn start_rename(h: &mut egui_kittest::Harness<'static, SheetApp>, new_name: &str) {
-    h.state_mut().grid.renaming_tab = Some(0);
-    h.state_mut().grid.rename_text = new_name.to_string();
+    gridcraft_ui_egui::tabs::begin_tab_rename(h.state_mut(), 0);
+    h.run_steps(3);
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.run_steps(2);
+    h.input_mut().events.push(Event::Text(new_name.to_string()));
     h.run_steps(3);
 }
 
@@ -37,7 +41,7 @@ fn enter_saves_the_sheet_name_and_closes_the_field() {
     h.input_mut().events.push(Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
     h.input_mut().events.push(Event::Key { key: Key::Enter, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE });
     h.run_steps(3);
-    assert_eq!(h.state().grid.renaming_tab, None, "Enter must close the rename field");
+    assert!(h.state().grid.renaming_tab.is_none(), "Enter must close the rename field");
     assert_eq!(sheet_name(&h), "Budget");
 }
 
@@ -55,6 +59,6 @@ fn clicking_a_cell_saves_the_sheet_name_and_closes_the_field() {
         Event::PointerButton { pos, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE },
     ]);
     h.run_steps(3);
-    assert_eq!(h.state().grid.renaming_tab, None, "clicking elsewhere must close the rename field");
+    assert!(h.state().grid.renaming_tab.is_none(), "clicking elsewhere must close the rename field");
     assert_eq!(sheet_name(&h), "Ledger");
 }

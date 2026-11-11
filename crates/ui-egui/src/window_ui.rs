@@ -145,9 +145,31 @@ impl SheetApp {
         }
     }
 
-    /// Whether a window other than the current one has a cell, text-box or header/footer draft open.
+    /// Drops the sheet name and field value typed in workbooks that have closed, in every window: nothing is left to enter them
+    /// into, and they must not count as unsaved work.
+    pub(crate) fn forget_closed_drafts(&mut self) {
+        let open: Vec<u64> = self.session.documents().iter().map(|d| d.uid).collect();
+        let forget = |grid: &mut grid::GridState| {
+            if grid.renaming_tab.as_ref().is_some_and(|r| !open.contains(&r.doc)) {
+                grid.renaming_tab = None;
+            }
+            if grid.field_draft.as_ref().is_some_and(|d| !d.is_in(&open)) {
+                grid.field_draft = None;
+            }
+        };
+        forget(&mut self.grid);
+        self.parked.values_mut().for_each(|w| forget(&mut w.grid));
+    }
+
+    /// Whether a window other than the current one has a cell, text-box, header/footer, sheet-name or field draft open.
     pub fn parked_window_with_draft(&self) -> Option<u64> {
-        let open = |w: &WindowUi| w.editor.is_some() || w.text_box_editor.is_some() || w.grid.hf_edit.is_some();
+        let open = |w: &WindowUi| {
+            w.editor.is_some()
+                || w.text_box_editor.is_some()
+                || w.grid.hf_edit.is_some()
+                || w.grid.renaming_tab.is_some()
+                || w.grid.field_draft.is_some()
+        };
         self.parked.iter().filter(|(_, w)| open(w)).map(|(id, _)| *id).min()
     }
 
@@ -168,14 +190,17 @@ impl SheetApp {
     }
 
     /// A draft in any window that entering would change something with: a cell or formula-bar
-    /// edit with text, a text box or header/footer edit that changed, unsaved macro steps, or a
-    /// comment reply typed and not sent (the app keeps it, so it counts whether or not the
-    /// Comments pane is drawn, as long as the comment it answers is there).
+    /// edit with text, a text box or header/footer edit that changed, a sheet name or a field
+    /// value typed and not entered, unsaved macro steps, or a comment reply typed and not sent
+    /// (the app keeps it, so it counts whether or not the Comments pane is drawn, as long as the
+    /// comment it answers is there).
     pub fn has_unsaved_drafts(&self) -> bool {
         let drafts = |editor: &Option<editor::EditState>, text_box: &Option<text_box::EditState>, grid: &grid::GridState| {
             editor.as_ref().is_some_and(editor::EditState::changes_cell)
                 || text_box.as_ref().is_some_and(text_box::EditState::changed)
                 || grid.hf_edit.as_ref().is_some_and(crate::paper_view::HfEdit::changed)
+                || grid.renaming_tab.as_ref().is_some_and(crate::tabs::TabRename::changed)
+                || grid.field_draft.as_ref().is_some_and(crate::field_drafts::FieldDraft::changed)
         };
         drafts(&self.editor, &self.text_box_editor, &self.grid)
             || self.parked.values().any(|w| drafts(&w.editor, &w.text_box_editor, &w.grid))

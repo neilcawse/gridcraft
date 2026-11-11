@@ -56,6 +56,8 @@ impl SheetApp {
         }
         if matches!(id, "sheet.activate" | "sheet.next" | "sheet.previous" | "sheet.hide" | "sheet.unhide" | "object.delete" | "object.move") {
             self.commit_text_box_edit()?;
+            // A chart title or size typed in the sheet showing goes into it before another sheet comes forward.
+            crate::field_drafts::commit(self)?;
         }
         if let Some(r) = self.run_ui_command(id, &params) {
             return r;
@@ -376,9 +378,12 @@ impl SheetApp {
         if !self.commit_edit(0, 0, false, false) {
             return;
         }
-        // The File view hides the sheet, and with it the header or footer being edited in place:
-        // it is entered now, as a click elsewhere would, not left open behind the view.
+        // The File view hides the sheet, and with it the header, sheet name or field being typed in place:
+        // each is entered now, as a click elsewhere would, not left open behind the view.
         crate::paper_view::commit(self);
+        if crate::tabs::commit_rename(self).is_err() || crate::field_drafts::commit(self).is_err() {
+            return;
+        }
         match &mut self.backstage {
             Some(b) => b.page = page,
             None => self.backstage = Some(backstage::Backstage::new(page)),

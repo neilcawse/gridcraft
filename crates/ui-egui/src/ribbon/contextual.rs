@@ -14,11 +14,7 @@ pub(super) fn table_design(app: &mut SheetApp, ui: &mut Ui) {
     ui.vertical(|ui| {
         ui.label(egui::RichText::new("Table Name:").small());
         let field = egui::Id::unique(("gridcraft.table_name", &tname));
-        if let Some(name) = crate::widgets::committed_text(ui, field, &tname, Some(120.0))
-            && name != tname
-        {
-            act(app, "table.rename", json!({"table": tname, "name": name}));
-        }
+        crate::field_drafts::text_field(app, ui, field, crate::field_drafts::Field::TableName(tname.clone()), &tname, Some(120.0));
     });
     let __k = big_button(ui, Icon::Table, "Resize\nTable", "Resize Table", false);
     control_keytip(app, ui, &__k, "dialog:tableResize");
