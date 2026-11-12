@@ -131,8 +131,12 @@ impl Bridge {
     /// hears when unsaved work appears or goes away.
     pub fn sync(&self, app: &mut SheetApp, ctx: &egui::Context) {
         if let Some(save_as) = self.save_requested.take()
-            && app.session.active().is_some()
+            && let Some(active) = app.session.active().map(|d| d.uid)
         {
+            // A Save of a workbook whose Save As still waits for the host (the user hasn't chosen
+            // where yet) is that Save As again with the newer content: a plain Save would make a
+            // .csv/.tsv that replaces the waiting whole-workbook file.
+            let save_as = save_as || self.unacked.borrow().save_as_waiting(active);
             app.run_or_alert(if save_as { "file.saveAs" } else { "file.save" }, serde_json::json!({}));
         }
         self.apply_stored(app);
@@ -169,7 +173,7 @@ impl Bridge {
             .post_message_with_transfer(&message, &self.origin, &js_sys::Array::of1(&buffer))
             .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))?;
         if self.ack && save.marks_saved {
-            self.unacked.borrow_mut().push(save_id, save.document, Arc::clone(&save.content));
+            self.unacked.borrow_mut().push(save_id, save.document, save.save_as, Arc::clone(&save.content));
         }
         Ok(())
     }

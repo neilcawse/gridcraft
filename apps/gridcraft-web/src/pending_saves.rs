@@ -8,10 +8,12 @@
 /// workbook stays unsaved, never wrongly saved).
 pub const MAX_PER_DOC: usize = 8;
 
-/// One save waiting for the host: the workbook it came from (`DocState::uid`) and its content.
+/// One save waiting for the host: the workbook it came from (`DocState::uid`), its content, and
+/// whether it was a Save As.
 struct Pending<T> {
     save_id: u64,
     doc: u64,
+    save_as: bool,
     content: T,
 }
 
@@ -28,8 +30,8 @@ impl<T> Default for PendingSaves<T> {
 
 impl<T> PendingSaves<T> {
     /// Save `save_id` of workbook `doc`, with `content`, went to the host.
-    pub fn push(&mut self, save_id: u64, doc: u64, content: T) {
-        self.pending.push(Pending { save_id, doc, content });
+    pub fn push(&mut self, save_id: u64, doc: u64, save_as: bool, content: T) {
+        self.pending.push(Pending { save_id, doc, save_as, content });
         let of_doc = self.pending.iter().filter(|p| p.doc == doc).count();
         if of_doc > MAX_PER_DOC
             && let Some(oldest) = self.pending.iter().position(|p| p.doc == doc)
@@ -58,6 +60,12 @@ impl<T> PendingSaves<T> {
         self.pending.retain(|p| open.contains(&p.doc));
     }
 
+    /// Whether a Save As of workbook `doc` is still waiting (e.g. for the user to choose where):
+    /// a Save meanwhile must make the same kind of file, or it would replace the waiting one.
+    pub fn save_as_waiting(&self, doc: u64) -> bool {
+        self.pending.iter().any(|p| p.doc == doc && p.save_as)
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.pending.len()
@@ -71,8 +79,8 @@ mod tests {
     #[test]
     fn a_stored_save_gives_its_own_workbook_and_content() {
         let mut p = PendingSaves::default();
-        p.push(1, 10, "a v1");
-        p.push(2, 20, "b v1");
+        p.push(1, 10, false, "a v1");
+        p.push(2, 20, false, "b v1");
         // The second workbook's save is stored while the first is active: it is still the second's.
         assert_eq!(p.stored(2), Some((20, "b v1")));
         assert_eq!(p.stored(2), None, "a save is stored once");
@@ -82,8 +90,8 @@ mod tests {
     #[test]
     fn a_discarded_save_is_never_stored() {
         let mut p = PendingSaves::default();
-        p.push(1, 10, "v1");
-        p.push(2, 10, "v2");
+        p.push(1, 10, false, "v1");
+        p.push(2, 10, false, "v2");
         p.discard(2);
         assert_eq!(p.stored(2), None, "the workbook stays unsaved");
         assert_eq!(p.len(), 1);
@@ -94,9 +102,9 @@ mod tests {
     #[test]
     fn a_newer_stored_save_forgets_older_ones_of_that_workbook_only() {
         let mut p = PendingSaves::default();
-        p.push(1, 10, "a v1");
-        p.push(2, 20, "b v1");
-        p.push(3, 10, "a v2");
+        p.push(1, 10, false, "a v1");
+        p.push(2, 20, false, "b v1");
+        p.push(3, 10, false, "a v2");
         assert_eq!(p.stored(3), Some((10, "a v2")));
         assert_eq!(p.stored(1), None);
         assert_eq!(p.stored(2), Some((20, "b v1")));
@@ -106,13 +114,27 @@ mod tests {
     fn waiting_saves_stay_bounded() {
         let mut p = PendingSaves::default();
         for id in 1..=100 {
-            p.push(id, 10, id);
+            p.push(id, 10, false, id);
         }
-        p.push(101, 20, 101);
+        p.push(101, 20, false, 101);
         assert_eq!(p.len(), MAX_PER_DOC + 1);
         assert_eq!(p.stored(1), None, "the oldest went");
         assert_eq!(p.stored(100), Some((10, 100)));
         p.keep_open(&[10]);
         assert_eq!(p.stored(101), None, "a closed workbook's saves are forgotten");
+    }
+
+    #[test]
+    fn a_save_as_waits_for_its_own_workbook_until_stored_or_discarded() {
+        let mut p = PendingSaves::default();
+        p.push(1, 10, true, "a as");
+        p.push(2, 20, false, "b");
+        assert!(p.save_as_waiting(10));
+        assert!(!p.save_as_waiting(20), "another workbook's Save As doesn't count");
+        p.push(3, 10, true, "a as v2");
+        p.discard(1);
+        assert!(p.save_as_waiting(10), "the newer Save As still waits");
+        assert_eq!(p.stored(3), Some((10, "a as v2")));
+        assert!(!p.save_as_waiting(10));
     }
 }
