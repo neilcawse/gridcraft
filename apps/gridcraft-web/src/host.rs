@@ -29,8 +29,10 @@
 //! - `gridcraft:dirty` (to the parent): `{ dirty }` whenever unsaved work appears or goes away:
 //!   a workbook with unsaved changes or a draft not yet entered (a cell being typed in, a text
 //!   box or header being edited).
-//! - `gridcraft:request-save` (from the parent): save the active workbook as File › Save would,
-//!   so a parent's own Save button or shortcut gets a `gridcraft:save` back.
+//! - `gridcraft:request-save` (from the parent): `{ saveAs? }` save the active workbook as File ›
+//!   Save would, or with `saveAs: true` as File › Save As would (a whole-workbook .xlsx, .xlsm for
+//!   a macro-enabled one, instead of a .csv/.tsv), so a parent's own Save and Save As buttons and
+//!   shortcuts get a `gridcraft:save` back.
 //! - `gridcraft:failed` (to the parent): `{ error }` when the app couldn't start.
 //!
 //! Only the parent window on the page's own origin is heard or answered. In host mode the page
@@ -69,8 +71,9 @@ pub struct Bridge {
     /// Workbook saves handed over and not yet stored or discarded (`?ack=1`).
     unacked: Rc<RefCell<PendingSaves<Arc<Workbook>>>>,
     next_save_id: Rc<Cell<u64>>,
-    /// The parent asked for a save (`gridcraft:request-save`) since the last frame.
-    save_requested: Rc<Cell<bool>>,
+    /// The parent asked for a save (`gridcraft:request-save`) since the last frame: `Some(true)`
+    /// when any of those asks was a Save As.
+    save_requested: Rc<Cell<Option<bool>>>,
     /// The unsaved-work state last reported to the parent.
     reported: Rc<Cell<Option<bool>>>,
 }
@@ -127,8 +130,10 @@ impl Bridge {
     /// files the parent sent open and the parent hears which workbook each became, and the parent
     /// hears when unsaved work appears or goes away.
     pub fn sync(&self, app: &mut SheetApp, ctx: &egui::Context) {
-        if self.save_requested.take() && app.session.active().is_some() {
-            app.run_or_alert("file.save", serde_json::json!({}));
+        if let Some(save_as) = self.save_requested.take()
+            && app.session.active().is_some()
+        {
+            app.run_or_alert(if save_as { "file.saveAs" } else { "file.save" }, serde_json::json!({}));
         }
         self.apply_stored(app);
         let sent = std::mem::take(&mut *self.sent.borrow_mut());
@@ -215,7 +220,10 @@ impl Bridge {
                     unacked.borrow_mut().discard(save_id);
                     return;
                 }
-                Some("gridcraft:request-save") => save_requested.set(true),
+                Some("gridcraft:request-save") => {
+                    let save_as = js_sys::Reflect::get(&data, &JsValue::from_str("saveAs")).is_ok_and(|v| v.as_bool() == Some(true));
+                    save_requested.set(Some(save_as || save_requested.get() == Some(true)));
+                }
                 _ => return,
             }
             ctx.request_repaint();
