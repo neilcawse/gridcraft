@@ -154,6 +154,21 @@ impl SheetApp {
         true
     }
 
+    /// Saving the workbook to its own .csv/.tsv file (`name`) kept only the active sheet's values:
+    /// the info bar says so, once per workbook.
+    pub(super) fn tell_csv_loss(&mut self, name: &str) {
+        let Some(uid) = self.session.active().map(|d| d.uid) else { return };
+        if self.csv_loss_told.insert(uid) {
+            self.notice = Some(Notice {
+                text: format!(
+                    "Saved {name} as CSV: it keeps the values of the active sheet only. Other sheets, formulas and formatting are not in the file; use File › Save As for an .xlsx that keeps them."
+                ),
+                kind: NoticeKind::Warning,
+                action: None,
+            });
+        }
+    }
+
     /// AutoSave: save workbooks that have a file shortly after they change. This decision lives in
     /// `logic` so a hidden or logic-only frame still saves; the monotonic timestamp check keeps a
     /// forced hidden UI pass from saving the same change twice.

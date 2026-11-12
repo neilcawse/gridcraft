@@ -340,15 +340,27 @@ impl SheetApp {
                         let path = if std::path::Path::new(&path).extension().is_none() { format!("{path}.xlsx") } else { path };
                         self.run_or_alert("file.save", json!({"path": path}));
                     }
-                } else if (self.services.download.is_some() || self.services.host_save.is_some())
-                    && let Ok(r) = self.run("file.saveBytes", json!({"format": "xlsx"}))
-                    && let Some(b) = r.get("base64").and_then(Json::as_str).and_then(gridcraft_engine::io::base64_decode)
-                {
-                    let name = r.get("name").and_then(Json::as_str).unwrap_or("Book.xlsx").to_string();
+                } else if self.services.download.is_some() || self.services.host_save.is_some() {
                     // Save of a workbook with no file (the web keeps none) asks with `save`: that is
-                    // not Save As, so a host page writes it back to the file it came from.
+                    // not Save As, so a host page writes it back to the file it came from, in that
+                    // file's format (.xlsx, .xlsm, .csv, .tsv). Save As makes an .xlsx (an .xlsm
+                    // stays macro-enabled), which holds the whole workbook.
                     let save_as = params.get("save").and_then(Json::as_bool) != Some(true);
-                    self.deliver_file(&name, &b, save_as, true);
+                    let format = if !save_as {
+                        json!({})
+                    } else if suggested.to_ascii_lowercase().ends_with(".xlsm") {
+                        json!({"format": "xlsm"})
+                    } else {
+                        json!({"format": "xlsx"})
+                    };
+                    if let Ok(r) = self.run("file.saveBytes", format)
+                        && let Some(b) = r.get("base64").and_then(Json::as_str).and_then(gridcraft_engine::io::base64_decode)
+                    {
+                        let name = r.get("name").and_then(Json::as_str).unwrap_or("Book.xlsx").to_string();
+                        if self.deliver_file(&name, &b, save_as, true) && r.get("lossy").and_then(Json::as_bool) == Some(true) {
+                            self.tell_csv_loss(&name);
+                        }
+                    }
                 }
             }
             // File › Options (`file.options`) and the File tab itself open the Backstage view.

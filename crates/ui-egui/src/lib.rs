@@ -311,6 +311,8 @@ pub struct SheetApp {
     /// Workbook saves handed to a host page that confirms its saves ([`Services::host_save`]),
     /// counted so the Save Changes prompt can tell that its Save is waiting for the host.
     host_saves_sent: u64,
+    /// Workbooks already told that saving them to their .csv/.tsv left out what CSV can't hold.
+    csv_loss_told: std::collections::HashSet<u64>,
     /// The update check, the startup prompt and a running self-update (desktop only).
     #[cfg(not(target_arch = "wasm32"))]
     updates_rt: updates_ui::Runtime,

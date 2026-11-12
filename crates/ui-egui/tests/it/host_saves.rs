@@ -161,6 +161,60 @@ fn a_sent_file_reports_whether_saves_may_replace_it() {
     assert!(app.open_sent("Broken.xlsx", b"PK\x03\x04 not a workbook").is_none(), "a file that didn't open is no workbook");
 }
 
+/// The name of the page's last file.
+fn last(log: &Log) -> String {
+    log.borrow().last().unwrap().name.clone()
+}
+
+#[test]
+fn save_writes_a_sent_csv_back_as_csv_and_says_once_what_it_left_out() {
+    let (mut app, log) = host_app(true);
+    let sent = app.open_sent("Data.csv", b"Name,Qty\nBolts,4\n").unwrap();
+    assert!(sent.in_place);
+    app.run("cell.set", json!({"cell": "B2", "input": "5"})).unwrap();
+    app.run("file.save", json!({})).unwrap();
+    assert_eq!(last(&log), "Data.csv", "Save keeps the file's own format");
+    assert!(!log.borrow().last().unwrap().save_as);
+    assert!(app.notice.is_none(), "plain values on one sheet lose nothing");
+
+    app.run("cell.set", json!({"cell": "C2", "input": "=B2*2"})).unwrap();
+    app.run("file.save", json!({})).unwrap();
+    assert_eq!(last(&log), "Data.csv");
+    assert!(app.notice.as_ref().is_some_and(|n| n.text.contains("formulas")), "{:?}", app.notice);
+    app.notice = None;
+    app.run("cell.set", json!({"cell": "C3", "input": "=B2*3"})).unwrap();
+    app.run("file.save", json!({})).unwrap();
+    assert!(app.notice.is_none(), "the warning comes once per workbook");
+
+    // Save As makes an .xlsx, which keeps the formulas.
+    app.run("file.saveAs", json!({})).unwrap();
+    let got = log.borrow();
+    let g = got.last().unwrap();
+    assert_eq!((g.name.as_str(), g.save_as), ("Data.xlsx", true));
+}
+
+#[test]
+fn save_writes_a_sent_xlsm_back_as_xlsm_with_its_macros() {
+    let (mut app, log) = host_app(true);
+    let mut wb = Workbook::new();
+    let vba = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1 fake OLE2 vbaProject".to_vec();
+    wb.vba_project = Some(vba.clone().into());
+    let bytes = gridcraft_engine::io::save_bytes(&wb, "Macros.xlsm").unwrap();
+    assert!(app.open_sent("Macros.xlsm", &bytes).unwrap().in_place);
+    app.run("cell.set", json!({"cell": "A1", "input": "edited"})).unwrap();
+    app.run("file.save", json!({})).unwrap();
+    assert_eq!(last(&log), "Macros.xlsm");
+    let r = app.run("file.saveBytes", json!({})).unwrap();
+    assert_eq!(r["name"], "Macros.xlsm");
+    let saved = gridcraft_engine::io::base64_decode(r["base64"].as_str().unwrap()).unwrap();
+    let (back, _) = gridcraft_engine::io::open_bytes("Macros.xlsm", &saved).unwrap();
+    assert_eq!(back.vba_project.as_deref(), Some(&vba), "the macros survive Save");
+    // Save As stays macro-enabled.
+    app.run("file.saveAs", json!({})).unwrap();
+    assert_eq!(last(&log), "Macros.xlsm");
+    assert!(log.borrow().last().unwrap().save_as);
+}
+
 #[test]
 fn a_draft_not_yet_entered_is_unsaved_work() {
     let (mut app, _) = host_app(true);

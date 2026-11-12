@@ -83,6 +83,7 @@ impl SheetApp {
             native_windows: false,
             arrange_windows: None,
             host_saves_sent: 0,
+            csv_loss_told: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             updates_rt: Default::default(),
         }

@@ -9,13 +9,16 @@
 //!   didn't open, waits behind a password prompt (after which it counts as a workbook the user
 //!   opened), was imported (.ods, .xls, .xlsb) or decrypted, which Save never writes over the
 //!   file they came from ([`SentFile::in_place`]).
-//! - `gridcraft:save` (to the parent): `{ name, bytes, docId, saveId, saveAs }` (`bytes` a
+//! - `gridcraft:save` (to the parent): `{ name, bytes, docId, saveId, saveAs, copy }` (`bytes` a
 //!   transferred `ArrayBuffer`) for every file GridCraft would otherwise download: Save and Save
-//!   As (an .xlsx workbook) and the exports (PDF, CSV, web page). `docId` is the workbook it came
+//!   As (the workbook, in its own file's format: .xlsx, .xlsm, .csv or .tsv; Save As .xlsx or
+//!   .xlsm) and the exports (PDF, CSV, web page). `docId` is the workbook it came
 //!   from, taken when the bytes were made (a Save Changes prompt that then closes it can't give
 //!   the file to another workbook), the same number `gridcraft:opened` gave for a sent file, so
 //!   the parent writes it back only to that file. `saveId` numbers the saves. `saveAs` is true
 //!   when the user asked for a new name or place (Save As, Download, an export), false for Save.
+//!   `copy` is true for an export: a separate file, never the workbook's own, whatever its
+//!   format (a CSV export of an .xlsx workbook must not become the workbook's file).
 //! - `gridcraft:saved` (from the parent, with `?ack=1`): `{ saveId, name }`, the save is stored
 //!   as `name`. Only then does the workbook count as saved, as it was when it was saved, and a
 //!   Save Changes prompt's Save leaves it open until then. Without `?ack=1` a workbook counts as
@@ -154,6 +157,7 @@ impl Bridge {
             ("docId", id_value(Some(save.document))),
             ("saveId", id_value(Some(save_id))),
             ("saveAs", save.save_as.into()),
+            ("copy", (!save.marks_saved).into()),
         ])
         .ok_or_else(|| "couldn't build the message".to_string())?;
         self.parent
