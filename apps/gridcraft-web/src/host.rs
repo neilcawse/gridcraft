@@ -108,6 +108,8 @@ impl Bridge {
         let bridge = self.clone();
         services.host_save = Some(Box::new(move |save: &HostSave<'_>| bridge.post_save(save)));
         services.host_confirms_saves = self.ack;
+        let unacked = Rc::clone(&self.unacked);
+        services.host_save_as_waiting = Some(Box::new(move |doc| unacked.borrow().save_as_waiting(doc)));
     }
 
     /// `?author=`: the host's name for the user signs new notes and comments.
@@ -131,12 +133,10 @@ impl Bridge {
     /// hears when unsaved work appears or goes away.
     pub fn sync(&self, app: &mut SheetApp, ctx: &egui::Context) {
         if let Some(save_as) = self.save_requested.take()
-            && let Some(active) = app.session.active().map(|d| d.uid)
+            && app.session.active().is_some()
         {
-            // A Save of a workbook whose Save As still waits for the host (the user hasn't chosen
-            // where yet) is that Save As again with the newer content: a plain Save would make a
-            // .csv/.tsv that replaces the waiting whole-workbook file.
-            let save_as = save_as || self.unacked.borrow().save_as_waiting(active);
+            // A Save of a workbook whose Save As still waits here becomes that Save As in the app
+            // (`Services::host_save_as_waiting`), whichever command asked.
             app.run_or_alert(if save_as { "file.saveAs" } else { "file.save" }, serde_json::json!({}));
         }
         self.apply_stored(app);

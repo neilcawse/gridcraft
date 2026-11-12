@@ -194,6 +194,33 @@ fn save_writes_a_sent_csv_back_as_csv_and_says_once_what_it_left_out() {
 }
 
 #[test]
+fn a_save_while_a_save_as_waits_is_that_save_as_again() {
+    let waiting = Rc::new(RefCell::new(Vec::<u64>::new()));
+    let (mut app, log) = host_app(true);
+    let sent = app.open_sent("Data.csv", b"Name,Qty\nBolts,4\n").unwrap();
+    let other = Rc::clone(&waiting);
+    app.services.host_save_as_waiting = Some(Box::new(move |doc| other.borrow().contains(&doc)));
+    app.run("cell.set", json!({"cell": "C2", "input": "=B2*2"})).unwrap();
+    app.run("file.saveAs", json!({})).unwrap();
+    assert_eq!(last(&log), "Data.xlsx");
+    // The page hasn't stored it (the user is still to choose where): Save, from any command, is
+    // that Save As again with the newer content.
+    waiting.borrow_mut().push(sent.doc);
+    app.run("cell.set", json!({"cell": "C3", "input": "=B2*3"})).unwrap();
+    app.run("file.save", json!({})).unwrap();
+    {
+        let got = log.borrow();
+        let g = got.last().unwrap();
+        assert_eq!((g.name.as_str(), g.save_as), ("Data.xlsx", true));
+        assert!(Arc::ptr_eq(&g.content, &app.session.active().unwrap().wb), "made from the newer edit");
+    }
+    // Once stored or discarded, Save writes the .csv again.
+    waiting.borrow_mut().clear();
+    app.run("file.save", json!({})).unwrap();
+    assert_eq!((last(&log).as_str(), log.borrow().last().unwrap().save_as), ("Data.csv", false));
+}
+
+#[test]
 fn save_writes_a_sent_xlsm_back_as_xlsm_with_its_macros() {
     let (mut app, log) = host_app(true);
     let mut wb = Workbook::new();

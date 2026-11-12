@@ -44,6 +44,11 @@ pub struct Services {
     /// Web, with `host_save`: the page says when it has stored a save. The workbook stays unsaved
     /// until then (the host marks it saved), and the Save Changes prompt's Save doesn't close it.
     pub host_confirms_saves: bool,
+    /// Web, with `host_confirms_saves`: whether a Save As of this workbook (`DocState::uid`) is
+    /// still waiting for the page (e.g. for the user to choose where). A Save meanwhile, from any
+    /// command, is that Save As again with the newer content: a plain Save of a .csv/.tsv would
+    /// replace the waiting whole workbook with text.
+    pub host_save_as_waiting: Option<Box<dyn Fn(u64) -> bool>>,
     /// Web: start an asynchronous file pick; the bytes arrive later in `inbox`.
     pub open_async: Option<Box<dyn Fn()>>,
     /// Files delivered asynchronously (name, bytes), opened on the next frame.

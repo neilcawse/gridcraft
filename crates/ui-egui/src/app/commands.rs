@@ -344,8 +344,10 @@ impl SheetApp {
                     // Save of a workbook with no file (the web keeps none) asks with `save`: that is
                     // not Save As, so a host page writes it back to the file it came from, in that
                     // file's format (.xlsx, .xlsm, .csv, .tsv). Save As makes an .xlsx (an .xlsm
-                    // stays macro-enabled), which holds the whole workbook.
-                    let save_as = params.get("save").and_then(Json::as_bool) != Some(true);
+                    // stays macro-enabled), which holds the whole workbook. A Save while a Save As of
+                    // this workbook still waits for the host page is that Save As again.
+                    let waiting = self.session.active().is_some_and(|d| self.services.host_save_as_waiting.as_ref().is_some_and(|w| w(d.uid)));
+                    let save_as = params.get("save").and_then(Json::as_bool) != Some(true) || waiting;
                     let format = if !save_as {
                         json!({})
                     } else if suggested.to_ascii_lowercase().ends_with(".xlsm") {
