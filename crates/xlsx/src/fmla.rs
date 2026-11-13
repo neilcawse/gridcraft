@@ -160,7 +160,8 @@ pub fn from_file(text: &str) -> String {
     }
 }
 
-fn strip_param_prefixes(e: Expr) -> Expr {
+/// `e` with Excel's `_xlpm.` prefix dropped from LET/LAMBDA parameter names: the model's spelling.
+pub(crate) fn strip_param_prefixes(e: Expr) -> Expr {
     e.map(&mut |x| match x {
         Expr::Name(n) => Expr::Name(strip_param_prefix(n)),
         Expr::Call(n, args) => Expr::Call(strip_param_prefix(n), args),

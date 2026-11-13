@@ -39,7 +39,7 @@ impl FileKind {
             "xlsx" | "xlsm" | "xltx" | "xltm" => FileKind::Xlsx,
             "xls" | "xlt" => FileKind::Xls,
             "xlsb" => FileKind::Xlsb,
-            "ods" => FileKind::Ods,
+            "ods" | "fods" => FileKind::Ods,
             "csv" => FileKind::Csv,
             "tsv" | "tab" | "txt" => FileKind::Tsv,
             "json" | "scjson" => FileKind::Json,
@@ -292,7 +292,14 @@ fn read_plain(name: &str, bytes: &[u8], csv_as_text: bool) -> Result<(Workbook, 
         _ => kind.filter(|k| matches!(k, FileKind::Ods | FileKind::Xlsb)),
     };
     if let Some(import) = import {
-        let read = if import == FileKind::Ods { gridcraft_xlsx::read_ods } else { gridcraft_xlsx::read_xlsb };
+        let read = |bytes: &[u8]| {
+            if import == FileKind::Ods {
+                // A formula calling a function GridCraft doesn't calculate keeps its saved result.
+                gridcraft_xlsx::read_ods_with(bytes, (XLSX_FUNCTIONS, &gridcraft_calc::is_known_function as &dyn Fn(&str) -> bool))
+            } else {
+                gridcraft_xlsx::read_xlsb(bytes)
+            }
+        };
         let (wb, report) = read(bytes).map_err(|e| EngineError::Other(format!("We can't import '{name}': {e}")))?;
         return Ok((wb, report.warnings));
     }

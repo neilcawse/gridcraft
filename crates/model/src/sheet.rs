@@ -154,6 +154,12 @@ pub struct Sheet {
     /// PivotTables whose output lives on this sheet.
     #[serde(default)]
     pub pivots: Vec<PivotTable>,
+    /// Report areas of the file's PivotTables that GridCraft did not import (an .xls PivotTable,
+    /// an ODS DataPilot table). Their cells are plain cells; `GETPIVOTDATA` over one shows the
+    /// value the file saved until the formula has to be calculated again. Moved with rows and
+    /// columns; not in JSON.
+    #[serde(skip)]
+    pub unimported_pivots: Vec<RangeRef>,
     pub protection: Option<SheetProtection>,
     /// Allow Edit Ranges (meaningful while the sheet is protected).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -230,6 +236,7 @@ impl Sheet {
             slicers: vec![],
             controls: vec![],
             pivots: vec![],
+            unimported_pivots: vec![],
             protection: None,
             edit_ranges: vec![],
             print: PrintSettings::default(),

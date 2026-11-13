@@ -293,7 +293,7 @@ fn insert_table(s: &mut Session, p: &Json) -> Result<Json> {
     let name = str_param(p, "name")
         .map(str::to_string)
         .unwrap_or_else(|| (1..).map(|n| format!("Table{n}")).find(|n| d.wb.table(n).is_none()).unwrap_or_else(|| "Table".into()));
-    if !valid_table_name(&name) {
+    if !gridcraft_core::valid_table_name(&name) {
         return Err(EngineError::Other("The name that you entered is not valid.".into()));
     }
     if d.wb.table(&name).is_some() || d.wb.names.iter().any(|n| n.name.eq_ignore_ascii_case(&name)) {
@@ -527,21 +527,10 @@ fn table_style(s: &mut Session, p: &Json) -> Result<Json> {
     })
 }
 
-/// Table names follow the Microsoft name rules, as the xlsx writer does: letters, digits, `_` and `.`,
-/// starting with a letter, `_` or `\`, and at most 255 characters. Anything else (a hyphen, say) would
-/// read as an operator inside a structured reference, and the writer would rename the table on save.
-fn valid_table_name(name: &str) -> bool {
-    name.chars().count() <= 255
-        && name.starts_with(|c: char| c.is_alphabetic() || c == '_' || c == '\\')
-        && CellRef::parse(name).is_none()
-        && !super::formulas::is_r1c1(name)
-        && name.chars().enumerate().all(|(i, c)| c.is_alphanumeric() || c == '_' || c == '.' || (i == 0 && c == '\\'))
-}
-
 fn table_rename(s: &mut Session, p: &Json) -> Result<Json> {
     let (si, ti) = find_table(s, p)?;
     let name = str_param(p, "name").ok_or_else(|| bad("table.rename", "missing `name`"))?.to_string();
-    if !valid_table_name(&name) {
+    if !gridcraft_core::valid_table_name(&name) {
         return Err(EngineError::Other("The name that you entered is not valid.".into()));
     }
     let wb = &s.doc()?.wb;
@@ -1978,7 +1967,9 @@ mod tests {
         assert!(e.to_string().contains("already exists"), "{e}");
         let e = s.execute("table.rename", json!({"table": "Table1", "name": "rate"})).unwrap_err();
         assert!(e.to_string().contains("already exists"), "{e}");
-        for n in ["R2C3", "c", "r", "RC", "C5"] {
+        // Excel's table names are its defined names': R1x, C1x, R2D2 and the booleans are refused too
+        // (live Excel 16.115 doesn't load a table named so; `RCx` it takes).
+        for n in ["R2C3", "c", "r", "RC", "C5", "R1x", "C1x", "R2D2", "TRUE", "false", "a?b"] {
             let e = s.execute("table.rename", json!({"table": "Table1", "name": n})).unwrap_err();
             assert!(e.to_string().contains("not valid"), "{n}: {e}");
             let e = s.execute("insert.table", json!({"range": "C1:C2", "name": n})).unwrap_err();

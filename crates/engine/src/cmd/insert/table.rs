@@ -28,7 +28,7 @@ pub(super) fn insert_table(s: &mut Session, p: &Json) -> Result<Json> {
     let name = str_param(p, "name")
         .map(str::to_string)
         .unwrap_or_else(|| (1..).map(|n| format!("Table{n}")).find(|n| d.wb.table(n).is_none()).unwrap_or_else(|| "Table".into()));
-    if !valid_table_name(&name) {
+    if !gridcraft_core::valid_table_name(&name) {
         return Err(EngineError::Other("The name that you entered is not valid.".into()));
     }
     if d.wb.table(&name).is_some() || d.wb.names.iter().any(|n| n.name.eq_ignore_ascii_case(&name)) {
@@ -259,21 +259,10 @@ pub(super) fn table_style(s: &mut Session, p: &Json) -> Result<Json> {
     })
 }
 
-/// Table names follow the Microsoft name rules, as the xlsx writer does: letters, digits, `_` and `.`,
-/// starting with a letter, `_` or `\`, and at most 255 characters. Anything else (a hyphen, say) would
-/// read as an operator inside a structured reference, and the writer would rename the table on save.
-fn valid_table_name(name: &str) -> bool {
-    name.chars().count() <= 255
-        && name.starts_with(|c: char| c.is_alphabetic() || c == '_' || c == '\\')
-        && CellRef::parse(name).is_none()
-        && !crate::cmd::formulas::is_r1c1(name)
-        && name.chars().enumerate().all(|(i, c)| c.is_alphanumeric() || c == '_' || c == '.' || (i == 0 && c == '\\'))
-}
-
 pub(super) fn table_rename(s: &mut Session, p: &Json) -> Result<Json> {
     let (si, ti) = find_table(s, p)?;
     let name = str_param(p, "name").ok_or_else(|| bad("table.rename", "missing `name`"))?.to_string();
-    if !valid_table_name(&name) {
+    if !gridcraft_core::valid_table_name(&name) {
         return Err(EngineError::Other("The name that you entered is not valid.".into()));
     }
     let wb = &s.doc()?.wb;
@@ -303,7 +292,7 @@ pub(super) fn table_rename(s: &mut Session, p: &Json) -> Result<Json> {
                     o => o,
                 });
                 if let Some(cell) = sh.cells.get_mut(c) {
-                    cell.formula = Some(std::sync::Arc::new(Formula::from_expr(ne)));
+                    cell.formula = Some(std::sync::Arc::new(f.rewritten(ne)));
                 }
             }
         }

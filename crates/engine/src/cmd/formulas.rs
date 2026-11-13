@@ -1,6 +1,6 @@
 //! Formulas tab: AutoSum, Insert Function, names, auditing, calculation.
 
-use gridcraft_core::{CellError, CellRef, RangeRef, Value};
+use gridcraft_core::{CellError, CellRef, RangeRef, Value, valid_defined_name};
 use gridcraft_model::{CalcMode, Cell, DefinedName, Formula, Workbook};
 use serde_json::{Value as Json, json};
 
@@ -317,38 +317,12 @@ fn list_functions(_: &mut Session, p: &Json) -> Result<Json> {
     Ok(Json::Array(v))
 }
 
-fn valid_name(n: &str) -> bool {
-    let mut chars = n.chars();
-    let Some(first) = chars.next() else { return false };
-    if !(first.is_alphabetic() || first == '_' || first == '\\') {
-        return false;
-    }
-    if n.chars().count() > 255 || CellRef::parse(n).is_some() || is_r1c1(n) {
-        return false;
-    }
-    n.chars().all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '\\' | '?'))
-}
-
-/// Looks like an R1C1 reference (`R`, `C`, `RC`, `R2`, `C3`, `R1C1`), which Excel doesn't
-/// accept as a name.
-pub(crate) fn is_r1c1(n: &str) -> bool {
-    let digits = |s: &str| s.bytes().take_while(u8::is_ascii_digit).count();
-    let mut rest = n;
-    if let Some(r) = rest.strip_prefix(['R', 'r']) {
-        rest = r.get(digits(r)..).unwrap_or("");
-    }
-    if let Some(c) = rest.strip_prefix(['C', 'c']) {
-        rest = c.get(digits(c)..).unwrap_or("");
-    }
-    rest.is_empty() && !n.is_empty()
-}
-
 fn define_name(s: &mut Session, p: &Json) -> Result<Json> {
     let Some(name) = str_param(p, "name").map(str::to_string) else {
         s.ui_requests.push(crate::UiRequest::Dialog("defineName".into(), json!({})));
         return ok();
     };
-    if !valid_name(&name) {
+    if !valid_defined_name(&name) {
         return Err(EngineError::Other("The name that you entered is not valid.".into()));
     }
     for n in [Some(name.as_str()), str_param(p, "oldName")].into_iter().flatten() {
@@ -538,10 +512,10 @@ fn create_from_selection(s: &mut Session, p: &Json) -> Result<Json> {
     };
     let clean = |t: String| -> String {
         let mut n: String = t.trim().chars().map(|c| if c.is_alphanumeric() || c == '.' { c } else { '_' }).collect();
-        if !n.is_empty() && !valid_name(&n) {
+        if !n.is_empty() && !valid_defined_name(&n) {
             n.insert(0, '_');
         }
-        if valid_name(&n) { n } else { String::new() }
+        if valid_defined_name(&n) { n } else { String::new() }
     };
     // The labels in the chosen edge rows/columns name the cells between them.
     let (r0, r1) = (r.start.row + top as u32, r.end.row.saturating_sub(bottom as u32));
