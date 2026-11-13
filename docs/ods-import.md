@@ -64,8 +64,10 @@ The calculation settings (`table:calculation-settings`, ODF 1.3 part 3 §9.4.1) 
 null date (`table:null-date`, §9.4.2) of 1899-12-30 is Excel's 1900 date system and 1904-01-01
 its 1904 system (dates read as that system's serial numbers); under any other null date every
 formula keeps its saved result, because its date arithmetic has no Excel equivalent. Precision
-as shown (`table:precision-as-shown`) becomes Excel's "Set precision as displayed": formula
-results are rounded as their format shows them when they calculate.
+as shown (`table:precision-as-shown`) becomes Excel's "Set precision as displayed": numbers are
+stored as their format shows them (constants when the file opens, formula results when they
+calculate, both by `NumberFormat::round_as_displayed`, so equal values under one format store the
+same number), and formulas read the rounded values.
 
 Criteria and lookups match text the way the document's calculation settings say
 (`table:calculation-settings`, ODF 1.3 part 3 §19.646 table 16): with regular expressions unless
