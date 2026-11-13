@@ -34,12 +34,19 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 - **Estimate:** 25–40 h. [target-app-parity.md](target-app-parity.md#performance), [hardware-parity.md](hardware-parity.md)
 
 ### 3. Some unmodelled XLSX content is dropped on save (FF)
-- **Missing:** slicers and their caches, timelines, the data model, query tables attached to
-  tables, unmodelled `extLst` entries, chart details. Pass-through (#330) keeps custom XML,
-  external links, connections, sheet query tables, printer settings, form and ActiveX controls,
-  OLE objects and sheet backgrounds; never checked in Excel (repair prompts unknown).
+- **Missing:** slicers and their caches, timelines, unmodelled `extLst` entries (among them x14
+  data bar settings beyond a solid fill, icon sets, colour scales and the text rules
+  containsText, notContainsText, beginsWith and endsWith), chart details. Pass-through (#330) is
+  a deny-list: every part GridCraft does not rebuild is written back byte for byte, with its
+  relationship chain (the thumbnail, sensitivity labels, custom XML, external links,
+  connections, the Power Pivot data model, XML maps, shared-workbook revision logs, query
+  tables, printer settings, form and ActiveX controls, OLE objects, sheet backgrounds, dialog
+  sheets and Excel 4.0 macro sheets, the shapes of legacy VML drawings that are not notes,
+  custom sheet views, the picture fills of the theme, the document properties it does not
+  model). Value metadata it does not model (rich errors, linked data types, cube members) is
+  kept with the cells that carry it while they hold the same value.
 - **Evidence:** `crates/xlsx/src/passthrough.rs` (what is kept, and why the rest isn't).
-- **Impact:** open-edit-save still simplifies workbooks with slicers, timelines or Power Pivot.
+- **Impact:** open-edit-save still simplifies workbooks with slicers or timelines.
 - **Estimate:** 6–10 h. [file-format-parity.md](file-format-parity.md)
 
 ### 4. Charts lose options on round trip; shallow chart model (F, FF)

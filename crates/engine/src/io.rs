@@ -136,8 +136,9 @@ fn decrypt_message(name: &str, e: gridcraft_xlsx::DecryptError) -> String {
 }
 
 /// Parses bytes that aren't encrypted, then takes the workbook's macros, and the button actions
-/// xlsx has no place for, out of their hidden names, and adopts the Python cells they hold (see
-/// [`adopt_python`]) within the limits of [`enforce_python_limits`].
+/// xlsx has no place for, out of their hidden names, and rebuilds the cached results of the
+/// Python cells the file holds (see [`adopt_python`]) within the limits of
+/// [`enforce_python_limits`].
 fn open_plain(name: &str, bytes: &[u8], csv_as_text: bool) -> Result<(Workbook, Vec<String>)> {
     let (mut wb, mut warnings) = read_plain(name, bytes, csv_as_text)?;
     warnings.extend(crate::macros::load(&mut wb));
@@ -151,21 +152,23 @@ fn open_plain(name: &str, bytes: &[u8], csv_as_text: bool) -> Result<(Workbook, 
 /// Python cells (each one is also limited to [`gridcraft_model::python::MAX_RESULT_CELLS`]).
 pub const MAX_ADOPTED_RESULT_CELLS: u64 = 4_000_000;
 
-/// Python cells from a file: a cell whose formula is `PY("…",0|1)` (a format that kept it as a
-/// formula) becomes a Python cell, and a Python cell whose spilled values the file cached gets
+/// The cached results of a file's Python cells: one whose spilled values the file cached gets
 /// them back as its result, so it shows them until it runs again. Results are rebuilt for at most
 /// [`MAX_ADOPTED_RESULT_CELLS`] cells in all; the rest keep only their own cached value, and the
 /// values they spilled stay as plain values. Returns the warnings.
+///
+/// No formula becomes a Python cell here, whatever the format: Python cells exist only in files
+/// that declare them, and of the formats read that is xlsx alone, whose reader takes them from
+/// the workbook's Python part and its `PY(…)` formulas ([MS-XLSX] 2.3.10, `xlsx::python_part`).
+/// In any other format a call to a function named `PY` is what the file says it is, such as the
+/// user-defined function of an `.xls` ([MS-XLS] 2.5.198.63 PtgFuncVar, iftab 255 over a PtgName
+/// of a function Lbl, 2.4.150): its formula, array and cached result stay, and a save to xlsx
+/// writes them back instead of turning them into code.
 pub fn adopt_python(wb: &mut Workbook) -> Vec<String> {
     let mut budget = MAX_ADOPTED_RESULT_CELLS;
     let mut skipped = 0usize;
     for si in 0..wb.sheets.len() {
         let Some(sh) = wb.sheets.get(si) else { continue };
-        let formulas: Vec<(CellRef, gridcraft_model::PyCode)> = sh
-            .cells
-            .iter()
-            .filter_map(|(c, cell)| cell.formula.as_ref().and_then(|f| gridcraft_model::PyCode::from_formula(&f.text)).map(|p| (c, p)))
-            .collect();
         let max = gridcraft_model::python::MAX_RESULT_CELLS as u64;
         let spills: Vec<(CellRef, RangeRef)> = sh
             .spill_ranges
@@ -173,16 +176,10 @@ pub fn adopt_python(wb: &mut Workbook) -> Vec<String> {
             .filter(|(a, r)| r.count() <= max && sh.cell(**a).and_then(|c| c.py.as_ref()).is_some_and(|p| p.output.is_none()))
             .map(|(a, r)| (*a, *r))
             .collect();
-        if formulas.is_empty() && spills.is_empty() {
+        if spills.is_empty() {
             continue;
         }
         let Some(sh) = wb.sheet_mut(si) else { continue };
-        for (c, py) in formulas {
-            if let Some(cell) = sh.cells.get_mut(c) {
-                cell.formula = None;
-                cell.py = Some(std::sync::Arc::new(py));
-            }
-        }
         for (anchor, range) in spills {
             let Some(left) = budget.checked_sub(range.count()) else {
                 skipped += 1;
@@ -504,8 +501,14 @@ pub fn save_bytes(wb: &Workbook, path: &str) -> Result<Vec<u8>> {
 
 /// Encodes a workbook as `kind`, whatever `path`'s extension says.
 pub fn save_bytes_as(wb: &Workbook, path: &str, kind: FileKind) -> Result<Vec<u8>> {
+    save_bytes_reported(wb, path, kind).map(|(bytes, _)| bytes)
+}
+
+/// [`save_bytes_as`], with what the file was written without (an XLSX can leave out content kept
+/// from the file the workbook was read from, see `gridcraft_xlsx::WriteReport`).
+pub fn save_bytes_reported(wb: &Workbook, path: &str, kind: FileKind) -> Result<(Vec<u8>, Vec<String>)> {
     let sheet = wb.active_sheet();
-    match kind {
+    let bytes = match kind {
         // The extension picks the package kind; only the macro-enabled kinds (.xlsm, .xltm) carry
         // the VBA project, so any other name saves without it, as Excel does.
         // Macros, and button actions xlsx has no place for, travel in hidden names.
@@ -516,8 +519,14 @@ pub fn save_bytes_as(wb: &Workbook, path: &str, kind: FileKind) -> Result<Vec<u8
                 None => named,
             };
             let book = std::path::Path::new(path).file_name().and_then(std::ffi::OsStr::to_str).unwrap_or_default();
-            gridcraft_xlsx::write_xlsx_named_with(named.as_ref().unwrap_or(wb), gridcraft_xlsx::XlsxKind::from_path(path), book, XLSX_FUNCTIONS)
-                .map_err(|e| EngineError::Other(e.to_string()))
+            return gridcraft_xlsx::write_xlsx_named_with(
+                named.as_ref().unwrap_or(wb),
+                gridcraft_xlsx::XlsxKind::from_path(path),
+                book,
+                XLSX_FUNCTIONS,
+            )
+            .map(|(bytes, report)| (bytes, report.warnings))
+            .map_err(|e| EngineError::Other(e.to_string()));
         }
         FileKind::Xls => {
             Err(EngineError::Other("Excel 97-2003 (.xls) is supported for import only. Save as .xlsx or another supported export format.".into()))
@@ -532,7 +541,8 @@ pub fn save_bytes_as(wb: &Workbook, path: &str, kind: FileKind) -> Result<Vec<u8
         FileKind::Tsv => wb.sheet(sheet).map(|sh| csv(wb, sh, b'\t')).transpose().map(Option::unwrap_or_default),
         FileKind::Json => crate::macros::json_bytes(wb),
         FileKind::Html => to_html(wb, sheet).map(String::into_bytes),
-    }
+    }?;
+    Ok((bytes, vec![]))
 }
 
 /// [`save_bytes`] for the file at `path`: relative paths to linked workbooks are rewritten for

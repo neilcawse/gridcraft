@@ -12,6 +12,17 @@ use crate::package::{normalize, resolve, split_dir};
 use crate::xml;
 use crate::{read_xlsx, write_xlsx};
 
+mod custom_views;
+mod damaged_parts;
+mod deny_list;
+mod doc_props;
+mod kept_sheets;
+mod rich_values;
+mod strict_kept;
+mod table_children;
+mod theme_kept;
+mod vml_objects;
+
 const NS_R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const NS_MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const PRINTER: &[u8] = &[0, 1, 2, 3, 250, 251, 252, 253, 9, 9, 9];
@@ -650,6 +661,11 @@ fn worksheet_xml(value: &str) -> String {
 /// Sheets in file order: Data, Chart1 (a chart sheet on Data), More, Spare, Last (a hidden chart
 /// sheet on More, last in the list). "More" has a print area; the active tab is "More".
 fn chartsheet_package() -> Vec<u8> {
+    chartsheet_package_with("Data!$A$1:$A$3", "'More'!$A$1")
+}
+
+/// [`chartsheet_package`] with the series formulas of the charts of "Chart1" and "Last".
+fn chartsheet_package_with(first: &str, last: &str) -> Vec<u8> {
     let workbook = format!(
         r#"<?xml version="1.0"?><workbook xmlns="{NS_MAIN}" xmlns:r="{NS_R}"><bookViews><workbookView activeTab="2"/></bookViews><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Chart1" sheetId="2" r:id="rId2"/><sheet name="More" sheetId="3" r:id="rId3"/><sheet name="Spare" sheetId="4" r:id="rId4"/><sheet name="Last" sheetId="9" state="hidden" r:id="rId5"/></sheets><definedNames><definedName name="_xlnm.Print_Area" localSheetId="2">More!$A$1:$B$2</definedName></definedNames></workbook>"#
     );
@@ -658,7 +674,7 @@ fn chartsheet_package() -> Vec<u8> {
     );
     let (cs1, cs2) = (chartsheet_xml("first"), chartsheet_xml("last"));
     let (d1, d2) = (drawing_xml("first"), drawing_xml("last"));
-    let (c1, c2) = (chart_xml("Data!$A$1:$A$3"), chart_xml("'More'!$A$1"));
+    let (c1, c2) = (chart_xml(first), chart_xml(last));
     let (s1, s2, s3) = (worksheet_xml("data"), worksheet_xml("more"), worksheet_xml("spare"));
     make_zip(&[
         ("[Content_Types].xml", content_types.as_bytes()),
@@ -814,6 +830,25 @@ fn a_chart_sheet_whose_name_a_worksheet_took_is_dropped() {
     chart_sheet_chain(&u, "Chart1");
 }
 
+/// A kept sheet's chart may plot another kept sheet (a macro sheet's chart plots the macro
+/// sheet's own cells): that sheet is written too, so the chart still finds it. Here "Chart1"
+/// plots the kept sheet "Last", and "Last" plots "More".
+#[test]
+fn a_chart_plotting_a_kept_sheet_is_kept_while_that_sheet_is() {
+    let (mut wb, rep) = read_xlsx(&chartsheet_package_with("Last!$A$1:$A$3", "'More'!$A$1")).unwrap();
+    assert!(!rep.warnings.iter().any(|w| w.contains("skipped") || w.contains("dropped")), "{:?}", rep.warnings);
+    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    u.assert_valid();
+    assert_eq!(written_sheets(&u).iter().map(|s| s.0.as_str()).collect::<Vec<_>>(), ["Data", "Chart1", "More", "Spare", "Last"]);
+    assert_eq!(u.text(&chart_sheet_chain(&u, "Chart1").2), chart_xml("Last!$A$1:$A$3"));
+    // Renaming "More" leaves "Last" out, and with it "Chart1", which plots it.
+    wb.sheet_mut(1).unwrap().name = "Renamed".into();
+    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    u.assert_valid();
+    assert_eq!(written_sheets(&u).iter().map(|s| s.0.as_str()).collect::<Vec<_>>(), ["Data", "Renamed", "Spare"]);
+    assert!(u.find(chart_xml("Last!$A$1:$A$3").as_bytes()).is_empty());
+}
+
 #[test]
 fn formulas_name_the_sheets_a_chart_plots() {
     use crate::passthrough::sheet_names_in;
@@ -822,6 +857,35 @@ fn formulas_name_the_sheets_a_chart_plots() {
     assert_eq!(sheet_names_in("SUM(Data!A1:A3,'Other sheet'!B2)"), ["Data", "Other sheet"]);
     assert!(sheet_names_in("[1]Ext!A1").is_empty() && sheet_names_in("[1]Ext!A1:A3").is_empty());
     assert!(sheet_names_in("Name").is_empty() && sheet_names_in("").is_empty());
+}
+
+#[test]
+fn formulas_of_deleted_cells_name_no_sheet() {
+    use crate::passthrough::sheet_names_in;
+    // `#REF!` is an error value, not a sheet called `#REF`.
+    assert_eq!(sheet_names_in("Data!#REF!"), ["Data"]);
+    assert!(sheet_names_in("#REF!").is_empty());
+    assert_eq!(sheet_names_in("SUM(Data!A1,#REF!,'More'!B2)"), ["Data", "More"]);
+    assert!(sheet_names_in("#DIV/0!").is_empty() && sheet_names_in("#NULL!").is_empty() && sheet_names_in("#N/A").is_empty());
+    // A quoted name may start with `#`.
+    assert_eq!(sheet_names_in("'#1 data'!A1"), ["#1 data"]);
+}
+
+#[test]
+fn a_chart_sheet_plotting_deleted_cells_is_kept() {
+    // Series on cells that were deleted (`Data!#REF!`, a bare `#REF!`) refer to no sheet that is gone.
+    let (wb, rep) = read_xlsx(&chartsheet_package_with("Data!#REF!", "#REF!")).unwrap();
+    assert!(!rep.warnings.iter().any(|w| w.contains("skipped") || w.contains("dropped")), "{:?}", rep.warnings);
+    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    u.assert_valid();
+    assert_eq!(
+        written_sheets(&u),
+        [("Data", ""), ("Chart1", ""), ("More", ""), ("Spare", ""), ("Last", "hidden")].map(|(a, b)| (a.to_string(), b.to_string())),
+    );
+    for (name, formula) in [("Chart1", "Data!#REF!"), ("Last", "#REF!")] {
+        let (_, _, c_part) = chart_sheet_chain(&u, name);
+        assert_eq!(u.text(&c_part), chart_xml(formula), "{name}");
+    }
 }
 
 #[test]
@@ -875,9 +939,8 @@ const LOGO: &[u8] = b"\x89PNG\r\n\x1a\n letterhead logo";
 const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n footer signature";
 const HF_VML: &str = r##"<xml xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel"><o:shapelayout v:ext="edit"><o:idmap v:ext="edit" data="1"/></o:shapelayout><v:shapetype id="_x0000_t75" coordsize="21600,21600" o:spt="75" o:preferrelative="t" path="m@4@5l@4@11@9@11@9@5xe" filled="f" stroked="f"/><v:shape id="LH" o:spid="_x0000_s1025" type="#_x0000_t75" style="position:absolute;margin-left:0;margin-top:0;width:120pt;height:40pt;z-index:1"><v:imagedata o:relid="rId1" o:title="logo"/><o:lock v:ext="edit" rotation="t"/></v:shape><v:shape id="CF" o:spid="_x0000_s1026" type="#_x0000_t75" style="position:absolute;margin-left:0;margin-top:0;width:80pt;height:20pt;z-index:2"><v:imagedata o:relid="rId2" o:title="signature"/><o:lock v:ext="edit" rotation="t"/></v:shape></xml>"##;
 
-/// The VML drawing of one note and nothing else. [`VML`] also holds a check box that only the
-/// drawing lists, which is kept with the drawing (and its source shape block).
-const NOTE_VML: &str = r##"<xml xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel"><o:shapelayout v:ext="edit"><o:idmap v:ext="edit" data="1"/></o:shapelayout><v:shape id="_x0000_s1027" type="#_x0000_t202" style="position:absolute"><v:textbox><div>old note<br></div></v:textbox><x:ClientData ObjectType="Note"><x:Row>0</x:Row><x:Column>0</x:Column></x:ClientData></v:shape></xml>"##;
+/// A notes drawing as Excel writes it for a sheet with nothing else drawn on it.
+const NOTES_VML: &str = r##"<xml xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel"><o:shapelayout v:ext="edit"><o:idmap v:ext="edit" data="1"/></o:shapelayout><v:shapetype id="_x0000_t202" coordsize="21600,21600" o:spt="202" path="m,l,21600r21600,l21600,xe"><v:stroke joinstyle="miter"/></v:shapetype><v:shape id="_x0000_s1025" type="#_x0000_t202" style="position:absolute"><v:textbox><div>old note<br></div></v:textbox><x:ClientData ObjectType="Note"><x:Row>0</x:Row><x:Column>0</x:Column></x:ClientData></v:shape></xml>"##;
 
 /// #1257: a letterhead in the header and a picture in the footer (`&G`), drawn from a VML part
 /// that `<legacyDrawingHF>` names, next to a note whose VML drawing GridCraft rewrites.
@@ -905,7 +968,7 @@ fn header_picture_package() -> Vec<u8> {
         ("xl/worksheets/sheet1.xml", sheet.as_bytes()),
         ("xl/worksheets/_rels/sheet1.xml.rels", sheet_rels.as_bytes()),
         ("xl/comments1.xml", COMMENTS.as_bytes()),
-        ("xl/drawings/vmlDrawing1.vml", NOTE_VML.as_bytes()),
+        ("xl/drawings/vmlDrawing1.vml", NOTES_VML.as_bytes()),
         ("xl/drawings/vmlDrawing2.vml", HF_VML.as_bytes()),
         ("xl/drawings/_rels/vmlDrawing2.vml.rels", hf_rels.as_bytes()),
         ("xl/media/image1.png", LOGO),

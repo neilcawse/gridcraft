@@ -110,7 +110,13 @@ pub(super) fn autofilter_xml(range: RangeRef, criteria: &[(u32, FilterCriterion)
     s
 }
 
-pub(super) fn table_xml(t: &Table, cols: &[String], name: &str, id: u32, out: &mut Out) -> String {
+/// The `id` the `<tableColumn>` of column `i` (0-based) is written with: its position, except that
+/// a table bound to a query table keeps the numbers its fields name its columns by.
+pub(super) fn table_column_id(bound: Option<&TableBinding<'_>>, i: usize) -> u32 {
+    bound.and_then(|b| b.column_id(i)).unwrap_or_else(|| u32::try_from(i).unwrap_or(u32::MAX).saturating_add(1))
+}
+
+pub(super) fn table_xml(t: &Table, cols: &[String], name: &str, id: u32, bound: Option<&TableBinding<'_>>, out: &mut Out) -> String {
     let mut s =
         format!("{XML_DECL}<table xmlns=\"{NS_MAIN}\" id=\"{id}\" name=\"{0}\" displayName=\"{0}\" ref=\"{1}\"", esc_attr(name), t.range.a1());
     if !t.header_row {
@@ -121,10 +127,10 @@ pub(super) fn table_xml(t: &Table, cols: &[String], name: &str, id: u32, out: &m
     } else {
         s.push_str(" totalsRowShown=\"0\"");
     }
-    if let Some(ty) = &t.table_type {
+    if let Some(ty) = t.table_type.as_deref().or(bound.and_then(TableBinding::table_type)) {
         let _ = write!(s, " tableType=\"{}\"", esc_attr(ty));
     }
-    if let Some(c) = t.connection_id {
+    if let Some(c) = t.connection_id.or(bound.and_then(TableBinding::connection_id)) {
         let _ = write!(s, " connectionId=\"{c}\"");
     }
     s.push('>');
@@ -136,11 +142,15 @@ pub(super) fn table_xml(t: &Table, cols: &[String], name: &str, id: u32, out: &m
     let _ = write!(s, "<tableColumns count=\"{}\">", cols.len());
     for (i, name) in cols.iter().enumerate() {
         let col = t.columns.get(i);
-        let _ = write!(s, "<tableColumn id=\"{}\"", i + 1);
+        let col_id = table_column_id(bound, i);
+        let _ = write!(s, "<tableColumn id=\"{col_id}\"");
         if let Some(u) = col.and_then(|c| c.unique_name.as_ref()) {
             let _ = write!(s, " uniqueName=\"{}\"", esc_attr(u));
         }
         let _ = write!(s, " name=\"{}\"", esc_attr(&encode_xstring(name)));
+        if let Some(f) = bound.and_then(|b| b.query_field_id(i)) {
+            let _ = write!(s, " queryTableFieldId=\"{f}\"");
+        }
         let totals = col.map(|c| c.totals).unwrap_or_default();
         if t.totals_row {
             let f = match totals {

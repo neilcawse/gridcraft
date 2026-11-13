@@ -2782,6 +2782,28 @@ fn saving_to_an_unknown_extension_is_refused() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// Saving reports what the file was written without: two names that differ only in case can't
+/// both be in an XLSX.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn save_reports_what_the_file_is_written_without() {
+    let nonce = unique_nonce();
+    let dir = std::env::temp_dir().join(format!("gridcraft-save-warn-{}-{nonce}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "A1", "input": "1"})).unwrap();
+    let r = s.execute("file.save", json!({"path": dir.join("clean.xlsx")})).unwrap();
+    assert!(r.get("warnings").is_none(), "{r}");
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    for name in ["Rate", "RATE"] {
+        wb.names.push(gridcraft_model::DefinedName { name: name.into(), scope: None, formula: "1".into(), comment: String::new(), hidden: false });
+    }
+    let r = s.execute("file.save", json!({"path": dir.join("names.xlsx")})).unwrap();
+    let warnings = r["warnings"].as_array().unwrap();
+    assert!(warnings.len() == 1 && warnings[0].as_str().unwrap().contains("differ only in case"), "{r}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// An XLSX opened by its content under an unknown extension (`budget.dat`) saves back to its own
 /// file as XLSX; a Save As to another unknown extension is still refused.
 #[test]

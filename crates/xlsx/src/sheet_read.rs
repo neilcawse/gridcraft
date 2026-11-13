@@ -555,7 +555,12 @@ fn read_cell(cx: &mut Ctx<'_>, sheet: &mut Sheet, st: &mut RowState, c: &El, pos
     let value = match c.attr("t").unwrap_or("n") {
         "s" => match v.and_then(|v| v.trim().parse::<usize>().ok()) {
             Some(i) => match cx.sst.get(i) {
-                Some(s) => Value::Text(s.clone()),
+                Some(s) => {
+                    if let Some(&Some(reading)) = cx.si_phonetics.get(i) {
+                        sheet.phonetic_cells.insert(pos, reading);
+                    }
+                    Value::Text(s.clone())
+                }
                 None => {
                     cx.warn("some cells refer to missing shared strings");
                     Value::Empty
@@ -568,7 +573,8 @@ fn read_cell(cx: &mut Ctx<'_>, sheet: &mut Sheet, st: &mut RowState, c: &El, pos
             c.child("is").map(|is| Value::text(xml::rich_text(is))).or_else(|| v.map(|v| Value::text(xml::decode_xstring(v)))).unwrap_or(Value::Empty)
         }
         "b" => v.map(|v| Value::Bool(matches!(v.trim(), "1" | "true" | "TRUE"))).unwrap_or(Value::Empty),
-        "e" => v.map(|v| Value::Error(CellError::parse(v.trim()).unwrap_or(CellError::Value))).unwrap_or(Value::Empty),
+        // `#SPILL!` and `#CALC!` are saved as `#VALUE!` with a rich value that names the error.
+        "e" => v.map(|v| Value::Error(rich_error(cx, c).or_else(|| CellError::parse(v.trim())).unwrap_or(CellError::Value))).unwrap_or(Value::Empty),
         "d" => match v.and_then(|v| parse_iso_datetime(v.trim(), cx.date_system)) {
             Some(n) => Value::number(n),
             None => {
@@ -597,7 +603,12 @@ fn read_cell(cx: &mut Ctx<'_>, sheet: &mut Sheet, st: &mut RowState, c: &El, pos
         }
         let picture = vm.parse::<usize>().ok().and_then(|n| n.checked_sub(1)).and_then(|n| cx.cell_pictures.get(n)).cloned().flatten();
         if picture.is_none() {
-            cx.warn("some cells have unsupported or missing value metadata; kept their scalar fallback (cell pictures may be missing)");
+            // Value metadata GridCraft doesn't model (rich errors, linked data types, cube
+            // members) is kept by pass-through, which also says when it can't be.
+            match vm.parse::<u32>() {
+                Ok(n) => cx.value_meta.push((pos, n)),
+                Err(_) => cx.warn("some cells have a value metadata index that is not a number; kept their scalar value"),
+            }
         }
         picture
     });
@@ -656,6 +667,12 @@ fn read_cell(cx: &mut Ctx<'_>, sheet: &mut Sheet, st: &mut RowState, c: &El, pos
         None => value,
     };
     sheet.cells.set(pos, Cell { value, formula: formula.map(Arc::new), style, py });
+}
+
+/// The error a cell's `vm` rich value stands for, if it is one (see [`crate::rich_errors`]).
+fn rich_error(cx: &Ctx<'_>, c: &El) -> Option<CellError> {
+    let n = c.attr("vm")?.parse::<usize>().ok()?.checked_sub(1)?;
+    cx.rich_errors.get(n).copied().flatten()
 }
 
 fn read_formula(cx: &mut Ctx<'_>, st: &mut RowState, f: &El, pos: CellRef, dynamic: bool) -> Option<Formula> {

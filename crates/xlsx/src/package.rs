@@ -26,7 +26,8 @@ pub struct Package<'a> {
 pub struct Rel {
     pub id: String,
     /// Last path segment of the relationship type (`worksheet`, `styles`, …): the same for the
-    /// transitional and strict namespaces.
+    /// transitional and strict namespaces, but for the two kinds Strict spells without a hyphen
+    /// (`extendedProperties`, `customProperties`), which are named as Transitional does.
     pub kind: String,
     /// Resolved part name (no leading `/`), or the raw target for external relationships.
     pub target: String,
@@ -69,20 +70,14 @@ impl<'a> Package<'a> {
         self.read_limited(part, MAX_PART)
     }
 
-    /// Reads a part the reader can do without (the caller warns and goes on when it fails). A read
-    /// that fails partway is charged this part's whole allowance (`maximum`, and the byte that
-    /// detects an overrun) instead of ending the package's: the decompression work stays bounded,
-    /// and the parts read after it still open.
-    pub fn read_optional_limited(&mut self, part: &str, maximum: u64) -> Result<Option<Vec<u8>>, IoError> {
-        let before = self.total;
-        let read = self.read_limited(part, maximum);
-        if let Err(IoError::Zip(_)) = &read {
-            self.total = before.saturating_add(maximum.min(MAX_PART).saturating_add(1)).min(MAX_TOTAL);
-        }
-        read
-    }
-
-    /// Reads a small metadata part without allowing it to expand to the general part limit.
+    /// Reads a small metadata part without allowing it to expand to the general part limit. A part
+    /// whose directory entry declares no bytes is empty and is not decompressed: some producers
+    /// write an empty file as a deflate entry with no stream at all, which no reader can decode.
+    ///
+    /// The package budget is charged the bytes this read produced, whether it succeeded or failed
+    /// partway: a damaged part costs what was decompressed of it and no more, so it can't make the
+    /// parts read after it fail. Only a package that really expands past [`MAX_TOTAL`] has no
+    /// budget left.
     pub fn read_limited(&mut self, part: &str, maximum: u64) -> Result<Option<Vec<u8>>, IoError> {
         let maximum = maximum.min(MAX_PART);
         let Some(&idx) = self.names.get(&normalize(part)) else {
@@ -92,28 +87,25 @@ impl<'a> Package<'a> {
         if f.size() > maximum {
             return Err(IoError::TooLarge(format!("{part} expands to {} bytes", f.size())));
         }
+        if f.size() == 0 {
+            return Ok(Some(Vec::new()));
+        }
         let remaining = MAX_TOTAL.saturating_sub(self.total);
         let limit = maximum.min(remaining);
         let mut out = Vec::with_capacity(f.size().min(16 * 1024 * 1024) as usize);
-        let read = (&mut f).take(limit + 1).read_to_end(&mut out).map_err(|e| {
-            // A read that fails partway has already spent decompression work and buffered data
-            // the package budget never sees: count the allowance as spent, so a loop over many
-            // broken parts can't decompress it over and over.
-            self.total = MAX_TOTAL;
-            IoError::Zip(format!("{part}: {e}"))
-        });
+        let read = (&mut f).take(limit + 1).read_to_end(&mut out);
+        // What was produced is spent, however the read ended; the byte past `limit` that shows an
+        // overrun is part of it, so repeated attempts at an oversized part can't decompress it
+        // for free.
+        self.total = self.total.saturating_add(out.len() as u64).min(MAX_TOTAL);
         if out.len() as u64 > limit {
-            // The allowance was spent getting here; make the exhaustion terminal instead of
-            // letting later reads pay the same decompression cost again.
-            self.total = MAX_TOTAL;
             return Err(IoError::TooLarge(if remaining < maximum {
                 "package expands to more than 1 GB".into()
             } else {
                 format!("{part} expands to more than {maximum} bytes")
             }));
         }
-        read?;
-        self.total += out.len() as u64;
+        read.map_err(|e| IoError::Zip(format!("{part}: {e}")))?;
         Ok(Some(out))
     }
 
@@ -141,7 +133,12 @@ impl<'a> Package<'a> {
             .filter_map(|r| {
                 let id = r.attr("Id")?.to_string();
                 let ty = r.attr("Type").unwrap_or("");
-                let kind = ty.rsplit('/').next().unwrap_or("").to_string();
+                let kind = match ty.rsplit('/').next().unwrap_or("") {
+                    "extendedProperties" => "extended-properties",
+                    "customProperties" => "custom-properties",
+                    other => other,
+                }
+                .to_string();
                 let target_raw = r.attr("Target")?;
                 let external = r.attr("TargetMode").is_some_and(|m| m.eq_ignore_ascii_case("External"));
                 let target = if external { target_raw.to_string() } else { resolve(dir, target_raw) };
@@ -221,6 +218,7 @@ impl ZipOut {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{Entry, damaged_zip};
 
     #[test]
     fn resolving() {
@@ -233,42 +231,59 @@ mod tests {
         assert_eq!(split_dir("x.xml"), ("", "x.xml"));
     }
 
-    /// An over-budget read must spend the package's allowance once and for all: loops over many
-    /// broken parts (a sheet's optional VML relationships, for one) otherwise re-decompress the
-    /// remaining allowance again and again.
+    /// A read that runs over the package's allowance spends it: loops over many oversized parts
+    /// (a sheet's optional VML relationships, for one) otherwise re-decompress the remaining
+    /// allowance again and again.
     #[test]
-    fn a_failed_part_ends_the_package_budget() {
+    fn an_over_budget_read_ends_the_package_budget() {
         let z = crate::tests::make_zip(&[("a.xml", b"0123456789"), ("b.xml", b"hello")]);
         let mut pkg = Package::open(&z).unwrap();
         assert!(pkg.read("a.xml").unwrap().is_some());
+        assert_eq!(pkg.total, 10);
         // Nothing left to spend within the per-part limit either.
         pkg.total = MAX_TOTAL - 1;
-        assert!(pkg.read("b.xml").is_err());
-        assert_eq!(pkg.total, MAX_TOTAL, "the failed read is charged");
-        // Oversized repeated attempts stay cheap errors now: no allowance is left to pay for.
+        assert!(matches!(pkg.read("b.xml"), Err(IoError::TooLarge(m)) if m.contains("1 GB")));
+        assert_eq!(pkg.total, MAX_TOTAL, "the over-budget read is charged");
+        // Repeated attempts stay cheap errors: no allowance is left to pay for.
         assert!(matches!(pkg.read("b.xml"), Err(IoError::TooLarge(_))));
     }
 
-    /// A part the reader can do without, damaged inside an intact archive, costs its own
-    /// allowance: the parts after it are still read.
+    /// A part that fails to read is charged the bytes that were read of it, not the package's
+    /// whole allowance: the parts read after it still open, with their true error or content.
     #[test]
-    fn a_damaged_optional_part_costs_only_its_allowance() {
-        use std::io::Write as _;
-        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-        w.start_file("a.xml", stored).unwrap();
-        w.write_all(b"<a>damaged</a>").unwrap();
-        w.start_file("b.xml", zip::write::SimpleFileOptions::default()).unwrap();
-        w.write_all(b"hello").unwrap();
-        let mut z = w.finish().unwrap().into_inner();
-        let at = z.windows(7).position(|x| x == b"damaged").unwrap();
-        z[at] ^= 0x20;
+    fn a_damaged_part_costs_only_what_was_read_of_it() {
+        let z = damaged_zip(&[Entry::BadChecksum("a.xml", b"<a>damaged</a>"), Entry::Intact("b.xml", b"hello")]);
         let mut pkg = Package::open(&z).unwrap();
-        assert!(matches!(pkg.read_optional_limited("a.xml", 1024), Err(IoError::Zip(_))));
-        assert_eq!(pkg.total, 1025, "the failed read is charged its allowance");
+        assert!(matches!(pkg.read_limited("a.xml", 1024), Err(IoError::Zip(_))));
+        assert_eq!(pkg.total, 14, "the failed read is charged what it produced");
         assert_eq!(pkg.read("b.xml").unwrap().as_deref(), Some(&b"hello"[..]));
-        // An ordinary read of it still ends the package's budget.
-        assert!(pkg.read("a.xml").is_err());
-        assert_eq!(pkg.total, MAX_TOTAL);
+        // Reading the damaged part again fails the same way, never as an exhausted package.
+        assert!(matches!(pkg.read("a.xml"), Err(IoError::Zip(_))));
+        assert_eq!(pkg.total, 14 + 5 + 14);
+    }
+
+    /// A stream that fails before it produces anything costs nothing, and the parts after it are
+    /// read with the whole budget: the old accounting made the next read fail with "the package
+    /// expands to more than 1 GB".
+    #[test]
+    fn an_undecodable_part_leaves_the_budget_for_the_parts_after_it() {
+        let z = damaged_zip(&[Entry::BadStream("a.bin", 40), Entry::Intact("b.xml", b"hello")]);
+        let mut pkg = Package::open(&z).unwrap();
+        assert!(matches!(pkg.read_limited("a.bin", 1024), Err(IoError::Zip(_))));
+        assert_eq!(pkg.total, 0);
+        assert_eq!(pkg.read_limited("b.xml", 1024).unwrap().as_deref(), Some(&b"hello"[..]));
+        assert!(pkg.read("a.bin").is_err());
+        assert_eq!(pkg.read("b.xml").unwrap().as_deref(), Some(&b"hello"[..]));
+    }
+
+    /// A part whose directory entry declares 0 bytes is an empty part, read as such even when its
+    /// deflate entry has no stream (the thumbnail some producers write that way).
+    #[test]
+    fn a_part_declared_empty_is_empty() {
+        let z = damaged_zip(&[Entry::EmptyWithoutStream("docProps/thumbnail.wmf"), Entry::Intact("b.xml", b"hello")]);
+        let mut pkg = Package::open(&z).unwrap();
+        assert_eq!(pkg.read_limited("docProps/thumbnail.wmf", 1024).unwrap(), Some(vec![]));
+        assert_eq!(pkg.total, 0);
+        assert_eq!(pkg.read("b.xml").unwrap().as_deref(), Some(&b"hello"[..]));
     }
 }

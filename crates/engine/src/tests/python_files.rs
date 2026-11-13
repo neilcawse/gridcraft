@@ -198,6 +198,37 @@ fn xlsx_stores_the_code_in_the_python_part_with_cached_values() {
     assert!(!save(&mut plain, "xlsx").windows(10).any(|w| w == b"python.xml"));
 }
 
+/// The Python parts of a package: (content-type overrides, workbook relationships) of the Python kind.
+fn python_parts(bytes: &[u8]) -> (usize, usize) {
+    (
+        part(bytes, "[Content_Types].xml").matches("application/vnd.ms-excel.python+xml").count(),
+        part(bytes, "xl/_rels/workbook.xml.rels").matches("/relationships/Python\"").count(),
+    )
+}
+
+/// A workbook has one Python part ([MS-XLSX] 2.1.23) and a save writes it from the cells' code. The
+/// part the file came with was kept beside the written one, first in the relationships, where the
+/// reader found it: an edited script came back as it was, and every save added another part.
+#[test]
+fn an_edited_script_stays_edited_through_saves_and_reopens_with_one_python_part() {
+    let data = "<sheetData><row r=\"1\"><c r=\"A1\"><f>_xlfn._xlws.PY(0,0)</f><v>5</v></c></row></sheetData>";
+    let mut s = s();
+    open(&mut s, "excel.xlsx", &excel_shaped(data, Some(&["5"])));
+    assert_eq!(code(&s, "A1").map(|p| p.code).as_deref(), Some("5"));
+    py(&mut s, "A1", "6");
+    for round in 0..3 {
+        let bytes = save(&mut s, "xlsx");
+        assert_eq!(python_parts(&bytes), (1, 1), "save {round}: one Python part, named by one relationship");
+        let python = part(&bytes, "xl/python.xml");
+        assert!(python.contains("<code>6</code>") && !python.contains("<code>5</code>"), "save {round}: {python}");
+        open(&mut s, "again.xlsx", &bytes);
+        assert_eq!(code(&s, "A1").map(|p| p.code).as_deref(), Some("6"), "opened after save {round}");
+    }
+    // Without Python cells the file's Python part goes too, instead of staying behind unused.
+    s.execute("edit.clearContents", json!({"range": "A1"})).unwrap();
+    assert_eq!(python_parts(&save(&mut s, "xlsx")), (0, 0));
+}
+
 #[test]
 fn excel_authored_python_cells_are_read_as_python() {
     // A workbook as [MS-XLSX] 2.3.10 describes it: `_xlfn._xlws.PY(index,0|1,params…)` naming a
@@ -294,9 +325,11 @@ fn a_damaged_python_part_is_a_warning_and_the_workbook_opens_with_its_values() {
 
 #[test]
 fn a_python_cell_without_its_code_keeps_its_whole_cached_result_as_values() {
-    // A1's cached result spills over A1:A3; C1 is an ordinary dynamic array with a stale cache.
+    // A1's cached result spills over A1:A3; C1 is an ordinary dynamic array with a stale cache
+    // (SEQUENCE is written with its `_xlfn.` prefix, as Excel writes it: bare, a file's SEQUENCE is a
+    // user-defined function).
     let data = "<sheetData><row r=\"1\"><c r=\"A1\" cm=\"1\"><f t=\"array\" ref=\"A1:A3\">_xlfn._xlws.PY(0,0)</f><v>1</v></c>\
-                <c r=\"C1\" cm=\"1\"><f t=\"array\" ref=\"C1:C3\">SEQUENCE(3)</f><v>1</v></c></row>\
+                <c r=\"C1\" cm=\"1\"><f t=\"array\" ref=\"C1:C3\">_xlfn.SEQUENCE(3)</f><v>1</v></c></row>\
                 <row r=\"2\"><c r=\"A2\"><v>2</v></c><c r=\"C2\"><v>9</v></c></row>\
                 <row r=\"3\"><c r=\"A3\"><v>3</v></c><c r=\"C3\"><v>9</v></c></row></sheetData>";
     let missing = excel_shaped(data, None);
@@ -612,19 +645,70 @@ fn hostile_python_content_in_files_is_capped() {
     s.execute("formulas.calculateNow", json!({})).unwrap();
     assert_eq!(v(&s, "C1"), Value::Number(1.0));
 
-    // PY formulas from other formats become Python cells; non-literal PY calls stay formulas.
+    // A file that doesn't declare Python cells has none: `PY(…)` formulas of other formats stay
+    // formulas, whatever form the code takes.
     let mut wb = Workbook::new();
     let sh = wb.sheet_mut(0).unwrap();
-    sh.set_cell(CellRef::new(0, 0), Cell::formula(gridcraft_model::Formula::new("=PY(\"1+\"&\"1\",1)")));
-    sh.set_cell(CellRef::new(1, 0), Cell::formula(gridcraft_model::Formula::new("=PY(A1,0)")));
-    sh.set_cell(CellRef::new(2, 0), Cell::formula(gridcraft_model::Formula::new("=_xlfn._xlws.PY(\"2\",0)")));
-    crate::io::adopt_python(&mut wb);
+    for (row, text) in ["=PY(\"1+\"&\"1\",1)", "=PY(A1,0)", "=_xlfn._xlws.PY(\"2\",0)", "=PY(\"3\")"].into_iter().enumerate() {
+        sh.set_cell(CellRef::new(row as u32, 0), Cell::formula(gridcraft_model::Formula::new(text)));
+    }
+    assert!(crate::io::adopt_python(&mut wb).is_empty());
     let sh = wb.sheet(0).unwrap();
-    let a1 = sh.cell(CellRef::new(0, 0)).unwrap();
-    assert_eq!(a1.py.as_ref().map(|p| (p.code.as_str(), p.object)), Some(("1+1", true)));
-    assert!(a1.formula.is_none());
-    assert!(sh.cell(CellRef::new(1, 0)).unwrap().py.is_none());
-    assert_eq!(sh.cell(CellRef::new(2, 0)).unwrap().py.as_ref().map(|p| p.code.as_str()), Some("2"));
+    for row in 0..4 {
+        let cell = sh.cell(CellRef::new(row, 0)).unwrap();
+        assert!(cell.py.is_none() && cell.formula.is_some(), "row {row} stays a formula");
+    }
+}
+
+/// A one-sheet Excel 97-2003 workbook ([MS-CFB] container, [MS-XLS] BIFF8 stream) whose A1 is the
+/// one-cell array formula `{=PY("1+1")}` with the cached result 7: PY here is a user-defined
+/// function, a function Lbl (2.4.150, `fFunc`) called as a PtgFuncVar with iftab 255 (2.5.198.63)
+/// over a PtgName and the PtgStr "1+1", inside an ARRAY record that the cell's FORMULA reaches
+/// through a PtgExp. An .xls has no Python cell to declare.
+fn xls_udf_named_py_in_an_array() -> Vec<u8> {
+    fn rec(id: u16, payload: &[u8]) -> Vec<u8> {
+        [&id.to_le_bytes()[..], &(payload.len() as u16).to_le_bytes(), payload].concat()
+    }
+    let words = |w: &[u16]| -> Vec<u8> { w.iter().flat_map(|x| x.to_le_bytes()).collect() };
+    let bof = |dt: u16| rec(0x0809, &[words(&[0x0600, dt, 6319, 1997]), 0xC009u32.to_le_bytes().to_vec(), 0x0306u32.to_le_bytes().to_vec()].concat());
+    let lbl = rec(0x0018, &[words(&[2]), vec![0, 2], words(&[0, 0, 0]), vec![0; 4], vec![0], b"PY".to_vec()].concat());
+    let call = [&[0x23][..], &1u32.to_le_bytes(), &[0x17, 3, 0], b"1+1", &[0x22, 2, 255, 0]].concat();
+    let cell = rec(0x0006, &[words(&[0, 0, 0]), 7f64.to_le_bytes().to_vec(), words(&[0]), vec![0; 4], words(&[5]), vec![1, 0, 0, 0, 0]].concat());
+    let array = rec(0x0221, &[words(&[0, 0]), vec![0; 2], vec![0; 6], words(&[call.len() as u16]), call].concat());
+    let sheet = [bof(0x0010), cell, array, rec(0x000A, &[])].concat();
+    let name = [&[6, 0][..], b"Sheet1"].concat();
+    let head = [bof(0x0005), lbl].concat();
+    let at = (head.len() + 4 + 6 + name.len() + 4) as u32;
+    let globals = [head, rec(0x0085, &[&at.to_le_bytes()[..], &[0, 0], &name].concat()), rec(0x000A, &[])].concat();
+    gridcraft_xlsx::testing::compound_file(&[("Workbook", &[globals, sheet].concat())])
+}
+
+#[test]
+fn a_legacy_xls_function_named_py_is_not_adopted_as_python() {
+    let (wb, _) = crate::io::open_bytes("udf.xls", &xls_udf_named_py_in_an_array()).unwrap();
+    let a1 = wb.sheet(0).unwrap().cell(CellRef::parse("A1").unwrap()).unwrap();
+    assert!(a1.py.is_none(), "an .xls holds no Python cell");
+    let f = a1.formula.as_ref().expect("the call stays a formula");
+    assert_eq!(f.text, "PY(\"1+1\")");
+    assert!(f.array.is_some(), "and an array formula");
+    assert_eq!(a1.value, Value::Number(7.0), "with the result the file cached");
+    // Saved as xlsx it is still that formula, with no Python part to run as code.
+    let bytes = gridcraft_xlsx::write_xlsx(&wb).unwrap();
+    let xml = sheet_xml(&bytes);
+    assert!(xml.contains("t=\"array\"") && !xml.contains("_xlfn._xlws.PY"), "{xml}");
+    let (back, _) = crate::io::open_bytes("udf.xlsx", &bytes).unwrap();
+    let b1 = back.sheet(0).unwrap().cell(CellRef::parse("A1").unwrap()).unwrap();
+    assert!(b1.py.is_none() && b1.formula.is_some(), "a second open keeps the formula");
+}
+
+#[test]
+fn a_py_formula_in_native_json_stays_a_formula() {
+    let mut wb = Workbook::new();
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.set_cell(CellRef::new(0, 0), Cell::formula(gridcraft_model::Formula::new("=PY(\"1+1\",0)")));
+    let (wb, _) = crate::io::open_bytes("formula.json", &serde_json::to_vec(&wb).unwrap()).unwrap();
+    let a1 = wb.sheet(0).unwrap().cell(CellRef::new(0, 0)).unwrap();
+    assert!(a1.py.is_none() && a1.formula.is_some(), "only a Python cell JSON holds is one");
 }
 
 #[test]
@@ -647,13 +731,11 @@ fn py_formulas_over_the_size_limit_keep_only_their_value() {
         }
         v.join("&")
     };
-    let mut wb = Workbook::new();
-    let sh = wb.sheet_mut(0).unwrap();
-    let cell = |text: String| Cell { value: Value::text("cached"), ..Cell::formula(gridcraft_model::Formula::new(&text)) };
-    sh.set_cell(CellRef::new(0, 0), cell(format!("_xlfn._xlws.PY({},0)", lits(8_080))));
-    sh.set_cell(CellRef::new(1, 0), cell(format!("_xlfn._xlws.PY({},0)", lits(8_079))));
-    let xlsx = gridcraft_xlsx::write_xlsx(&wb).unwrap();
-    let (wb, warnings) = crate::io::open_bytes("long.xlsx", &xlsx).unwrap();
+    // The formulas as a file holds them, by the name the format gives the function: the model's
+    // own text for a call to PY has no prefix, so a workbook built in memory would write plain PY.
+    let cell = |at: &str, n: usize| format!("<c r=\"{at}\" t=\"str\"><f>_xlfn._xlws.PY({},0)</f><v>cached</v></c>", lits(n).replace('&', "&amp;"));
+    let data = format!("<sheetData><row r=\"1\">{}</row><row r=\"2\">{}</row></sheetData>", cell("A1", 8_080), cell("A2", 8_079));
+    let (wb, warnings) = crate::io::open_bytes("long.xlsx", &excel_shaped(&data, None)).unwrap();
     let sh = wb.sheet(0).unwrap();
     let over = sh.cell(CellRef::new(0, 0)).unwrap();
     assert!(over.py.is_none() && over.formula.is_none(), "8,080 characters of code is over the limit");
