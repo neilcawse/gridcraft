@@ -6765,13 +6765,15 @@ fn open_content_kind_and_save_dialog_payloads_distinguish_xlsx_from_imports_and_
         assert_eq!(s.take_ui_requests(), vec![crate::UiRequest::Dialog("saveAs".into(), json!({"saveAs": true}))], "{name}");
     }
 
-    // Imported (.xls, .xlsb, .ods), encrypted .xlsx, and non-XLSX text files get content_kind = None
-    // and queue saveAs: true on file.save.
+    // Imported (.xls, .xlsb, .ods), macro/template SpreadsheetML (.xlsm, .xltx, .xltm),
+    // encrypted .xlsx, and non-XLSX text files get content_kind = None and queue saveAs: true on file.save.
     for (name, bytes, pw) in [
         ("legacy.xls", xls_fixture(), None),
         ("source.xlsb", xlsb_fixture(), None),
         ("source.ods", ods_fixture(), None),
         ("disguised.xlsx", ods_fixture(), None),
+        ("macro.xlsm", xlsx.clone(), None),
+        ("template.xltx", xlsx.clone(), None),
         ("Secret.xlsx", encrypted_book("pw-99"), Some("pw-99")),
         ("notes.csv", b"a,b\n1,2\n".to_vec(), None),
     ] {
