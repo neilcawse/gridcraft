@@ -21,7 +21,12 @@ mod csv;
 mod drawing;
 mod feature_bags;
 mod fmla;
+mod import_rules;
 mod ods;
+mod ods_formula;
+mod ods_numfmt;
+mod ods_settings;
+mod ods_style;
 mod omml;
 mod package;
 mod passthrough;
@@ -50,7 +55,7 @@ use gridcraft_model::Workbook;
 
 pub use crypto::{DecryptError, check_encryption, decrypt};
 pub use csv::{MAX_CSV_BYTES, decode_text, read_csv, read_csv_with_report, write_csv, write_csv_limited};
-pub use ods::read_ods;
+pub use ods::{read_ods, read_ods_with};
 pub use package::MAX_PART;
 pub use passthrough::{rebase_links, rewrite_kept_names};
 pub use xls::{read_xls, read_xls_with};
@@ -268,7 +273,7 @@ pub enum Format {
     Unknown,
 }
 
-/// Guesses the format from content: ODS mimetype, XLSB package content types, other ZIP packages as XLSX, text as CSV.
+/// Guesses the format from content: ODS mimetype (or a flat ODS document), XLSB package content types, other ZIP packages as XLSX, text as CSV.
 pub fn sniff(bytes: &[u8]) -> Format {
     if bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06") || bytes.starts_with(b"PK\x07\x08") {
         return if ods::has_mimetype(bytes) {
@@ -290,6 +295,9 @@ pub fn sniff(bytes: &[u8]) -> Format {
         } else {
             Format::LegacyBinary
         };
+    }
+    if ods::is_flat(bytes) {
+        return Format::Ods;
     }
     if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) || bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
         return Format::Csv;

@@ -12,8 +12,9 @@ supported.
 values; source formatting and other workbook features are omitted. Import warnings go to stderr.
 Convert to `.xlsx` to save the imported workbook; XLSB output is not supported.
 
-`.ods` files support [worksheet data import](ods-import.md). Formula cells use their last saved
-values; source formatting and other workbook features are omitted. Import warnings go to stderr.
+`.ods` and flat `.fods` files are [imported](ods-import.md) with values, formulas (translated
+from OpenFormula, with their saved results) and named ranges; source formatting and other
+workbook features are omitted. Import warnings go to stderr.
 Convert to `.xlsx` to save the imported workbook; ODS output is not supported.
 
 ```sh

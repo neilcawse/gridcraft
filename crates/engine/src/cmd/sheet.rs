@@ -213,6 +213,7 @@ fn shift_sheet_features(sh: &mut Sheet, axis: Axis, at: u32, count: u32, insert:
         });
         pt.last_range = pt.last_range.and_then(map_range);
     }
+    sh.unimported_pivots = std::mem::take(&mut sh.unimported_pivots).into_iter().filter_map(map_range).collect();
 }
 
 /// Rewrites every formula reference (chart series included), sparkline source and PivotTable

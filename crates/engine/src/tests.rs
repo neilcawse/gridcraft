@@ -2390,10 +2390,11 @@ fn create_names_from_selection() {
 #[test]
 fn names_that_look_like_references_are_refused() {
     let mut s = s();
-    for bad in ["R1C1", "r2", "C3", "RC", "R", "c", "rc12", "A1", "XFD1048576", "1st"] {
+    // Live Excel 16.115 refuses R1C1 notation followed by a letter (`R1x`, `RC1x`, `R1C1x`) as it does the bare notation.
+    for bad in ["R1C1", "r2", "C3", "RC", "R", "c", "rc12", "A1", "XFD1048576", "1st", "R1C1X", "R1x", "C1x", "RC1x", "R2D2", "TRUE", "false"] {
         assert!(s.execute("formulas.defineName", json!({"name": bad, "refersTo": "=1"})).is_err(), "{bad}");
     }
-    for good in ["R1C1X", "Rate", "RCx", "Rx", "_R1", "Cost"] {
+    for good in ["Rate", "RCx", "Rx", "RCC", "R_1", "R1.x", "CR1x", "_R1", "Cost"] {
         s.execute("formulas.defineName", json!({"name": good, "refersTo": "=1"})).unwrap();
     }
 }
@@ -2552,7 +2553,7 @@ fn ods_fixture() -> Vec<u8> {
         ),
         (
             "content.xml",
-            r#"<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:of="urn:oasis:names:tc:opendocument:xmlns:of:1.2" office:version="1.3"><office:body><office:spreadsheet><table:table table:name="Data"><table:table-row><table:table-cell office:value-type="float" office:value="42" table:formula="of:=SUM([.B1:.B2])"/><table:table-cell office:value-type="string"><text:p>Original data</text:p></table:table-cell></table:table-row></table:table></office:spreadsheet></office:body></office:document-content>"#,
+            r#"<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:of="urn:oasis:names:tc:opendocument:xmlns:of:1.2" office:version="1.3"><office:body><office:spreadsheet><table:table table:name="Data"><table:table-row><table:table-cell office:value-type="float" office:value="42" table:formula="of:=[.C1]*2"/><table:table-cell office:value-type="string"><text:p>Original data</text:p></table:table-cell><table:table-cell office:value-type="float" office:value="21"/></table:table-row></table:table></office:spreadsheet></office:body></office:document-content>"#,
         ),
     ] {
         zip.start_file(name, options).unwrap();
@@ -2562,7 +2563,7 @@ fn ods_fixture() -> Vec<u8> {
 }
 
 #[test]
-fn ods_import_keeps_cached_values_and_reports_limits() {
+fn ods_import_reads_formulas_and_reports_limits() {
     let bytes = ods_fixture();
     assert_eq!(gridcraft_xlsx::sniff(&bytes), gridcraft_xlsx::Format::Ods);
     for name in ["source.ods", "source.xlsx"] {
@@ -2574,11 +2575,376 @@ fn ods_import_keeps_cached_values_and_reports_limits() {
         assert!(s.doc().unwrap().display_title().ends_with(".xlsx"));
         assert_eq!(v(&s, "A1"), Value::Number(42.0));
         assert_eq!(v(&s, "B1"), Value::from("Original data"));
-        assert!(s.doc().unwrap().wb.active().unwrap().cell(CellRef::parse("A1").unwrap()).unwrap().formula.is_none());
+        assert_eq!(formula_at(&s, "A1").as_deref(), Some("C1*2"));
         let saved = s.execute("file.saveBytes", json!({"format": "xlsx"})).unwrap();
         s.execute("file.open", json!({"name": "imported.xlsx", "base64": saved["base64"]})).unwrap();
         assert_eq!(v(&s, "A1"), Value::Number(42.0));
     }
+}
+
+/// A package of `content.xml` holding `body` inside `office:spreadsheet` (with `settings` before
+/// the tables), opened and fully recalculated.
+fn recalculated_ods(settings: &str, body: &str) -> Session {
+    recalculated_styled_ods("", settings, body)
+}
+
+/// [`recalculated_ods`] with the automatic styles `styles`.
+fn recalculated_styled_ods(styles: &str, settings: &str, body: &str) -> Session {
+    use std::io::{Cursor, Write};
+    let content = format!(
+        r#"<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:number="urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:of="urn:oasis:names:tc:opendocument:xmlns:of:1.2" office:version="1.3"><office:automatic-styles>{styles}</office:automatic-styles><office:body><office:spreadsheet>{settings}{body}</office:spreadsheet></office:body></office:document-content>"#
+    );
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for (name, data) in [("mimetype", "application/vnd.oasis.opendocument.spreadsheet"), ("content.xml", content.as_str())] {
+        zip.start_file(name, options).unwrap();
+        zip.write_all(data.as_bytes()).unwrap();
+    }
+    let bytes = zip.finish().unwrap().into_inner();
+    let mut s = s();
+    s.execute("file.open", json!({"name": "book.ods", "base64": crate::io::base64_encode(&bytes)})).unwrap();
+    let d = s.doc_mut().unwrap();
+    let mut wb = (*d.wb).clone();
+    d.calc.recalc_all(&mut wb);
+    d.wb = std::sync::Arc::new(wb);
+    s
+}
+
+/// One `table:table` named `name` of one row of `cells`.
+fn ods_row(name: &str, cells: &str) -> String {
+    format!(r#"<table:table table:name="{name}"><table:table-row>{cells}</table:table-row></table:table>"#)
+}
+
+/// A float cell with the formula `formula` (XML-escaped) and the saved result `saved`.
+fn ods_formula(formula: &str, saved: f64) -> String {
+    format!(r#"<table:table-cell table:formula="of:={formula}" office:value-type="float" office:value="{saved}"/>"#)
+}
+
+/// An MROUND operand reading a named expression through another (`alias` is `mround_b`) reads
+/// the document's value: the LET the translation adds binds a name no named expression spells
+/// (ODF 1.3 part 4, 6.17.4).
+#[test]
+fn ods_mround_operands_read_named_expressions_unchanged() {
+    let names = r#"<table:named-expressions><table:named-expression table:name="mround_b" table:expression="100" table:base-cell-address="$Data.$A$1"/><table:named-expression table:name="alias" table:expression="mround_b" table:base-cell-address="$Data.$A$1"/></table:named-expressions>"#;
+    let s = recalculated_ods(
+        "",
+        &format!("{names}{}", ods_row("Data", &[ods_formula("MROUND(alias;2)", 99.0), ods_formula("MROUND(alias;7)", 99.0)].concat())),
+    );
+    assert_eq!((v(&s, "A1"), v(&s, "B1")), (Value::Number(100.0), Value::Number(98.0)));
+    assert!(formula_at(&s, "A1").is_some_and(|f| !f.contains("mround_b,")), "{:?}", formula_at(&s, "A1"));
+}
+
+/// INDIRECT's literal text finds a name the way LibreOffice does (values measured with LibreOffice
+/// 26.2, whose saved results the corpus check can't see): the name of the formula's sheet, then
+/// the workbook's, before any cell; a qualifier, `Sheet.Name` or `Sheet!Name` in any case and with
+/// quotes, names only that sheet's own names; a sheet the name isn't on, a `$` or padding leave the
+/// cell. `Q1` is a cell in today's grid, so the import renames the name (`_Q1`): a text that finds
+/// no name must keep reading the cell, and one that finds the name must read it.
+#[test]
+fn ods_indirect_text_finds_names_as_libreoffice_does() {
+    let ind = |t: &str| ods_formula(&format!("INDIRECT(&quot;{t}&quot;)"), 99.0);
+    let cell = |v: f64| format!(r#"<table:table-cell office:value-type="float" office:value="{v}"/>"#);
+    let row = |first: f64, formulas: &[String], q1: f64| {
+        // The cell Q1 is the 17th: the formulas sit between A1 and it.
+        let gap = 16 - 1 - formulas.len();
+        format!(
+            r#"<table:table-row>{}{}<table:table-cell table:number-columns-repeated="{gap}"/>{}</table:table-row>"#,
+            cell(first),
+            formulas.concat(),
+            cell(q1)
+        )
+    };
+    let data: Vec<String> = ["Q1", "q1", "Data.Q1", "data.q1", "'Data'.Q1", "$Data.Q1", "Data.$Q1", "Data!Q1", "'Data'!Q1", "Other.Q1", "Other!Q1"]
+        .iter()
+        .map(|t| ind(t))
+        .chain([ods_formula("SUM(INDIRECT(&quot;Data.Q1&quot;))", 99.0), ods_formula("SUM(INDIRECT(&quot;data.q1&quot;))", 99.0)])
+        .collect();
+    let other: Vec<String> =
+        ["Q1", "Other!Q1", "Other.Q1", "Data.Q1", "Data!Q1", "data.q1"].iter().map(|t| ind(t)).chain([ods_formula("Q1*2", 18.0)]).collect();
+    // Data's own name Q1 is its A1 (5); Data!Q1 is 7, Other's A1 11 and Other!Q1 9.
+    let body = format!(
+        r#"<table:table table:name="Data">{}<table:named-expressions><table:named-range table:name="Q1" table:base-cell-address="$Data.$A$1" table:cell-range-address="$Data.$A$1"/></table:named-expressions></table:table><table:table table:name="Other">{}</table:table>"#,
+        row(5.0, &data, 7.0),
+        row(11.0, &other, 9.0)
+    );
+    let s = recalculated_ods("", &body);
+    let wb = &s.doc().unwrap().wb;
+    let at = |sheet: usize, c: u32| wb.sheets[sheet].value(CellRef::new(0, c));
+    let row_values = |sheet: usize, n: u32| (1..=n).map(|c| at(sheet, c)).collect::<Vec<_>>();
+    let numbers = |v: &[f64]| v.iter().copied().map(Value::Number).collect::<Vec<_>>();
+    // Name 5 for the name's own spellings; the cell 7 for `$Data.Q1` and `Data.$Q1`, whose parts
+    // name no sheet and no name; Other's cell 9.
+    assert_eq!(row_values(0, 13), numbers(&[5.0, 5.0, 5.0, 5.0, 5.0, 7.0, 7.0, 5.0, 5.0, 9.0, 9.0, 5.0, 5.0]));
+    // Other has no name Q1: the cell 9, whichever way it is named, and Data's name through Data.
+    assert_eq!(row_values(1, 7), numbers(&[9.0, 9.0, 9.0, 5.0, 5.0, 5.0, 18.0]));
+    let formula = |sheet: usize, c: u32| wb.sheets[sheet].cell(CellRef::new(0, c)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone());
+    assert_eq!(formula(0, 1).as_deref(), Some("INDIRECT(\"_Q1\")"));
+    assert_eq!(formula(0, 3).as_deref(), Some("INDIRECT(\"'Data'!_Q1\")"));
+    assert_eq!(formula(0, 6).as_deref(), Some("INDIRECT(\"'Data'!Q1\")"));
+    assert_eq!(formula(1, 1).as_deref(), Some("INDIRECT(\"Q1\")"));
+    assert_eq!(formula(1, 2).as_deref(), Some("INDIRECT(\"Other!Q1\")"));
+    assert_eq!(formula(1, 3).as_deref(), Some("INDIRECT(\"'Other'!Q1\")"));
+}
+
+/// Text comparisons and criteria tell case apart unless the document says otherwise
+/// (`table:case-sensitive`, ODF 1.3 part 3, 19.594, default true; part 4, 6.4.7): Excel's never
+/// do, so such formulas keep their saved results. Comparisons case can't change are imported.
+#[test]
+fn ods_case_sensitive_comparisons_keep_their_saved_results() {
+    let cells = [
+        r#"<table:table-cell table:formula="of:=&quot;a&quot;=&quot;A&quot;" office:value-type="boolean" office:boolean-value="false"/>"#.to_string(),
+        ods_formula("COUNTIF([.E1];&quot;a&quot;)", 0.0),
+        ods_formula("IF(LEN([.E1])=1;5;6)", 9.0),
+        ods_formula("IF([.E1]=&quot;&quot;;5;6)", 9.0),
+        r#"<table:table-cell office:value-type="string" office:string-value="A"/>"#.to_string(),
+    ]
+    .concat();
+    for settings in ["", r#"<table:calculation-settings table:case-sensitive="true"/>"#] {
+        let s = recalculated_ods(settings, &ods_row("Data", &cells));
+        assert_eq!((v(&s, "A1"), v(&s, "B1")), (Value::Bool(false), Value::Number(0.0)), "{settings}");
+        assert_eq!((formula_at(&s, "A1"), formula_at(&s, "B1")), (None, None));
+        assert_eq!((v(&s, "C1"), v(&s, "D1")), (Value::Number(5.0), Value::Number(6.0)));
+    }
+    let s = recalculated_ods(
+        r#"<table:calculation-settings table:case-sensitive="false" table:use-regular-expressions="false" table:use-wildcards="true"/>"#,
+        &ods_row("Data", &cells),
+    );
+    assert_eq!((v(&s, "A1"), v(&s, "B1")), (Value::Bool(true), Value::Number(1.0)));
+}
+
+/// INDIRECT's text may name its sheet with OpenFormula's dot (ODF 1.3 part 4, 6.14.7): literal
+/// text becomes Excel's, ADDRESS's text means the same to both, and text the formula otherwise
+/// computes keeps the saved result.
+#[test]
+fn ods_indirect_reads_openformula_sheet_separators() {
+    let data = [
+        ods_formula("INDIRECT(&quot;'My Sheet'.A1&quot;)", 0.0),
+        ods_formula("SUM(INDIRECT(&quot;'My Sheet'.A1:B1&quot;))", 0.0),
+        ods_formula("INDIRECT(&quot;B&quot;&amp;&quot;9&quot;)", 7.0),
+        ods_formula("INDIRECT(ADDRESS(1;1;1;1;&quot;My Sheet&quot;))", 0.0),
+        ods_formula("INDIRECT(&quot;Other.A1&quot;)", 0.0),
+    ]
+    .concat();
+    let other =
+        [r#"<table:table-cell office:value-type="float" office:value="42"/>"#, r#"<table:table-cell office:value-type="float" office:value="8"/>"#]
+            .concat();
+    let s = recalculated_ods("", &[ods_row("Data", &data), ods_row("My Sheet", &other), ods_row("Other", &other)].concat());
+    assert_eq!((v(&s, "A1"), v(&s, "B1"), v(&s, "C1")), (Value::Number(42.0), Value::Number(50.0), Value::Number(7.0)));
+    assert_eq!((v(&s, "D1"), v(&s, "E1")), (Value::Number(42.0), Value::Number(42.0)));
+    assert_eq!(formula_at(&s, "A1").as_deref(), Some("INDIRECT(\"'My Sheet'!A1\")"));
+}
+
+/// A sheet whose name Excel forbids opens under another (`A/B` as `AB`): INDIRECT text naming it
+/// with OpenFormula's dot or Excel's `!` follows it, while ADDRESS text built for it (given, or
+/// computed where a sheet was repaired) keeps the saved result.
+#[test]
+fn ods_indirect_follows_repaired_sheet_names() {
+    let data = [
+        ods_formula("INDIRECT(&quot;'A/B'.A1&quot;)", 0.0),
+        ods_formula("INDIRECT(&quot;'A/B'!A1&quot;)", 0.0),
+        ods_formula("INDIRECT(ADDRESS(1;1;1;1;&quot;A/B&quot;))", 42.0),
+        ods_formula("INDIRECT(ADDRESS(1;1;1;1;[.E1]))", 42.0),
+        r#"<table:table-cell office:value-type="string" office:string-value="A/B"/>"#.to_string(),
+    ]
+    .concat();
+    let other = r#"<table:table-cell office:value-type="float" office:value="42"/>"#;
+    let s = recalculated_ods("", &[ods_row("Data", &data), ods_row("A/B", other)].concat());
+    assert_eq!(s.doc().unwrap().wb.sheets[1].name, "AB");
+    assert!(["A1", "B1", "C1", "D1"].iter().all(|c| v(&s, c) == Value::Number(42.0)));
+    assert_eq!(formula_at(&s, "A1").as_deref(), Some("INDIRECT(\"'AB'!A1\")"));
+    assert_eq!(formula_at(&s, "B1").as_deref(), Some("INDIRECT(\"'AB'!A1\")"));
+    assert_eq!((formula_at(&s, "C1"), formula_at(&s, "D1")), (None, None));
+}
+
+/// The null date (`table:null-date`, ODF 1.3 part 3, 9.4.2) is day 0 of the document's dates:
+/// 1904-01-01 is Excel's 1904 date system; a day neither system starts from keeps every
+/// formula's saved result.
+#[test]
+fn ods_null_date_sets_the_date_system() {
+    let cells = [
+        ods_formula("DATE(2000;1;1)", 0.0),
+        r#"<table:table-cell office:value-type="date" office:date-value="2000-01-01"/>"#.to_string(),
+        ods_formula("[.B1]+1", 0.0),
+    ]
+    .concat();
+    let s = recalculated_ods(
+        r#"<table:calculation-settings><table:null-date table:date-value="1904-01-01"/></table:calculation-settings>"#,
+        &ods_row("Data", &cells),
+    );
+    assert_eq!((v(&s, "A1"), v(&s, "B1"), v(&s, "C1")), (Value::Number(35064.0), Value::Number(35064.0), Value::Number(35065.0)));
+    assert_eq!(s.doc().unwrap().wb.date_system, gridcraft_core::DateSystem::D1904);
+    let s = recalculated_ods("", &ods_row("Data", &cells));
+    assert_eq!((v(&s, "A1"), v(&s, "C1")), (Value::Number(36526.0), Value::Number(36527.0)));
+    let s = recalculated_ods(
+        r#"<table:calculation-settings><table:null-date table:date-value="1900-01-01"/></table:calculation-settings>"#,
+        &ods_row("Data", &cells),
+    );
+    assert_eq!((v(&s, "A1"), formula_at(&s, "A1")), (Value::Number(0.0), None));
+}
+
+/// A named expression using one that isn't imported (a regex criterion, a function GridCraft
+/// doesn't have), directly or through others, isn't imported either: the formulas using it keep
+/// their saved results instead of reading #NAME? (ODF 1.3 part 4, 5.11).
+#[test]
+fn ods_names_using_unimported_names_keep_saved_results() {
+    let names = [
+        ("PatternCount", "COUNTIF([$Data.$A$1];&quot;a.*&quot;)"),
+        ("AliasCount", "PatternCount"),
+        ("Alias2", "AliasCount+0"),
+        ("Missing", "NOSUCHFUNCTION(1)"),
+        ("UsesMissing", "Missing"),
+        ("Fine", "[$Data.$E$1]*2"),
+    ];
+    let names: String = names
+        .iter()
+        .map(|(n, e)| format!(r#"<table:named-expression table:name="{n}" table:expression="{e}" table:base-cell-address="$Data.$A$1"/>"#))
+        .collect();
+    let cells = [
+        r#"<table:table-cell office:value-type="string" office:string-value="abc"/>"#.to_string(),
+        ods_formula("AliasCount", 1.0),
+        ods_formula("Alias2", 1.0),
+        ods_formula("UsesMissing", 3.0),
+        r#"<table:table-cell office:value-type="float" office:value="4"/>"#.to_string(),
+        ods_formula("Fine", 0.0),
+    ]
+    .concat();
+    let s = recalculated_ods("", &format!("<table:named-expressions>{names}</table:named-expressions>{}", ods_row("Data", &cells)));
+    assert_eq!(
+        (v(&s, "B1"), v(&s, "C1"), v(&s, "D1"), v(&s, "F1")),
+        (Value::Number(1.0), Value::Number(1.0), Value::Number(3.0), Value::Number(8.0))
+    );
+    let wb = &s.doc().unwrap().wb;
+    assert_eq!(wb.names.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(), ["Fine"]);
+}
+
+/// A name is read where it is used (ODF 1.3 part 4, 5.11): a sheet's own name hides the
+/// workbook's of the same spelling. When the import leaves the sheet's out, the formulas and
+/// names of that sheet using it keep what they have instead of reading the workbook's, while the
+/// other sheets still read the workbook's.
+#[test]
+fn ods_a_sheets_unimported_name_does_not_fall_back_to_the_workbooks() {
+    let names = |rate: &str| {
+        format!(
+            r#"<table:named-expressions><table:named-expression table:name="Rate" table:expression="{rate}" table:base-cell-address="$Data.$A$1"/><table:named-expression table:name="Twice" table:expression="Rate*2" table:base-cell-address="$Data.$A$1"/></table:named-expressions>"#
+        )
+    };
+    let sheet = |name: &str, cells: &str, local: &str| {
+        format!(r#"<table:table table:name="{name}"><table:table-row>{cells}</table:table-row>{local}</table:table>"#)
+    };
+    let four = r#"<table:table-cell office:value-type="float" office:value="4"/>"#;
+    let data = [ods_formula("Rate", 99.0), ods_formula("Twice", 77.0), four.to_string()].concat();
+    let other = [ods_formula("Rate", 0.0), ods_formula("Twice", 0.0)].concat();
+    let body = format!("{}{}{}", names("[$Data.$C$1]*2"), sheet("Data", &data, &names("NOSUCHFUNCTION(1)")), sheet("Other", &other, ""));
+    let s = recalculated_ods("", &body);
+    let wb = &s.doc().unwrap().wb;
+    let at = |sheet: usize, a: &str| wb.sheets[sheet].value(CellRef::parse(a).unwrap());
+    let formula = |sheet: usize, a: &str| wb.sheets[sheet].cell(CellRef::parse(a).unwrap()).and_then(|c| c.formula.as_ref().map(|f| f.text.clone()));
+    assert_eq!((at(0, "A1"), at(0, "B1")), (Value::Number(99.0), Value::Number(77.0)));
+    assert_eq!((formula(0, "A1"), formula(0, "B1")), (None, None));
+    assert_eq!((at(1, "A1"), at(1, "B1")), (Value::Number(8.0), Value::Number(16.0)));
+    assert_eq!((formula(1, "A1").as_deref(), formula(1, "B1").as_deref()), (Some("Rate"), Some("Twice")));
+    assert_eq!(wb.names.iter().map(|n| (n.name.as_str(), n.scope)).collect::<Vec<_>>(), [("Rate", None), ("Twice", None)]);
+}
+
+/// A workbook name is evaluated where it is used (ODF 1.3 part 4, 5.11): the names it reads are
+/// the sheet's own first. When the import leaves out a sheet's name, a workbook name reading
+/// that spelling, directly or through other workbook names, would read the workbook's instead,
+/// so the formulas and names of that sheet using it keep what they have; sheets that declare no
+/// such name, or one the import has, still evaluate it as the file does.
+#[test]
+fn ods_workbook_names_reading_a_sheets_unimported_name_keep_saved_results() {
+    let names = |list: &[(&str, &str)]| {
+        let each: String = list
+            .iter()
+            .map(|(n, e)| format!(r#"<table:named-expression table:name="{n}" table:expression="{e}" table:base-cell-address="$Data.$A$1"/>"#))
+            .collect();
+        format!("<table:named-expressions>{each}</table:named-expressions>")
+    };
+    let sheet = |title: &str, cells: &str, local: &str| {
+        format!(r#"<table:table table:name="{title}"><table:table-row>{cells}</table:table-row>{local}</table:table>"#)
+    };
+    let abc = r#"<table:table-cell office:value-type="string" office:string-value="abc"/>"#;
+    let four = r#"<table:table-cell office:value-type="float" office:value="4"/>"#;
+    let workbook = names(&[("Rate", "10"), ("Twice", "Rate*2"), ("Quad", "Twice*2"), ("Plain", "[$Data.$E$1]*3")]);
+    // Data's own Rate counts with a regular expression, which the import leaves out.
+    let data_names = names(&[("Rate", "COUNTIF([$Data.$A$1];&quot;a.*&quot;)"), ("Local", "Twice+1")]);
+    let data = [
+        abc.to_string(),
+        ods_formula("Twice", 2.0),
+        ods_formula("Quad", 4.0),
+        ods_formula("Local", 3.0),
+        four.to_string(),
+        ods_formula("Plain", 0.0),
+        ods_formula("Rate", 1.0),
+    ]
+    .concat();
+    let other = [ods_formula("Twice", 0.0), ods_formula("Quad", 0.0), ods_formula("Rate", 0.0)].concat();
+    let third = [ods_formula("Twice", 0.0), ods_formula("Quad", 0.0)].concat();
+    let body =
+        format!("{workbook}{}{}{}", sheet("Data", &data, &data_names), sheet("Other", &other, ""), sheet("Third", &third, &names(&[("Rate", "5")])));
+    let s = recalculated_ods("", &body);
+    let wb = &s.doc().unwrap().wb;
+    let at = |sheet: usize, a: &str| wb.sheets[sheet].value(CellRef::parse(a).unwrap());
+    let formula = |sheet: usize, a: &str| wb.sheets[sheet].cell(CellRef::parse(a).unwrap()).and_then(|c| c.formula.as_ref().map(|f| f.text.clone()));
+    // Data: the workbook names that read its left-out Rate, and its own name using one, keep their results.
+    let kept = [("B1", 2.0), ("C1", 4.0), ("D1", 3.0), ("G1", 1.0)];
+    assert_eq!(kept.map(|(a, _)| at(0, a)), kept.map(|(_, want)| Value::Number(want)));
+    assert_eq!(kept.map(|(a, _)| formula(0, a)), [None, None, None, None]);
+    // A name that reads nothing the sheet declares is still evaluated there.
+    assert_eq!((at(0, "F1"), formula(0, "F1").as_deref()), (Value::Number(12.0), Some("Plain")));
+    // Other declares nothing: the workbook's Rate. Third declares one the import has: its own.
+    assert_eq!((at(1, "A1"), at(1, "B1"), at(1, "C1")), (Value::Number(20.0), Value::Number(40.0), Value::Number(10.0)));
+    assert_eq!((at(2, "A1"), at(2, "B1")), (Value::Number(10.0), Value::Number(20.0)));
+    assert_eq!(formula(2, "A1").as_deref(), Some("Twice"));
+    let imported: Vec<(&str, Option<usize>)> = wb.names.iter().map(|n| (n.name.as_str(), n.scope)).collect();
+    assert_eq!(imported, [("Rate", None), ("Twice", None), ("Quad", None), ("Plain", None), ("Rate", Some(2))]);
+}
+
+/// A text style whose maps end in one every number meets (ODF 1.3 part 3 §16.29.26, §19.472)
+/// still decorates text: a string shows as `Name: x` while 1.234 shows 1.23 and 7 shows `big`.
+#[test]
+fn ods_a_text_style_with_number_maps_still_decorates_text() {
+    let styles = r#"<number:number-style style:name="Two"><number:number number:decimal-places="2" number:min-integer-digits="1"/></number:number-style>
+        <number:number-style style:name="Big"><number:text>big</number:text></number:number-style>
+        <number:text-style style:name="M"><number:text>Name: </number:text><number:text-content/><style:map style:condition="value()&gt;5" style:apply-style-name="Big"/><style:map style:condition="value()&lt;=1.7976931348623157E+308" style:apply-style-name="Two"/></number:text-style>
+        <style:style style:name="c" style:family="table-cell" style:data-style-name="M"/>"#;
+    let cells = [
+        r#"<table:table-cell table:style-name="c" office:value-type="string" office:string-value="x"/>"#,
+        r#"<table:table-cell table:style-name="c" office:value-type="float" office:value="1.234"/>"#,
+        r#"<table:table-cell table:style-name="c" office:value-type="float" office:value="7"/>"#,
+    ]
+    .concat();
+    let mut s = recalculated_styled_ods(styles, "", &ods_row("Data", &cells));
+    let shown: Vec<String> =
+        ["A1", "B1", "C1"].iter().map(|a| s.execute("cell.get", json!({"cell": a})).unwrap()["text"].as_str().unwrap().to_string()).collect();
+    assert_eq!(shown, ["Name: x", "1.23", "big"]);
+}
+
+/// OpenFormula's MROUND takes the greater of two equally near multiples, whatever the signs
+/// (ODF 1.3 part 4, 6.17.4); Excel's rounds ties away from zero and refuses opposite signs.
+#[test]
+fn ods_mround_recalculates_with_openformula_semantics() {
+    let cells = [("-1;-2", 0.0), ("-3;2", -2.0), ("1;-2", 2.0), ("7;3", 6.0), ("-7.5;5", -5.0), ("2.5;0", 0.0), ("0.25;0.1", 0.3)];
+    let row: String = cells
+        .iter()
+        .map(|(args, _)| format!(r#"<table:table-cell table:formula="of:=MROUND({args})" office:value-type="float" office:value="99"/>"#))
+        .collect();
+    let s = recalculated_ods("", &format!(r#"<table:table table:name="Data"><table:table-row>{row}</table:table-row></table:table>"#));
+    for (c, (args, want)) in cells.iter().enumerate() {
+        let at = gridcraft_core::CellRef::new(0, c as u32).a1();
+        assert_eq!(v(&s, &at), Value::Number(*want), "MROUND({args})");
+    }
+}
+
+/// A document matching criteria with regular expressions (ODF 1.3 part 3, 19.748) keeps the
+/// saved result of a COUNTIF whose pattern Excel would read as a literal, through recalculation.
+#[test]
+fn ods_regex_criteria_keep_their_saved_result_after_recalculation() {
+    let s = recalculated_ods(
+        r#"<table:calculation-settings table:use-regular-expressions="true" table:use-wildcards="false"/>"#,
+        r#"<table:table table:name="Data"><table:table-row><table:table-cell office:value-type="string" office:string-value="abc"/><table:table-cell table:formula="of:=COUNTIF([.A1];&quot;a.*&quot;)" office:value-type="float" office:value="1"/></table:table-row></table:table>"#,
+    );
+    assert_eq!(v(&s, "B1"), Value::Number(1.0));
 }
 
 #[test]
@@ -5426,7 +5792,6 @@ fn editing_quote_prefixed_text_keeps_it_text() {
     let d = s.doc().unwrap();
     assert_eq!(crate::display::edit_text(&d.wb, d.wb.active().unwrap(), CellRef::parse("B1").unwrap()), "hello");
 }
-
 #[test]
 fn csv_as_text_keeps_identifier_columns_as_written() {
     let csv = "gtin,zip,flag,day\n8435392892278,01234,TRUE,2026-03-04\n";

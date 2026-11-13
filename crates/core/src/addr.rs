@@ -244,8 +244,8 @@ impl fmt::Display for RangeRef {
 }
 
 /// Whether `name` reads as an R1C1 reference: `R`, `C`, `RC`, `R1`, `C1`, `R1C`, `RC1`, `R1C1`
-/// in any case.
-fn is_r1c1_token(name: &str) -> bool {
+/// in any case. Excel doesn't accept such a name as a defined name.
+pub fn is_r1c1_token(name: &str) -> bool {
     let mut chars = name.chars().peekable();
     let mut letters = 0;
     for letter in ['r', 'c'] {
@@ -258,6 +258,52 @@ fn is_r1c1_token(name: &str) -> bool {
         }
     }
     letters > 0 && chars.next().is_none()
+}
+
+/// Whether Excel refuses `name` as a defined name for reading like R1C1 notation: an R1C1 token
+/// ([`is_r1c1_token`]), or an `R` and/or `C` with digits after it and then anything but a `.` (`R1x`,
+/// `C1x`, `RC1x`, `R2D2`, `R1C1x`). Live Excel 16.115 refuses all of those in a workbook's
+/// `definedName`s and takes `RCx`, `RCC`, `R_1`, `R1.x`, `CR1x`, `Rate`.
+pub fn is_r1c1_name(name: &str) -> bool {
+    if is_r1c1_token(name) {
+        return true;
+    }
+    let b = name.as_bytes();
+    let (mut at, mut digits) = (0, false);
+    for letter in *b"rc" {
+        if b.get(at).is_some_and(|c| c.to_ascii_lowercase() == letter) {
+            at += 1;
+            let from = at;
+            while b.get(at).is_some_and(u8::is_ascii_digit) {
+                at += 1;
+            }
+            digits |= at > from;
+        }
+    }
+    digits && b.get(at).is_some_and(|c| *c != b'.')
+}
+
+/// Whether Excel accepts `name` as a defined name: at most 255 characters, the first a letter, `_`
+/// or `\`, the rest letters (any script), digits, `_`, `.`, `\` and `?`, not a cell reference in
+/// today's grid (`TAX2020`), not R1C1 notation (`R`, `RC`, `R1C1`, `R1x`: see [`is_r1c1_name`]) and
+/// not a boolean. Names that read as a cell open in Excel as the cell.
+pub fn valid_defined_name(name: &str) -> bool {
+    let Some(first) = name.chars().next() else { return false };
+    (first.is_alphabetic() || first == '_' || first == '\\')
+        && name.chars().count() <= 255
+        && CellRef::parse(name).is_none()
+        && !is_r1c1_name(name)
+        && !name.eq_ignore_ascii_case("TRUE")
+        && !name.eq_ignore_ascii_case("FALSE")
+        && name.chars().all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '\\' | '?'))
+}
+
+/// Whether a table may have the name `name`: a name Excel accepts as a defined name
+/// ([`valid_defined_name`]: not a cell, R1C1 notation, `R1x` or a boolean; tables and defined names
+/// share one namespace) that has no `?` and no `\` after its first character, which a structured
+/// reference reads as something else.
+pub fn valid_table_name(name: &str) -> bool {
+    valid_defined_name(name) && !name.contains('?') && !name.chars().skip(1).any(|c| c == '\\')
 }
 
 /// Whether Excel quotes a sheet name in a reference (`'My Sheet'!A1`): it starts with a digit or
@@ -383,6 +429,36 @@ mod tests {
         for bare in ["Sheet1", "XFE1", "AB1048577", "Ärger", "日本", "Σ", "Sheet.1", "_x", "A1A", "Data", "RR", "CRX"] {
             assert!(!sheet_needs_quotes(bare), "{bare:?} should stay bare");
         }
+    }
+
+    #[test]
+    fn defined_names_follow_excel() {
+        for good in
+            ["Tax_2020", "_x", "\\back", "a\\b", "name?", "a.b", "aé", "日本", "RR", "CRX", "XFE1", "RCx", "RCC", "R_1", "R1.x", "CR1x", "Rate", "Rx"]
+        {
+            assert!(valid_defined_name(good), "{good:?} is a name");
+        }
+        for bad in [
+            "", "TAX2020", "q1", "XFD1", "R", "c", "RC", "R1C1", "r2c3", "R1x", "C1x", "RC1x", "R1C1x", "R2D2", "rc1x", "TRUE", "false", "my name",
+            "1st", "a-b", "a/b", "a,b", "?x", ".x",
+        ] {
+            assert!(!valid_defined_name(bad), "{bad:?} is not a name");
+        }
+        assert!(valid_defined_name(&"x".repeat(255)) && !valid_defined_name(&"x".repeat(256)));
+    }
+
+    /// A table's name is a defined name Excel holds, without `?` or a `\` after the first character.
+    /// Live Excel 16.115 loads a table named `Good1` or `RCx` and not one named `R1x`, `C1x`, `R2D2`,
+    /// `R1C1`, `TRUE`, `A1` or `a b`.
+    #[test]
+    fn table_names_follow_defined_names() {
+        for good in ["Good1", "RCx", "Rate", "_x", "\\x", "a.b", "R1.x", "日本"] {
+            assert!(valid_table_name(good), "{good:?} is a table name");
+        }
+        for bad in ["", "R1x", "C1x", "R2D2", "RC1x", "R1C1", "R", "TRUE", "false", "A1", "TAX2020", "a b", "a-b", "a?b", "a\\b", "1st"] {
+            assert!(!valid_table_name(bad), "{bad:?} is not a table name");
+        }
+        assert!(valid_table_name(&"x".repeat(255)) && !valid_table_name(&"x".repeat(256)));
     }
 
     #[test]
