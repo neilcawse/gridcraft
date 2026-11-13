@@ -1,7 +1,7 @@
 use super::array::{Acc, Agg, zip2, zip3};
 use super::format::same_kind;
 use super::special::{ev_shape, resized_sum_range, resizes_sum_range};
-use super::{Area, Arg, Array, CellError, Ev, Evaluator, Expr, FnCtx, Lambda, Pipe, Value, compare, err};
+use super::{Area, Arg, Array, CellError, Ev, Evaluator, Expr, FnCtx, Lambda, OneCellReading, Pipe, Value, compare, err};
 use std::sync::Arc;
 
 impl<'h> Evaluator<'h> {
@@ -356,6 +356,7 @@ impl<'h> Evaluator<'h> {
             };
             // Only an argument left out (`f(a,,b)`) is omitted; one that computes a blank is given.
             let blank_value = !from_ref && value == Value::Empty && lambda_at != Some(i) && !matches!(a, Expr::Missing);
+            let value = one_cell_reference_as_array(self.host.one_cell_reading(), spec.name, from_ref, value);
             evaluated.push(Arg { value, from_ref, blank_value });
         }
         // The function may go through every value it is given (a SUM inside each call of a
@@ -467,5 +468,18 @@ impl<'h> Evaluator<'h> {
         }
         let u = n.to_ascii_uppercase();
         gridcraft_functions::lookup(&u).map(|_| u)
+    }
+}
+
+/// SUMPRODUCT reads a reference as an array even when it is one cell, so text there counts as 0,
+/// whether it is written with two corners or one: Excel 16.114 calculates `SUMPRODUCT(A1,B1)`
+/// and `SUMPRODUCT(A1:A1,B1:B1)` over the text "4" (typed or a formula's) and 2 as 0. A value
+/// written in the formula is left as it is. Excel 2013 and earlier ([`OneCellReading::Scalar`])
+/// read a reference to one cell as the value in it, text included.
+fn one_cell_reference_as_array(reading: OneCellReading, function: &str, from_ref: bool, value: Value) -> Value {
+    if reading == OneCellReading::Array && function == "SUMPRODUCT" && from_ref && !matches!(value, Value::Array(_)) {
+        Value::from(Array::scalar(value))
+    } else {
+        value
     }
 }

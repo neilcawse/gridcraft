@@ -2079,6 +2079,7 @@ dependencies = [
  "gridcraft-engine",
  "gridcraft-mcp",
  "gridcraft-sandbox",
+ "gridcraft-xlsx",
  "log",
  "quick-xml 0.41.0",
  "serde_json",

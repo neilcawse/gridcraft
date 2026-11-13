@@ -19,7 +19,8 @@ fn harness(selection: &str) -> egui_kittest::Harness<'static, SheetApp> {
         )
         .unwrap();
     session.execute("home.columnWidth", json!({"cols": "A:D", "width": 100})).unwrap();
-    session.execute("home.rowHeight", json!({"rows": "1:4", "height": 60})).unwrap();
+    // Not a height AutoFit gives these rows: three lines of 20 px (Windows) are 60 px.
+    session.execute("home.rowHeight", json!({"rows": "1:4", "height": 70})).unwrap();
     session.execute("selection.set", json!({"range": selection})).unwrap();
     let mut h = crate::common::builder().with_step_dt(1.0 / 60.0).with_size(vec2(1200.0, 800.0)).build_ui_state(
         |ui, app: &mut SheetApp| {
