@@ -123,6 +123,22 @@ fraction sections with literal text (`#\:#=/=#`, `#_#/#`), zero fractions, zero-
 denominators, `?` placeholders padding the thousands separator, and booleans through the text
 section (`TEXT(TRUE,";;;\@@\@")` = `@TRUE@`).
 
+Format rules taken from Excel-authored fixtures (poi `GeneralFormatTests.xlsx` and
+`ElapsedFormatTests.xlsx`, ironcalc `TEXT.xlsx`):
+
+- `TEXT(x,"General")` keeps 11 characters for the digits and puts the minus sign on top
+  (`TEXT(-1/3,"General")` = `-0.333333333`), and writes fixed or scientific notation, whichever
+  shows more significant digits, fixed on a tie (`1E-9` is `0.000000001`, `1E-10` is `1E-10`). A
+  cell shown as General counts the sign in its width.
+- `m`/`mm` right after `h` or `s`, or right before `s`, is minutes (`s:m`). An `h` or `s` after an
+  elapsed `[h]` or `[s]` shows the elapsed total too (`[s]" ("ss")"`); an `m` after `[m]` is the
+  minute of the hour (`[mm]:mm:ss` of 1 day 1 minute is `1441:01:00`). In the 1900 date system
+  no date or time code, elapsed or not, has a value before day 0 (`#VALUE!` in `TEXT`, `########`
+  in a cell); the 1904 system shows any negative value as `-` plus the absolute value
+  (`TEXT(-0.5,"h:mm")` is `-12:00`, `TEXT(-1.5,"m/d/yyyy")` is `-1/2/1904`).
+- A date or time code that also holds digit placeholders (`mm###`) is invalid: `TEXT` gives
+  `#VALUE!`. Only the zeros of a fraction of a second (`ss.00`) belong to a time code.
+
 `MEDIAN` and `AGGREGATE` function number 12 use an overflow-safe midpoint for even-sized
 inputs, so large finite middle values do not become `#NUM!` merely because their sum overflows (#1579).
 Sorting, argument coercion and error propagation are unchanged; this is a numerical correction

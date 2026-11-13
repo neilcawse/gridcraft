@@ -1,12 +1,14 @@
-//! Rendering a value with a parsed section.
+//! Rendering a value with a parsed section, with the separators and the month and day names of
+//! the locale in effect ([`gridcraft_core::locale::current`]).
 
 use std::fmt::Write as _;
 
 use gridcraft_core::DateSystem;
 use gridcraft_core::date::{datetime_from_serial, max_serial};
+use gridcraft_core::locale;
 
 use crate::calendar::Calendar;
-use crate::decimal::{decimal_digits, fixed, fixed_from_digits, format_general_fit};
+use crate::decimal::{decimal_digits, fixed, fixed_from_digits};
 use crate::parse::{DatePart, Section, Tok};
 
 /// Text being built plus the first repeat-fill position.
@@ -81,12 +83,13 @@ pub(crate) fn render_text_within(sec: &Section, text: &str, max_units: usize) ->
     Some(out)
 }
 
-/// Renders a number through a General section (literals around the General keyword).
-pub(crate) fn render_general(sec: &Section, v: f64, width: usize) -> Out {
+/// Renders a number through a General section: `general` (the number already written as General)
+/// with the section's literals around it.
+pub(crate) fn render_general(sec: &Section, general: &str) -> Out {
     let mut out = Out::default();
     for t in &sec.toks {
         match t {
-            Tok::General => out.push(&format_general_fit(v, width).unwrap_or_else(|| "#".repeat(width.clamp(1, 11)))),
+            Tok::General => out.push(general),
             Tok::Fill(c) => out.fill(*c),
             other => out.push_tok(other),
         }
@@ -156,9 +159,9 @@ pub(crate) fn render_date(sec: &Section, v: f64, sys: DateSystem) -> Option<Out>
                     DatePart::Minute(n) => push_padded(text, minute, n),
                     DatePart::Second(n) => push_padded(text, second, n),
                     DatePart::SubSec(n) => {
-                        // `.` and the first `n` (at most 3) of the three millisecond digits, then
-                        // zeros for the digits beyond milliseconds.
-                        text.push('.');
+                        // The decimal separator and the first `n` (at most 3) of the three
+                        // millisecond digits, then zeros for the digits beyond milliseconds.
+                        text.push(locale::current().decimal);
                         for (k, div) in [100, 10, 1].into_iter().enumerate() {
                             if k < n as usize {
                                 text.push(char::from(b'0' + (milli / div % 10) as u8));
@@ -266,6 +269,7 @@ fn fill_int(toks: &[Tok], idxs: &[usize], digits: &str, thousands: bool, force_z
     let mut pos = 0usize;
     let count = idxs.len();
     let sep = |p: usize| thousands && p > 0 && p.is_multiple_of(3);
+    let group = locale::current().group;
     for (k, &ti) in idxs.iter().rev().enumerate() {
         let leftmost = k + 1 == count;
         let ph = match toks.get(ti) {
@@ -279,14 +283,14 @@ fn fill_int(toks: &[Tok], idxs: &[usize], digits: &str, thousands: bool, force_z
                 '0' => {
                     parts.buf.push('0');
                     if sep(pos) {
-                        parts.buf.push(',');
+                        parts.buf.push(group);
                     }
                     pos += 1;
                 }
                 _ if force_zero && k == 0 => {
                     parts.buf.push('0');
                     if sep(pos) {
-                        parts.buf.push(',');
+                        parts.buf.push(group);
                     }
                     pos += 1;
                 }
@@ -306,7 +310,7 @@ fn fill_int(toks: &[Tok], idxs: &[usize], digits: &str, thousands: bool, force_z
                 let d = ds.get(rem.saturating_sub(1 + s)).copied().unwrap_or(b'0');
                 parts.buf.push(char::from(d));
                 if sep(pos + s) {
-                    parts.buf.push(',');
+                    parts.buf.push(group);
                 }
             }
             rem -= take;
@@ -321,10 +325,11 @@ fn with_commas(digits: &str, thousands: bool) -> String {
         return digits.to_string();
     }
     let n = digits.chars().count();
+    let group = locale::current().group;
     let mut s = String::with_capacity(n + n / 3);
     for (i, c) in digits.chars().enumerate() {
         if i > 0 && (n - i).is_multiple_of(3) {
-            s.push(',');
+            s.push(group);
         }
         s.push(c);
     }
@@ -523,7 +528,7 @@ pub(crate) fn render_number(sec: &Section, v: f64) -> Out {
         }
         fill_frac(toks, &frac_idx, &frac_s, &mut parts);
         if let Some(p) = point {
-            parts.set_piece(p, ".");
+            parts.set_piece(p, locale::current().decimal.encode_utf8(&mut [0; 4]));
         }
     }
     let mut out = Out::default();

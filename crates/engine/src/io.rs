@@ -300,7 +300,18 @@ fn read_plain(name: &str, bytes: &[u8], csv_as_text: bool) -> Result<(Workbook, 
                 gridcraft_xlsx::read_xlsb(bytes)
             }
         };
-        let (wb, report) = read(bytes).map_err(|e| EngineError::Other(format!("We can't import '{name}': {e}")))?;
+        let (mut wb, report) = read(bytes).map_err(|e| EngineError::Other(format!("We can't import '{name}': {e}")))?;
+        // A document that calculates with the values as displayed (`table:precision-as-shown`, ODF 1.3
+        // part 3, 19.696; part 4, 3.4) is Excel's "Set precision as displayed". Excel then keeps every
+        // number as its format shows it (Microsoft Support, "Change formula recalculation, iteration,
+        // or precision in Excel": it "permanently changes stored values in cells from full precision
+        // (15 digits) to whatever format, including decimal places, is displayed"). Formula results
+        // are rounded as they calculate; the constants are rounded here by the same sweep that turning
+        // the option on in a workbook uses, so a constant and a formula result of equal value under one
+        // format always store the same number.
+        if import == FileKind::Ods && wb.calc.precision_as_displayed {
+            crate::cmd::round_all_constants_as_displayed(&mut wb);
+        }
         return Ok((wb, report.warnings));
     }
     // Text named `.xlsx` is read as text.

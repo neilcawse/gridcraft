@@ -260,11 +260,16 @@ impl Value {
             Value::Array(a) => a.data.first().map(|v| v.to_number_in(sys)).unwrap_or(Ok(0.0)),
         }
     }
-    /// Coercion to text as `&` does it.
+    /// Coercion to text as `&` does it. A number is written with the decimal separator of the
+    /// locale in effect ([`crate::locale::current`]).
     pub fn to_text(&self) -> Result<String, CellError> {
         match self {
             Value::Empty => Ok(String::new()),
-            Value::Number(n) => Ok(number_to_text(*n)),
+            Value::Number(n) => {
+                let s = number_to_text(*n);
+                let decimal = crate::locale::current().decimal;
+                Ok(if decimal != '.' && s.contains('.') { s.replace('.', decimal.encode_utf8(&mut [0; 4])) } else { s })
+            }
             Value::Bool(b) => Ok(if *b { "TRUE".into() } else { "FALSE".into() }),
             Value::Text(t) => Ok(t.to_string()),
             Value::Error(e) => Err(*e),
@@ -346,24 +351,61 @@ pub fn compare_numbers(a: f64, b: f64) -> Ordering {
     round15(a).partial_cmp(&round15(b)).unwrap_or(Ordering::Equal)
 }
 
-/// Case-insensitive text order in three levels, as Excel's collation sorts: first by letters and
-/// digits alone (Arabic marks, tatweel and invisible format characters skipped, Arabic-Indic digits
-/// read as digits); then, letter by letter, by the marks on each letter (none first, then in
-/// Excel's mark order) and the digit script (ASCII, Arabic-Indic, Extended Arabic-Indic); then, to
-/// break a remaining tie, by every character (Unicode lowercase). Only text that is equal at the
-/// last level compares equal.
-pub fn compare_text(a: &str, b: &str) -> Ordering {
-    if !(a.is_ascii() && b.is_ascii()) {
-        let primary = primary_chars(a).cmp(primary_chars(b));
-        if primary != Ordering::Equal {
-            return primary;
-        }
-        let secondary = secondary_weights(a).cmp(secondary_weights(b));
-        if secondary != Ordering::Equal {
-            return secondary;
-        }
+/// Excel's order of the printable ASCII characters, case folded: space, punctuation and symbols,
+/// then digits, then letters. A workbook calculated by Excel 14 shows that a space sorts before a digit:
+/// `VLOOKUP("100_300130…",…,7)` over " West Valley…", " Financial…", "Fiscal Year…", 0, 0,
+/// "100_300130…" bisects to " Financial…". The apostrophe and hyphen come right after the space.
+const ASCII_ORDER: &[u8] = b" '-!\"#$%&()*,./:;?@[\\]^_`{|}~+<=>0123456789abcdefghijklmnopqrstuvwxyz";
+
+/// Collation weight of each ASCII byte (uppercase letters weigh as lowercase); control
+/// characters come first, in code order.
+const ASCII_WEIGHT: [u16; 128] = {
+    let mut w = [0u16; 128];
+    let mut i = 0;
+    while i < 128 {
+        w[i] = i as u16;
+        i += 1;
     }
-    lowercase_chars(a).cmp(lowercase_chars(b))
+    let mut k = 0;
+    while k < ASCII_ORDER.len() {
+        let c = ASCII_ORDER[k] as usize;
+        w[c] = 128 + k as u16;
+        if c >= b'a' as usize && c <= b'z' as usize {
+            w[c - 32] = 128 + k as u16;
+        }
+        k += 1;
+    }
+    w
+};
+
+/// Weight of one (lowercased) character: ASCII by [`ASCII_WEIGHT`], anything else after it by
+/// code point.
+fn char_weight(c: char) -> u32 {
+    match ASCII_WEIGHT.get(c as usize) {
+        Some(&w) => u32::from(w),
+        None => 256 + c as u32,
+    }
+}
+
+/// Case-insensitive text order the way Excel compares text (`<`, `>`, criteria, sorting,
+/// approximate lookups): digits before punctuation and symbols before letters, so `"Spec 1" >
+/// "{}"` (an Excel-calculated workbook counts nine "Spec n" cells for `COUNTIF(B23:B31,">{}")`).
+/// Text that is not all ASCII compares in three levels, as Excel's collation sorts: first by letters
+/// and digits alone (Arabic marks, tatweel and invisible format characters skipped, Arabic-Indic
+/// digits read as digits); then, letter by letter, by the marks on each letter (none first, then in
+/// Excel's mark order) and the digit script (ASCII, Arabic-Indic, Extended Arabic-Indic); then, to
+/// break a remaining tie, by every character. Characters are weighed by [`char_weight`] at every
+/// level; only text that is equal at the last level compares equal.
+pub fn compare_text(a: &str, b: &str) -> Ordering {
+    let primary = primary_chars(a).map(char_weight).cmp(primary_chars(b).map(char_weight));
+    if primary != Ordering::Equal {
+        return primary;
+    }
+    let secondary = secondary_weights(a).cmp(secondary_weights(b));
+    if secondary != Ordering::Equal {
+        return secondary;
+    }
+    lowercase_chars(a).map(char_weight).cmp(lowercase_chars(b).map(char_weight))
 }
 
 fn lowercase_chars(s: &str) -> impl Iterator<Item = char> + '_ {
@@ -444,22 +486,27 @@ pub fn sort_compare(a: &Value, b: &Value) -> Ordering {
     }
 }
 
-/// Number → text the way Excel converts in `&` and `TEXT(x,"General")`-free contexts: up to 15
-/// significant digits, scientific for very large or very small magnitudes.
+/// Number → text the way Excel converts in `&`, CONCAT and TEXTJOIN: at most 15 significant
+/// digits, rounded first; scientific from 1E+15, below 1E-9, and wherever the decimal would be
+/// longer than 21 characters (`0.` plus 19 decimals: `0.0000692361330972509` stays decimal,
+/// `1.28233995888454E-06` does not, as Excel caches them).
 pub fn number_to_text(n: f64) -> String {
     if n == 0.0 || !n.is_finite() {
         return "0".into();
     }
-    let a = n.abs();
-    if !(1e-9..1e15).contains(&a) && a.round() != a || a >= 1e15 {
-        return sci_text(n, 15);
-    }
-    // A value just below 1e15 can round up to 1e15 at 15 significant digits.
-    if format!("{:.14e}", a).parse::<f64>().is_ok_and(|r| r >= 1e15) {
+    // Round to 15 significant digits first, then pick decimal or scientific from the rounded
+    // magnitude, so 999999999999999.5 reads `1E+15`, never a 16-digit integer.
+    let sci = format!("{:.14e}", n);
+    let (mant, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
+    let mag: i32 = exp.parse().unwrap_or(0);
+    let digits = mant.bytes().filter(u8::is_ascii_digit).count();
+    let sig = digits.saturating_sub(mant.bytes().rev().take_while(|&b| b == b'0').count());
+    // Characters after `0.` for |n| < 1: the leading zeros, then the significant digits.
+    let decimals_below_one = i64::from(-mag) - 1 + sig as i64;
+    if !(-9..15).contains(&mag) || decimals_below_one > 19 {
         return sci_text(n, 15);
     }
     // 15 significant digits, trailing zeros trimmed.
-    let mag = a.log10().floor() as i32;
     let decimals = (14 - mag).clamp(0, 30) as usize;
     let s = format!("{:.*}", decimals, n);
     trim_decimal(&s)
@@ -488,6 +535,23 @@ pub fn sci_text(n: f64, sig: usize) -> String {
 mod tests {
     use super::*;
 
+    /// Excel's text order: space and punctuation/symbols, then digits, then letters, case folded.
+    #[test]
+    fn text_collation_follows_excel_order() {
+        use Ordering::{Equal, Greater, Less};
+        assert_eq!(compare_text("Spec 1", "{}"), Greater);
+        assert_eq!(compare_text("_x", "a"), Less);
+        assert_eq!(compare_text("9", "!"), Greater);
+        assert_eq!(compare_text(" West", "100_300"), Less);
+        assert_eq!(compare_text("~", "+"), Less);
+        assert_eq!(compare_text("ABC", "abc"), Equal);
+        assert_eq!(compare_text("abc", "abd"), Less);
+        assert_eq!(compare_text("ab", "abc"), Less);
+        assert_eq!(compare_text("é", "z"), Greater);
+        assert_eq!(compare_text("Éa", "éB"), Less);
+        assert_ne!(compare_text("a-b", "ab"), Equal);
+    }
+
     #[test]
     fn number_text() {
         assert_eq!(number_to_text(1.0), "1");
@@ -506,6 +570,38 @@ mod tests {
         assert_eq!(number_to_text(999999999999999.9), "1E+15");
         assert_eq!(number_to_text(-999999999999999.9), "-1E+15");
         assert_eq!(number_to_text(999999999999999.0), "999999999999999");
+    }
+
+    /// Excel switches to scientific when the 15-digit decimal would be longer than 21 characters
+    /// (`0.` plus 19 decimals). Excel-verified: IMTAN, IMSECH, IMCSCH and IMEXP results cached by
+    /// Excel for Mac in the `formulas` project's test.xlsx (ENGINEERING!S53, R47, S37, V37, V39).
+    #[test]
+    fn number_text_small_magnitudes() {
+        assert_eq!(number_to_text(6.92361330972509e-5), "0.0000692361330972509");
+        assert_eq!(number_to_text(2.41377759972715e-4), "0.000241377759972715");
+        assert_eq!(number_to_text(1.28233995888454e-6), "1.28233995888454E-06");
+        assert_eq!(number_to_text(-4.48088972789593e-6), "-4.48088972789593E-06");
+        assert_eq!(number_to_text(5.98317105631764e-7), "5.98317105631764E-07");
+        assert_eq!(number_to_text(-2.99158552811404e-7), "-2.99158552811404E-07");
+        // Just below powers of ten: the 21-character limit, and the rounded magnitude.
+        assert_eq!(number_to_text(9.99999999999999e-5), "0.0000999999999999999");
+        assert_eq!(number_to_text(9.99999999999999e-6), "9.99999999999999E-06");
+        assert_eq!(number_to_text(9.9999999999999e-6), "0.0000099999999999999");
+        assert_eq!(number_to_text(9.99999999999999e-9), "9.99999999999999E-09");
+        assert_eq!(number_to_text(-9.99999999999999e-9), "-9.99999999999999E-09");
+        assert_eq!(number_to_text(9.99999999999999e-10), "9.99999999999999E-10");
+        assert_eq!(number_to_text(9.999999999999999e-6), "0.00001");
+        assert_eq!(number_to_text(0.00001), "0.00001");
+        assert_eq!(number_to_text(0.000001), "0.000001");
+        assert_eq!(number_to_text(1.5e-9), "0.0000000015");
+        // Below 1E-9 `&` is always scientific, however short the decimal (the IM functions format
+        // their parts by the 21-character rule alone, see functions::engineering::complex).
+        assert_eq!(number_to_text(1e-16), "1E-16");
+        // Large side: 15 significant digits, scientific from 1E+15.
+        assert_eq!(number_to_text(99999999999999.9), "99999999999999.9");
+        assert_eq!(number_to_text(999999999999999.4), "999999999999999");
+        assert_eq!(number_to_text(9999999999999998.0), "1E+16");
+        assert_eq!(number_to_text(9.99999999999999e15), "9.99999999999999E+15");
     }
 
     #[test]

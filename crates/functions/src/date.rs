@@ -1,7 +1,7 @@
 //! Date and time functions.
 
 use gridcraft_core::date::{DateTime, datetime_from_serial, days_in_month, is_leap, serial_from_ymd, serial_in_system};
-use gridcraft_core::parse::parse_input;
+use gridcraft_core::parse::parse_date_time_text;
 use gridcraft_core::{CellError, DateSystem, Value};
 
 use crate::util::{R, S, arg, as_array, has, num, num_val, opt_bool, opt_num, scalar, text, to_int};
@@ -238,11 +238,7 @@ fn parsed_text(a: &[Arg], c: &mut dyn Ctx) -> R<(f64, &'static str)> {
             _ => CellError::Value,
         });
     };
-    let p = parse_input(&t, c.date_system());
-    match (p.value, p.format) {
-        (Value::Number(n), Some(f)) if f.contains(['d', 'y', 'h']) => Ok((n, f)),
-        _ => Err(CellError::Value),
-    }
+    parse_date_time_text(&t, c.date_system()).ok_or(CellError::Value)
 }
 
 fn datevalue(a: &[Arg], c: &mut dyn Ctx) -> R<Value> {
@@ -757,6 +753,49 @@ mod tests {
         close(ev("TIMEVALUE", vec![t("6:00 PM")]), 0.75);
         close(ev("TIMEVALUE", vec![t("1/2/2020 12:00")]), 0.5);
         is_err(ev("TIMEVALUE", vec![t("x")]), CellError::Value);
+    }
+
+    /// Excel-authored ironcalc fixtures DATEVALUE.xlsx / TIMEVALUE.xlsx (and Excel-saved workbooks'
+    /// `DATEVALUE("1-JAN"&_YEAR)`), en-US-readable rows only.
+    #[test]
+    fn text_conversion_grammar() {
+        close(ev("DATEVALUE", vec![t("1JUN2021")]), 44348.0);
+        close(ev("DATEVALUE", vec![t("1-JAN2024")]), 45292.0);
+        close(ev("DATEVALUE", vec![t("May 2022")]), d(2022.0, 5.0, 1.0));
+        close(ev("DATEVALUE", vec![t("2026-1-1")]), 46023.0);
+        close(ev("DATEVALUE", vec![t("2026/01/01")]), 46023.0);
+        close(ev("DATEVALUE", vec![t("2026-01-01 23:59:59")]), 46023.0);
+        close(ev("DATEVALUE", vec![t("2026-07-16 4:35 PM")]), 46219.0);
+        // DATEVALUE and TIMEVALUE trim; coercion does not.
+        close(ev("DATEVALUE", vec![t(" 2024-01-10 ")]), 45301.0);
+        close(ev("DATEVALUE", vec![t("2026-01-01 ")]), 46023.0);
+        close(ev("TIMEVALUE", vec![t(" 4:35 PM ")]), 0.6909722222222222);
+        for bad in [
+            "2026.01.01",
+            "-2026-01-01",
+            "2026-01-01x",
+            "\"2026-01-12\"",
+            "2026-13-01",
+            "1789-05-05",
+            "10000-01-01",
+            "2100-02-29",
+            "8",
+            " 10 ",
+            "10.0",
+            "008",
+        ] {
+            is_err(ev("DATEVALUE", vec![t(bad)]), CellError::Value);
+        }
+        close(ev("TIMEVALUE", vec![t("4 : 35")]), 0.1909722222222222);
+        close(ev("TIMEVALUE", vec![t("4 pm")]), 0.6666666666666666);
+        close(ev("TIMEVALUE", vec![t("4:5 pm")]), 0.6701388888888888);
+        close(ev("TIMEVALUE", vec![t("4:35 Am")]), 0.1909722222222222);
+        close(ev("TIMEVALUE", vec![t("24:00")]), 0.0);
+        close(ev("TIMEVALUE", vec![t("23:59:60")]), 0.0);
+        close(ev("TIMEVALUE", vec![t("7/7/2026 4:35 PM")]), 0.6909722222189885);
+        for bad in ["13:00 PM", "4:35 A.M.", "4:35 PMx", ":35", "4::35", "1600", "4.35", "-4:35 AM", "0:0:86400", "-0.2", "10.0"] {
+            is_err(ev("TIMEVALUE", vec![t(bad)]), CellError::Value);
+        }
     }
 
     /// Security: WORKDAY counts the holidays each step passes by binary search, so a long run of

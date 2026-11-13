@@ -1,6 +1,7 @@
 //! Calendars a format section can show dates in: the `B1` (Gregorian) and `B2` (Hijri) prefixes.
 
-use gridcraft_core::date::{DateTime, MONTHS, WEEKDAYS, days_from_civil, days_in_month};
+use gridcraft_core::date::{DateTime, days_from_civil, days_in_month};
+use gridcraft_core::locale;
 
 /// The calendar a section's year, month and day parts count in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -58,17 +59,20 @@ impl Calendar {
     }
 }
 
+/// A Gregorian date with the month and day names of the locale in effect
+/// ([`gridcraft_core::locale::current`]).
 fn gregorian_date(dt: &DateTime) -> CalendarDate {
-    let month_name = MONTHS.get((dt.month as usize).wrapping_sub(1)).copied().unwrap_or("");
-    let day_name = WEEKDAYS.get(dt.weekday as usize).copied().unwrap_or("");
+    let loc = locale::current();
+    let month = (dt.month as usize).wrapping_sub(1);
+    let weekday = dt.weekday as usize;
     CalendarDate {
         year: dt.year.into(),
         month: dt.month,
         day: dt.day,
-        month_name,
-        month_short: month_name.get(..3).unwrap_or(month_name),
-        day_name,
-        day_short: day_name.get(..3).unwrap_or(day_name),
+        month_name: loc.months.get(month).copied().unwrap_or(""),
+        month_short: loc.months_short.get(month).copied().unwrap_or(""),
+        day_name: loc.days.get(weekday).copied().unwrap_or(""),
+        day_short: loc.days_short.get(weekday).copied().unwrap_or(""),
     }
 }
 

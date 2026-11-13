@@ -2756,6 +2756,64 @@ fn ods_indirect_follows_repaired_sheet_names() {
     assert_eq!((formula_at(&s, "C1"), formula_at(&s, "D1")), (None, None));
 }
 
+/// `table:precision-as-shown` (ODF 1.3 part 3, 19.696) calculates with the values as displayed:
+/// Excel's "Set precision as displayed", with the constants stored as shown.
+#[test]
+fn ods_precision_as_shown_calculates_with_displayed_values() {
+    let styles = r#"<number:number-style style:name="OneDec"><number:number number:decimal-places="1" number:min-integer-digits="1"/></number:number-style><style:style style:name="c" style:family="table-cell" style:data-style-name="OneDec"/>"#;
+    let cells =
+        [r#"<table:table-cell table:style-name="c" office:value-type="float" office:value="1.234"/>"#.to_string(), ods_formula("[.A1]*2", 9.0)]
+            .concat();
+    let s = recalculated_styled_ods(styles, r#"<table:calculation-settings table:precision-as-shown="true"/>"#, &ods_row("Data", &cells));
+    assert_eq!((v(&s, "A1"), v(&s, "B1")), (Value::Number(1.2), Value::Number(2.4)));
+    assert!(s.doc().unwrap().wb.calc.precision_as_displayed);
+    let s = recalculated_styled_ods(styles, "", &ods_row("Data", &cells));
+    assert_eq!((v(&s, "A1"), v(&s, "B1")), (Value::Number(1.234), Value::Number(2.468)));
+}
+
+/// "Set precision as displayed" stores every number as its format shows it, a typed constant and a
+/// formula result alike (Microsoft Support: it "permanently changes stored values in cells from
+/// full precision (15 digits) to whatever format, including decimal places, is displayed"). An ODS
+/// document with `table:precision-as-shown` therefore holds the same number in a constant and in a
+/// formula of that value under one format: the import's rounding of constants and the
+/// calculation's rounding of results are one rule. Fractions, engineering notation and a
+/// conditional section once rounded differently on the two paths (`A1 = 0.3` stayed 0.3 while
+/// `B1 = 0.3` was 0.25, so `A1 - B1` was 0.05 though both display `0 2/8`).
+#[test]
+fn ods_precision_as_shown_rounds_constants_and_formulas_by_one_rule() {
+    let styles = concat!(
+        r#"<number:number-style style:name="Frac8"><number:fraction number:min-integer-digits="1" number:min-numerator-digits="1" number:min-denominator-digits="1" number:denominator-value="8"/></number:number-style>"#,
+        r#"<number:number-style style:name="Frac2"><number:fraction number:min-integer-digits="1" number:min-numerator-digits="2" number:min-denominator-digits="2"/></number:number-style>"#,
+        r#"<number:number-style style:name="Eng"><number:scientific-number number:decimal-places="1" number:min-integer-digits="1" number:exponent-interval="3" number:min-exponent-digits="1" number:forced-exponent-sign="true"/></number:number-style>"#,
+        r#"<number:number-style style:name="Big" style:volatile="true"><number:number number:decimal-places="0" number:min-integer-digits="1"/></number:number-style>"#,
+        r#"<number:number-style style:name="Cond"><number:number number:decimal-places="2" number:min-integer-digits="1"/><style:map style:condition="value()&gt;=100" style:apply-style-name="Big"/></number:number-style>"#,
+        r#"<style:style style:name="c1" style:family="table-cell" style:data-style-name="Frac8"/>"#,
+        r#"<style:style style:name="c2" style:family="table-cell" style:data-style-name="Frac2"/>"#,
+        r#"<style:style style:name="c3" style:family="table-cell" style:data-style-name="Eng"/>"#,
+        r#"<style:style style:name="c4" style:family="table-cell" style:data-style-name="Cond"/>"#,
+    );
+    // (style, value, columns of the constant, the formula and their difference, the stored number)
+    let cases = [
+        ("c1", 0.3, ["A", "B", "C"], 0.25),
+        ("c2", 0.3333333, ["D", "E", "F"], 1.0 / 3.0),
+        ("c3", 123456.789, ["G", "H", "I"], 120000.0),
+        ("c4", 1.234, ["J", "K", "L"], 1.0),
+    ];
+    let mut cells = String::new();
+    for (style, n, [a, b, _], _) in cases {
+        cells += &format!(r#"<table:table-cell table:style-name="{style}" office:value-type="float" office:value="{n}"/>"#);
+        cells += &format!(r#"<table:table-cell table:style-name="{style}" table:formula="of:={n}" office:value-type="float" office:value="{n}"/>"#);
+        cells += &ods_formula(&format!("[.{a}1]-[.{b}1]"), 9.0);
+    }
+    let s = recalculated_styled_ods(styles, r#"<table:calculation-settings table:precision-as-shown="true"/>"#, &ods_row("Data", &cells));
+    for (style, n, [a, b, diff], stored) in cases {
+        let (constant, formula) = (v(&s, &format!("{a}1")), v(&s, &format!("{b}1")));
+        assert_eq!(constant, Value::Number(stored), "{style}: the constant {n}");
+        assert_eq!(formula, Value::Number(stored), "{style}: the formula ={n}");
+        assert_eq!(v(&s, &format!("{diff}1")), Value::Number(0.0), "{style}: constant - formula");
+    }
+}
+
 /// The null date (`table:null-date`, ODF 1.3 part 3, 9.4.2) is day 0 of the document's dates:
 /// 1904-01-01 is Excel's 1904 date system; a day neither system starts from keeps every
 /// formula's saved result.
