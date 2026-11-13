@@ -18,8 +18,11 @@ pub struct Ctx<'a> {
     pub pkg: Package<'a>,
     pub report: ReadReport,
     pub sst: Vec<Arc<str>>,
-    /// Phonetic (furigana) data of the shared strings, one entry per base text.
+    /// Phonetic (furigana) data of the shared strings, one entry per distinct reading of a text.
     pub phonetics: Vec<PhoneticString>,
+    /// Per shared string, the reading its cells take when it is not the first of its text
+    /// (`Sheet::phonetic_cells`); empty when no string needs one.
+    pub si_phonetics: Vec<Option<Option<u32>>>,
     /// Cell format index → model style.
     pub xf_map: Vec<StyleId>,
     pub dxfs: Vec<Style>,
@@ -33,6 +36,11 @@ pub struct Ctx<'a> {
     pub num_fmts: std::collections::HashMap<u32, String>,
     /// Value metadata blocks, indexed by the worksheet's one-based `vm` attribute.
     pub cell_pictures: Vec<Option<Arc<CellPicture>>>,
+    /// Cells of the worksheet being read whose value metadata (`vm`) is not a cell picture, with
+    /// the one-based index, collected per sheet for pass-through.
+    pub value_meta: Vec<(gridcraft_core::CellRef, u32)>,
+    /// The same blocks' errors, for the cells that show `#SPILL!` or `#CALC!` (see [`crate::rich_errors`]).
+    pub rich_errors: Vec<Option<gridcraft_core::CellError>>,
     /// x14 conditional-format ids of the current sheet's data bars, with the index of the rule in `cond_formats`.
     pub cf_ext_ids: Vec<(String, usize)>,
     /// Cells of the worksheet being read whose formulas lack dynamic-array metadata (legacy
@@ -52,32 +60,48 @@ impl Ctx<'_> {
     pub fn warn(&mut self, m: impl Into<String>) {
         self.report.warn(m);
     }
-    /// Stores the phonetic data read from `xl/sharedStrings.xml`.
+    /// Stores the phonetic data read from `xl/sharedStrings.xml`: the readings of the `<si>`
+    /// items that have one, by item index.
     ///
-    /// One entry per base text: the writer rebuilds the shared string table from the values the
-    /// sheets use and holds each text once (the format's `uniqueCount`), so only one reading can be
-    /// written per text. A later `<si>` with a text that is already there is dropped — with a
-    /// warning when its data differs, so nothing is lost silently.
-    pub fn keep_phonetics(&mut self, list: Vec<PhoneticString>) {
+    /// A text's cells take its first reading (`Workbook::phonetics`); the `<si>` items of the
+    /// same text with another reading, or none, are recorded per item (`si_phonetics`) for their
+    /// cells to name theirs (`Sheet::phonetic_cells`).
+    pub fn keep_phonetics(&mut self, sst: &[Arc<str>], readings: Vec<(usize, PhoneticString)>) {
+        self.si_phonetics = Vec::new();
+        if readings.is_empty() {
+            self.phonetics = Vec::new();
+            return;
+        }
         let mut kept: Vec<PhoneticString> = Vec::new();
-        let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        let mut conflicts = 0usize;
-        for p in list {
-            match index.get(p.text.as_str()) {
-                Some(&i) => {
-                    if kept.get(i).is_some_and(|k| *k != p) {
-                        conflicts += 1;
-                    }
-                }
+        let mut by_text: std::collections::HashMap<String, Vec<u32>> = std::collections::HashMap::new();
+        let mut chosen: Vec<Option<u32>> = vec![None; sst.len()];
+        for (si, p) in readings {
+            let same = by_text.entry(p.text.clone()).or_default();
+            let i = match same.iter().copied().find(|&i| kept.get(i as usize) == Some(&p)) {
+                Some(i) => i,
                 None => {
-                    index.insert(p.text.clone(), kept.len());
+                    let i = u32::try_from(kept.len()).unwrap_or(u32::MAX);
+                    same.push(i);
                     kept.push(p);
+                    i
                 }
+            };
+            if let Some(c) = chosen.get_mut(si) {
+                *c = Some(i);
             }
         }
-        if conflicts > 0 {
-            self.warn(format!("shared strings: {conflicts} phonetic readings were dropped because another <si> with the same text already had one"));
-        }
+        // The first reading of each text is the one its cells take without naming one.
+        let first = |t: &str| by_text.get(t).and_then(|v| v.first().copied());
+        let overrides: Vec<Option<Option<u32>>> = chosen
+            .iter()
+            .zip(sst)
+            .map(|(&c, t)| match (c, first(t)) {
+                (Some(c), Some(f)) if c == f => None,
+                (None, None) => None,
+                (c, _) => Some(c),
+            })
+            .collect();
+        self.si_phonetics = if overrides.iter().any(Option::is_some) { overrides } else { Vec::new() };
         self.phonetics = kept;
     }
     /// A fresh id for a chart, picture, shape or table.
@@ -125,7 +149,7 @@ fn read_shared_strings(cx: &mut Ctx<'_>, wb_rels: &[Rel]) -> Result<(), IoError>
                     let (runs, props) = xml::phonetic_data(&si, &text);
                     dropped += raw.saturating_sub(runs.len());
                     if !runs.is_empty() || props.is_some() {
-                        phonetics.push(PhoneticString { text: text.clone(), runs, props });
+                        phonetics.push((sst.len(), PhoneticString { text: text.clone(), runs, props }));
                     }
                     sst.push(Arc::from(text));
                     Ok(())
@@ -136,8 +160,8 @@ fn read_shared_strings(cx: &mut Ctx<'_>, wb_rels: &[Rel]) -> Result<(), IoError>
                 if dropped > 0 {
                     cx.warn(format!("shared strings: {dropped} phonetic runs were dropped (bad sb/eb or no reading)"));
                 }
+                cx.keep_phonetics(&sst, phonetics);
                 cx.sst = sst;
-                cx.keep_phonetics(phonetics);
             }
             None => cx.warn(format!("missing part {}", r.target)),
         }
@@ -253,6 +277,7 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
         report: ReadReport::default(),
         sst: vec![],
         phonetics: vec![],
+        si_phonetics: vec![],
         xf_map: vec![],
         dxfs: vec![],
         palette: crate::tables::INDEXED.to_vec(),
@@ -262,6 +287,8 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
         next_id: 1,
         num_fmts: Default::default(),
         cell_pictures: vec![],
+        value_meta: vec![],
+        rich_errors: vec![],
         cf_ext_ids: vec![],
         legacy_formulas: vec![],
         shared_formula_bytes: 0,
@@ -272,7 +299,7 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
     let wb_part = find_rel(&root_rels, "officeDocument").map(|r| r.target.clone()).unwrap_or_else(|| "xl/workbook.xml".into());
     let wb_xml = workbook_xml(&mut cx.pkg, &wb_part)?;
     let wb_rels = cx.pkg.rels(&wb_part)?;
-    let mut kept = crate::passthrough::KeptReader::new(&mut cx);
+    let mut kept = crate::passthrough::KeptReader::new(&mut cx, &wb_xml);
     cx.cell_pictures = match crate::richdata::read(&mut cx, &wb_rels) {
         Ok(pictures) => pictures,
         Err(error) => {
@@ -280,6 +307,7 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
             vec![]
         }
     };
+    cx.rich_errors = crate::rich_errors::read(&mut cx, &wb_rels);
     // The code of Python cells, which their formulas name by index.
     cx.python = crate::python_part::read(&mut cx, &wb_rels)?;
     let mut wb = Workbook::new();
@@ -324,12 +352,16 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
         let name = se.attr("name").unwrap_or("").to_string();
         let rel = se.attr("id").and_then(|id| wb_rels.iter().find(|r| r.id == id)).cloned();
         let Some(rel) = rel else {
-            cx.warn(format!("sheet \"{name}\" has no part; skipped"));
+            // A VBA module sheet's entry has no part: it is kept as it is (see `passthrough`).
+            if !crate::passthrough::is_module_entry(se) {
+                cx.warn(format!("sheet \"{name}\" has no part; skipped"));
+            }
             file_to_model.push(None);
             continue;
         };
-        if rel.kind == "chartsheet" {
-            // Kept as it is and written back in place (see `passthrough`); nothing to model.
+        if crate::passthrough::sheet_kind(&rel.kind).is_some() {
+            // Chart, dialog and macro sheets: kept as they are and written back in place (see
+            // `passthrough`); nothing to model.
             file_to_model.push(None);
             continue;
         }
@@ -340,12 +372,14 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
         }
         let name = names.unique(&name, i);
         cx.legacy_formulas.clear();
+        cx.value_meta.clear();
         let (mut sheet, read_controls) = match crate::sheet_read::read_sheet(&mut cx, &rel.target, &name) {
             Ok(s) => s,
             Err(IoError::TooLarge(m)) => return Err(IoError::TooLarge(m)),
             Err(e) => {
                 cx.warn(format!("sheet \"{name}\" could not be read: {e}"));
                 cx.legacy_formulas.clear();
+                cx.value_meta.clear();
                 (Sheet::new(name.clone()), Default::default())
             }
         };
@@ -355,7 +389,8 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
             Err(IoError::TooLarge(m)) => return Err(IoError::TooLarge(m)),
             Err(e) => cx.warn(format!("PivotTables on sheet \"{name}\" could not be read: {e}")),
         }
-        sheet.preserved = kept.sheet(&mut cx, &rel.target, &name, &read_controls);
+        let value_meta = std::mem::take(&mut cx.value_meta);
+        sheet.preserved = kept.sheet(&mut cx, &rel.target, &name, &sheet, value_meta, &read_controls);
         sheet.file_id = se.attr_u32("sheetId").unwrap_or(0);
         sheet.visibility = match se.attr("state") {
             Some("hidden") => Visibility::Hidden,
@@ -463,7 +498,10 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
             Err(e) => cx.warn(format!("macros (VBA project) could not be read and were dropped: {e}")),
         }
     }
+    // The kept macro sheets name their text by shared-string index: they are resolved here.
     wb.preserved = kept.workbook(&mut cx, &wb_part, &wb_xml, &file_to_model);
+    cx.sst = Vec::new();
+    cx.si_phonetics = Vec::new();
     if let Some(w) = cx.python.warning() {
         cx.warn(w);
     }
@@ -471,6 +509,7 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
     wb.apply_name_call_case();
     // Legacy formulas read as dynamic-array formulas with Excel's implicit `@`.
     crate::array_formula::apply_legacy(&mut wb, legacy_formulas, functions);
+    crate::passthrough::seal_cell_meta(&mut wb);
     wb.styles = cx.styles;
     wb.phonetics = cx.phonetics;
     Ok((wb, cx.report))
@@ -494,7 +533,8 @@ impl SheetNames {
     /// A valid name for the i-th sheet, unique among the names assigned so far, which it joins.
     pub(crate) fn unique(&mut self, name: &str, i: usize) -> String {
         let mut base: String = name.chars().filter(|c| !matches!(c, ':' | '\\' | '/' | '?' | '*' | '[' | ']')).take(31).collect();
-        if base.trim().is_empty() {
+        // Excel takes a name of spaces only (`" "`, written by Excel itself): only an empty one is blank.
+        if base.is_empty() {
             base = format!("Sheet{}", i + 1);
         }
         let name = if self.taken.contains(&base.to_ascii_lowercase()) {

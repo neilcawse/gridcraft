@@ -28,6 +28,7 @@ mod passthrough;
 mod pivot;
 mod python_part;
 mod read;
+mod rich_errors;
 mod richdata;
 mod sheet_read;
 mod sheet_write;
@@ -51,7 +52,7 @@ pub use crypto::{DecryptError, check_encryption, decrypt};
 pub use csv::{MAX_CSV_BYTES, decode_text, read_csv, read_csv_with_report, write_csv, write_csv_limited};
 pub use ods::read_ods;
 pub use package::MAX_PART;
-pub use passthrough::rebase_links;
+pub use passthrough::{rebase_links, rewrite_kept_names};
 pub use xls::{read_xls, read_xls_with};
 pub use xlsb::read_xlsb;
 
@@ -188,16 +189,17 @@ impl XlsxKind {
         }
     }
 
-    /// Whether this kind may carry a VBA project (`.xlsm`, `.xltm`).
+    /// Whether this kind may carry a VBA project or Excel 4.0 macro sheets (`.xlsm`, `.xltm`).
     pub fn is_macro_enabled(self) -> bool {
         matches!(self, XlsxKind::MacroWorkbook | XlsxKind::MacroTemplate)
     }
 }
 
-/// Writes a workbook as an `.xlsx` package, or as an `.xlsm` one when it holds a VBA project,
-/// with the default [`FunctionInfo`].
+/// Writes a workbook as an `.xlsx` package, or as an `.xlsm` one when it holds a VBA project or
+/// Excel 4.0 macro sheets, with the default [`FunctionInfo`].
 pub fn write_xlsx(wb: &Workbook) -> Result<Vec<u8>, IoError> {
-    let kind = if wb.vba_project.is_some() { XlsxKind::MacroWorkbook } else { XlsxKind::Workbook };
+    let macros = wb.vba_project.is_some() || wb.preserved.as_deref().is_some_and(gridcraft_model::Preserved::has_macro_sheets);
+    let kind = if macros { XlsxKind::MacroWorkbook } else { XlsxKind::Workbook };
     write::write_xlsx(wb, kind, FunctionInfo::default())
 }
 
@@ -217,8 +219,16 @@ pub fn write_xlsx_named(wb: &Workbook, kind: XlsxKind, book_name: &str) -> Resul
     write::write_xlsx_named(wb, kind, Some(book_name))
 }
 
-/// Writes a workbook with caller-supplied function facts and file name.
-pub fn write_xlsx_named_with(wb: &Workbook, kind: XlsxKind, book_name: &str, functions: FunctionInfo) -> Result<Vec<u8>, IoError> {
+/// What a save wrote the file without: content of the workbook (most of it kept from the file it
+/// was read from) that the package could not hold as it stands, each said once.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WriteReport {
+    pub warnings: Vec<String>,
+}
+
+/// Writes a workbook with caller-supplied function facts and file name, with what the file was
+/// written without.
+pub fn write_xlsx_named_with(wb: &Workbook, kind: XlsxKind, book_name: &str, functions: FunctionInfo) -> Result<(Vec<u8>, WriteReport), IoError> {
     write::write_xlsx_named_with(wb, kind, Some(book_name), functions)
 }
 

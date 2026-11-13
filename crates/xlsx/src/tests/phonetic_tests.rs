@@ -132,20 +132,57 @@ fn hostile_phonetic_runs_lose_only_the_runs() {
     assert_eq!(read_xlsx(&bytes).unwrap().0.phonetics, wb.phonetics);
 }
 
-#[test]
-fn identical_text_with_different_readings_keeps_the_first_and_warns() {
-    let sst = r#"<?xml version="1.0"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="2" uniqueCount="2"><si><t>東</t><rPh sb="0" eb="1"><t>ヒガシ</t></rPh></si><si><t>東</t><rPh sb="0" eb="1"><t>アズマ</t></rPh></si></sst>"#;
-    let (wb, report) = read_xlsx(&package(sst)).unwrap();
-    // The saved table holds each text once, so only one reading can be written: the first.
-    assert_eq!(wb.phonetics.len(), 1);
-    assert_eq!(wb.phonetics[0].runs.first().map(|r| r.text.as_str()), Some("ヒガシ"));
-    assert!(report.warnings.iter().any(|w| w.contains("phonetic readings")), "{:?}", report.warnings);
+/// The readings of each cell, as written: the `<si>` its `<v>` names, as its text and first reading.
+fn cell_readings(bytes: &[u8]) -> Vec<(String, Option<String>)> {
+    let (wb, _) = read_xlsx(bytes).unwrap();
+    let sheet = wb.sheet(0).unwrap();
+    ["A1", "B1", "C1"]
+        .iter()
+        .map(|a| {
+            let Value::Text(t) = sheet.value(at(a)) else { panic!("{a} is not text") };
+            let reading = match sheet.phonetic_cells.get(&at(a)) {
+                Some(named) => named.map(|i| wb.phonetics[i as usize].runs[0].text.clone()),
+                None => wb.phonetics.iter().find(|p| p.text == *t).map(|p| p.runs[0].text.clone()),
+            };
+            (t.to_string(), reading)
+        })
+        .collect()
+}
 
-    // The same text twice with the same reading is not a conflict.
-    let same = sst.replace("アズマ", "ヒガシ");
+/// The same kanji read two ways, and once with no reading: Excel holds three `<si>` items with the
+/// same base text, and each cell keeps its own through an open + save.
+#[test]
+fn identical_text_with_different_readings_keeps_each_cells_reading() {
+    let sst = r#"<?xml version="1.0"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="3" uniqueCount="3"><si><t>東</t><rPh sb="0" eb="1"><t>ヒガシ</t></rPh></si><si><t>東</t><rPh sb="0" eb="1"><t>アズマ</t></rPh></si><si><t>東</t></si></sst>"#;
+    let body = r#"<sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c></row></sheetData>"#;
+    let bytes = minimal(body, &[("xl/sharedStrings.xml", sst)], SST_RELS, "");
+    let (wb, report) = read_xlsx(&bytes).unwrap();
+    assert!(!report.warnings.iter().any(|w| w.contains("phonetic")), "{:?}", report.warnings);
+    assert_eq!(wb.phonetics.len(), 2);
+    let expected = [("東", Some("ヒガシ")), ("東", Some("アズマ")), ("東", None)].map(|(t, r)| (t.to_string(), r.map(str::to_string)));
+    assert_eq!(cell_readings(&bytes), expected);
+
+    let written = write_xlsx(&wb).unwrap();
+    let out = part(&written, "xl/sharedStrings.xml");
+    assert_eq!(out.matches("<si><t>東</t>").count(), 3, "{out}");
+    assert_eq!(cell_readings(&written), expected);
+    let (again, _) = read_xlsx(&written).unwrap();
+    assert_eq!(part(&write_xlsx(&again).unwrap(), "xl/sharedStrings.xml"), out);
+
+    // A cell given another text takes that text's reading, not the one it named.
+    let mut edited = wb.clone();
+    text_cell(edited.sheet_mut(0).unwrap(), "B1", "西");
+    text_cell(edited.sheet_mut(0).unwrap(), "C1", "西");
+    let out = part(&write_xlsx(&edited).unwrap(), "xl/sharedStrings.xml");
+    assert_eq!(out.matches("<si><t>東</t>").count(), 1, "{out}");
+    assert_eq!(out.matches("<si><t>西</t></si>").count(), 1, "{out}");
+
+    // The same text twice with the same reading is one entry.
+    let same = sst.replace("アズマ", "ヒガシ").replace("<si><t>東</t></si>", "");
     let (wb, report) = read_xlsx(&package(&same)).unwrap();
     assert_eq!(wb.phonetics.len(), 1);
-    assert!(!report.warnings.iter().any(|w| w.contains("phonetic readings")), "{:?}", report.warnings);
+    assert!(wb.sheet(0).unwrap().phonetic_cells.is_empty());
+    assert!(!report.warnings.iter().any(|w| w.contains("phonetic")), "{:?}", report.warnings);
 }
 
 #[test]

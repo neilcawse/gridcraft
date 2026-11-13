@@ -11,6 +11,7 @@ use gridcraft_model::{
 
 use crate::drawing::{Obj, image_content_type, image_ext};
 use crate::fmla::text_to_file;
+use crate::passthrough::TableBinding;
 use crate::styles::{color_attrs, dxf_id};
 use crate::tables::{paper_id, px_to_col_width, px_to_pt};
 use crate::write::{
@@ -193,8 +194,11 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> (
 
     write_sheet_data(&mut s, SheetCellData { workbook: wb, index: si, sheet, overrides: &overrides, extra: &extra, dynamic: &dynamic }, &sid, out);
 
-    let prio = write_sheet_rules(&mut s, sheet, &mut rels, out);
-    let kept = write_sheet_printing(&mut s, sheet, &mut rels, out);
+    // The sheet's kept content (printer settings, custom views, controls, OLE objects…) is
+    // written first: its relationships are the sheet's, and its elements go in several places.
+    let kept = crate::passthrough::SheetKept::write(sheet, &mut rels, out);
+    let prio = write_sheet_rules(&mut s, sheet, &kept, &mut rels, out);
+    write_sheet_printing(&mut s, sheet, &kept);
 
     write_sheet_drawing(&mut s, wb, si, sheet, &mut rels, out);
     write_sheet_notes(&mut s, sheet, si, &kept, &mut rels, out);
@@ -207,8 +211,13 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> (
             out.table_id += 1;
             let n = out.tables;
             let name = table_name(&t.name, &mut used_names, out.table_id);
-            let xml = table_xml(t, cols, &name, out.table_id, out);
-            out.part(&format!("xl/tables/table{n}.xml"), Some(CT_TABLE), xml.into_bytes());
+            let bound = kept.table_binding(t.id, cols);
+            let xml = table_xml(t, cols, &name, out.table_id, bound.as_ref(), out);
+            let part = format!("xl/tables/table{n}.xml");
+            out.part(&part, Some(CT_TABLE), xml.into_bytes());
+            if let Some(b) = &bound {
+                b.write(&part, out);
+            }
             let rid = rels.add("table", &format!("../tables/table{n}.xml"));
             let _ = write!(parts, "<tablePart r:id=\"{rid}\"/>");
         }
@@ -226,6 +235,25 @@ struct CellWriteInput<'a> {
     header_override: Option<&'a String>,
     spill_value: Option<&'a Value>,
     dynamic_range: Option<&'a RangeRef>,
+    /// The `vm` of value metadata kept by pass-through, for a cell that still holds its value.
+    value_meta: Option<u32>,
+    /// The reading (furigana) a text cell names instead of its text's first ([`named_reading`]).
+    reading: Option<Option<u32>>,
+}
+
+/// The reading a text cell names (`Sheet::phonetic_cells`: an index into `Workbook::phonetics`,
+/// or none), while the cell still holds that reading's text and it is not the text's first one.
+fn named_reading(wb: &Workbook, sheet: &Sheet, at: CellRef, cell: Option<&Cell>) -> Option<Option<u32>> {
+    let named = *sheet.phonetic_cells.get(&at)?;
+    let cell = cell.filter(|c| c.formula.is_none())?;
+    let Value::Text(t) = &cell.value else { return None };
+    // A text without any reading has only plain entries.
+    let first = wb.phonetics.iter().position(|p| p.text == **t)?;
+    match named {
+        None => Some(None),
+        Some(i) if i as usize != first && wb.phonetics.get(i as usize).is_some_and(|p| p.text == **t) => Some(Some(i)),
+        Some(_) => None,
+    }
 }
 
 fn write_sheet_extensions(s: &mut String, sheet: &Sheet, prio: &[u32]) {
@@ -378,7 +406,7 @@ fn write_sheet_drawing(s: &mut String, wb: &Workbook, si: usize, sheet: &Sheet, 
     }
 }
 
-fn write_sheet_printing<'a>(s: &mut String, sheet: &'a Sheet, rels: &mut Rels, out: &mut Out) -> crate::passthrough::SheetKept<'a> {
+fn write_sheet_printing(s: &mut String, sheet: &Sheet, kept: &crate::passthrough::SheetKept<'_>) {
     // Printing.
     let p = &sheet.print;
     if p.gridlines || p.headings || p.center_h || p.center_v {
@@ -390,8 +418,6 @@ fn write_sheet_printing<'a>(s: &mut String, sheet: &'a Sheet, rels: &mut Rels, o
         }
         s.push_str("/>");
     }
-    // Unmodelled content kept from the source file (printer settings, controls, OLE objects…).
-    let kept = crate::passthrough::SheetKept::write(sheet, rels, out);
     // Margins are kept as f32: widen each through its shortest decimal, so 0.3 is written as
     // `0.3`, as Excel writes it, and not as `0.30000001192092896` (#1609).
     let m = |i: usize| {
@@ -459,11 +485,11 @@ fn write_sheet_printing<'a>(s: &mut String, sheet: &'a Sheet, rels: &mut Rels, o
             let _ = write!(s, "</{tag}>");
         }
     }
-
-    kept
+    // Kept custom sheet properties (a binary part each) follow the breaks.
+    s.push_str(&kept.custom_properties());
 }
 
-fn write_sheet_rules(s: &mut String, sheet: &Sheet, rels: &mut Rels, out: &mut Out) -> Vec<u32> {
+fn write_sheet_rules(s: &mut String, sheet: &Sheet, kept: &crate::passthrough::SheetKept<'_>, rels: &mut Rels, out: &mut Out) -> Vec<u32> {
     // sheetProtection
     if let Some(p) = &sheet.protection {
         s.push_str("<sheetProtection sheet=\"1\" objects=\"1\" scenarios=\"1\"");
@@ -500,6 +526,8 @@ fn write_sheet_rules(s: &mut String, sheet: &Sheet, rels: &mut Rels, out: &mut O
     {
         s.push_str(&autofilter_xml(af.range, &af.criteria, out));
     }
+    // The kept custom views follow the filter (and sort state), before the merged cells.
+    s.push_str(&kept.custom_sheet_views());
     if !sheet.merges.is_empty() {
         let merges: Vec<&RangeRef> = sheet.merges.iter().filter(|m| !m.is_single()).collect();
         let _ = write!(s, "<mergeCells count=\"{}\">", merges.len());
@@ -585,6 +613,7 @@ struct SheetCellData<'a> {
 
 fn write_sheet_data(s: &mut String, data: SheetCellData<'_>, sid: &dyn Fn(gridcraft_model::StyleId) -> u32, out: &mut Out) {
     let SheetCellData { workbook, index, sheet, overrides, extra, dynamic } = data;
+    let metas = crate::passthrough::cell_meta_index(sheet, out);
     // Cell storage is already row-major; sort only when extra cells need merging.
     let mut keys: Vec<(CellRef, Option<&Cell>)> = Vec::with_capacity(sheet.cells.len());
     keys.extend(sheet.cells.iter().map(|(c, cell)| (c, Some(cell))));
@@ -645,6 +674,7 @@ fn write_sheet_data(s: &mut String, data: SheetCellData<'_>, sid: &dyn Fn(gridcr
         s.push('>');
         for &(cell_ref, mut cell) in cells {
             let ov = overrides.get(&cell_ref);
+            let value_meta = metas.get(&cell_ref).filter(|m| crate::passthrough::cell_meta_holds(m, cell)).map(|m| m.vm);
             let ex = extra.get(&cell_ref);
             let mut legacy_cell = None;
             let array = dynamic.get(&cell_ref).copied().or_else(|| {
@@ -674,6 +704,8 @@ fn write_sheet_data(s: &mut String, data: SheetCellData<'_>, sid: &dyn Fn(gridcr
                     header_override: ov,
                     spill_value: ex,
                     dynamic_range: array.as_ref(),
+                    value_meta,
+                    reading: if sheet.phonetic_cells.is_empty() { None } else { named_reading(workbook, sheet, cell_ref, cell) },
                 },
                 sid,
                 out,
@@ -751,7 +783,7 @@ fn write_sheet_views(s: &mut String, sheet: &Sheet, selected: bool) {
 }
 
 fn write_cell(s: &mut String, input: CellWriteInput<'_>, sid: &dyn Fn(gridcraft_model::StyleId) -> u32, out: &mut Out) {
-    let CellWriteInput { reference: c, cell, picture, header_override: ov, spill_value: extra, dynamic_range: dynamic } = input;
+    let CellWriteInput { reference: c, cell, picture, header_override: ov, spill_value: extra, dynamic_range: dynamic, value_meta, reading } = input;
     let style = cell.map(|x| sid(x.style)).unwrap_or(0);
     s.push_str("<c r=\"");
     push_a1(s, c);
@@ -803,6 +835,9 @@ fn write_cell(s: &mut String, input: CellWriteInput<'_>, sid: &dyn Fn(gridcraft_
         s.push_str(" cm=\"1\"");
         out.dynamic_arrays = true;
     }
+    if let Some(vm) = value_meta {
+        let _ = write!(s, " vm=\"{vm}\"");
+    }
     let text = formula.map(|f| esc(&crate::fmla::to_file(f))).or_else(|| py_text.map(|t| esc(&t)));
     if let Some(text) = text {
         let t = match &value {
@@ -848,7 +883,10 @@ fn write_cell(s: &mut String, input: CellWriteInput<'_>, sid: &dyn Fn(gridcraft_
             let _ = write!(s, "><v>{}</v></c>", num(*n));
         }
         Value::Text(t) => {
-            let i = out.sst.index(t);
+            let i = match reading.filter(|_| ov.is_none() && extra.is_none()) {
+                Some(r) => out.sst.index_with(t, r),
+                None => out.sst.index(t),
+            };
             let _ = write!(s, " t=\"s\"><v>{i}</v></c>");
         }
         Value::Bool(b) => {

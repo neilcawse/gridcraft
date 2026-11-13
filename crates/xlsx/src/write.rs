@@ -22,6 +22,7 @@ pub const CT_CHART: &str = "application/vnd.openxmlformats-officedocument.drawin
 pub const CT_TABLE: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml";
 pub const CT_COMMENTS: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml";
 pub const CT_VBA: &str = "application/vnd.ms-office.vbaProject";
+pub const CT_THEME: &str = "application/vnd.openxmlformats-officedocument.theme+xml";
 pub const CT_THREADED_COMMENTS: &str = "application/vnd.ms-excel.threadedcomments+xml";
 pub const CT_PERSONS: &str = "application/vnd.ms-excel.person+xml";
 pub const REL_THREADED_COMMENT: &str = "http://schemas.microsoft.com/office/2017/10/relationships/threadedComment";
@@ -84,11 +85,14 @@ impl Rels {
     }
 }
 
-/// Shared string table being built.
+/// Shared string table being built: one entry per text, plus one per other reading of a text
+/// that some cells carry (`Sheet::phonetic_cells`).
 #[derive(Default)]
 pub struct Sst {
-    list: Vec<String>,
-    map: HashMap<String, u32>,
+    /// Text, and the reading the entry names (`None`: the text's first, `Workbook::phonetics`).
+    list: Vec<(std::sync::Arc<str>, Option<Option<u32>>)>,
+    map: HashMap<std::sync::Arc<str>, u32>,
+    named: HashMap<(std::sync::Arc<str>, Option<u32>), u32>,
     pub count: u64,
 }
 
@@ -99,8 +103,22 @@ impl Sst {
             return i;
         }
         let i = self.list.len() as u32;
-        self.list.push(s.to_string());
-        self.map.insert(s.to_string(), i);
+        let rc: std::sync::Arc<str> = std::sync::Arc::from(s);
+        self.list.push((std::sync::Arc::clone(&rc), None));
+        self.map.insert(rc, i);
+        i
+    }
+
+    /// The entry of `s` with reading `reading` (an index into `Workbook::phonetics`, or none).
+    pub fn index_with(&mut self, s: &str, reading: Option<u32>) -> u32 {
+        self.count += 1;
+        let key: (std::sync::Arc<str>, Option<u32>) = (std::sync::Arc::from(s), reading);
+        if let Some(&i) = self.named.get(&key) {
+            return i;
+        }
+        let i = self.list.len() as u32;
+        self.list.push((std::sync::Arc::clone(&key.0), Some(reading)));
+        self.named.insert(key, i);
         i
     }
 }
@@ -140,11 +158,21 @@ pub struct Out {
     pub functions: FunctionInfo,
     /// Defined names analysed for implicit intersection, shared by every formula written.
     pub(crate) names: crate::array_formula::NameCache,
+    /// What the save left out of the file, once each ([`crate::WriteReport`]).
+    pub warnings: Vec<String>,
     /// The code of the Python cells written so far, in order: script `i` of the Python part.
     pub python_scripts: Vec<String>,
 }
 
 impl Out {
+    /// Notes something the file is written without.
+    pub fn warn(&mut self, w: impl Into<String>) {
+        let w = w.into();
+        if !self.warnings.contains(&w) {
+            self.warnings.push(w);
+        }
+    }
+
     pub fn part(&mut self, name: &str, content_type: Option<&str>, data: Vec<u8>) {
         if let Some(ct) = content_type {
             self.overrides.push((format!("/{name}"), ct.to_string()));
@@ -224,7 +252,7 @@ fn check_sheet_names(wb: &Workbook) -> Result<(), IoError> {
 const DEFAULT_BOOK_NAME: &str = "Workbook.xlsx";
 
 pub fn write_xlsx(wb: &Workbook, kind: XlsxKind, functions: FunctionInfo) -> Result<Vec<u8>, IoError> {
-    write_xlsx_named_with(wb, kind, None, functions)
+    write_xlsx_named_with(wb, kind, None, functions).map(|(bytes, _)| bytes)
 }
 
 /// The `<workbookView>` attributes beyond `activeTab`: the window's display settings
@@ -249,9 +277,66 @@ fn workbook_view_attrs(wb: &Workbook) -> String {
     attrs
 }
 
+/// A written package and what it was written without.
+type Written = (Vec<u8>, crate::WriteReport);
+
 /// Writes the workbook for the file `book_name` (a bare file name). A PivotChart is bound to its
 /// PivotTable in Excel only when its link starts with the workbook in brackets.
-pub fn write_xlsx_named_with(wb: &Workbook, kind: XlsxKind, book_name: Option<&str>, functions: FunctionInfo) -> Result<Vec<u8>, IoError> {
+pub fn write_xlsx_named_with(wb: &Workbook, kind: XlsxKind, book_name: Option<&str>, functions: FunctionInfo) -> Result<Written, IoError> {
+    // The workbook's kept cell and value metadata is written when it fits what GridCraft writes
+    // with it. Its dynamic-array formulas are marked `cm="1"`, an entry the kept part may lack:
+    // the workbook is then written again without the kept metadata.
+    if let Some(written) = write_package(wb, kind, book_name, functions, true)? {
+        return Ok(written);
+    }
+    let (bytes, mut report) =
+        write_package(wb, kind, book_name, functions, false)?.ok_or_else(|| IoError::Format("the workbook could not be written".into()))?;
+    report.warnings.insert(0, "The cell and value metadata kept from the file did not fit the dynamic-array formulas and was left out.".into());
+    Ok((bytes, report))
+}
+
+/// The `<calcPr>` element: the calculation mode, iteration and precision settings, and a full
+/// recalculation on load when the written formulas have no saved results (`needs_calc`).
+fn calc_pr(calc: &CalcSettings, needs_calc: bool) -> String {
+    let mut w = String::from("<calcPr calcId=\"191029\"");
+    match calc.mode {
+        CalcMode::Automatic => {}
+        CalcMode::Manual => w.push_str(" calcMode=\"manual\""),
+        CalcMode::AutomaticExceptTables => w.push_str(" calcMode=\"autoNoTable\""),
+    }
+    // CT_CalcPr defaults: iterate off, 100 iterations, 0.001 maximum change. The limits are kept
+    // while iteration is off, as Options keeps them.
+    if calc.iterative {
+        w.push_str(" iterate=\"1\"");
+    }
+    if calc.iterative || calc.max_iterations != CalcSettings::DEFAULT_ITERATIONS {
+        let _ = write!(w, " iterateCount=\"{}\"", calc.max_iterations);
+    }
+    if calc.iterative || calc.max_change != CalcSettings::DEFAULT_CHANGE {
+        let _ = write!(w, " iterateDelta=\"{}\"", crate::xml::num(calc.max_change));
+    }
+    if calc.precision_as_displayed {
+        w.push_str(" fullPrecision=\"0\"");
+    }
+    if calc.r1c1 {
+        w.push_str(" refMode=\"R1C1\"");
+    }
+    if needs_calc {
+        w.push_str(" fullCalcOnLoad=\"1\"");
+    }
+    w.push_str("/>");
+    w
+}
+
+/// [`write_xlsx_named_with`] with or without (`keep_metadata`) the kept cell and value metadata.
+/// `None` when it can't be written next to the dynamic-array formulas.
+fn write_package(
+    wb: &Workbook,
+    kind: XlsxKind,
+    book_name: Option<&str>,
+    functions: FunctionInfo,
+    keep_metadata: bool,
+) -> Result<Option<Written>, IoError> {
     if wb.sheets.is_empty() {
         return Err(IoError::Format("a workbook needs at least one sheet".into()));
     }
@@ -284,9 +369,11 @@ pub fn write_xlsx_named_with(wb: &Workbook, kind: XlsxKind, book_name: Option<&s
         kept: Default::default(),
         functions,
         names: Default::default(),
+        warnings: vec![],
         python_scripts: vec![],
     };
     out.kept.reserve_vml_blocks(wb);
+    out.kept.use_metadata(wb, keep_metadata, kind.is_macro_enabled());
     out.default_type("rels", "application/vnd.openxmlformats-package.relationships+xml");
     out.default_type("xml", "application/xml");
 
@@ -298,9 +385,8 @@ pub fn write_xlsx_named_with(wb: &Workbook, kind: XlsxKind, book_name: Option<&s
     };
 
     let mut wb_rels = Rels::default();
-    let (sheets_xml, kept, pivots) = write_sheets(wb, &mut out, active, &mut wb_rels);
-
-    let names = write_defined_names(wb, &kept, &out.chart_names);
+    let (sheets_xml, kept, pivots, _) = write_sheets(wb, &mut out, active, &mut wb_rels, kind.is_macro_enabled());
+    let names = write_defined_names(wb, &kept, &out.chart_names, &mut out.warnings);
 
     let mut w = format!("{XML_DECL}<workbook xmlns=\"{NS_MAIN}\" xmlns:r=\"{NS_REL}\">");
     // A workbook read from a file keeps its <fileVersion> as it was: Excel trusts the saved values
@@ -331,34 +417,9 @@ pub fn write_xlsx_named_with(wb: &Workbook, kind: XlsxKind, book_name: Option<&s
     if !names.is_empty() {
         let _ = write!(w, "<definedNames>{names}</definedNames>");
     }
-    w.push_str("<calcPr calcId=\"191029\"");
-    match wb.calc.mode {
-        CalcMode::Automatic => {}
-        CalcMode::Manual => w.push_str(" calcMode=\"manual\""),
-        CalcMode::AutomaticExceptTables => w.push_str(" calcMode=\"autoNoTable\""),
-    }
-    // CT_CalcPr defaults: iterate off, 100 iterations, 0.001 maximum change. The limits are kept
-    // while iteration is off, as Options keeps them.
-    let calc = &wb.calc;
-    if calc.iterative {
-        w.push_str(" iterate=\"1\"");
-    }
-    if calc.iterative || calc.max_iterations != CalcSettings::DEFAULT_ITERATIONS {
-        let _ = write!(w, " iterateCount=\"{}\"", calc.max_iterations);
-    }
-    if calc.iterative || calc.max_change != CalcSettings::DEFAULT_CHANGE {
-        let _ = write!(w, " iterateDelta=\"{}\"", crate::xml::num(calc.max_change));
-    }
-    if wb.calc.precision_as_displayed {
-        w.push_str(" fullPrecision=\"0\"");
-    }
-    if wb.calc.r1c1 {
-        w.push_str(" refMode=\"R1C1\"");
-    }
-    if out.needs_calc {
-        w.push_str(" fullCalcOnLoad=\"1\"");
-    }
-    w.push_str("/>");
+    w.push_str(&calc_pr(&wb.calc, out.needs_calc));
+    // The kept custom views (View › Custom Views) follow the calculation properties.
+    w.push_str(&crate::passthrough::workbook_elements(wb, crate::passthrough::SLOT_CUSTOM_WORKBOOK_VIEWS));
     w.push_str(&pivots.workbook_xml(&mut wb_rels));
     let exts = crate::passthrough::workbook_elements(wb, "ext");
     if !exts.is_empty() {
@@ -382,31 +443,35 @@ pub fn write_xlsx_named_with(wb: &Workbook, kind: XlsxKind, book_name: Option<&s
         out.part(fpb::PART, Some(fpb::CONTENT_TYPE), fpb::checkbox_part().into_bytes());
         wb_rels.add_uri(fpb::REL, "featurePropertyBag/featurePropertyBag.xml");
     }
-    out.part(
-        "xl/theme/theme1.xml",
-        Some("application/vnd.openxmlformats-officedocument.theme+xml"),
-        crate::theme::write_theme(&wb.theme).into_bytes(),
-    );
-    wb_rels.add("theme", "theme/theme1.xml");
-    // Phonetic (furigana) data is kept per string text: the table below holds each text once, so
-    // the runs of the entry with that text are written next to it (`Workbook::phonetics`).
-    let phonetics: HashMap<&str, &PhoneticString> = wb.phonetics.iter().map(|p| (p.text.as_str(), p)).collect();
-    let mut sst = format!("{XML_DECL}<sst xmlns=\"{NS_MAIN}\" count=\"{}\" uniqueCount=\"{}\">", out.sst.count, out.sst.list.len());
-    for t in &out.sst.list {
-        let _ = write!(sst, "<si>{}</si>", crate::xml::si_body(t, phonetics.get(t.as_str()).copied()));
+    // The theme part: as the file had it while the theme is unchanged, otherwise from the model.
+    const THEME_PART: &str = "xl/theme/theme1.xml";
+    if !crate::passthrough::write_theme(wb, THEME_PART, CT_THEME, &mut out) {
+        out.part(THEME_PART, Some(CT_THEME), crate::theme::write_theme(&wb.theme).into_bytes());
     }
+    wb_rels.add("theme", "theme/theme1.xml");
+    // Phonetic (furigana) data: an entry takes the first reading of its text
+    // (`Workbook::phonetics`), or the one it names (`Sheet::phonetic_cells`).
+    out.sst.map = HashMap::new();
+    out.sst.named = HashMap::new();
+    let sst_list = std::mem::take(&mut out.sst.list);
+    let mut phonetics: HashMap<&str, &PhoneticString> = HashMap::new();
+    for p in &wb.phonetics {
+        phonetics.entry(p.text.as_str()).or_insert(p);
+    }
+    let mut sst = format!("{XML_DECL}<sst xmlns=\"{NS_MAIN}\" count=\"{}\" uniqueCount=\"{}\">", out.sst.count, sst_list.len());
+    for (t, named) in sst_list {
+        let reading = match named {
+            None => phonetics.get(t.as_ref()).copied(),
+            Some(i) => i.and_then(|i| wb.phonetics.get(i as usize)),
+        };
+        let _ = write!(sst, "<si>{}</si>", crate::xml::si_body(&t, reading));
+    }
+    drop(phonetics);
     sst.push_str("</sst>");
     out.part("xl/sharedStrings.xml", Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"), sst.into_bytes());
     wb_rels.add("sharedStrings", "sharedStrings.xml");
-    if !out.cell_pictures.is_empty() {
-        crate::richdata::write(&mut out, &mut wb_rels)?;
-    } else if out.dynamic_arrays {
-        out.part(
-            "xl/metadata.xml",
-            Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheetMetadata+xml"),
-            METADATA.as_bytes().to_vec(),
-        );
-        wb_rels.add("sheetMetadata", "metadata.xml");
+    if !write_cell_metadata(wb, &mut out, &mut wb_rels)? {
+        return Ok(None);
     }
     if !out.persons.is_empty() {
         let mut x = format!("{XML_DECL}<personList xmlns=\"{NS_THREADED}\" xmlns:x=\"{NS_MAIN}\">");
@@ -445,13 +510,19 @@ pub fn write_xlsx_named_with(wb: &Workbook, kind: XlsxKind, book_name: Option<&s
             let _ = write!(core, "<{tag}>{}</{tag}>", esc(v));
         }
     }
+    core.push_str(&crate::passthrough::workbook_elements(wb, crate::passthrough::SLOT_CORE_PROPERTIES));
     core.push_str("</cp:coreProperties>");
     out.part("docProps/core.xml", Some("application/vnd.openxmlformats-package.core-properties+xml"), core.into_bytes());
     let mut app = String::from(XML_DECL);
-    app.push_str("<Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\" xmlns:vt=\"http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes\"><Application>GridCraft</Application>");
+    let _ = write!(
+        app,
+        "<Properties xmlns=\"{}\" xmlns:vt=\"http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes\"><Application>GridCraft</Application>",
+        crate::passthrough::NS_EXTENDED_PROPERTIES
+    );
     if !company.is_empty() {
         let _ = write!(app, "<Company>{}</Company>", esc(&company));
     }
+    app.push_str(&crate::passthrough::workbook_elements(wb, crate::passthrough::SLOT_EXTENDED_PROPERTIES));
     app.push_str("</Properties>");
     out.part("docProps/app.xml", Some("application/vnd.openxmlformats-officedocument.extended-properties+xml"), app.into_bytes());
     let mut root = Rels::default();
@@ -488,7 +559,30 @@ pub fn write_xlsx_named_with(wb: &Workbook, kind: XlsxKind, book_name: Option<&s
     for (name, data) in &parts {
         zip.add(name, data)?;
     }
-    zip.finish()
+    zip.finish().map(|bytes| Some((bytes, crate::WriteReport { warnings: std::mem::take(&mut out.warnings) })))
+}
+
+/// Writes the workbook's cell and value metadata: GridCraft's own for its cell pictures, the kept
+/// metadata of the file (decided by `KeptOut::use_metadata`), or the dynamic-array flag alone.
+/// `false` when the kept metadata can't sit next to the dynamic-array formulas written.
+fn write_cell_metadata(wb: &Workbook, out: &mut Out, wb_rels: &mut Rels) -> Result<bool, IoError> {
+    if !out.cell_pictures.is_empty() {
+        crate::richdata::write(out, wb_rels)?;
+        crate::passthrough::write_rich_types(wb, wb_rels, out);
+    } else if out.kept.metadata() {
+        if out.dynamic_arrays && !crate::passthrough::metadata_fits_dynamic_arrays(wb) {
+            return Ok(false);
+        }
+        crate::passthrough::write_metadata(wb, wb_rels, out);
+    } else if out.dynamic_arrays {
+        out.part(
+            "xl/metadata.xml",
+            Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheetMetadata+xml"),
+            METADATA.as_bytes().to_vec(),
+        );
+        wb_rels.add("sheetMetadata", "metadata.xml");
+    }
+    Ok(true)
 }
 
 fn write_sheets(
@@ -496,11 +590,14 @@ fn write_sheets(
     out: &mut Out,
     active: usize,
     wb_rels: &mut Rels,
-) -> (String, crate::passthrough::WorkbookKept, crate::pivot::PivotWriter) {
-    // Kept content first: the chart sheets among the worksheets need their relationship ids.
-    let kept = crate::passthrough::write_workbook(wb, wb_rels, out);
+    macros: bool,
+) -> (String, crate::passthrough::WorkbookKept, crate::pivot::PivotWriter, Vec<usize>) {
+    // Kept content first: the chart, dialog and macro sheets among the worksheets need their
+    // relationship ids. Macro sheets only go into a macro-enabled package, like the VBA project.
+    let kept = crate::passthrough::write_workbook(wb, wb_rels, out, macros);
     let mut pivots = crate::pivot::PivotWriter::default();
     let mut sheets_xml = String::new();
+    let mut sheet_ids = Vec::with_capacity(wb.sheets.len());
     let any_visible = wb.sheets.iter().any(|s| s.visibility == Visibility::Visible);
     let mut ids = crate::passthrough::SheetIds::new(wb, &kept);
     for (i, sheet) in wb.sheets.iter().enumerate() {
@@ -521,19 +618,28 @@ fn write_sheets(
         };
         let name: String = sheet.name.chars().take(31).collect();
         let sheet_id = ids.take(sheet.file_id);
+        sheet_ids.push(sheet_id as usize);
         let _ = write!(sheets_xml, "<sheet name=\"{}\" sheetId=\"{sheet_id}\"{state} r:id=\"{rid}\"/>", esc_attr(&name));
     }
     sheets_xml.push_str(&kept.sheet_entries(wb.sheets.len(), true, &mut ids));
 
-    (sheets_xml, kept, pivots)
+    (sheets_xml, kept, pivots, sheet_ids)
 }
 
-fn write_defined_names(wb: &Workbook, kept: &crate::passthrough::WorkbookKept, chart_names: &[String]) -> String {
+fn write_defined_names(wb: &Workbook, kept: &crate::passthrough::WorkbookKept, chart_names: &[String], warnings: &mut Vec<String>) -> String {
     // Defined names, then print areas and titles.
     let mut names = String::new();
     let mut seen = std::collections::HashSet::new();
     for n in &wb.names {
-        if n.name.is_empty() || !seen.insert((n.name.to_ascii_lowercase(), n.scope)) {
+        if n.name.is_empty() {
+            continue;
+        }
+        // Excel's names are case-insensitive: one per name and scope.
+        if !seen.insert((n.name.to_ascii_lowercase(), n.scope)) {
+            let w = "Defined names that differ only in case from an earlier one in the same scope were left out.".to_string();
+            if !warnings.contains(&w) {
+                warnings.push(w);
+            }
             continue;
         }
         if let Some(sc) = n.scope
@@ -589,6 +695,8 @@ fn write_defined_names(wb: &Workbook, kept: &crate::passthrough::WorkbookKept, c
         }
     }
 
+    // The names scoped to the kept chart, dialog and macro sheets.
+    names.push_str(&kept.names);
     names
 }
 
@@ -596,5 +704,5 @@ fn write_defined_names(wb: &Workbook, kept: &crate::passthrough::WorkbookKept, c
 const METADATA: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<metadata xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:xda=\"http://schemas.microsoft.com/office/spreadsheetml/2017/dynamicarray\"><metadataTypes count=\"1\"><metadataType name=\"XLDAPR\" minSupportedVersion=\"120000\" copy=\"1\" pasteAll=\"1\" pasteValues=\"1\" merge=\"1\" splitFirst=\"1\" rowColShift=\"1\" clearFormats=\"1\" clearComments=\"1\" assign=\"1\" coerce=\"1\" cellMeta=\"1\"/></metadataTypes><futureMetadata name=\"XLDAPR\" count=\"1\"><bk><extLst><ext uri=\"{bdbb8cdc-fa1e-496e-a857-3c3f30c029c3}\"><xda:dynamicArrayProperties fDynamic=\"1\" fCollapsed=\"0\"/></ext></extLst></bk></futureMetadata><cellMetadata count=\"1\"><bk><rc t=\"1\" v=\"0\"/></bk></cellMetadata></metadata>";
 /// Writes a workbook with a caller-supplied file name and the default function facts.
 pub fn write_xlsx_named(wb: &Workbook, kind: XlsxKind, book_name: Option<&str>) -> Result<Vec<u8>, IoError> {
-    write_xlsx_named_with(wb, kind, book_name, FunctionInfo::default())
+    write_xlsx_named_with(wb, kind, book_name, FunctionInfo::default()).map(|(bytes, _)| bytes)
 }

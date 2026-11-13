@@ -9,7 +9,7 @@ pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(noundo "file.new", "New Workbook", ["File"], Some("Cmd+N"), "{sample?: \"budget\"|\"sales\"|\"grades\"}", always, new_workbook),
         cmd!(noundo "file.open", "Open…", ["File"], Some("Cmd+O"), "{path} | {name, base64}, plus {password} for a password-protected workbook and {csvAsText?: bool} to keep every csv/tsv/txt field as text, with no number or date conversion (xlsx, xlsm, xls import, xlsb and ods data import, csv, tsv, txt, json)", always, open),
-        cmd!(noundo "file.save", "Save", ["File"], Some("Cmd+S"), "{path?} (xlsx by default; .csv/.tsv/.json/.html/.pdf by extension)", has_doc, save),
+        cmd!(noundo "file.save", "Save", ["File"], Some("Cmd+S"), "{path?} (xlsx by default; .csv/.tsv/.json/.html/.pdf by extension). Returns {path, bytes, warnings?}: warnings name what the file was written without", has_doc, save),
         cmd!(noundo "file.saveAs", "Save As…", ["File"], Some("Cmd+Shift+S"), "{path} (.xlsx, .csv, .tsv, .json, .html, or .pdf: a PDF of the active sheet)", has_doc, save_as),
         cmd!(query "file.saveBytes", "Encode Workbook", [], None, "{format?: xlsx|csv|tsv|json|html} → {base64}", has_doc, save_bytes),
         cmd!(noundo "file.close", "Close", ["File"], Some("Cmd+W"), "{force?: bool, document?: bool} (closes the active window, or with `document` the workbook and all its windows; the workbook closes with its last window)", has_doc, close),
@@ -125,9 +125,9 @@ fn save(s: &mut Session, p: &Json) -> Result<Json> {
     let kind = crate::io::FileKind::from_path(&path).or(d.content_kind.filter(|_| d.path.as_deref() == Some(path.as_str())));
     let rebased = crate::io::source_dir(&path).and_then(|f| gridcraft_xlsx::rebase_links(&d.wb, &f));
     let wb = rebased.as_ref().unwrap_or(&d.wb);
-    let bytes = match kind {
-        Some(kind) => crate::io::save_bytes_as(wb, &path, kind)?,
-        None => crate::io::save_bytes(wb, &path)?,
+    let (bytes, warnings) = match kind {
+        Some(kind) => crate::io::save_bytes_reported(wb, &path, kind)?,
+        None => (crate::io::save_bytes(wb, &path)?, vec![]),
     };
     crate::io::write_file(&path, &bytes)?;
     // Only a full-fidelity format clears the dirty flag and becomes the document's file.
@@ -142,7 +142,12 @@ fn save(s: &mut Session, p: &Json) -> Result<Json> {
         d.saved = d.wb.clone();
         d.path = Some(path.clone());
     }
-    Ok(json!({"path": path, "bytes": bytes.len()}))
+    // What the file was written without (content kept from the file read that it can't hold).
+    if warnings.is_empty() {
+        Ok(json!({"path": path, "bytes": bytes.len()}))
+    } else {
+        Ok(json!({"path": path, "bytes": bytes.len(), "warnings": warnings}))
+    }
 }
 
 fn save_as(s: &mut Session, p: &Json) -> Result<Json> {

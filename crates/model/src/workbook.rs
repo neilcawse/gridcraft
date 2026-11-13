@@ -226,15 +226,15 @@ pub struct Workbook {
     pub custom_lists: Vec<Vec<String>>,
     /// Named cell styles (Cell Styles gallery): name → style.
     pub cell_styles: Vec<(String, crate::style::Style)>,
-    /// Phonetic (furigana) data of shared strings (`xl/sharedStrings.xml`), one entry per string
-    /// text, so that an open + save keeps a Japanese workbook's readings. Written back next to the
-    /// `<si>` holding the same text.
+    /// Phonetic (furigana) data of shared strings (`xl/sharedStrings.xml`), one entry per distinct
+    /// reading of a text, so that an open + save keeps a Japanese workbook's readings. A text cell
+    /// takes the first entry with its text, unless its sheet names another one (or none) for it
+    /// in [`crate::Sheet::phonetic_cells`]: the same kanji can be read differently in two cells,
+    /// and Excel then holds two `<si>` items with the same base text.
     ///
-    /// Keyed by text because that is all a cell keeps of its shared string: the saved table holds
-    /// each text once (the format's `uniqueCount`), so two `<si>` items that share a base text can
-    /// only keep one reading — the reader keeps the first and warns. Empty for workbooks without
-    /// phonetic data; not present in older JSON. Modelled data (unlike [`Workbook::preserved`],
-    /// which holds unmodelled parts), so it is saved to JSON as well as to XLSX.
+    /// Empty for workbooks without phonetic data; not present in older JSON. Modelled data
+    /// (unlike [`Workbook::preserved`], which holds unmodelled parts), so it is saved to JSON as
+    /// well as to XLSX.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub phonetics: Vec<PhoneticString>,
     /// VBA project (`xl/vbaProject.bin`) carried through unchanged. GridCraft does not run
