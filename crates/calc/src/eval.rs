@@ -97,6 +97,25 @@ pub(crate) fn stack_position() -> usize {
     std::hint::black_box(&marker) as *const u8 as usize
 }
 
+/// How SUMPRODUCT reads a reference that holds one cell (`A1`, `A1:A1`, `INDEX(…)`,
+/// `INDEX(…):INDEX(…)`, a name): Excel 2016 changed it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OneCellReading {
+    /// As an array, so text there counts as 0, as the text in a larger range does: Excel 2016 and
+    /// later. Excel 16.114 calculates `SUMPRODUCT(A1,B1)`, `SUMPRODUCT(A1:A1,B1:B1)` and
+    /// `SUMPRODUCT(INDEX(…):INDEX(…),B1)` over the text "4" (or an empty text) and 2 as 0.
+    #[default]
+    Array,
+    /// As the value in the cell, so text there is `#VALUE!`: Excel 2013 and earlier, whose caches
+    /// say so (poi FormulaEvalTestData_Copy.xlsx, Excel 15.0300, caches `#VALUE!` for
+    /// `SUMPRODUCT(G1330:G1330,I1330:I1330)` over the text "4" and 2; two workbooks saved by
+    /// Excel 15.0300 cache
+    /// `#VALUE!` for `SUMPRODUCT(INDEX(…):INDEX(…),INDEX(…):INDEX(…))/SQRT(…)` over a cell holding
+    /// `""`). Only for reading such a cache again ([`crate::recalc::evaluate_expr_as`]): GridCraft
+    /// calculates as the Excel it models does.
+    Scalar,
+}
+
 /// What the evaluator needs from its surroundings.
 pub trait Host {
     fn workbook(&self) -> &Workbook;
@@ -137,6 +156,11 @@ pub trait Host {
     }
     /// Called when a formula's evaluation runs past the stack budget.
     fn stack_exhausted(&mut self) {}
+    /// How SUMPRODUCT reads a reference that holds one cell ([`OneCellReading`]). Only reading an
+    /// older Excel's cache again asks for another reading than the current Excel's.
+    fn one_cell_reading(&self) -> OneCellReading {
+        OneCellReading::Array
+    }
 }
 
 pub struct Evaluator<'h> {

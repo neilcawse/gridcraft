@@ -4,19 +4,21 @@ use super::*;
 const MAX_XML_PART: u64 = 64 * 1024 * 1024;
 
 /// Most zip entries looked at while validating a written package.
-const MAX_ENTRIES: usize = 200_000;
+pub(super) const MAX_ENTRIES: usize = 200_000;
 
-/// Decompressed bytes that comparing one package's relationship kinds may read in total: the
-/// relationship parts themselves and the targets whose content is checked.
-const RELATIONSHIP_BUDGET: u64 = 512 * 1024 * 1024;
-
-/// Relationship kinds (lower case) whose absence after a save isn't a loss: the calculation chain is
-/// a cache Excel rebuilds, and GridCraft never writes it.
-pub(super) const REBUILT_KINDS: [&str; 1] = ["calcchain"];
+/// The zip package `bytes` is, when it is one from its first byte (a local file header). The zip
+/// reader also finds an archive stored inside another file (an `.xls` that embeds an `.xlsx` as an
+/// OLE object), which says nothing about the file itself.
+pub(super) fn zip_package(bytes: &[u8]) -> Option<zip::ZipArchive<Cursor<&[u8]>>> {
+    if !bytes.starts_with(b"PK\x03\x04") {
+        return None;
+    }
+    zip::ZipArchive::new(Cursor::new(bytes)).ok()
+}
 
 // ---------------------------------------------------------------- package validation
 
-fn local_name(name: &[u8]) -> &[u8] {
+pub(super) fn local_name(name: &[u8]) -> &[u8] {
     match name.iter().rposition(|&b| b == b':') {
         Some(i) => name.get(i + 1..).unwrap_or(name),
         None => name,
@@ -26,7 +28,7 @@ fn local_name(name: &[u8]) -> &[u8] {
 /// `(element local name, attributes)` for every start/empty element of an XML part.
 type XmlElement = (String, Vec<(String, String)>);
 
-fn xml_elements(xml: &[u8]) -> Result<Vec<XmlElement>, String> {
+pub(super) fn xml_elements(xml: &[u8]) -> Result<Vec<XmlElement>, String> {
     use quick_xml::events::Event;
     let mut reader = quick_xml::Reader::from_reader(xml);
     let mut buf = Vec::new();
@@ -57,12 +59,12 @@ fn xml_elements(xml: &[u8]) -> Result<Vec<XmlElement>, String> {
     Ok(out)
 }
 
-fn attr<'a>(attrs: &'a [(String, String)], k: &str) -> Option<&'a str> {
+pub(super) fn attr<'a>(attrs: &'a [(String, String)], k: &str) -> Option<&'a str> {
     attrs.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str())
 }
 
 /// Lower-cased part name without a leading slash: OPC part names compare case-insensitively.
-fn part_key(name: &str) -> String {
+pub(super) fn part_key(name: &str) -> String {
     name.trim_start_matches('/').to_ascii_lowercase()
 }
 
@@ -88,7 +90,7 @@ fn percent_decode(s: &str) -> String {
 }
 
 /// Resolves a relationship target against the source part's directory.
-fn resolve_target(source_dir: &str, target: &str) -> String {
+pub(super) fn resolve_target(source_dir: &str, target: &str) -> String {
     let target = percent_decode(target.split('#').next().unwrap_or(target));
     let joined = match target.strip_prefix('/') {
         Some(abs) => abs.to_string(),
@@ -108,35 +110,36 @@ fn resolve_target(source_dir: &str, target: &str) -> String {
     parts.join("/")
 }
 
-type Zip<'a> = zip::ZipArchive<Cursor<&'a [u8]>>;
+pub(super) type Zip<'a> = zip::ZipArchive<Cursor<&'a [u8]>>;
 
-fn zip_names(zip: &mut Zip<'_>) -> Vec<String> {
+pub(super) fn zip_names(zip: &mut Zip<'_>) -> Vec<String> {
     (0..zip.len().min(MAX_ENTRIES)).filter_map(|i| zip.by_index_raw(i).ok().filter(|f| !f.is_dir()).map(|f| f.name().to_string())).collect()
 }
 
-fn read_zip_part(zip: &mut Zip<'_>, name: &str) -> Result<Vec<u8>, String> {
+pub(super) fn read_zip_part(zip: &mut Zip<'_>, name: &str) -> Result<Vec<u8>, String> {
     let f = zip.by_name(name).map_err(|e| format!("{name}: {e}"))?;
     let mut buf = Vec::new();
     f.take(MAX_XML_PART).read_to_end(&mut buf).map_err(|e| format!("{name}: {e}"))?;
     Ok(buf)
 }
 
-enum PartError {
+pub(super) enum PartError {
     /// Reading the part would spend more than the remaining budget.
     OverBudget,
     Unreadable,
 }
 
-/// Reads a part like [`read_zip_part`], charging the decompressed bytes to `budget`.
-fn read_zip_part_within(zip: &mut Zip<'_>, name: &str, budget: &mut u64) -> Result<Vec<u8>, PartError> {
+/// Reads a part like [`read_zip_part`], charging the decompressed bytes to `budget`. A part larger
+/// than the budget left or than [`MAX_XML_PART`] isn't returned cut short: it is `OverBudget`.
+pub(super) fn read_zip_part_within(zip: &mut Zip<'_>, name: &str, budget: &mut u64) -> Result<Vec<u8>, PartError> {
     let f = zip.by_name(name).map_err(|_| PartError::Unreadable)?;
-    // One byte past what is left shows that the part doesn't fit.
-    let limit = MAX_XML_PART.min(budget.saturating_add(1));
+    // One byte past what is allowed shows that the part doesn't fit.
+    let allowed = MAX_XML_PART.min(*budget);
     let mut buf = Vec::new();
     // Bytes read before a decompression error still count against the budget.
-    let res = f.take(limit).read_to_end(&mut buf);
+    let res = f.take(allowed.saturating_add(1)).read_to_end(&mut buf);
     let read = buf.len() as u64;
-    if read > *budget {
+    if read > allowed {
         *budget = 0;
         return Err(PartError::OverBudget);
     }
@@ -145,15 +148,13 @@ fn read_zip_part_within(zip: &mut Zip<'_>, name: &str, budget: &mut u64) -> Resu
     Ok(buf)
 }
 
-/// Whether the producer flagged its cached results as stale with `<calcPr fullCalcOnLoad="1">`:
-/// libraries that don't calculate write it, and store 0 or nothing as every formula's value.
-pub(super) fn full_calc_on_load(bytes: &[u8]) -> bool {
-    let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(bytes)) else { return false };
-    let names = zip_names(&mut zip);
+/// The zip entry holding the workbook part: the target of the package's `officeDocument`
+/// relationship, `xl/workbook.xml` when the package doesn't say.
+pub(super) fn workbook_entry(zip: &mut Zip<'_>, names: &[String]) -> Option<String> {
     let find = |key: &str| names.iter().find(|n| part_key(n) == key).cloned();
     let mut workbook = "xl/workbook.xml".to_string();
     if let Some(rels) = find("_rels/.rels")
-        && let Ok(xml) = read_zip_part(&mut zip, &rels)
+        && let Ok(xml) = read_zip_part(zip, &rels)
         && let Ok(els) = xml_elements(&xml)
         && let Some(target) = els
             .iter()
@@ -162,13 +163,38 @@ pub(super) fn full_calc_on_load(bytes: &[u8]) -> bool {
     {
         workbook = resolve_target("", target);
     }
-    let Some(name) = find(&part_key(&workbook)) else { return false };
-    let Ok(xml) = read_zip_part(&mut zip, &name) else { return false };
-    xml_elements(&xml)
-        .ok()
-        .into_iter()
-        .flatten()
-        .any(|(e, a)| e == "calcPr" && attr(&a, "fullCalcOnLoad").is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true")))
+    find(&part_key(&workbook))
+}
+
+/// An XML Schema boolean (`1`/`0`/`true`/`false`); `None` for anything else.
+fn xsd_bool(v: &str) -> Option<bool> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" => Some(true),
+        "0" | "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// What the workbook part's `<calcPr>` says about how the producer calculated, read from the
+/// package itself (the importer keeps only part of it). A package without `<calcPr>`, or one that
+/// can't be read, has the defaults: automatic calculation, completed.
+pub(super) fn calc_props(bytes: &[u8]) -> CalcProps {
+    let mut props = CalcProps::default();
+    let Some(mut zip) = zip_package(bytes) else { return props };
+    let names = zip_names(&mut zip);
+    let Some(name) = workbook_entry(&mut zip, &names) else { return props };
+    let Ok(xml) = read_zip_part(&mut zip, &name) else { return props };
+    let Some((_, a)) = xml_elements(&xml).ok().into_iter().flatten().find(|(e, _)| e == "calcPr") else { return props };
+    props.mode = match attr(&a, "calcMode").map(|m| m.trim().to_ascii_lowercase()).as_deref() {
+        Some("manual") => CalcMode::Manual,
+        Some("autonotable") => CalcMode::AutoNoTable,
+        _ => CalcMode::Auto,
+    };
+    props.completed = attr(&a, "calcCompleted").and_then(xsd_bool);
+    props.full_calc_on_load = attr(&a, "fullCalcOnLoad").and_then(xsd_bool).unwrap_or(false);
+    props.iterate = attr(&a, "iterate").and_then(xsd_bool).unwrap_or(false);
+    props.calc_id = attr(&a, "calcId").and_then(|v| v.trim().parse().ok());
+    props
 }
 
 /// Problems Excel would repair in a written package: parts without a content type, content-type
@@ -245,6 +271,11 @@ pub fn validate_package(bytes: &[u8]) -> Result<Vec<String>, String> {
                 continue;
             }
             let target = attr(&attrs, "Target").unwrap_or("");
+            // A target that is only a fragment (`#Sheet1!A1`, how Excel links a shape or picture to a
+            // cell) resolves, by RFC 3986, to the source part itself: no other part can be missing.
+            if target.starts_with('#') {
+                continue;
+            }
             let resolved = resolve_target(src_dir, target);
             if !parts.contains(&resolved.to_ascii_lowercase()) {
                 let kind = attr(&attrs, "Type").and_then(|t| t.rsplit('/').next()).unwrap_or("?");
@@ -255,66 +286,21 @@ pub fn validate_package(bytes: &[u8]) -> Result<Vec<String>, String> {
     Ok(issues)
 }
 
-/// Every relationship kind (last segment of the type, the same in the transitional and strict
-/// namespaces) in the package's relationship parts, keyed in lower case. Relationships that carry
-/// nothing are left out, as a save may rightly drop them: a link to a place in the workbook
-/// (`#Sheet1!A1`, written as a cell's `location`) and a target part with nothing in it.
-pub(super) fn relationship_kinds(bytes: &[u8]) -> Result<BTreeMap<String, String>, String> {
-    relationship_kinds_within(bytes, RELATIONSHIP_BUDGET)
-}
-
-/// [`relationship_kinds`] reading at most `budget` decompressed bytes. `Err` once the relationship
-/// parts alone need more: their kinds can't be listed completely.
-fn relationship_kinds_within(bytes: &[u8], mut budget: u64) -> Result<BTreeMap<String, String>, String> {
-    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("not a zip package: {e}"))?;
-    let names = zip_names(&mut zip);
-    let by_key: HashMap<String, &String> = names.iter().map(|n| (part_key(n), n)).collect();
-    // Several relationships name the same part; each fresh check decompressed it again, so
-    // repeated references to one highly compressible part multiplied the work. The verdict is
-    // remembered per (part, named content) and the decompression the package can cause is
-    // budgeted as a whole, the relationship parts included: many large, unreferenced rels parts
-    // would otherwise each spend a full per-part allowance.
-    let mut verdicts: HashMap<(String, &'static str), bool> = HashMap::new();
-    let mut kinds = BTreeMap::new();
-    for n in names.iter().filter(|n| part_key(n).ends_with(".rels")) {
-        let Some(src_dir) = rels_source_dir(&part_key(n)) else { continue };
-        let xml = match read_zip_part_within(&mut zip, n, &mut budget) {
-            Ok(xml) => xml,
-            Err(PartError::OverBudget) => return Err(format!("{n}: relationship check stopped at its decompression limit")),
-            Err(PartError::Unreadable) => continue,
-        };
-        let Ok(els) = xml_elements(&xml) else { continue };
-        for (_, attrs) in els.iter().filter(|(el, _)| el == "Relationship") {
-            let Some(kind) = attr(attrs, "Type").and_then(|t| t.rsplit('/').next()) else { continue };
-            let target = attr(attrs, "Target").unwrap_or("");
-            if kind.eq_ignore_ascii_case("hyperlink") && target.starts_with('#') {
-                continue;
-            }
-            let external = attr(attrs, "TargetMode").is_some_and(|m| m.eq_ignore_ascii_case("External"));
-            if !external
-                && let Some(part) = by_key.get(&resolve_target(&src_dir, target).to_ascii_lowercase())
-                && !holds_something(&mut zip, part, kind, &mut verdicts, &mut budget)
-            {
-                continue;
-            }
-            kinds.entry(kind.to_ascii_lowercase()).or_insert_with(|| kind.to_string());
-        }
-    }
-    Ok(kinds)
-}
-
-/// The directory of the part a rels part describes: `xl` for `xl/_rels/workbook.xml.rels`, the
-/// empty string for the package's `_rels/.rels`.
-fn rels_source_dir(key: &str) -> Option<String> {
-    let (dir, _) = key.strip_suffix(".rels")?.rsplit_once('/')?;
-    Some(dir.strip_suffix("_rels")?.trim_end_matches('/').to_string())
-}
-
 /// Whether a part has content: an element under its root, or for comments (whose authors list
-/// comes first) a comment, for VML a shape. Read only as far as needed; an unreadable part counts.
+/// comes first) a comment, for VML a shape. A part that isn't XML (printer settings, a VBA
+/// project, a thumbnail) is binary content, and an empty one holds nothing. Read only as far as
+/// needed; an unreadable part counts.
 /// `verdicts` remembers the answer per (part, named content); `budget` is the decompression this
-/// package's remaining checks may cause, and once it is spent the part counts as having content.
-fn holds_something(zip: &mut Zip<'_>, name: &str, kind: &str, verdicts: &mut HashMap<(String, &'static str), bool>, budget: &mut u64) -> bool {
+/// package's remaining checks may cause, and what the check reads is charged to it. `None` when the
+/// answer lies past what the budget (or the largest part read) allows: what the part holds is
+/// unknown, which is neither holding something nor holding nothing.
+pub(super) fn holds_something(
+    zip: &mut Zip<'_>,
+    name: &str,
+    kind: &str,
+    verdicts: &mut HashMap<(String, &'static str), bool>,
+    budget: &mut u64,
+) -> Option<bool> {
     let wanted: Option<&'static [u8]> = match kind.to_ascii_lowercase().as_str() {
         "comments" => Some(b"comment"),
         "vmldrawing" => Some(b"shape"),
@@ -326,22 +312,49 @@ fn holds_something(zip: &mut Zip<'_>, name: &str, kind: &str, verdicts: &mut Has
         None => "any",
     };
     if let Some(v) = verdicts.get(&(name.to_ascii_lowercase(), marker)) {
-        return *v;
+        return Some(*v);
     }
-    let v = holds_something_uncached(zip, name, marker, budget);
+    let v = holds_something_uncached(zip, name, marker, budget)?;
     verdicts.insert((name.to_ascii_lowercase(), marker), v);
-    v
+    Some(v)
 }
 
-fn holds_something_uncached(zip: &mut Zip<'_>, name: &str, marker: &'static str, budget: &mut u64) -> bool {
+fn holds_something_uncached(zip: &mut Zip<'_>, name: &str, marker: &'static str, budget: &mut u64) -> Option<bool> {
+    let Ok(f) = zip.by_name(name) else { return Some(true) };
+    // The directory says the part has no bytes: it is empty, whatever its (possibly missing)
+    // compressed stream looks like. Some producers write an empty file as a deflate entry with no
+    // stream at all, which can't be decoded and must not be mistaken for an unreadable part.
+    if f.size() == 0 {
+        return Some(false);
+    }
+    // One byte past what is allowed shows that the answer isn't within it. Only what the scan
+    // reads is charged, not the size of the part: it stops at the first element that decides.
+    let allowed = MAX_XML_PART.min(*budget);
+    let mut window = f.take(allowed.saturating_add(1));
+    let holds = has_content(std::io::BufReader::new(&mut window), marker);
+    let read = allowed.saturating_add(1) - window.limit();
+    if read > allowed {
+        *budget = 0;
+        return None;
+    }
+    *budget -= read;
+    Some(holds)
+}
+
+/// [`holds_something`] on the bytes of the part: `marker` names the content wanted (`comment`,
+/// `shape`), any element under the root otherwise.
+fn has_content(mut input: impl std::io::BufRead, marker: &str) -> bool {
     use quick_xml::events::Event;
-    let Ok(f) = zip.by_name(name) else { return true };
-    if *budget == 0 {
+    // XML starts with `<` (after a byte order mark and white space). Whatever else it starts
+    // with is not XML, and parsing its bytes as XML would decide by chance.
+    let head = input.fill_buf().unwrap_or_default();
+    let head = head.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(head);
+    if let Some(first) = head.iter().find(|b| !b.is_ascii_whitespace())
+        && *first != b'<'
+    {
         return true;
     }
-    let take = f.size().min(MAX_XML_PART).min(*budget);
-    *budget -= take;
-    let mut reader = quick_xml::Reader::from_reader(std::io::BufReader::new(f.take(take)));
+    let mut reader = quick_xml::Reader::from_reader(input);
     let wanted: Option<&'static [u8]> = match marker {
         "comment" => Some(b"comment"),
         "shape" => Some(b"shape"),
@@ -366,38 +379,5 @@ fn holds_something_uncached(zip: &mut Zip<'_>, name: &str, marker: &'static str,
             Err(_) => return true,
         }
         buf.clear();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::io::Write as _;
-
-    use super::*;
-
-    /// A package with `count` relationship parts of `size` bytes each, none of them describing an
-    /// existing part.
-    fn many_rels(count: usize, size: usize) -> Vec<u8> {
-        let mut z = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-        let head = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/custom" Target="https://example.com" TargetMode="External"/>"#;
-        let tail = "</Relationships>";
-        let filler = " ".repeat(size.saturating_sub(head.len() + tail.len()));
-        for i in 0..count {
-            z.start_file(format!("xl/_rels/part{i}.xml.rels"), opts).unwrap();
-            z.write_all(head.as_bytes()).unwrap();
-            z.write_all(filler.as_bytes()).unwrap();
-            z.write_all(tail.as_bytes()).unwrap();
-        }
-        z.finish().unwrap().into_inner()
-    }
-
-    #[test]
-    fn relationship_parts_count_against_the_decompression_budget() {
-        // Each part fits the per-part allowance, but together they need more than the budget.
-        let bytes = many_rels(8, 64 * 1024);
-        assert!(relationship_kinds_within(&bytes, 256 * 1024).is_err());
-        let kinds = relationship_kinds_within(&bytes, 1024 * 1024).unwrap();
-        assert_eq!(kinds.get("custom").map(String::as_str), Some("custom"));
     }
 }

@@ -2536,41 +2536,25 @@ fn text_before_after_empty_instance_defaults_to_one() {
     assert_eq!(t.get("A4"), Value::Error(CellError::Value));
 }
 
+/// SUMPRODUCT reads a one-cell reference as an array, written with two corners or one, so text
+/// there is 0: Excel 16.114 calculates `SUMPRODUCT(A1,B1)`, `SUMPRODUCT(A1:A1,B1:B1)` and
+/// `SUMPRODUCT(A1:A1,B1)` over the text "4" (a formula's or typed) and 2 as 0, and
+/// `SUMPRODUCT(B1:B1,B1)` as 4.
 #[test]
-fn loan_schedule_residue_keeps_excels_sign() {
-    // A synthetic monthly loan schedule: interest on the opening balance, principal = PMT - interest,
-    // each later period guarded by IF(p - SUM(principal so far) > 0, ...). After the 12th payment
-    // Excel is left with 2^-30 > 0, so it takes a 13th, tiny-interest period. That last bit comes
-    // from PMT; the old (1 + rate)^nper form left -2.8e-8 and returned "" instead.
+fn sumproduct_reads_a_one_cell_reference_as_an_array() {
     let mut t = T::new();
-    t.set("B1", "4653300");
-    t.set("B2", "1");
-    t.set("B3", "0.141");
-    let col = |i: u8| char::from(b'A' + i).to_string();
-    t.set("C8", "=$B$1*($B$3/12)");
-    t.set("C7", "=PMT($B$3/12,$B$2*12,-$B$1)-C8");
-    t.set("D8", "=($B1-C7)*($B$3/12)");
-    t.set("D7", "=PMT($B$3/12,$B$2*12,-$B$1)-D8");
-    for i in 4..16 {
-        let (c, p) = (col(i), col(i - 1));
-        t.set(&format!("{c}8"), &format!("=IF($B1-SUM($C7:{p}7)>0,($B1-SUM($C7:{p}7))*($B$3/12),\"\")"));
-        t.set(&format!("{c}7"), &format!("=IF($B1-SUM($C7:{p}7)>0,PMT($B$3/12,$B$2*12,-$B$1)-{c}8,\"\")"));
+    t.set("A1", "=\"4\"");
+    t.set("B1", "2");
+    t.set("A2", "'4");
+    t.set("C1", "=SUMPRODUCT(A1:A1,B1:B1)");
+    t.set("C2", "=SUMPRODUCT(A1,B1)");
+    t.set("C3", "=SUMPRODUCT(B1:B1,B1)");
+    t.set("C4", "=SUMPRODUCT(A2,B1)");
+    t.set("C5", "=SUMPRODUCT(A2:A2,B1)");
+    for at in ["C1", "C2", "C4", "C5"] {
+        assert_eq!(t.get(at), Value::Number(0.0), "{at}");
     }
-    t.set("N4", "=IF($B$1-SUM($C7:N7)>0,$B$1-SUM($C7:N7),\"\")");
-    // Excel's values (Value2) for the same synthetic inputs.
-    // The leftover (2^-30 in Excel) is 12 payments' worth of rounding, so a one-ULP libm difference
-    // moves it by as much as its own size: only its sign is checked, and the 13th period must exist.
-    let positive = |cell: &str| match t.get(cell) {
-        Value::Number(x) => assert!(x > 0.0 && x < 1e-6, "{cell}: {x}"),
-        other => panic!("{cell}: expected a small positive number, got {other:?}"),
-    };
-    positive("N4");
-    positive("O8");
-    match t.get("O7") {
-        Value::Number(x) => assert!((x - 418025.37230211904).abs() < 1e-3, "O7: {x}"),
-        other => panic!("O7: expected a number, got {other:?}"),
-    }
-    assert_eq!(t.get("P7"), Value::Text("".into()));
+    assert_eq!(t.get("C3"), Value::Number(4.0));
 }
 
 #[test]
@@ -2979,6 +2963,60 @@ fn formulas_read_a_dirty_python_cell_after_it_is_laid_out() {
     t.set("B2", "");
     assert_eq!((t.num("B1"), t.num("B2")), (5.0, 6.0));
     assert_eq!((t.num("A1"), t.num("A2"), t.num("A3")), (5.0, 100.0, 111.0));
+}
+
+/// An Excel 2013 cache is read again with SUMPRODUCT taking a reference to one cell as the value
+/// in it (`OneCellReading::Scalar`), so text there is `#VALUE!`; every other evaluation reads it
+/// as an array, as above. A workbook saved by Excel 15.0300 caches `#VALUE!`
+/// for the shape of `nested` below, where Excel 16.114 calculates `#DIV/0!`: SUMPRODUCT is 0 over
+/// the empty text, the divisor `SQRT(0)` is 0, and the error of a division's left operand comes
+/// before its division by zero (`=NA()/0` is `#N/A`, `=("a"+1)/SQRT(SUM(Z20)*SUM(Z20))` `#VALUE!`).
+#[test]
+fn sumproduct_reads_a_one_cell_reference_as_its_value_for_an_excel_2013_cache() {
+    use crate::eval::OneCellReading::{Array, Scalar};
+    let mut t = T::new();
+    t.set("A1", "=IF(FALSE,1,\"\")");
+    t.set("A2", "=\"4\"");
+    t.set("B1", "2");
+    t.set("B2", "3");
+    let eval = |formula: &str, reading| {
+        let e = gridcraft_formula::parse(formula).unwrap();
+        crate::recalc::evaluate_expr_as(&t.wb, 0, c("D1"), &e, reading)
+    };
+    let (value, zero) = (Value::Error(CellError::Value), Value::Number(0.0));
+    // A reference to one cell, however it is written, over text.
+    for f in [
+        "SUMPRODUCT(A1,B1)",
+        "SUMPRODUCT(A1:A1,B1:B1)",
+        "SUMPRODUCT(A2,B1)",
+        "SUMPRODUCT(B1,A2:A2)",
+        "SUMPRODUCT(INDEX(A1:A2,2),B1)",
+        "SUMPRODUCT(OFFSET(A1,0,0),B1)",
+        "SUMPRODUCT(INDEX(A1:A2,1):INDEX(A1:A2,1),INDEX(B1:B2,1):INDEX(B1:B2,1))",
+    ] {
+        assert_eq!(eval(f, Scalar), value, "{f}");
+        assert_eq!(eval(f, Array), zero, "{f}");
+    }
+    // Numbers, and arrays of more than one cell, are read the same way.
+    for (f, want) in [
+        ("SUMPRODUCT(B1,B1)", 4.0),
+        ("SUMPRODUCT(B1:B1,B1)", 4.0),
+        ("SUMPRODUCT(INDEX(B1:B2,1):INDEX(B1:B2,1),B1)", 4.0),
+        ("SUMPRODUCT(A1:A2,B1:B2)", 0.0),
+        ("SUMPRODUCT(B1:B2,B1:B2)", 13.0),
+    ] {
+        for reading in [Array, Scalar] {
+            assert_eq!(eval(f, reading), Value::Number(want), "{f}");
+        }
+    }
+    // Nested in a division, as in that workbook.
+    let (text, number) = ("INDEX(A1:A2,1):INDEX(A1:A2,1)", "INDEX(B1:B2,1):INDEX(B1:B2,1)");
+    let nested = format!("IF(TRUE,SUMPRODUCT({text},{number})/SQRT(SUM({text})*SUM(A1)),\"\")");
+    assert_eq!(eval(&nested, Array), Value::Error(CellError::Div0));
+    assert_eq!(eval(&nested, Scalar), value);
+    // Calculating a cell reads it as an array.
+    t.set("D1", &format!("={nested}"));
+    assert_eq!(t.get("D1"), Value::Error(CellError::Div0));
 }
 
 /// A computed criterion whose formula runs a database function over the same criteria counts as

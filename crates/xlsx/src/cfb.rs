@@ -327,6 +327,13 @@ impl<'a> Compound<'a> {
     }
 }
 
+/// The stream called `name` (case-insensitive) directly under the root storage of the compound
+/// file `bytes` (an `.xls`: `Workbook`, `\u{5}SummaryInformation`…), or `None` when the file isn't
+/// a readable compound file or has no such stream.
+pub fn compound_root_stream(bytes: &[u8], name: &str) -> Option<Vec<u8>> {
+    Compound::open(bytes).ok()?.root_stream(name).ok().flatten()
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -413,6 +420,14 @@ pub(crate) mod tests {
         // Bytes the stream needs that the file doesn't hold are still damage.
         let cf = Compound::open(&file[..file.len() - 1]).unwrap();
         assert!(cf.root_stream("Workbook").is_err());
+    }
+
+    #[test]
+    fn a_root_stream_is_read_by_name_from_the_file() {
+        let file = crate::testing::compound_file(&[("Workbook", b"biff"), ("\u{5}SummaryInformation", b"props")]);
+        assert_eq!(compound_root_stream(&file, "\u{5}summaryinformation").as_deref(), Some(&b"props"[..]));
+        assert_eq!(compound_root_stream(&file, "Book"), None);
+        assert_eq!(compound_root_stream(b"not a compound file", "Workbook"), None);
     }
 
     #[test]

@@ -216,7 +216,7 @@ pub(super) fn range_set_values(s: &mut Session, p: &Json) -> Result<Json> {
     let start = target_range(s, p)?.start;
     let Some(rows) = p.get("values").and_then(Json::as_array) else { return Err(bad("range.setValues", "missing `values` (array of rows)")) };
     // A string is run through typed input by default, which reads it with en-US rules: a caller
-    // sending "05.04.2026" from a dd.mm.yyyy export got 4 May, and "2.500" became 2.5, in silence
+    // sending "05/04/2026" from a dd/mm/yyyy export got 4 May, and "2.500" became 2.5, in silence
     // (#2255). `parse: false` stores a string as the text it is; numbers, booleans and formulas
     // are unaffected either way.
     let parse = match p.get("parse") {
@@ -229,7 +229,7 @@ pub(super) fn range_set_values(s: &mut Session, p: &Json) -> Result<Json> {
     }
     let mut count = 0;
     // The strings typed input read as something other than the text given, for the result: a
-    // caller can notice a "05.04.2026" that became a date without reading the file back (#2255).
+    // caller can notice a "05/04/2026" that became a date without reading the file back (#2255).
     let mut converted: Vec<(CellRef, String)> = Vec::new();
     let mut converted_count = 0;
     edit(s, |cx| {

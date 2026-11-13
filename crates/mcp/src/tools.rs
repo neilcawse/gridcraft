@@ -196,7 +196,7 @@ fn base_tool_definitions() -> Vec<Value> {
                 json!({
                     "range": string("Top-left cell or range, e.g. \"A1\" or \"Sheet2!B3\""),
                     "values": {"type": "array", "description": "Rows of cell values", "items": {"type": "array", "items": {"type": ["string", "number", "boolean", "null"]}}},
-                    "parse": boolean("Read strings not starting with = like typed input, so \"05.04.2026\" becomes a date (default true); false stores them as the text they are, and \"\" clears the cell"),
+                    "parse": boolean("Read strings not starting with = like typed input, so \"05/04/2026\" becomes a date (default true); false stores them as the text they are, and \"\" clears the cell"),
                 }),
                 &["range", "values"],
             ),

@@ -34,7 +34,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 - **Estimate:** 25–40 h. [target-app-parity.md](target-app-parity.md#performance), [hardware-parity.md](hardware-parity.md)
 
 ### 3. Some unmodelled XLSX content is dropped on save (FF)
-- **Missing:** slicers and their caches, timelines, unmodelled `extLst` entries (among them x14
+- **Missing:** slicers on an OLAP source, timelines, unmodelled `extLst` entries (among them x14
   data bar settings beyond a solid fill, icon sets, colour scales and the text rules
   containsText, notContainsText, beginsWith and endsWith), chart details. Pass-through (#330) is
   a deny-list: every part GridCraft does not rebuild is written back byte for byte, with its
@@ -44,9 +44,10 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
   sheets and Excel 4.0 macro sheets, the shapes of legacy VML drawings that are not notes,
   custom sheet views, the picture fills of the theme, the document properties it does not
   model). Value metadata it does not model (rich errors, linked data types, cube members) is
-  kept with the cells that carry it while they hold the same value.
+  kept with the cells that carry it while they hold the same value; x14-only colour-scale,
+  data-bar and icon-set rules with cross-sheet `cfvo` are
 - **Evidence:** `crates/xlsx/src/passthrough.rs` (what is kept, and why the rest isn't).
-- **Impact:** open-edit-save still simplifies workbooks with slicers or timelines.
+- **Impact:** open-edit-save still simplifies workbooks with OLAP slicers or timelines.
 - **Estimate:** 6–10 h. [file-format-parity.md](file-format-parity.md)
 
 ### 4. Charts lose options on round trip; shallow chart model (F, FF)
