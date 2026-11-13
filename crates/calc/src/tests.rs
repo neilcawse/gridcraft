@@ -146,6 +146,32 @@ fn xlookup_returns_a_reference() {
     assert_eq!(t.num("D9"), 2.0);
 }
 
+/// CELL's `info_type` is read in the language of the locale in effect: French Excel takes
+/// `"adresse"` (poi StringContinueRecords.xls caches `$AV$3` for it), English gives `#VALUE!`.
+#[test]
+fn cell_info_type_is_read_in_the_language_of_the_locale() {
+    use gridcraft_core::locale::{FR_FR, scoped};
+    fn at(t: &mut T, formula: &str) -> Value {
+        t.set("D1", formula);
+        t.get("D1")
+    }
+    let mut t = T::new();
+    t.set("B3", "x");
+    assert_eq!(at(&mut t, "=CELL(\"address\",B3)"), Value::from("$B$3"));
+    assert_eq!(at(&mut t, "=CELL(\"adresse\",B3)"), Value::Error(CellError::Value));
+    scoped(&FR_FR, || {
+        assert_eq!(at(&mut t, "=CELL(\"adresse\",B3)"), Value::from("$B$3"));
+        assert_eq!(at(&mut t, "=CELL(\"ADRESSE\",B3)"), Value::from("$B$3"));
+        assert_eq!(at(&mut t, "=CELL(\"ligne\",B3)"), Value::Number(3.0));
+        assert_eq!(at(&mut t, "=CELL(\"col\",B3)"), Value::Number(2.0));
+        assert_eq!(at(&mut t, "=CELL(\"contenu\",B3)"), Value::from("x"));
+        assert_eq!(at(&mut t, "=CELL(\"type\",B3)"), Value::from("l"));
+        // Only the spellings of Microsoft's French page: not the English ones, not `colonne`.
+        assert_eq!(at(&mut t, "=CELL(\"address\",B3)"), Value::Error(CellError::Value));
+        assert_eq!(at(&mut t, "=CELL(\"colonne\",B3)"), Value::Error(CellError::Value));
+    });
+}
+
 #[test]
 fn long_chain() {
     let mut t = T::new();
@@ -366,6 +392,80 @@ fn iterative_calculation_of_text_and_errors() {
     assert_eq!(t.get("A1"), Value::from("go"));
     t.set("B1", "=B1+1/0");
     assert_eq!(t.get("B1"), Value::Error(CellError::Div0));
+}
+
+impl T {
+    /// Sets a cell with a number format.
+    fn set_formatted(&mut self, at: &str, input: &str, code: &str) {
+        let style = self.wb.styles.intern(gridcraft_model::Style { num_fmt: gridcraft_model::NumFmt::new(code), ..Default::default() });
+        let cell = if input.starts_with('=') {
+            Cell { style, ..Cell::formula(Formula::new(input)) }
+        } else {
+            Cell { style, ..Cell::value(gridcraft_core::parse::parse_input(input, self.wb.date_system).value) }
+        };
+        self.wb.sheet_mut(0).unwrap().cells.set(c(at), cell);
+        self.calc.cells_changed(&mut self.wb, &[(0, c(at))]);
+    }
+}
+
+/// Excel with "Set precision as displayed" (`calcPr fullPrecision="0"`) stores a formula result as
+/// the number its format shows, and the formulas that read the cell get that number: `=D10*0.05`
+/// in a `#,##0` cell is 6872, not 6871.9, and what reads it is 6872 too. General, text, date and
+/// fraction formats keep the full value. Without the option nothing is rounded.
+#[test]
+fn precision_as_displayed_stores_what_the_format_shows() {
+    let build = |pad: bool| {
+        let mut t = T::new();
+        t.wb.calc.precision_as_displayed = pad;
+        t.set("A1", "4925");
+        t.set_formatted("B1", "=A1/12", "#,##0.00");
+        t.set("C1", "=B1*12");
+        t.set_formatted("D1", "=0.004/12*2+0.0035/12*10", "0.00%");
+        t.set_formatted("E1", "=D1*A1", "0");
+        t.set("F1", "=A1/7");
+        t.set_formatted("G1", "=A1/7", "0.0;(0.0)");
+        t.set_formatted("H1", "=-A1/7", "0.0;(0.0)");
+        t.set_formatted("I1", "=A1/7", "@");
+        t.set_formatted("J1", "=A1/7", "d/m/yyyy");
+        t
+    };
+    let on = build(true);
+    assert_eq!(on.get("B1"), Value::Number(410.42));
+    // Read in the same pass, whichever formula is calculated first.
+    assert_eq!(on.num("C1"), 410.42 * 12.0);
+    assert_eq!(on.get("D1"), Value::Number(0.0036));
+    assert_eq!(on.get("E1"), Value::Number(18.0));
+    assert_eq!(on.num("F1"), 4925.0 / 7.0);
+    assert_eq!((on.get("G1"), on.get("H1")), (Value::Number(703.6), Value::Number(-703.6)));
+    assert_eq!((on.num("I1"), on.num("J1")), (4925.0 / 7.0, 4925.0 / 7.0));
+    // A full recalculation gives the same, and an edit reaches the dependents rounded.
+    let mut on = on;
+    on.calc.recalc_all(&mut on.wb);
+    assert_eq!((on.num("B1"), on.num("C1")), (410.42, 410.42 * 12.0));
+    on.set("A1", "100");
+    assert_eq!((on.num("B1"), on.num("C1"), on.num("E1")), (8.33, 8.33 * 12.0, 0.0));
+    let off = build(false);
+    assert_eq!((off.num("B1"), off.num("C1")), (4925.0 / 12.0, 4925.0));
+    let d1 = 0.004 / 12.0 * 2.0 + 0.0035 / 12.0 * 10.0;
+    assert_eq!(off.num("E1"), d1 * 4925.0);
+}
+
+/// A dynamic array rounds each element by the format of the cell it spills into.
+#[test]
+fn precision_as_displayed_rounds_spilled_cells_by_their_own_format() {
+    let mut t = T::new();
+    t.wb.calc.precision_as_displayed = true;
+    let one = t.wb.styles.intern(gridcraft_model::Style { num_fmt: gridcraft_model::NumFmt::new("0.0"), ..Default::default() });
+    let none = t.wb.styles.intern(gridcraft_model::Style { num_fmt: gridcraft_model::NumFmt::new("0"), ..Default::default() });
+    {
+        let sh = t.wb.sheet_mut(0).unwrap();
+        sh.set_style(c("A2"), one);
+        sh.set_style(c("A3"), none);
+    }
+    t.set_formatted("A1", "=SEQUENCE(3)/3*10", "0.00");
+    assert_eq!((t.num("A1"), t.num("A2"), t.num("A3")), (3.33, 6.7, 10.0));
+    t.set("B1", "=SUM(A1#)");
+    assert_eq!(t.num("B1"), 3.33 + 6.7 + 10.0);
 }
 
 #[test]

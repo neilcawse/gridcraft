@@ -300,6 +300,143 @@ fn time_formats() {
     assert_eq!(f("mm:ss.00", 61.25 / 86400.0), "01:01.25");
 }
 
+/// Excel-authored poi ElapsedFormatTests.xlsx (a 1904 date system workbook), `TEXT(value, code)`
+/// over all 51 rows: `m` after `s` is minutes, an `h` or `ss` after `[h]` or `[s]` shows the
+/// elapsed total, and a negative value is its absolute value behind a minus sign at the very
+/// start. The 1900 date system has no negative time at all: `#VALUE!` (Excel 16.114, live).
+#[test]
+fn elapsed_time_codes_match_the_excel_fixture() {
+    const CODES: [&str; 10] = [
+        "[h]:m:s.000",
+        "[m]:s.000",
+        "[s].000",
+        "[hh]:mm:ss.0",
+        "[mm]:ss.0",
+        "[ss].000",
+        "s:m\" @ hour \"[hh]",
+        "s\" secs and \"[m]\" mins\"",
+        "\"It was \"[h]\" [yes, \"h\"] hours and \"mm:ss",
+        "[s]\" [yes, \"ss\"] seconds\"",
+    ];
+    let two_hours_three_minutes_four_seconds = 2.0 / 24.0 + 3.0 / (24.0 * 60.0) + 4.0 / (24.0 * 60.0 * 60.0);
+    let positive: [(f64, [&str; 10]); 3] = [
+        (
+            314159.0 / 100_000.0,
+            [
+                "75:23:53.376",
+                "4523:53.376",
+                "271433.376",
+                "75:23:53.4",
+                "4523:53.4",
+                "271433.376",
+                "53:23 @ hour 75",
+                "53 secs and 4523 mins",
+                "It was 75 [yes, 75] hours and 23:53",
+                "271433 [yes, 271433] seconds",
+            ],
+        ),
+        (
+            two_hours_three_minutes_four_seconds,
+            [
+                "2:3:4.000",
+                "123:4.000",
+                "7384.000",
+                "02:03:04.0",
+                "123:04.0",
+                "7384.000",
+                "4:3 @ hour 02",
+                "4 secs and 123 mins",
+                "It was 2 [yes, 2] hours and 03:04",
+                "7384 [yes, 7384] seconds",
+            ],
+        ),
+        (
+            0.0,
+            [
+                "0:0:0.000",
+                "0:0.000",
+                "0.000",
+                "00:00:00.0",
+                "00:00.0",
+                "00.000",
+                "0:0 @ hour 00",
+                "0 secs and 0 mins",
+                "It was 0 [yes, 0] hours and 00:00",
+                "0 [yes, 00] seconds",
+            ],
+        ),
+    ];
+    for (value, wants) in positive {
+        for (code, want) in CODES.iter().zip(wants) {
+            assert_eq!(text_function(&Value::Number(value), code, S), Ok(want.into()), "TEXT({value}, {code})");
+            if value != 0.0 {
+                let negative = text_function(&Value::Number(-value), code, DateSystem::D1904);
+                assert_eq!(negative, Ok(format!("-{want}")), "TEXT({}, {code}) in 1904", -value);
+                assert_eq!(text_function(&Value::Number(-value), code, S), Err(CellError::Value), "TEXT({}, {code})", -value);
+            }
+        }
+    }
+}
+
+#[test]
+fn minutes_after_seconds_and_negative_times() {
+    // `m` right after `s` is minutes, as it is after `h` and before `s`.
+    assert_eq!(f("s:m", 61.0 / 86400.0), "1:1");
+    assert_eq!(f("h:m", 3660.0 / 86400.0), "1:1");
+    assert_eq!(f("m:s", 61.0 / 86400.0), "1:1");
+    assert_eq!(f("m/d/yyyy", 46302.0), "10/7/2026");
+    // The 1900 date system has no date or time before day 0, elapsed or not (Excel 16.114, live).
+    assert_eq!(f("[h]:mm;[h]:mm", -0.5), "12:00");
+    for code in ["[h]:mm", "[m]:ss", "[s]", "h:mm", "[h]:mm d", "m/d/yyyy"] {
+        assert_eq!(f(code, -0.5), "########", "{code}");
+        assert_eq!(text_function(&Value::Number(-0.5), code, S), Err(CellError::Value), "{code}");
+    }
+    // The 1904 system shows any negative date or time as a minus sign and the absolute value.
+    let d1904 = |v: f64, code: &str| text_function(&Value::Number(v), code, DateSystem::D1904);
+    for (v, code, want) in [
+        (-0.5, "[h]:mm", "-12:00"),
+        (-1.5, "[m]:ss", "-2160:00"),
+        (-1.5, "[s]", "-129600"),
+        (-0.5, "h:mm", "-12:00"),
+        (-1.5, "m/d/yyyy", "-1/2/1904"),
+        (-1.5, "[h]:mm d", "-36:00 2"),
+        (-0.25, "hh:mm:ss AM/PM", "-06:00:00 AM"),
+        (-0.5, "[h]:mm;[h]:mm", "12:00"),
+    ] {
+        assert_eq!(d1904(v, code), Ok(want.into()), "TEXT({v}, {code}) in 1904");
+    }
+    let cell = format_value(&Value::Number(-0.5), &NumberFormat::parse("h:mm"), DateSystem::D1904).text;
+    assert_eq!(cell, "-12:00");
+}
+
+/// An `m` or `mm` after an elapsed `[m]` is the minute of the hour, not the elapsed total again
+/// (Excel 16.114, `TEXT(1+TIME(1,1,2), code)`).
+#[test]
+fn minutes_after_elapsed_minutes_are_the_minute_of_the_hour() {
+    let v = 1.0 + (3600.0 + 62.0) / 86400.0;
+    for (code, want) in
+        [("[mm]:mm:ss", "1501:01:02"), ("[m] m:ss", "1501 1:02"), ("[m] mm:ss", "1501 01:02"), ("[m]:ss m", "1501:02 1"), ("[m]:s mm", "1501:2 01")]
+    {
+        assert_eq!(text_function(&Value::Number(v), code, S), Ok(want.into()), "{code}");
+    }
+}
+
+/// ironcalc TEXT.xlsx DATES!G2:G24: a date or time code with digit placeholders (`mm###`) is
+/// refused by Excel, so `TEXT` gives `#VALUE!`; only the zeros of a fraction of a second belong
+/// to a time code.
+#[test]
+fn digit_placeholders_do_not_mix_with_date_parts() {
+    for code in ["mm###", "yyyy0", "0 d/m/yy", "h:mm ?", "dd/mm/yyyy;0 d"] {
+        assert_eq!(text_function(&Value::Number(41181.0), code, S), Err(CellError::Value), "{code}");
+        assert_eq!(text_function(&Value::from("abc"), code, S), Err(CellError::Value), "{code}");
+        assert_eq!(text_function(&Value::Error(CellError::NA), code, S), Err(CellError::NA), "{code}");
+    }
+    for (code, want) in [("mm:ss.00", "01:01.25"), ("[h]:mm:ss.000", "0:01:01.250"), ("m/d/yy;@", "9/29/12")] {
+        let v = if code.starts_with("m/d") { 41181.0 } else { 61.25 / 86400.0 };
+        assert_eq!(text_function(&Value::Number(v), code, S), Ok(want.into()), "{code}");
+    }
+}
+
 #[test]
 fn date_serial_boundaries() {
     assert_eq!(f("h:mm:ss", 0.5 + 59.6 / 86400.0), "12:01:00");
@@ -397,6 +534,10 @@ fn text_fn() {
     assert_eq!(text_function(&Value::Number(1.0 / 3.0), "0.000", S), Ok("0.333".into()));
     assert_eq!(text_function(&Value::Empty, "0.00", S), Ok("0.00".into()));
     assert_eq!(text_function(&Value::Number(5.0), "", S), Ok("".into()));
+    // No text section: text that is not a number comes back unchanged (Excel 15 caches
+    // `TEXT("L0001","")` as "L0001" in LibreOffice's tdf131536.xlsx).
+    assert_eq!(text_function(&Value::from("L0001"), "", S), Ok("L0001".into()));
+    assert_eq!(text_function(&Value::from("5"), "", S), Ok("".into()));
     assert_eq!(text_function(&Value::Number(-1.0), "m/d/yyyy", S), Err(CellError::Value));
     assert_eq!(text_function(&Value::Number(2957003.0), "m/d/yyyy", DateSystem::D1904), Ok("12/31/9999".into()));
     assert_eq!(text_function(&Value::Number(2957004.0), "m/d/yyyy", DateSystem::D1904), Err(CellError::Value));
@@ -418,6 +559,36 @@ fn text_fn() {
     for &(b, code, want) in cases {
         assert_eq!(text_function(&Value::Bool(b), code, S), Ok(want.into()), "{code} with {b}");
     }
+}
+
+/// `TEXT(x,"General")` keeps 11 characters for the digits and puts the minus sign on top (poi
+/// GeneralFormatTests.xlsx, ironcalc TEXT.xlsx NUMBERS!H7/H20), while a cell's General counts the
+/// sign in its width.
+#[test]
+fn text_general_width_excludes_the_sign() {
+    for (n, want) in [
+        (-1.0 / 3.0, "-0.333333333"),
+        (-1e-8, "-0.00000001"),
+        (1e-9, "0.000000001"),
+        (-1e-9, "-0.000000001"),
+        (-1.234567891, "-1.234567891"),
+        (-10000000000.0, "-10000000000"),
+        (-100000000000.0, "-1E+11"),
+        (-112345000000.0, "-1.12345E+11"),
+        (-1.12345e-10, "-1.12345E-10"),
+        (1.12345e-10, "1.12345E-10"),
+        (1e-10, "1E-10"),
+        (0.0, "0"),
+    ] {
+        assert_eq!(text_function(&Value::Number(n), "General", S), Ok(want.into()), "{n:e}");
+    }
+    // A General section is the same: the colour tag and literals around it don't change the width.
+    assert_eq!(text_function(&Value::Number(-1.0 / 3.0), "General;General", S), Ok("0.333333333".into()));
+    assert_eq!(text_function(&Value::Number(-1.0 / 3.0), "[Red]General", S), Ok("-0.333333333".into()));
+    // The cell display and the CSV writer are unchanged.
+    assert_eq!(f("General", -1.0 / 3.0), "-0.33333333");
+    assert_eq!(f("General", -1e-8), "-1E-08");
+    assert_eq!(f("General", -10000000000.0), "-1E+10");
 }
 
 /// Deterministic xorshift for fuzzing.
@@ -651,7 +822,10 @@ fn decimal_digits_keeps_fifteen_digits_and_truncates_a_tie() {
 /// `TEXT()` as it was before the cache: parse the code, then format.
 fn text_uncached(v: &Value, code: &str, sys: DateSystem) -> Result<String, CellError> {
     if code.is_empty() {
-        return Ok(String::new());
+        return Ok(match v.scalar() {
+            Value::Text(t) if gridcraft_core::parse::parse_number_text(&t).is_none() => t.to_string(),
+            _ => String::new(),
+        });
     }
     let fmt = NumberFormat::parse(code);
     let n = match v.scalar() {
@@ -668,7 +842,7 @@ fn text_uncached(v: &Value, code: &str, sys: DateSystem) -> Result<String, CellE
     if !n.is_finite() {
         return Err(CellError::Num);
     }
-    let (f, overflow) = fmt.format_number(n, sys);
+    let (f, overflow) = fmt.format_number(n, sys, GeneralStyle::Text);
     if overflow { Err(CellError::Value) } else { Ok(f.text) }
 }
 
@@ -895,6 +1069,35 @@ fn closed_brackets_still_hold_their_semicolons() {
     assert_eq!(parse::parse_sections("[unknown;x]0;0").len(), 2);
     assert_eq!(f("0\\[0", 5.0), "0[5");
     assert_eq!(f("\"[\"0;0", 5.0), "[5");
+}
+
+/// TEXT reads its code in the locale's syntax and writes the locale's separators and names, as the
+/// caches of Excel in those languages show (`0.0%` is `0` with a thousands separator in Italian).
+#[test]
+fn text_follows_the_locale_in_effect() {
+    use gridcraft_core::locale::{DE_DE, ES_ES, IT_IT, SV_SE, scoped};
+    let t = |v: f64, code: &str| text_function(&Value::Number(v), code, S);
+    scoped(&IT_IT, || {
+        assert_eq!(t(0.15, "0.0%"), Ok("15%".into()));
+        assert_eq!(t(0.155, "0,0%"), Ok("15,5%".into()));
+        assert_eq!(t(1234.5, "#.##0,00"), Ok("1.234,50".into()));
+        assert_eq!(t(1.5, "General"), Ok("1,5".into()));
+    });
+    scoped(&DE_DE, || {
+        assert_eq!(t(68.2, "00,00"), Ok("68,20".into()));
+        assert_eq!(t(67.1, "00.00"), Ok("0.067".into()));
+        assert_eq!(t(46085.0, "dddd d. mmmm yyyy"), Ok("Mittwoch 4. März 2026".into()));
+        // A quoted or escaped separator stays as written.
+        assert_eq!(t(2.5, "0,0\".\"\\,"), Ok("2,5.,".into()));
+    });
+    scoped(&ES_ES, || {
+        assert_eq!(t(45297.0, "mmmm"), Ok("enero".into()));
+        assert_eq!(t(45297.0, "mmm ddd"), Ok("ene sáb".into()));
+    });
+    scoped(&SV_SE, || assert_eq!(t(44926.0, "ÅÅÅÅ-MM-DD"), Ok("2022-12-31".into())));
+    // en-US is untouched: `Å` is a literal there.
+    assert_eq!(t(44926.0, "ÅÅÅÅ-MM-DD"), Ok("ÅÅÅÅ-12-31".into()));
+    assert_eq!(t(0.15, "0.0%"), Ok("15.0%".into()));
 }
 
 const JAN_1_2001: f64 = 36892.0;
@@ -1173,6 +1376,24 @@ fn round_as_displayed_matches_excel() {
         ("0.00;-0.00;\"zero\"", 0.001, 0.0),
         ("0.00_);(0.00)", 1.23456, 1.23),
         ("#,##0.0_);[Red](#,##0.0)", 2.345, 2.3),
+        // The digits shown decide: Excel rounds the 15 significant digits it keeps, half away from
+        // zero, so a tie that binary floating point misplaces (2.675) rounds as it displays.
+        ("0.00", 1000.8333333333, 1000.83),
+        ("0.00", 2.675, 2.68),
+        ("0.00", -2.675, -2.68),
+        ("0", 6871.900000000001, 6872.0),
+        ("#,##0", 27487.600000000002, 27488.0),
+        ("#,##0.0#", 410.9166666666667, 410.92),
+        ("0.000", 1.0005, 1.001),
+        ("0.00", 0.1 + 0.2, 0.3),
+        ("0.00", 410.92, 410.92),
+        ("0.00%", 0.0035833333333333333, 0.0036),
+        ("0%", 0.126, 0.13),
+        ("0;-0.0", -2.46, -2.5),
+        ("0.0E+0", 12345.0, 12000.0),
+        ("0.0E+0", 9.96, 10.0),
+        ("_(* #,##0.00_);_(* \\(#,##0.00\\);_(* \"-\"??_);_(@_)", 410.9166667, 410.92),
+        ("_(* #,##0.00_);_(* \\(#,##0.00\\);_(* \"-\"??_);_(@_)", -18.0166667, -18.02),
         // Kept at full precision.
         ("General", 1.0 / 3.0, 1.0 / 3.0),
         ("m/d/yyyy", 45000.75, 45000.75),
@@ -1236,6 +1457,8 @@ fn round_as_displayed_matches_excel() {
     }
     // A negative that rounds to zero stores 0, not -0.
     let z = r("0.00", -0.004);
+    assert!(z == 0.0 && z.is_sign_positive());
+    let z = r("0.00%", 0.00004);
     assert!(z == 0.0 && z.is_sign_positive());
     // Non-finite and extreme inputs come back unchanged or finite, never a panic.
     assert!(r("0.00", f64::NAN).is_nan());

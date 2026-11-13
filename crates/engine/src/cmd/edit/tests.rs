@@ -176,9 +176,11 @@ fn set_values_can_store_strings_as_the_text_they_are() {
     let row: Vec<Json> = strings.iter().map(|v| json!(v)).collect();
     let get = |s: &mut Session, a: &str| s.execute("cell.get", json!({"cell": a})).unwrap();
 
-    // The default is unchanged: the dates swap, the thousands separator is a decimal point.
+    // The default is unchanged: slash dates are month-first, the thousands separator is a decimal
+    // point. A dot is not a date separator in en-US, so "05.04.2026" stays text.
     s.execute("range.setValues", json!({"range": "A1", "values": [row.clone()]})).unwrap();
-    assert_eq!(get(&mut s, "A1")["text"], "5/4/2026", "dd.mm.yyyy read as mm.dd.yyyy");
+    assert_eq!(get(&mut s, "A1")["value"], json!("05.04.2026"), "en-US reads no dot dates");
+    assert_eq!(get(&mut s, "B1")["text"], "2/11/2026", "mm/dd/yyyy read month-first");
     assert_eq!(get(&mut s, "C1")["value"], json!(2.5), "\"2.500\" read as a decimal");
     assert_eq!(get(&mut s, "D1")["value"], json!(0.0425), "\"4.25 %\" read as a percentage");
 
@@ -223,11 +225,10 @@ fn set_values_reports_the_strings_typed_input_read() {
     let row = json!(["05.04.2026", "02/11/2026", "2.500", "4.25 %", "=1+1", "'keep"]);
     let r = s.execute("range.setValues", json!({"range": "A1", "values": [row.clone()]})).unwrap();
     assert_eq!(r["cells"], 6, "{r}");
-    assert_eq!(r["convertedCount"], 4, "{r}");
-    assert_eq!(r["converted"][0], json!({"cell": "A1", "input": "05.04.2026", "stored": "5/4/2026"}), "{r}");
-    assert_eq!(r["converted"][1], json!({"cell": "B1", "input": "02/11/2026", "stored": "2/11/2026"}), "{r}");
-    assert_eq!(r["converted"][2], json!({"cell": "C1", "input": "2.500", "stored": "2.5"}), "{r}");
-    assert_eq!(r["converted"][3], json!({"cell": "D1", "input": "4.25 %", "stored": "4.25%"}), "{r}");
+    assert_eq!(r["convertedCount"], 3, "{r}");
+    assert_eq!(r["converted"][0], json!({"cell": "B1", "input": "02/11/2026", "stored": "2/11/2026"}), "{r}");
+    assert_eq!(r["converted"][1], json!({"cell": "C1", "input": "2.500", "stored": "2.5"}), "{r}");
+    assert_eq!(r["converted"][2], json!({"cell": "D1", "input": "4.25 %", "stored": "4.25%"}), "{r}");
     // The report is a diagnostic, not a second copy of the data: a long input is cut.
     let long = s.execute("range.setValues", json!({"range": "J1", "values": [["9".repeat(100)]]})).unwrap();
     assert_eq!(long["convertedCount"], 1, "{long}");
@@ -266,7 +267,7 @@ fn set_values_text_survives_an_xlsx_roundtrip() {
     s.new_workbook();
     let values = json!([["05.04.2026", "2.500", "4.25 %", "=1+1", 3, true]]);
     s.execute("range.setValues", json!({"range": "A1", "parse": false, "values": values})).unwrap();
-    s.execute("range.setValues", json!({"range": "A3", "values": [["05.04.2026"]]})).unwrap();
+    s.execute("range.setValues", json!({"range": "A3", "values": [["05/04/2026"]]})).unwrap();
     let bytes = crate::io::save_bytes(&s.doc().unwrap().wb, "book.xlsx").unwrap();
     let (wb, _) = crate::io::open_bytes("book.xlsx", &bytes).unwrap();
     let sh = wb.sheet(0).unwrap();

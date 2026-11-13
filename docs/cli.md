@@ -84,6 +84,9 @@ exports write `<c><f>TRUE()</f><v>1</v></c>`), holds the same value: it matches 
 counted as *booleans saved as 1/0* (`boolAsNumber`). Excel types logical results, so on files it saved this count
 should be 0; a non-zero count there would point at a formula where GridCraft returns a logical and Excel a number.
 
+names, the Swedish year letter, and for fr-FR the `info_type` names of CELL that Microsoft's French page lists
+(`CELL("adresse",AV3)` caches `$AV$3` in poi StringContinueRecords.xls, `#VALUE!` in en-US Excel);
+`crates/core/src/locale.rs`). Evidence rule: a locale counts only when every cell
 Each mismatch lists the cell, formula, expected (cached) and actual (GridCraft) values and the functions the formula
 calls. Mismatches roll up by function: *checked* (formula cells calling it), *mismatched*, and *primary* (mismatched
 while none of the cell's precedents mismatch — the likely culprit, as opposed to a downstream effect). They also roll

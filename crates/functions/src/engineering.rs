@@ -617,6 +617,14 @@ mod tests {
         cx(ev("IMCSC", vec![t("4+3i")]), -0.075_489_832_915_863_7, 0.064_877_471_370_635_5);
         is_text(ev("IMSECH", vec![t("0")]), "1");
         is_err(ev("IMCSCH", vec![t("0")]), CellError::Num);
+        // Tiny parts stay decimal while the decimal fits 21 characters, whatever the exponent
+        // (ironcalc COMPLEXs.xlsx D16:D18 and IMCONJUGATE I16:I18, Excel's own results).
+        is_text(ev("COMPLEX", vec![n(1e-16), n(0.0)]), "0.0000000000000001");
+        is_text(ev("COMPLEX", vec![n(1e-17), n(0.0)]), "0.00000000000000001");
+        is_text(ev("COMPLEX", vec![n(1e-18), n(0.0), t("j")]), "0.000000000000000001");
+        is_text(ev("IMCONJUGATE", vec![t("1E-17")]), "0.00000000000000001");
+        is_text(ev("COMPLEX", vec![n(1.5e-17), n(-2.5e-17)]), "0.000000000000000015-0.000000000000000025i");
+        is_text(ev("COMPLEX", vec![n(1e-30), n(1.0)]), "1E-30+i");
         // sech z · cosh z = 1
         let Value::Text(c) = ev("IMCOSH", vec![t("4+3i")]) else { panic!() };
         let Value::Text(sc) = ev("IMSECH", vec![t("4+3i")]) else { panic!() };

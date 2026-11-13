@@ -138,6 +138,9 @@ pub(crate) struct Section {
     pub fraction: bool,
     pub currency: bool,
     pub fill: bool,
+    /// A date or time section that also holds digit placeholders (`mm###`). Excel rejects such a
+    /// code in `TEXT` (`#VALUE!`); elsewhere the placeholders show as literal characters.
+    pub date_digits: bool,
     /// Date sections: the most digits of any `.0`/`.00`/`.000` part (at most 3), which decides how
     /// the time of day is rounded.
     pub sub_digits: u8,
@@ -532,6 +535,7 @@ fn analyze(raw: Raw) -> Section {
         fraction: false,
         currency,
         fill: toks.iter().any(|t| matches!(t, Tok::Fill(_))),
+        date_digits: false,
         sub_digits: 0,
         needs_date: false,
         ampm: false,
@@ -558,7 +562,7 @@ fn analyze(raw: Raw) -> Section {
 }
 
 fn analyze_date(mut toks: Vec<Tok>, mut sec: Section) -> Section {
-    // m/mm after hours or before seconds means minutes.
+    // m/mm after hours or seconds, or before seconds, means minutes.
     for i in 0..toks.len() {
         let Some(Tok::Date(DatePart::Month(n))) = toks.get(i) else { continue };
         let n = *n;
@@ -567,12 +571,26 @@ fn analyze_date(mut toks: Vec<Tok>, mut sec: Section) -> Section {
         }
         let prev = toks.get(..i).and_then(|s| s.iter().rev().find_map(date_part));
         let next = toks.get(i + 1..).and_then(|s| s.iter().find_map(date_part));
-        let after_h = matches!(prev, Some(DatePart::Hour(_) | DatePart::ElapsedH(_)));
+        let after_h_or_s = matches!(prev, Some(DatePart::Hour(_) | DatePart::ElapsedH(_) | DatePart::Second(_) | DatePart::ElapsedS(_)));
         let before_s = matches!(next, Some(DatePart::Second(_) | DatePart::ElapsedS(_)));
-        if (after_h || before_s)
+        if (after_h_or_s || before_s)
             && let Some(t) = toks.get_mut(i)
         {
             *t = Tok::Date(DatePart::Minute(n));
+        }
+    }
+    // An h or s after an elapsed `[h]` or `[s]` shows the elapsed total too: `[h]" ("h" hours)"`
+    // and `[s] ss` repeat the count, unlike `[h]:mm`, whose minutes are the part of the hour. An
+    // m after `[m]` stays the minute of the hour (Excel: `[mm]:mm:ss` is `1441:01:00`).
+    let (mut elapsed_h, mut elapsed_s) = (false, false);
+    for t in &mut toks {
+        let Tok::Date(d) = t else { continue };
+        match *d {
+            DatePart::ElapsedH(_) => elapsed_h = true,
+            DatePart::ElapsedS(_) => elapsed_s = true,
+            DatePart::Hour(n) if elapsed_h => *d = DatePart::ElapsedH(n),
+            DatePart::Second(n) if elapsed_s => *d = DatePart::ElapsedS(n),
+            _ => {}
         }
     }
     let mut out = Vec::with_capacity(toks.len());
@@ -589,7 +607,11 @@ fn analyze_date(mut toks: Vec<Tok>, mut sec: Section) -> Section {
         }
         match t {
             Tok::Date(_) | Tok::Fill(_) => out.push(t.clone()),
-            other => push_lit(&mut out, &other.literal_text()),
+            other => {
+                // Only the zeros of a fraction of a second (`ss.00`) may follow a date part.
+                sec.date_digits |= matches!(other, Tok::Digit(_));
+                push_lit(&mut out, &other.literal_text());
+            }
         }
         i += 1;
     }

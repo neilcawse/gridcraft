@@ -283,6 +283,15 @@ impl<'h> Evaluator<'h> {
             Some(Err(e)) => return err(e),
             None => return err(CellError::Value),
         };
+        // A locale with spellings of its own reads those and not the English ones (French Excel:
+        // `CELL("adresse",A1)`), as Excel reads the text in the language of its interface.
+        let kind = match gridcraft_core::locale::current().cell_info_names() {
+            [] => kind,
+            names => match names.iter().find(|(local, _)| *local == kind) {
+                Some((_, english)) => (*english).to_string(),
+                None => return err(CellError::Value),
+            },
+        };
         let area = match args.get(1).map(|a| self.eval(a)) {
             Some(Ev::R(a)) => a.first().copied(),
             None => Some(Area { sheet: self.sheet, range: RangeRef::cell(self.at) }),
