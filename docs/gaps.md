@@ -108,6 +108,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
   date field grouped differently) is saved connected to the first of them only. A slicer on a
   coarser level of a date grouped at several levels (a Years slicer on a Date grouped by years
   and months, which Excel keeps in its own cache field) is skipped with a warning on open.
+  yet (command only). Refreshing a file's pivot keeps its sort-by-value, captions, item order and layout settings; Excel's order among items with equal sort values is not reproduced.
 - **Impact:** pivots are the analyst's main tool.
 - **Estimate:** 20–30 h for beta (25–40 h full).
 
@@ -221,6 +222,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 | 2026-10-15 | minor | §13: Solver prepares reports before committing the solution, model and report sheets together; report refusal preserves the workbook and Undo/Redo (#1050) |
 | 2026-10-13 | minor | §17: drawing groups (`grpSp`) opened from a file are kept on save and move or delete as one; Group / Ungroup commands remain |
 | 2026-10-13 | minor | §3, §8: PivotTable slicers read, shown, clickable and written |
+| 2026-10-13 | minor | §8: refresh fidelity for file pivots (sort by value, captions, item order, layout settings) |
 | 2026-10-13 | minor | §3: Excel 2010 conditional formats (`x14:conditionalFormattings`, cross-sheet rules) read, evaluated and written back in the extension |
 | 2026-10-13 | trivial | §4: multi-level category axes landed |
 | 2026-10-12 | minor | §9: next/previous sheet commands retain the current visible sheet and selection when there is no visible destination |
