@@ -47,8 +47,16 @@ pub fn specs() -> Vec<CommandSpec> {
 /// Distinct, non-blank display values of a table column, in first-seen order. Used to populate a
 /// slicer's tiles and to detect "everything selected".
 pub fn column_values(wb: &Workbook, sheet: usize, table: &str, column: &str) -> Vec<String> {
-    let Some(sh) = wb.sheet(sheet) else { return vec![] };
-    let Some(t) = sh.tables.iter().find(|t| t.name.eq_ignore_ascii_case(table)) else { return vec![] };
+    let (sh, t) = match wb.sheet(sheet).and_then(|sh| sh.tables.iter().find(|t| t.name.eq_ignore_ascii_case(table)).map(|t| (sh, t))) {
+        Some(pair) => pair,
+        None => match wb.table(table).and_then(|(si, ti)| {
+            let sh = wb.sheet(si)?;
+            Some((sh, sh.tables.get(ti)?))
+        }) {
+            Some(pair) => pair,
+            None => return vec![],
+        },
+    };
     let Some(ci) = t.column_index(column) else { return vec![] };
     let Some(dr) = t.data_range() else { return vec![] };
     let col = dr.start.col + ci as u32;
@@ -134,18 +142,23 @@ fn next_selection(current: Option<Vec<String>>, all: &[String], value: &str, mul
     }
 }
 
-/// Writes the slicer's current selection into the sheet filter and re-applies it.
+/// Re-applies slicer `id`'s selected filter values to its target table's sheet autofilter.
 fn reapply_slicer(wb: &mut Workbook, sheet: usize, id: u32) {
     let info = wb.sheet(sheet).and_then(|sh| {
         let sl = sh.slicers.iter().find(|s| s.id == id)?;
         let SlicerSource::Table { table, column, selected } = &sl.source else { return None };
-        let t = sh.tables.iter().find(|t| t.name.eq_ignore_ascii_case(table))?;
+        let (target_sheet, t) = sh
+            .tables
+            .iter()
+            .find(|t| t.name.eq_ignore_ascii_case(table))
+            .map(|t| (sheet, t))
+            .or_else(|| wb.table(table).and_then(|(si, ti)| Some((si, wb.sheet(si)?.tables.get(ti)?))))?;
         let ci = t.column_index(column)?;
-        Some((t.range, t.range.start.col + ci as u32, selected.clone()))
+        Some((target_sheet, t.range, t.range.start.col + ci as u32, selected.clone()))
     });
-    let Some((table_range, abs_col, selected)) = info else { return };
+    let Some((target_sheet, table_range, abs_col, selected)) = info else { return };
     {
-        let Some(sh) = wb.sheet_mut(sheet) else { return };
+        let Some(sh) = wb.sheet_mut(target_sheet) else { return };
         let af = sh.autofilter.get_or_insert_with(|| AutoFilter { range: table_range, criteria: vec![] });
         let off = abs_col.saturating_sub(af.range.start.col);
         af.criteria.retain(|(o, _)| *o != off);
@@ -153,9 +166,10 @@ fn reapply_slicer(wb: &mut Workbook, sheet: usize, id: u32) {
             af.criteria.push((off, FilterCriterion::Values { values, blanks: false }));
         }
     }
-    super::data::apply_filter(wb, sheet);
+    super::data::apply_filter(wb, target_sheet);
 }
 
+/// Inserts a slicer for a table column on the active sheet or the named table's sheet.
 fn insert_slicer(s: &mut Session, p: &Json) -> Result<Json> {
     // A table named by `table` is found on any sheet, as the other table commands find it, and the slicer goes on that
     // table's sheet. Looked up on the active sheet only, a named table on another sheet gave "Select a cell inside a
@@ -287,21 +301,28 @@ fn slicer_delete(s: &mut Session, p: &Json) -> Result<Json> {
     let (idx, id) = find_slicer(s, p)?;
     let sheet = s.doc()?.wb.active_sheet();
     // Absolute column of a table slicer, so its filter criterion can be removed too.
-    let abs_col = s.doc().ok().and_then(|d| {
+    let target = s.doc().ok().and_then(|d| {
         let sh = d.wb.active()?;
         let SlicerSource::Table { table, column, .. } = &sh.slicers.get(idx)?.source else { return None };
-        let t = sh.tables.iter().find(|t| t.name.eq_ignore_ascii_case(table))?;
+        let (target_sheet, t) = sh
+            .tables
+            .iter()
+            .find(|t| t.name.eq_ignore_ascii_case(table))
+            .map(|t| (sheet, t))
+            .or_else(|| d.wb.table(table).and_then(|(si, ti)| Some((si, d.wb.sheet(si)?.tables.get(ti)?))))?;
         let ci = t.column_index(column)?;
-        Some(t.range.start.col + ci as u32)
+        Some((target_sheet, t.range.start.col + ci as u32))
     });
     edit(s, |cx| {
         let sh = cx.sheet_mut(sheet)?;
         sh.slicers.retain(|x| x.id != id);
-        if let Some(abs) = abs_col {
-            if let Some(af) = sh.autofilter.as_mut() {
+        if let Some((target_sheet, abs)) = target {
+            if let Some(af) = cx.sheet_mut(target_sheet)?.autofilter.as_mut() {
                 let off = abs.saturating_sub(af.range.start.col);
                 af.criteria.retain(|(o, _)| *o != off);
             }
+            super::data::apply_filter(&mut cx.wb, target_sheet);
+        } else {
             super::data::apply_filter(&mut cx.wb, sheet);
         }
         cx.structural = true;
@@ -325,5 +346,83 @@ pub(crate) fn drop_pivot(wb: &mut Workbook, sheet: &str, name: &str) {
             }
         }
         sh.slicers.retain(|sl| !matches!(&sl.source, SlicerSource::Pivot { pivots, .. } if pivots.is_empty()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    /// Verifies same-sheet and cross-sheet slicer filtering/clearing/deletion as well as missing-table fallbacks.
+    fn cross_sheet_and_same_sheet_slicer_filters_clears_and_handles_missing_tables() {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("range.setValues", json!({"range": "A1:B4", "values": [["Region", "Quarter"], ["East", "Q1"], ["West", "Q2"], ["East", "Q2"]]}))
+            .unwrap();
+        s.execute("insert.table", json!({"range": "A1:B4", "name": "SalesTable"})).unwrap();
+        let region_id = s.execute("insert.slicer", json!({"table": "SalesTable", "column": "Region"})).unwrap()["slicer"].as_u64().unwrap() as u32;
+        s.execute("slicer.toggle", json!({"slicer": region_id, "value": "East", "multi": false})).unwrap();
+
+        // 1. Same-sheet slicer on column 2 filters by Quarter, and deleting it preserves column 1's Region filter.
+        let same_id = s.execute("insert.slicer", json!({"table": "SalesTable", "column": "Quarter"})).unwrap()["slicer"].as_u64().unwrap() as u32;
+        s.execute("slicer.toggle", json!({"slicer": same_id, "value": "Q1", "multi": false})).unwrap();
+        assert!(!s.doc().unwrap().wb.sheets[0].is_row_filtered(1), "East/Q1 matches both filters");
+        assert!(s.doc().unwrap().wb.sheets[0].is_row_filtered(2), "West/Q2 filtered out");
+        assert!(s.doc().unwrap().wb.sheets[0].is_row_filtered(3), "East/Q2 filtered out by Quarter slicer");
+        s.execute("slicer.clear", json!({"slicer": same_id})).unwrap();
+        assert!(!s.doc().unwrap().wb.sheets[0].is_row_filtered(3), "clearing Quarter slicer unhides East/Q2");
+        assert!(s.doc().unwrap().wb.sheets[0].is_row_filtered(2), "Region filter on column 1 still hides West/Q2");
+        s.execute("slicer.toggle", json!({"slicer": same_id, "value": "Q1", "multi": false})).unwrap();
+        assert!(s.doc().unwrap().wb.sheets[0].is_row_filtered(3));
+        s.execute("slicer.delete", json!({"slicer": same_id})).unwrap();
+        assert!(!s.doc().unwrap().wb.sheets[0].is_row_filtered(3), "deleting Quarter slicer clears only Quarter criterion");
+        assert!(s.doc().unwrap().wb.sheets[0].is_row_filtered(2), "deleting Quarter slicer preserves Region criterion on column 1");
+        s.execute("slicer.delete", json!({"slicer": region_id})).unwrap();
+        // 2. Cross-sheet slicer filters and clears the target table's sheet.
+        s.execute("home.insertSheet", json!({"name": "Dashboard"})).unwrap();
+        let id = 42;
+        edit(&mut s, |cx| {
+            cx.sheet_mut(1)?.slicers.push(Slicer {
+                id,
+                source: SlicerSource::Table { table: "SalesTable".into(), column: "Quarter".into(), selected: None },
+                caption: "Quarter".into(),
+                anchor: Anchor { cell: CellRef::new(1, 1), dx: 0.0, dy: 0.0, width: 160.0, height: 200.0, mode: AnchorMode::MoveOnly },
+                columns: 1,
+                name: String::new(),
+                style: String::new(),
+                row_height: None,
+            });
+            Ok(Json::Null)
+        })
+        .unwrap();
+        let wb = &s.doc().unwrap().wb;
+        assert_eq!(column_values(wb, 1, "SalesTable", "Quarter"), vec!["Q1".to_string(), "Q2".to_string()]);
+        assert!(column_values(wb, 1, "NoSuchTable", "Quarter").is_empty());
+        s.execute("slicer.toggle", json!({"slicer": id, "value": "Q1", "multi": false})).unwrap();
+        assert!(s.doc().unwrap().wb.sheets[0].is_row_filtered(2), "row 3 (Q2) on Sheet1 should be filtered out");
+        s.execute("slicer.delete", json!({"slicer": id})).unwrap();
+        assert!(!s.doc().unwrap().wb.sheets[0].is_row_filtered(2), "deleting cross-sheet slicer clears filter on Sheet1");
+
+        // 3. Unknown table on a slicer: reapply_slicer, selectAll, and delete are safe no-ops/removals.
+        let orphan_id = 99;
+        edit(&mut s, |cx| {
+            cx.sheet_mut(1)?.slicers.push(Slicer {
+                id: orphan_id,
+                source: SlicerSource::Table { table: "MissingTable".into(), column: "Quarter".into(), selected: Some(vec!["Q1".into()]) },
+                caption: "Quarter".into(),
+                anchor: Anchor { cell: CellRef::new(1, 1), dx: 0.0, dy: 0.0, width: 160.0, height: 200.0, mode: AnchorMode::MoveOnly },
+                columns: 1,
+                name: String::new(),
+                style: String::new(),
+                row_height: None,
+            });
+            Ok(Json::Null)
+        })
+        .unwrap();
+        s.execute("slicer.selectAll", json!({"slicer": orphan_id})).unwrap();
+        s.execute("slicer.delete", json!({"slicer": orphan_id})).unwrap();
+        assert!(s.doc().unwrap().wb.sheets[1].slicers.is_empty());
     }
 }

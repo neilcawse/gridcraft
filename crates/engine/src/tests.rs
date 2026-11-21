@@ -7851,7 +7851,7 @@ fn from_saved_refreshes_empty_pivot_targets_and_preserves_populated_ones() {
     unrelated.value = Value::Number(99.0);
     sh.set_cell(CellRef::parse("C2").unwrap(), unrelated);
 
-    let doc = crate::DocState::from_saved(wb.clone(), None, "Saved.xlsx".into(), Some(crate::io::FileKind::Xlsx), crate::Trust::FromFile);
+    let doc = crate::DocState::from_saved(wb.clone(), None, "Saved.xlsx".into(), crate::Trust::FromFile);
     let sh = doc.wb.sheet(0).unwrap();
     assert_eq!(sh.value(CellRef::parse("E4").unwrap()), Value::Number(30.0), "last_range=None pivot populated");
     assert_eq!(sh.value(CellRef::parse("H4").unwrap()), Value::Number(30.0), "empty last_range pivot populated");
@@ -7860,7 +7860,7 @@ fn from_saved_refreshes_empty_pivot_targets_and_preserves_populated_ones() {
     assert_eq!(sh.value(CellRef::parse("C2").unwrap()), Value::Number(99.0), "unrelated saved formula value preserved");
 
     // `DocState::new` (`file.open`) also populates empty pivot targets and recalculates everything.
-    let doc_new = crate::DocState::new(wb, None, "Opened.xlsx".into(), Some(crate::io::FileKind::Xlsx), crate::Trust::FromFile);
+    let doc_new = crate::DocState::new(wb, None, "Opened.xlsx".into(), crate::Trust::FromFile);
     let sh_new = doc_new.wb.sheet(0).unwrap();
     assert_eq!(sh_new.value(CellRef::parse("E4").unwrap()), Value::Number(30.0), "DocState::new populates last_range=None pivot");
     assert_eq!(sh_new.value(CellRef::parse("C1").unwrap()), Value::Number(60.0), "DocState::new recalculates dependent formula");
