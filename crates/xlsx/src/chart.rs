@@ -553,8 +553,6 @@ pub(crate) fn from_dml_chart(dc: DmlChart, root: Option<&El>, budget: &mut Chart
     };
     let hole_size =
         if plot.is_some_and(|p| p.child("doughnutChart").is_some()) { (dc.hole_size * 100.0).round().clamp(10.0, 90.0) as u8 } else { 75 };
-    let hole_size =
-        if plot.is_some_and(|p| p.child("doughnutChart").is_some()) { (dc.hole_size * 100.0).round().clamp(10.0, 90.0) as u8 } else { 75 };
     let axis_number_formats = if let Some(plot) = plot {
         let val_axes: Vec<&El> = plot.kids("valAx").collect();
         let cat_ax = plot.child("catAx").or_else(|| plot.child("dateAx"));
@@ -588,7 +586,7 @@ pub(crate) fn from_dml_chart(dc: DmlChart, root: Option<&El>, budget: &mut Chart
     } else {
         AxisNumberFormats::default()
     };
-    Chart {
+    let auto_title_deleted = root
         .and_then(|r| r.child("chart"))
         .is_some_and(|c| c.child("title").is_none() && c.child("autoTitleDeleted").is_some_and(|d| d.flag("val", true)));
     let ch = Chart {

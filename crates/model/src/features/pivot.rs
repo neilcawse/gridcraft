@@ -47,6 +47,9 @@ impl PivotDateGroup {
             PivotDateGroup::Years => 3,
             PivotDateGroup::None => 4,
         }
+    }
+}
+
 /// An item of a field on the other axis that a sort by value takes its values from (e.g. the
 /// "Apples" column). The field is named by source column and date grouping, so two levels
 /// grouped from one date column (Years and Quarters) stay apart.

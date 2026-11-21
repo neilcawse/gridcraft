@@ -54,14 +54,14 @@ fn area_and_line_combo_round_trips_both_groups() {
         line(&ser(2))
     );
     let root = parse(xml.as_bytes()).unwrap();
-    let ch = read_chart(&root).unwrap();
+    let ch = read_chart(&root).unwrap().0;
     assert_eq!(ch.kind, ChartKind::Combo);
     assert_eq!(ch.series.len(), 3);
     let wb = gridcraft_model::Workbook::new();
     let written = crate::chart::write_chart(&wb, 0, &ch, "Book.xlsx");
     assert!(written.contains("<c:areaChart>"), "{written}");
     assert!(written.contains("<c:lineChart>"), "{written}");
-    let rt = read_chart(&parse(written.as_bytes()).unwrap()).unwrap();
+    let rt = read_chart(&parse(written.as_bytes()).unwrap()).unwrap().0;
     assert_eq!(rt.kind, ChartKind::Combo);
     assert_eq!(rt.series.len(), 3);
     assert_eq!(rt.series[0].kind, Some(ChartKind::Area));
@@ -76,11 +76,11 @@ fn area_and_line_combo_round_trips_both_groups() {
         "<c:chartSpace xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\">\
          <c:chart><c:plotArea>{bar_h}{area_st}{line_sec}<c:catAx><c:axId val=\"1\"/></c:catAx><c:valAx><c:axId val=\"2\"/></c:valAx><c:catAx><c:axId val=\"3\"/></c:catAx><c:valAx><c:axId val=\"4\"/></c:valAx></c:plotArea></c:chart></c:chartSpace>"
     );
-    let ch2 = read_chart(&parse(xml2.as_bytes()).unwrap()).unwrap();
+    let ch2 = read_chart(&parse(xml2.as_bytes()).unwrap()).unwrap().0;
     assert!(ch2.series[2].secondary);
     let written2 = crate::chart::write_chart(&wb, 0, &ch2, "Book.xlsx");
     assert!(written2.contains("<c:barChart>") && written2.contains("<c:areaChart>") && written2.contains("<c:lineChart>"), "{written2}");
-    let rt2 = read_chart(&parse(written2.as_bytes()).unwrap()).unwrap();
+    let rt2 = read_chart(&parse(written2.as_bytes()).unwrap()).unwrap().0;
     assert_eq!(rt2.series[0].kind, Some(ChartKind::BarClustered));
     assert_eq!(rt2.series[1].kind, Some(ChartKind::AreaStacked));
     assert_eq!(rt2.series[2].kind, Some(ChartKind::LineStacked));

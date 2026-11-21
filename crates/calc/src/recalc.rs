@@ -16,7 +16,7 @@ use gridcraft_core::{Array, CellError, CellRef, RangeRef, Value};
 use gridcraft_formula::Expr;
 use gridcraft_model::{CalcMode, Workbook};
 
-use crate::eval::{Area, Evaluator, Host, precedents, precedents_at, stack_position};
+use crate::eval::{Area, Evaluator, Host, precedents_at, stack_position};
 use crate::spill_index::{SpillIndex, indexing_pays};
 
 /// Whether a formula reads a linked workbook (`[1]Data!B:B`, `[1]!Rates`, `[1]Data!#REF!`),

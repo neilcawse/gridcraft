@@ -45,10 +45,9 @@ const MAX_ITEMS: usize = 1_048_576;
 /// Most cache fields read.
 const MAX_FIELDS: usize = 16_384;
 /// The `x14:dataField` extension (Excel 2010 show-values-as additions such as rank).
+const EXT_X14_CACHE_ID: &str = "{B32A0D14-FB34-4B6B-9E93-C2C0030C7C23}";
 const EXT_X14_DATA_FIELD: &str = "{E15A36E0-9728-4e99-A89B-3F7291B0FE68}";
 /// Extension carrying a cache's id for slicer caches.
-const EXT_X14_CACHE_ID: &str = "{725AE2AE-9491-48be-B2B4-4EB974FC3084}";
-const EXT_X14_PIVOT_TABLE: &str = "{962EF5D1-5CA2-4c93-8EF4-DBF5C05439D2}";
 /// The `x14:pivotField` extension (Repeat Item Labels: `fillDownLabels`).
 const EXT_X14_FIELD: &str = "{2946ED86-A175-432a-8AC1-64E0C546D7DE}";
 /// The `x14:pivotTableDefinition` extension (Show the Values row: `hideValuesRow`).

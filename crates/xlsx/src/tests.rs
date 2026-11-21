@@ -111,11 +111,12 @@ fn cross_sheet_table_slicer_imports_without_skipped_object_warning() {
     assert!(!report.warnings.iter().any(|w| w.contains("skipped")), "expected no skipped warnings, got: {:?}", report.warnings);
     assert_eq!(wb.sheets[0].slicers.len(), 1);
     let sl = &wb.sheets[0].slicers[0];
-    assert_eq!(sl.table, "Table_3");
-    assert_eq!(sl.column, "Date for Slicer");
     assert_eq!(sl.caption, "Date for Slicer");
     assert_eq!(sl.columns, 2);
-    assert_eq!(sl.selected.as_deref(), Some(&["2026-Q1".to_string()][..]));
+    let gridcraft_model::SlicerSource::Table { table, column, selected } = &sl.source else { panic!("expected table slicer") };
+    assert_eq!(table, "Table_3");
+    assert_eq!(column, "Date for Slicer");
+    assert_eq!(selected.as_deref(), Some(&["2026-Q1".to_string()][..]));
     assert_eq!(sl.anchor.cell, gridcraft_core::CellRef::new(2, 1));
     assert!(sl.anchor.width > 0.0 && sl.anchor.height > 0.0);
 
@@ -137,7 +138,8 @@ fn cross_sheet_table_slicer_imports_without_skipped_object_warning() {
     ]);
     let (wb_fb, _) = crate::read_xlsx(&zip_fallback).unwrap();
     assert_eq!(wb_fb.sheets[0].slicers.len(), 1);
-    assert_eq!((wb_fb.sheets[0].slicers[0].table.as_str(), wb_fb.sheets[0].slicers[0].column.as_str()), ("Table_3", "Date for Slicer"));
+    let gridcraft_model::SlicerSource::Table { table, column, .. } = &wb_fb.sheets[0].slicers[0].source else { panic!("expected table slicer") };
+    assert_eq!((table.as_str(), column.as_str()), ("Table_3", "Date for Slicer"));
 
     // 3. Negative cases: a missing cache, an unknown table/column, or a mismatched frame name when multiple slicer definitions exist attaches nothing.
     let slicer_two_defs = r#"<?xml version="1.0"?><slicers xmlns="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"><slicer name="Other_1" cache="SlicerCache_Table_3_Col_36" caption="Other"/><slicer name="Other_2" cache="SlicerCache_Table_3_Col_36" caption="Other 2"/></slicers>"#;

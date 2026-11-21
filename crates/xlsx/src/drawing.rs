@@ -381,7 +381,7 @@ fn read_object(
                                 cx.warn("cached chart points were dropped after the workbook's chart import budget was exceeded");
                             }
                             if !caches.is_empty() {
-                                cx.pending_pivot_charts.push((id, caches));
+                                cx.pivot_charts.push((id, caches));
                             }
                             sheet.charts.push(ch);
                             read_user_shapes(cx, &target, &cx_xml, anchor, sheet)?;

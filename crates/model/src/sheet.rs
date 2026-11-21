@@ -978,6 +978,7 @@ mod tests {
                 name: String::new(),
                 style: String::new(),
                 row_height: None,
+            }),
             ObjKind::Group => s.groups.push(crate::DrawingGroup {
                 id,
                 name: String::new(),

@@ -8,14 +8,6 @@ impl<'h> Evaluator<'h> {
     pub(super) fn trim_lines(&mut self, a: &Area) -> RangeRef {
         if a.range.is_full_cols() || a.range.is_full_rows() { self.trim(a) } else { a.range }
     }
-    /// Effective bounded range of an area (trimmed to the sheet's used range when the area runs to
-    /// the sheet edge or exceeds `FULL_SIZE_BOUNDED_CELLS`).
-    pub(super) fn effective_range(&mut self, a: &Area) -> RangeRef {
-        let cells = u64::from(a.range.height()) * u64::from(a.range.width());
-        let to_edge = a.range.end.row == MAX_ROWS - 1 || a.range.end.col == MAX_COLS - 1;
-        if cells <= super::FULL_SIZE_CELLS || (!to_edge && cells <= super::FULL_SIZE_BOUNDED_CELLS) { a.range } else { self.trim(a) }
-    }
-
     pub(super) fn offset(&mut self, args: &[Expr]) -> Ev {
         self.host.note_volatile();
         if args.len() < 3 || args.len() > 5 {

@@ -3495,7 +3495,7 @@ fn getpivotdata_reads_pivot_table_and_plain_cell_reports() {
         rows: vec![PivotField { source_col: "Category".into(), ..Default::default() }],
         columns: vec![PivotField { source_col: "Quarter".into(), ..Default::default() }],
         values: vec![PivotValue { source_col: "Sales".into(), func: PivotFunc::Sum, name: "Sum of Sales".into(), ..Default::default() }],
-        filters: vec![PivotFilter { source_col: "Region".into(), selected: Some(vec!["North".into()]) }],
+        filters: vec![PivotFilter { source_col: "Region".into(), selected: Some(vec!["North".into()]), ..PivotFilter::default() }],
         ..Default::default()
     });
 
@@ -3695,6 +3695,7 @@ fn getpivotdata_covers_outline_tabular_compact_multi_values_subtotals_and_grand_
     t.set("H2", "=GETPIVOTDATA(\"Count of Sales\",$A$13,\"Category\",\"Bikes\")");
     t.set("H3", "=GETPIVOTDATA(\"Count of Sales\",$A$13)");
     assert_eq!((t.num("H1"), t.num("H2"), t.num("H3")), (250.0, 5.0, 5.0));
+}
 
 #[test]
 fn full_column_match_and_sumifs_scale() {

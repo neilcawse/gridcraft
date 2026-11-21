@@ -203,10 +203,11 @@ pub fn slicer_tiles(wb: &Workbook, pt: &PivotTable, sheet: usize, field: &str, s
         .filter(|f| !own_level(f))
         .filter_map(|f| Some((src.col(&f.source_col)?, f.selected.as_deref()?, pt.filter_group(f))))
         .collect();
+    let dates = date_flags(wb, &src, col, group);
     let mut fi = FieldItems::default();
     let mut data: Vec<bool> = Vec::new();
     for (i, r) in src.rows.iter().enumerate() {
-        let k = fi.intern(wb, r.get(col).unwrap_or(&Value::Empty), group, fmt_of(col), i) as usize;
+        let k = fi.intern(wb, r.get(col).unwrap_or(&Value::Empty), group, fmt_of(col), dates.get(i).copied().unwrap_or(false), i) as usize;
         if data.len() <= k {
             data.resize(k + 1, false);
         }

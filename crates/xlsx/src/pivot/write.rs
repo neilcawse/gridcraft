@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 
 use super::{
-    CT_PIVOT_CACHE_DEF, CT_PIVOT_CACHE_REC, CT_PIVOT_TABLE, CellRef, DateSystem, EXT_X14_CACHE_ID, EXT_X14_DATA_FIELD, EXT_X14_FIELD, EXT_X14_PIVOT_TABLE, EXT_X14_TABLE, EXT_XPDL_TABLE, HashMap,
+    CT_PIVOT_CACHE_DEF, CT_PIVOT_CACHE_REC, CT_PIVOT_TABLE, CellRef, DateSystem, EXT_X14_CACHE_ID, EXT_X14_DATA_FIELD, EXT_X14_FIELD, EXT_X14_TABLE, EXT_XPDL_TABLE, HashMap,
     Key, MAX_ITEMS, MAX_RECORD_CELLS, MAX_SOURCE_CELLS, MONTHS, NS_MAIN, NS_REL, NS_X14, NS_XPDL, Out, PivotDateGroup, PivotField, PivotFilter, PivotFunc,
     PivotLayout, PivotShowAs, PivotSort, PivotTable, PivotValue, RangeRef, Rels, VALUES_FIELD, Value, Workbook, XML_DECL, datetime_from_serial, esc_attr,
     func_caption, func_name, group_by_name, group_caption, iso, key, label, mdy, same,
@@ -197,7 +197,6 @@ impl PivotWriter {
                     let Some(x) = self.write_cache(wb, si, idx, out) else { continue };
                     x
                 }
-            };
             };
             self.tables += 1;
             let t = self.tables;

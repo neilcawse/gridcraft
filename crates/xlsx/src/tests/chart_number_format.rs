@@ -38,7 +38,7 @@ fn excel_combo() -> String {
 
 #[test]
 fn typed_formats_are_read_and_linked_ones_are_not() {
-    let ch = read_chart(&parse(excel_combo().as_bytes()).unwrap()).unwrap();
+    let ch = read_chart(&parse(excel_combo().as_bytes()).unwrap()).unwrap().0;
     assert_eq!(
         ch.axis_number_formats,
         AxisNumberFormats { x: None, y: Some("[h]:mm".into()), y2: Some("0%".into()) },
@@ -50,7 +50,7 @@ fn typed_formats_are_read_and_linked_ones_are_not() {
 }
 
 fn read(plot: &str) -> Chart {
-    read_chart(&parse(format!("<c:chartSpace {NS}><c:chart><c:plotArea>{plot}</c:plotArea></c:chart></c:chartSpace>").as_bytes()).unwrap()).unwrap()
+    read_chart(&parse(format!("<c:chartSpace {NS}><c:chart><c:plotArea>{plot}</c:plotArea></c:chart></c:chartSpace>").as_bytes()).unwrap()).unwrap().0
 }
 
 #[test]

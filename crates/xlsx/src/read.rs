@@ -679,7 +679,7 @@ fn attach_pending_slicers(cx: &mut Ctx<'_>, wb: &mut Workbook) {
             if let Some(sh) = wb.sheets.get_mut(sheet_idx) {
                 let id = cx.next_object_id();
                 let caption = if caption.is_empty() { column.clone() } else { caption };
-                Arc::make_mut(sh).slicers.push(gridcraft_model::Slicer { id, table, column, caption, anchor, selected, columns });
+                Arc::make_mut(sh).slicers.push(gridcraft_model::Slicer { id, source: gridcraft_model::SlicerSource::Table { table, column, selected }, caption, anchor, columns, name: String::new(), style: String::new(), row_height: None });
             }
         }
     }
