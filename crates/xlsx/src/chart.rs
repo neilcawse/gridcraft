@@ -448,6 +448,23 @@ fn axis_num_fmt(a: Option<&El>) -> Option<String> {
     typed_num_fmt(a.filter(|a| !bool_val(a, "delete")).and_then(|a| a.child("numFmt")))
 }
 
+fn rich_title(t: &El) -> Option<String> {
+    let tx = t.child("tx")?;
+    if let Some(rich) = tx.child("rich") {
+        let paras: Vec<String> =
+            rich.kids("p").map(|p| p.kids("r").filter_map(|r| r.child("t")).map(|t| t.text.as_str()).collect::<String>()).collect();
+        let s = paras.join("\n");
+        return if s.is_empty() { None } else { Some(s) };
+    }
+    if let Some(sr) = tx.child("strRef") {
+        if let Some(v) = sr.path(&["strCache", "pt", "v"]) {
+            return Some(v.text.clone());
+        }
+        return sr.child("f").map(|f| f.text.trim().to_string());
+    }
+    None
+}
+
 pub(crate) fn from_dml_chart(dc: DmlChart, root: Option<&El>, budget: &mut ChartReadBudget) -> (Chart, Vec<PivotSeriesCache>) {
     let plot = root.and_then(|r| r.path(&["chart", "plotArea"]));
     let groups: Vec<&El> = plot.map(|p| p.children.iter().filter(|g| g.name.ends_with("Chart")).collect()).unwrap_or_default();
@@ -586,18 +603,20 @@ pub(crate) fn from_dml_chart(dc: DmlChart, root: Option<&El>, budget: &mut Chart
     } else {
         AxisNumberFormats::default()
     };
-    let auto_title_deleted = root
-        .and_then(|r| r.child("chart"))
-        .is_some_and(|c| c.child("title").is_none() && c.child("autoTitleDeleted").is_some_and(|d| d.flag("val", true)));
+    // No `<c:title>`: an automatic title (a lone series' name), unless the file deleted it.
+    let title = match root.and_then(|r| r.child("chart")) {
+        Some(c) => match c.child("title") {
+            Some(t) => rich_title(t).or(dc.title),
+            None if c.child("autoTitleDeleted").is_some_and(|d| d.flag("val", true)) => Some(String::new()),
+            None => None,
+        },
+        None => dc.title,
+    };
     let ch = Chart {
         id: 0,
         kind,
         anchor: Default::default(),
-        title: match dc.title {
-            Some(t) => Some(t),
-            None if auto_title_deleted => Some(String::new()),
-            None => None,
-        },
+        title,
         series,
         legend,
         data_labels: dc.data_labels || series_labels,
@@ -1157,12 +1176,14 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
         let _ = write!(s, "<c:pivotSource><c:name>[{}]{}</c:name><c:fmtId val=\"0\"/></c:pivotSource>", esc(book_name), esc(link));
     }
     s.push_str("<c:chart>");
+    // `None` is the automatic title; an empty title is one that was turned off.
     match &ch.title {
         Some(t) if !t.is_empty() => {
             s.push_str(&title_xml(t));
             s.push_str("<c:autoTitleDeleted val=\"0\"/>");
         }
-        _ => s.push_str("<c:autoTitleDeleted val=\"1\"/>"),
+        Some(_) => s.push_str("<c:autoTitleDeleted val=\"1\"/>"),
+        None => s.push_str("<c:autoTitleDeleted val=\"0\"/>"),
     }
     s.push_str("<c:plotArea><c:layout/>");
     let all: Vec<(usize, &Series)> = ch.series.iter().enumerate().collect();
