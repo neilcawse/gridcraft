@@ -507,7 +507,6 @@ fn read_object(
     }
 }
 
-/// A shape at `anchor`; `grouped` when it sits in a group, at its group's child-space transform.
 const MAX_ANNOTATION_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ANNOTATION_RELS_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -622,6 +621,7 @@ fn read_user_shapes(cx: &mut Ctx<'_>, chart_part: &str, chart_xml: &El, chart_an
     Ok(())
 }
 
+/// A shape at `anchor`; `grouped` when it sits in a group, at its group's child-space transform.
 fn read_shape(obj: &El, anchor: Anchor, grouped: bool) -> Option<Shape> {
     let sp = obj.child("spPr")?;
     if let Some(shape) = ink::read(obj, anchor, grouped) {
