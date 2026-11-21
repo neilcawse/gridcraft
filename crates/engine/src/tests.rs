@@ -7851,7 +7851,7 @@ fn from_saved_refreshes_empty_pivot_targets_and_preserves_populated_ones() {
     unrelated.value = Value::Number(99.0);
     sh.set_cell(CellRef::parse("C2").unwrap(), unrelated);
 
-    let doc = crate::DocState::from_saved(wb.clone(), None, "Saved.xlsx".into(), crate::Trust::FromFile);
+    let doc = crate::DocState::from_saved(wb.clone(), None, "Saved.xlsx".into(), Some(crate::io::FileKind::Xlsx), crate::Trust::FromFile);
     let sh = doc.wb.sheet(0).unwrap();
     assert_eq!(sh.value(CellRef::parse("E4").unwrap()), Value::Number(30.0), "last_range=None pivot populated");
     assert_eq!(sh.value(CellRef::parse("H4").unwrap()), Value::Number(30.0), "empty last_range pivot populated");
@@ -7860,11 +7860,62 @@ fn from_saved_refreshes_empty_pivot_targets_and_preserves_populated_ones() {
     assert_eq!(sh.value(CellRef::parse("C2").unwrap()), Value::Number(99.0), "unrelated saved formula value preserved");
 
     // `DocState::new` (`file.open`) also populates empty pivot targets and recalculates everything.
-    let doc_new = crate::DocState::new(wb, None, "Opened.xlsx".into(), crate::Trust::FromFile);
+    let doc_new = crate::DocState::new(wb, None, "Opened.xlsx".into(), Some(crate::io::FileKind::Xlsx), crate::Trust::FromFile);
     let sh_new = doc_new.wb.sheet(0).unwrap();
     assert_eq!(sh_new.value(CellRef::parse("E4").unwrap()), Value::Number(30.0), "DocState::new populates last_range=None pivot");
     assert_eq!(sh_new.value(CellRef::parse("C1").unwrap()), Value::Number(60.0), "DocState::new recalculates dependent formula");
     assert_eq!(sh_new.value(CellRef::parse("C2").unwrap()), Value::Number(2.0), "DocState::new recalculates all formulas");
+}
+
+#[test]
+fn open_content_kind_and_save_dialog_payloads_distinguish_xlsx_from_imports_and_encrypted() {
+    let mut src = s();
+    src.execute("cell.set", json!({"cell": "A1", "input": "42"})).unwrap();
+    let xlsx = crate::io::save_bytes(&src.doc().unwrap().wb, "book.xlsx").unwrap();
+
+    // Untitled workbook: save and saveAs both queue Save As (`saveAs: true`).
+    src.take_ui_requests();
+    src.execute("file.save", json!({})).unwrap();
+    assert_eq!(src.take_ui_requests(), vec![crate::UiRequest::Dialog("saveAs".into(), json!({"saveAs": true}))]);
+    src.execute("file.saveAs", json!({})).unwrap();
+    assert_eq!(src.take_ui_requests(), vec![crate::UiRequest::Dialog("saveAs".into(), json!({"saveAs": true}))]);
+
+    // Unencrypted .xlsx opened with an .xlsx name or with no extension (sniff fallback) gets
+    // content_kind = Some(FileKind::Xlsx), and file.save queues saveAs: false.
+    for name in ["Quarterly.xlsx", "Quarterly"] {
+        let mut s = s();
+        s.execute("file.open", json!({"name": name, "base64": crate::io::base64_encode(&xlsx)})).unwrap();
+        assert_eq!(s.doc().unwrap().content_kind, Some(crate::io::FileKind::Xlsx), "{name}");
+        s.take_ui_requests();
+        s.execute("file.save", json!({})).unwrap();
+        assert_eq!(s.take_ui_requests(), vec![crate::UiRequest::Dialog("saveAs".into(), json!({"saveAs": false}))], "{name}");
+        s.execute("file.saveAs", json!({})).unwrap();
+        assert_eq!(s.take_ui_requests(), vec![crate::UiRequest::Dialog("saveAs".into(), json!({"saveAs": true}))], "{name}");
+    }
+
+    // Imported (.xls, .xlsb, .ods), macro/template SpreadsheetML (.xlsm, .xltx, .xltm),
+    // encrypted .xlsx, and non-XLSX text files get content_kind = None and queue saveAs: true on file.save.
+    for (name, bytes, pw) in [
+        ("legacy.xls", xls_fixture(), None),
+        ("source.xlsb", xlsb_fixture(), None),
+        ("source.ods", ods_fixture(), None),
+        ("disguised.xlsx", ods_fixture(), None),
+        ("macro.xlsm", xlsx.clone(), None),
+        ("template.xltx", xlsx.clone(), None),
+        ("Secret.xlsx", encrypted_book("pw-99"), Some("pw-99")),
+        ("notes.csv", b"a,b\n1,2\n".to_vec(), None),
+    ] {
+        let mut s = s();
+        let mut params = json!({"name": name, "base64": crate::io::base64_encode(&bytes)});
+        if let Some(pw) = pw {
+            params["password"] = json!(pw);
+        }
+        s.execute("file.open", params).unwrap();
+        assert_eq!(s.doc().unwrap().content_kind, None, "{name}");
+        s.take_ui_requests();
+        s.execute("file.save", json!({})).unwrap();
+        assert_eq!(s.take_ui_requests(), vec![crate::UiRequest::Dialog("saveAs".into(), json!({"saveAs": true}))], "{name}");
+    }
 }
 
 #[test]
