@@ -7,7 +7,7 @@ use super::{
     func_caption, func_name, group_by_name, group_caption, iso, key, label, mdy, same,
 };
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Stats {
     blank: bool,
     text: bool,
@@ -57,7 +57,7 @@ impl Stats {
     }
 }
 
-/// Date grouping of a cache field.
+#[derive(Clone)]
 struct Group {
     by: PivotDateGroup,
     /// The database field the grouping applies to.
@@ -70,6 +70,7 @@ struct Group {
     items: Vec<String>,
 }
 
+#[derive(Clone)]
 struct CField {
     name: String,
     /// Column offset in the source (database fields only).
@@ -95,7 +96,11 @@ impl CField {
 }
 
 /// A cache built from the source of one or more PivotTables.
+#[derive(Clone)]
 struct Cache {
+    cache_id: Option<u32>,
+    source_sheet: usize,
+    source_range: RangeRef,
     fields: Vec<CField>,
     source_xml: String,
     records: Option<(u64, String)>,
@@ -125,6 +130,31 @@ pub struct SlicerField {
     pub grouped: bool,
 }
 
+/// Whether two PivotTables can share one `<pivotCacheDefinition>` part: same imported cache group,
+/// same worksheet source range, and identical cache field definitions/shared items/groupings.
+/// `axis_map` is per-PivotTable (`rowFields`/`colFields` indexing) and `records` is deterministic
+/// from `(source_sheet, source_range, fields)`, so neither needs to be compared here.
+fn cache_compatible(a: &Cache, b: &Cache) -> bool {
+    a.cache_id == b.cache_id
+        && a.source_sheet == b.source_sheet
+        && a.source_range == b.source_range
+        && a.source_xml == b.source_xml
+        && a.fields.len() == b.fields.len()
+        && a.fields.iter().zip(&b.fields).all(|(x, y)| {
+            x.name == y.name
+                && x.col == y.col
+                && x.itemized == y.itemized
+                && x.items == y.items
+                && x.formula == y.formula
+                && match (&x.group, &y.group) {
+                    (None, None) => true,
+                    (Some(g), Some(h)) => {
+                        g.by == h.by && g.base == h.base && g.par == h.par && g.start == h.start && g.end == h.end && g.items == h.items
+                    }
+                    _ => false,
+                }
+        })
+}
 /// PivotTables being written; the tables themselves are finished after the styles part (their
 /// value number formats need style number-format ids).
 #[derive(Default)]
@@ -168,6 +198,7 @@ impl PivotWriter {
                     x
                 }
             };
+            };
             self.tables += 1;
             let t = self.tables;
             rels.add("pivotTable", &format!("../pivotTables/pivotTable{t}.xml"));
@@ -188,6 +219,12 @@ impl PivotWriter {
         let slicer_fields = out.slicers.fields_for(si, idx);
         let tables: Vec<(&PivotTable, usize)> = members.iter().map(|((gs, _), pt)| (*pt, *gs)).collect();
         let (mut cache, maps) = build_cache(wb, &tables, &slicer_fields)?;
+        if cache.slicer_fields.is_empty() && members.len() == 1
+            && let Some(b) = self.built.iter().position(|existing| existing.slicer_fields.is_empty() && cache_compatible(existing, &cache))
+            && let Some(&(n, _)) = self.caches.get(b)
+        {
+            return Some((n, b, maps.into_iter().next()?));
+        }
         let n = self.caches.len() as u32 + 1;
         if !cache.slicer_fields.is_empty() {
             cache.slicer_id = Some(n);
@@ -512,7 +549,7 @@ fn build_cache(wb: &Workbook, tables: &[(&PivotTable, usize)], slicer_fields: &[
             formula: Some(f.to_string()),
         });
     }
-    Some((Cache { fields, source_xml, records, slicer_fields: slicer_idx, slicer_id: None }, axis_maps))
+    Some((Cache { cache_id: first.cache_id.0, source_sheet: si, source_range: r, fields, source_xml, records, slicer_fields: slicer_idx, slicer_id: None }, axis_maps))
 }
 
 fn group_items(sys: DateSystem, by: PivotDateGroup, start: f64, end: f64) -> Vec<String> {

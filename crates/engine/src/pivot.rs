@@ -65,7 +65,11 @@ pub struct Source {
 
 impl Source {
     pub fn col(&self, name: &str) -> Option<usize> {
-        self.headers.iter().position(|h| h.eq_ignore_ascii_case(name))
+        let sought = name.trim();
+        self.headers
+            .iter()
+            .position(|h| h.eq_ignore_ascii_case(sought))
+            .or_else(|| self.headers.iter().position(|h| h.trim().eq_ignore_ascii_case(sought)))
     }
     /// Per record: the column's cell is a number whose own format is a date (Excel caches such
     /// a number as `<d>` and sorts it after errors), and no cell of the column holds that number

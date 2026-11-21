@@ -36,7 +36,7 @@ fn validate_round_trip_package(source: &[u8], bytes: &[u8], max_report: usize) -
         Ok(issues) => issues.into_iter().for_each(|i| package.push(|| i)),
         Err(e) => package.push(|| e),
     }
-    if let (Ok(before), Ok(after)) = (relationship_kinds(source), relationship_kinds(bytes)) {
+    if let (Ok(before), Ok(after)) = (relationship_kinds(source, false), relationship_kinds(bytes, true)) {
         for (key, kind) in &before {
             if !after.contains_key(key) && !REBUILT_KINDS.contains(&key.as_str()) {
                 package.push(|| format!("lost relationship {kind}"));
