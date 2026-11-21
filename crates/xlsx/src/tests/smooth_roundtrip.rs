@@ -22,6 +22,7 @@ fn smooth_line_setting_round_trips() {
         trendlines: Vec::new(),
         number_format: None,
         innermost_categories: false,
+        label_number_format: None,
     };
     s.charts.push(Chart {
         id: 1,
@@ -41,6 +42,8 @@ fn smooth_line_setting_round_trips() {
         source: None,
         by_rows: false,
         pivot: None,
+        axis_number_formats: Default::default(),
+        pivot_label_formats: Vec::new(),
     });
     let mut smooth_series = base_series.clone();
     smooth_series.smooth = true;
@@ -62,6 +65,8 @@ fn smooth_line_setting_round_trips() {
         source: None,
         by_rows: false,
         pivot: None,
+        axis_number_formats: Default::default(),
+        pivot_label_formats: Vec::new(),
     });
     wb.sheets = vec![Arc::new(s)];
     let bytes = write_xlsx(&wb).unwrap();

@@ -8,10 +8,10 @@ use craft_drawingml::color::SchemeSlot;
 use craft_drawingml::style::{ColorBase, ColorRef as DmlColor, Fill as DmlFill};
 use gridcraft_core::{CellRef, RangeRef, Value, category_levels};
 use gridcraft_formula::{BinOp, Expr, Reference, SheetSel};
-use gridcraft_model::{Chart, ChartDataTable, ChartKind, Color, DefinedName, LegendPos, LineDash, Series, Trendline, TrendlineKind, Workbook};
+use gridcraft_model::{AxisNumberFormats, Chart, ChartDataTable, ChartKind, Color, DefinedName, LegendPos, LineDash, Series, Trendline, TrendlineKind, Workbook};
 
 use crate::drawing::{dml_color, srgb};
-use crate::xml::{El, esc, num};
+use crate::xml::{El, esc, esc_attr, num};
 
 // ---------------------------------------------------------------- reading
 
@@ -420,6 +420,33 @@ const DASHES: [(LineDash, &str); 11] = [
 
 const EMU_PER_PT: f64 = 12_700.0;
 
+fn bool_val(e: &El, k: &str) -> bool {
+    e.child(k).is_some_and(|c| c.flag("val", true))
+}
+
+/// A `<c:numFmt>` typed in Excel's Format pane (`sourceLinked="0"`); `None` when it follows the
+/// source cells.
+fn typed_num_fmt(e: Option<&El>) -> Option<String> {
+    let e = e.filter(|e| !e.flag("sourceLinked", false))?;
+    e.attr("formatCode").map(str::trim).filter(|c| !c.is_empty()).map(str::to_string)
+}
+
+/// The typed number format of a `<c:dLbls>` that shows values. Labels that show other numbers
+/// but not the values keep none: percentages, bubble sizes, and on scatter and bubble charts
+/// (`xy`) the X values. The format was typed for those, and on the values `0.0%` reads 3 as
+/// "300.0%".
+fn label_num_fmt(d: Option<&El>, xy: bool) -> Option<String> {
+    let other = |d: &El| bool_val(d, "showPercent") || bool_val(d, "showBubbleSize") || (xy && bool_val(d, "showCatName"));
+    let d = d.filter(|d| bool_val(d, "showVal") || !other(d))?;
+    typed_num_fmt(d.child("numFmt"))
+}
+
+/// The typed number format of an axis that is drawn: a deleted (hidden) axis keeps none, since
+/// the model draws every axis and its format would show up on an axis Excel doesn't show.
+fn axis_num_fmt(a: Option<&El>) -> Option<String> {
+    typed_num_fmt(a.filter(|a| !bool_val(a, "delete")).and_then(|a| a.child("numFmt")))
+}
+
 pub(crate) fn from_dml_chart(dc: DmlChart, root: Option<&El>, budget: &mut ChartReadBudget) -> (Chart, Vec<PivotSeriesCache>) {
     let plot = root.and_then(|r| r.path(&["chart", "plotArea"]));
     let groups: Vec<&El> = plot.map(|p| p.children.iter().filter(|g| g.name.ends_with("Chart")).collect()).unwrap_or_default();
@@ -427,15 +454,15 @@ pub(crate) fn from_dml_chart(dc: DmlChart, root: Option<&El>, budget: &mut Chart
         g.kids("axId").filter_map(|a| a.attr("val")).collect()
     }
     let first_axes = groups.first().map(|g| ax_ids(g)).unwrap_or_default();
-    let ser_els: Vec<(&El, bool)> = groups
+    let ser_els: Vec<(&El, &El, bool)> = groups
         .iter()
         .enumerate()
         .flat_map(|(gi, g)| {
             let sec = gi > 0 && ax_ids(g) != first_axes;
-            g.kids("ser").map(move |s| (s, sec))
+            g.kids("ser").map(move |s| (s, *g, sec))
         })
         .collect();
-    let multi_axis = ser_els.iter().any(|(_, sec)| *sec);
+    let multi_axis = ser_els.iter().any(|(_, _, sec)| *sec);
     let is_combo = dc.kind == ChartType::Combo || multi_axis;
     let base_kind = map_chart_type(dc.kind, plot);
     let kind = if is_combo { ChartKind::Combo } else { base_kind };
@@ -447,10 +474,12 @@ pub(crate) fn from_dml_chart(dc: DmlChart, root: Option<&El>, budget: &mut Chart
         .into_iter()
         .enumerate()
         .map(|(i, s)| {
-            let (sel, fallback_sec) = match ser_els.get(i).copied() {
-                Some((el, sec)) => (Some(el), sec),
-                None => (None, false),
+            let (sel, group_el, fallback_sec) = match ser_els.get(i).copied() {
+                Some((el, g, sec)) => (Some(el), Some(g), sec),
+                None => (None, None, false),
             };
+            let series_kind = s.kind.map(|k| map_chart_type(k, plot)).unwrap_or(base_kind);
+            let xy = matches!(series_kind, ChartKind::Scatter | ChartKind::ScatterLines | ChartKind::Bubble);
             let color = s
                 .fill
                 .as_ref()
@@ -505,6 +534,9 @@ pub(crate) fn from_dml_chart(dc: DmlChart, root: Option<&El>, budget: &mut Chart
                     .filter(|c| !c.is_empty() && !c.eq_ignore_ascii_case("General"))
                     .map(str::to_string),
                 innermost_categories: false,
+                label_number_format: sel
+                    .and_then(|e| e.child("dLbls"))
+                    .map_or_else(|| label_num_fmt(group_el.and_then(|g| g.child("dLbls")), xy), |d| label_num_fmt(Some(d), xy)),
             };
             if pivot.is_some() {
                 caches.push(sel.map(|e| pivot_series_cache(e, budget)).unwrap_or_default());
@@ -521,7 +553,42 @@ pub(crate) fn from_dml_chart(dc: DmlChart, root: Option<&El>, budget: &mut Chart
     };
     let hole_size =
         if plot.is_some_and(|p| p.child("doughnutChart").is_some()) { (dc.hole_size * 100.0).round().clamp(10.0, 90.0) as u8 } else { 75 };
-    let auto_title_deleted = root
+    let hole_size =
+        if plot.is_some_and(|p| p.child("doughnutChart").is_some()) { (dc.hole_size * 100.0).round().clamp(10.0, 90.0) as u8 } else { 75 };
+    let axis_number_formats = if let Some(plot) = plot {
+        let val_axes: Vec<&El> = plot.kids("valAx").collect();
+        let cat_ax = plot.child("catAx").or_else(|| plot.child("dateAx"));
+        let scatter = matches!(base_kind, ChartKind::Scatter | ChartKind::ScatterLines | ChartKind::Bubble);
+        let val_ax_of = |ids: &[&str]| val_axes.iter().find(|a| a.child_val("axId").is_some_and(|v| ids.contains(&v))).copied();
+        let (x_ax, y_ax) = if scatter {
+            let own: Vec<&El> = first_axes.iter().filter_map(|id| val_axes.iter().find(|a| a.child_val("axId") == Some(*id)).copied()).collect();
+            let horizontal = |a: &&El| matches!(a.child_val("axPos"), Some("b") | Some("t"));
+            match (own.iter().find(|a| horizontal(a)), own.iter().find(|a| !horizontal(a))) {
+                (Some(x), Some(y)) => (Some(*x), Some(*y)),
+                _ => (own.first().copied(), own.get(1).copied()),
+            }
+        } else {
+            (cat_ax, val_axes.first().copied())
+        };
+        let secondary_ids = groups.iter().map(|g| ax_ids(g)).find(|ids| *ids != first_axes);
+        let pct_unmodelled = |ids: &[&str]| {
+            groups.iter().any(|g| {
+                matches!(g.name.as_str(), "lineChart" | "line3DChart") && g.child_val("grouping") == Some("percentStacked") && ax_ids(g) == ids
+            })
+        };
+        if scatter {
+            AxisNumberFormats { x: axis_num_fmt(x_ax), y: axis_num_fmt(y_ax), y2: None }
+        } else {
+            AxisNumberFormats {
+                x: None,
+                y: if pct_unmodelled(&first_axes) { None } else { axis_num_fmt(val_ax_of(&first_axes).or(y_ax)) },
+                y2: secondary_ids.filter(|ids| !pct_unmodelled(ids)).and_then(|ids| axis_num_fmt(val_ax_of(&ids))),
+            }
+        }
+    } else {
+        AxisNumberFormats::default()
+    };
+    Chart {
         .and_then(|r| r.child("chart"))
         .is_some_and(|c| c.child("title").is_none() && c.child("autoTitleDeleted").is_some_and(|d| d.flag("val", true)));
     let ch = Chart {
@@ -551,6 +618,8 @@ pub(crate) fn from_dml_chart(dc: DmlChart, root: Option<&El>, budget: &mut Chart
         source: None,
         by_rows: false,
         pivot,
+        axis_number_formats,
+        pivot_label_formats: Vec::new(),
     };
     (ch, caches)
 }
@@ -841,7 +910,7 @@ fn multi_level_cat(f: &str, values: &str, wb: &Workbook, si: usize) -> Option<St
     Some(s)
 }
 
-fn series_xml(s: &Series, idx: usize, g: G, wb: &Workbook, si: usize) -> String {
+fn series_xml(s: &Series, idx: usize, g: G, labels: bool, wb: &Workbook, si: usize) -> String {
     let mut x = format!("<c:ser><c:idx val=\"{idx}\"/><c:order val=\"{idx}\"/>");
     if let Some(n) = &s.name {
         if is_ref(n) || is_defined_name(wb, si, n) {
@@ -873,6 +942,11 @@ fn series_xml(s: &Series, idx: usize, g: G, wb: &Workbook, si: usize) -> String 
         G::Line { markers: false, .. } | G::Scatter { lines: true } | G::Stock => x.push_str("<c:marker><c:symbol val=\"none\"/></c:marker>"),
         G::Bubble => x.push_str("<c:invertIfNegative val=\"0\"/>"),
         _ => {}
+    }
+    // A typed label format needs the series' own dLbls (after dPt, before trendline in every
+    // series type written here).
+    if let Some(f) = s.label_number_format.as_deref() {
+        x.push_str(&dlbls(labels, Some(f)));
     }
     // Trendlines sit between dLbls and the data in CT_LineSer, CT_BarSer, CT_AreaSer,
     // CT_ScatterSer and CT_BubbleSer; pie and radar series have none.
@@ -965,16 +1039,26 @@ fn trendline_xml(t: &Trendline, wb: &Workbook) -> String {
     x
 }
 
-fn dlbls(show: bool) -> String {
+/// `<c:numFmt>`: a typed format code, or "linked to source" when `None`.
+fn num_fmt_xml(code: Option<&str>) -> String {
+    match code {
+        Some(c) => format!("<c:numFmt formatCode=\"{}\" sourceLinked=\"0\"/>", esc_attr(c)),
+        None => "<c:numFmt formatCode=\"General\" sourceLinked=\"1\"/>".into(),
+    }
+}
+
+/// `<c:dLbls>`; a typed `fmt` comes first, as CT_DLbls orders it.
+fn dlbls(show: bool, fmt: Option<&str>) -> String {
     format!(
-        "<c:dLbls><c:showLegendKey val=\"0\"/><c:showVal val=\"{}\"/><c:showCatName val=\"0\"/><c:showSerName val=\"0\"/><c:showPercent val=\"0\"/><c:showBubbleSize val=\"0\"/></c:dLbls>",
+        "<c:dLbls>{}<c:showLegendKey val=\"0\"/><c:showVal val=\"{}\"/><c:showCatName val=\"0\"/><c:showSerName val=\"0\"/><c:showPercent val=\"0\"/><c:showBubbleSize val=\"0\"/></c:dLbls>",
+        fmt.map(|f| num_fmt_xml(Some(f))).unwrap_or_default(),
         show as u8
     )
 }
 
 fn group_xml(g: G, series: &[(usize, &Series)], ch: &Chart, axes: (u32, u32), wb: &Workbook, si: usize) -> String {
-    let sers: String = series.iter().map(|(i, s)| series_xml(s, *i, g, wb, si)).collect();
-    let dl = dlbls(ch.data_labels);
+    let sers: String = series.iter().map(|(i, s)| series_xml(s, *i, g, ch.data_labels, wb, si)).collect();
+    let dl = dlbls(ch.data_labels, None);
     let ax = format!("<c:axId val=\"{}\"/><c:axId val=\"{}\"/>", axes.0, axes.1);
     match g {
         G::Bar { bar, grouping } => {
@@ -1022,6 +1106,8 @@ struct Ax<'a> {
     grid: bool,
     title: Option<&'a str>,
     crosses_max: bool,
+    /// A typed number format (`None`: linked to source).
+    fmt: Option<&'a str>,
 }
 
 fn axis_xml(a: &Ax<'_>) -> String {
@@ -1038,9 +1124,10 @@ fn axis_xml(a: &Ax<'_>) -> String {
     if let Some(t) = a.title {
         s.push_str(&title_xml(t));
     }
+    s.push_str(&num_fmt_xml(a.fmt));
     let _ = write!(
         s,
-        "<c:numFmt formatCode=\"General\" sourceLinked=\"1\"/><c:majorTickMark val=\"out\"/><c:minorTickMark val=\"none\"/><c:tickLblPos val=\"nextTo\"/><c:crossAx val=\"{}\"/><c:crosses val=\"{}\"/>",
+        "<c:majorTickMark val=\"out\"/><c:minorTickMark val=\"none\"/><c:tickLblPos val=\"nextTo\"/><c:crossAx val=\"{}\"/><c:crosses val=\"{}\"/>",
         a.cross,
         if a.crosses_max { "max" } else { "autoZero" }
     );
@@ -1072,14 +1159,12 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
         let _ = write!(s, "<c:pivotSource><c:name>[{}]{}</c:name><c:fmtId val=\"0\"/></c:pivotSource>", esc(book_name), esc(link));
     }
     s.push_str("<c:chart>");
-    // `None` is the automatic title; an empty title is one that was turned off.
     match &ch.title {
         Some(t) if !t.is_empty() => {
             s.push_str(&title_xml(t));
             s.push_str("<c:autoTitleDeleted val=\"0\"/>");
         }
-        Some(_) => s.push_str("<c:autoTitleDeleted val=\"1\"/>"),
-        None => s.push_str("<c:autoTitleDeleted val=\"0\"/>"),
+        _ => s.push_str("<c:autoTitleDeleted val=\"1\"/>"),
     }
     s.push_str("<c:plotArea><c:layout/>");
     let all: Vec<(usize, &Series)> = ch.series.iter().enumerate().collect();
@@ -1127,6 +1212,7 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 grid: false,
                 title: ch.x_title.as_deref(),
                 crosses_max: false,
+                fmt: ch.axis_number_formats.x.as_deref(),
             }));
             s.push_str(&axis_xml(&Ax {
                 cat: false,
@@ -1137,6 +1223,7 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 grid: ch.gridlines,
                 title: ch.y_title.as_deref(),
                 crosses_max: false,
+                fmt: ch.axis_number_formats.y.as_deref(),
             }));
         }
         G::Bar { bar: true, .. } => {
@@ -1149,6 +1236,7 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 grid: false,
                 title: ch.x_title.as_deref(),
                 crosses_max: false,
+                fmt: None,
             }));
             s.push_str(&axis_xml(&Ax {
                 cat: false,
@@ -1159,6 +1247,7 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 grid: ch.gridlines,
                 title: ch.y_title.as_deref(),
                 crosses_max: false,
+                fmt: ch.axis_number_formats.y.as_deref(),
             }));
         }
         _ => {
@@ -1171,6 +1260,7 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 grid: false,
                 title: ch.x_title.as_deref(),
                 crosses_max: false,
+                fmt: None,
             }));
             s.push_str(&axis_xml(&Ax {
                 cat: false,
@@ -1181,12 +1271,23 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
                 grid: ch.gridlines,
                 title: ch.y_title.as_deref(),
                 crosses_max: false,
+                fmt: ch.axis_number_formats.y.as_deref(),
             }));
         }
     }
     if secondary.is_some() {
-        s.push_str(&axis_xml(&Ax { cat: true, id: 3, cross: 4, pos: "b", delete: true, grid: false, title: None, crosses_max: false }));
-        s.push_str(&axis_xml(&Ax { cat: false, id: 4, cross: 3, pos: "r", delete: false, grid: false, title: None, crosses_max: true }));
+        s.push_str(&axis_xml(&Ax { cat: true, id: 3, cross: 4, pos: "b", delete: true, grid: false, title: None, crosses_max: false, fmt: None }));
+        s.push_str(&axis_xml(&Ax {
+            cat: false,
+            id: 4,
+            cross: 3,
+            pos: "r",
+            delete: false,
+            grid: false,
+            title: None,
+            crosses_max: true,
+            fmt: ch.axis_number_formats.y2.as_deref(),
+        }));
     }
     if let Some(t) = &ch.data_table {
         let _ = write!(
