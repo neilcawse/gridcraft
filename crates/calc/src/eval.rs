@@ -24,7 +24,8 @@ pub use array::{binary_values, zip2};
 pub use format::r1c1_to_a1;
 pub(crate) use special::used_range_of;
 pub use special::{
-    DynamicReads, SPECIAL_FUNCTIONS, dynamic_reads, is_known_function, linked_parts, linked_value, precedents, precedents_at, resized_sum_range, takes_reference,
+    DynamicReads, SPECIAL_FUNCTIONS, dynamic_reads, is_known_function, linked_parts, linked_value, precedents, precedents_at, resized_sum_range,
+    takes_reference,
 };
 use special::{external_name, external_sheet, linked_definition_readable, linked_sheet_number};
 
@@ -462,7 +463,6 @@ impl<'h> Evaluator<'h> {
             },
         }
     }
-
 
     pub fn area_value(&mut self, a: &Area) -> Value {
         if a.range.is_single() {

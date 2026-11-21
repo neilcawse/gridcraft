@@ -8,7 +8,9 @@ use craft_drawingml::color::SchemeSlot;
 use craft_drawingml::style::{ColorBase, ColorRef as DmlColor, Fill as DmlFill};
 use gridcraft_core::{CellRef, RangeRef, Value, category_levels};
 use gridcraft_formula::{BinOp, Expr, Reference, SheetSel};
-use gridcraft_model::{AxisNumberFormats, Chart, ChartDataTable, ChartKind, Color, DefinedName, LegendPos, LineDash, Series, Trendline, TrendlineKind, Workbook};
+use gridcraft_model::{
+    AxisNumberFormats, Chart, ChartDataTable, ChartKind, Color, DefinedName, LegendPos, LineDash, Series, Trendline, TrendlineKind, Workbook,
+};
 
 use crate::drawing::{dml_color, srgb};
 use crate::xml::{El, esc, esc_attr, num};
@@ -1294,7 +1296,17 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
     }
     if let Some(sec) = secondary {
         let (cat_pos, val_pos) = if matches!(sec, G::Bar { bar: true, .. }) { ("l", "b") } else { ("b", "r") };
-        s.push_str(&axis_xml(&Ax { cat: true, id: 3, cross: 4, pos: cat_pos, delete: true, grid: false, title: None, crosses_max: false, fmt: None }));
+        s.push_str(&axis_xml(&Ax {
+            cat: true,
+            id: 3,
+            cross: 4,
+            pos: cat_pos,
+            delete: true,
+            grid: false,
+            title: None,
+            crosses_max: false,
+            fmt: None,
+        }));
         s.push_str(&axis_xml(&Ax {
             cat: false,
             id: 4,

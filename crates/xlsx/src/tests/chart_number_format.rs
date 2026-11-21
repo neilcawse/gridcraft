@@ -147,9 +147,13 @@ fn a_100_percent_line_axis_keeps_no_typed_format_while_area_keeps_it() {
 }
 
 fn series(values: &str, label: Option<&str>) -> Series {
-    Series { values: values.into(), number_format: None,
- innermost_categories: false,
- label_number_format: label.map(str::to_string), ..Series::default() }
+    Series {
+        values: values.into(),
+        number_format: None,
+        innermost_categories: false,
+        label_number_format: label.map(str::to_string),
+        ..Series::default()
+    }
 }
 
 fn chart(id: u32, kind: ChartKind, series: Vec<Series>, axes: AxisNumberFormats) -> Chart {
