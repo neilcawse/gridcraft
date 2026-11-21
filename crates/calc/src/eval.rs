@@ -132,6 +132,12 @@ pub trait Host {
     fn range_values(&mut self, sheet: usize, range: RangeRef) -> Vec<Value> {
         range.iter().map(|c| self.cell_value(sheet, c)).collect()
     }
+    /// Values of a block as an [`Array`]. Hosts can cache immutable evaluated ranges.
+    fn range_array(&mut self, sheet: usize, range: RangeRef) -> Option<Arc<Array>> {
+        let (h, w) = (range.height() as usize, range.width() as usize);
+        let data = self.range_values(sheet, range);
+        Array::new(h, w, data).map(Arc::new)
+    }
     /// The sheet's used range ([`used_range_of`]). Hosts that keep the workbook unchanged while
     /// evaluating can remember it.
     fn used_range(&mut self, sheet: usize) -> Option<RangeRef> {
@@ -365,7 +371,7 @@ impl<'h> Evaluator<'h> {
     }
 
     /// The value of a cell, in this workbook or in a linked one's saved values.
-    fn cell(&mut self, sheet: usize, c: CellRef) -> Value {
+    pub(super) fn cell(&mut self, sheet: usize, c: CellRef) -> Value {
         if linked_parts(sheet).is_none() {
             return self.host.cell_value(sheet, c);
         }
@@ -457,9 +463,6 @@ impl<'h> Evaluator<'h> {
         }
     }
 
-    pub(super) fn cell(&mut self, sheet: usize, c: CellRef) -> Value {
-        self.host.cell_value(sheet, c)
-    }
 
     pub fn area_value(&mut self, a: &Area) -> Value {
         if a.range.is_single() {
@@ -474,6 +477,9 @@ impl<'h> Evaluator<'h> {
         }
         if !self.spend((h as u64) * (w as u64)) {
             return Value::Error(CellError::Calc);
+        }
+        if linked_parts(a.sheet).is_none() {
+            return self.host.range_array(a.sheet, range).map(Value::Array).unwrap_or(Value::Error(CellError::Value));
         }
         let data = self.block_values(a.sheet, range);
         Array::new(h, w, data).map(Value::from).unwrap_or(Value::Error(CellError::Value))
