@@ -384,6 +384,8 @@ fn read_object(
                 } else {
                     cx.warn(format!("chart {target} is missing from the package and was skipped ({part}, object {n})"));
                 }
+            } else if crate::slicer::read_frame(cx, &sheet.name, gd, anchor) {
+                // A slicer: joined with its slicer part and cache once the sheets are read.
             } else if uri.contains("chartex") || uri.contains("chartEx") {
                 cx.warn(format!("a histogram, waterfall, treemap… chart without its chart part was skipped ({part}, object {n})"));
             } else {
@@ -800,6 +802,8 @@ pub enum Obj<'a> {
     Image(&'a Image, String),
     Chart(&'a gridcraft_model::Chart, String),
     Shape(&'a Shape),
+    /// A PivotTable slicer and its (unique) name.
+    Slicer(&'a gridcraft_model::Slicer, String),
 }
 
 impl Obj<'_> {
@@ -808,14 +812,16 @@ impl Obj<'_> {
             Obj::Image(o, _) => &o.anchor,
             Obj::Chart(o, _) => &o.anchor,
             Obj::Shape(o) => &o.anchor,
+            Obj::Slicer(o, _) => &o.anchor,
         }
     }
 
-    fn drawing_ref(&self) -> DrawingRef {
+    fn drawing_ref(&self) -> Option<DrawingRef> {
         match self {
-            Obj::Image(o, _) => DrawingRef::Image(o.id),
-            Obj::Chart(o, _) => DrawingRef::Chart(o.id),
-            Obj::Shape(o) => DrawingRef::Shape(o.id),
+            Obj::Image(o, _) => Some(DrawingRef::Image(o.id)),
+            Obj::Chart(o, _) => Some(DrawingRef::Chart(o.id)),
+            Obj::Shape(o) => Some(DrawingRef::Shape(o.id)),
+            Obj::Slicer(_, _) => None,
         }
     }
 }
@@ -1047,7 +1053,9 @@ impl DrawingOut<'_> {
 pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>]) -> String {
     let mut index = HashMap::new();
     for (i, o) in objs.iter().enumerate() {
-        index.entry(o.drawing_ref()).or_insert(i);
+        if let Some(r) = o.drawing_ref() {
+            index.entry(r).or_insert(i);
+        }
     }
     let mut member_parent = HashMap::new();
     for g in &sheet.groups {
@@ -1069,7 +1077,8 @@ pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>]) -> String {
         next_id: 2,
     };
     for (i, o) in objs.iter().enumerate() {
-        if let Some(gid) = out.outer_group(o.drawing_ref())
+        if let Some(dref) = o.drawing_ref()
+            && let Some(gid) = out.outer_group(dref)
             && !out.groups_done.contains(&gid)
             && let (Some(g), Some(b)) = (sheet.drawing_group(gid), out.rect(DrawingRef::Group(gid)))
         {
@@ -1125,6 +1134,9 @@ fn write_obj(s: &mut String, theme: &Theme, o: &Obj<'_>, id: usize, off: (i64, i
                 xfrm("xdr:xfrm", off, ext, rot),
                 xfrm("a:xfrm", off, ext, rot)
             );
+        }
+        Obj::Slicer(_, name) => {
+            s.push_str(&crate::slicer::frame_xml(id, name, &xfrm("xdr:xfrm", off, ext, rot), &xfrm("a:xfrm", off, ext, rot)));
         }
         Obj::Chart(_, rid) => {
             let _ = write!(
