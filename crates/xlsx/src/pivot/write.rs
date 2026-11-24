@@ -841,7 +841,16 @@ fn table_xml(pt: &PivotTable, idx: usize, cache_id: u32, c: &Cache, axis_map: &[
     if !pt.style.is_empty() {
         let _ = write!(s, " name=\"{}\"", esc_attr(&pt.style));
     }
-    s.push_str(" showRowHeaders=\"1\" showColHeaders=\"1\" showRowStripes=\"0\" showColStripes=\"0\" showLastColumn=\"1\"/>");
+    let o = pt.style_options;
+    let _ = write!(
+        s,
+        " showRowHeaders=\"{}\" showColHeaders=\"{}\" showRowStripes=\"{}\" showColStripes=\"{}\" showLastColumn=\"{}\"/>",
+        u8::from(o.show_row_headers),
+        u8::from(o.show_col_headers),
+        u8::from(o.show_row_stripes),
+        u8::from(o.show_col_stripes),
+        u8::from(o.show_last_column),
+    );
     let overridden = pt.rows.iter().chain(&pt.columns).any(|f| f.subtotal.is_some_and(|own| own != pt.subtotals));
     if !pt.show_values_row || overridden {
         s.push_str("<extLst>");

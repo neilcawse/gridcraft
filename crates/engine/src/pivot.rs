@@ -13,7 +13,8 @@ pub use gridcraft_core::quote_sheet;
 use gridcraft_core::{CellError, CellRef, MAX_COLS, MAX_ROWS, RangeRef, Value, number_to_text, split_sheet};
 use gridcraft_model::{
     BorderLine, BorderStyle, Cell, Chart, Color, Fill, HAlign, NumFmt, PivotDataCell, PivotDateGroup, PivotField, PivotFilter, PivotFunc,
-    PivotItemRef, PivotLayout, PivotLookup, PivotShowAs, PivotSort, PivotTable, PivotValue, Series, SlicerCrossFilter, Style, StyleId, Workbook,
+    PivotItemRef, PivotLayout, PivotLookup, PivotRowRole, PivotShowAs, PivotSort, PivotStyleGrid, PivotStyleLayout, PivotTable, PivotValue, Series,
+    SlicerCrossFilter, Style, StyleId, Workbook,
 };
 
 use crate::pivot_calc::CalcSet;
@@ -22,6 +23,7 @@ mod charts;
 mod compute;
 mod items;
 mod output;
+mod style;
 
 pub use charts::{chart_link, chart_series, clear_output, links_to, parse_chart_link};
 use compute::compute_from;
@@ -31,6 +33,7 @@ pub use items::{SlicerTile, distinct_labels, func_caption, item_label, slicer_ti
 use output::data_cols_exceed_sheet;
 pub use output::{CellKind, OutCell, Output, RowKind};
 use output::{cell_style, look};
+pub use style::{BuiltinPivotLook, builtin_look, parse_pivot_style_name, pivot_cell_style};
 /// Largest source block read (cells).
 pub const MAX_SOURCE_CELLS: u64 = 10_000_000;
 /// Largest report written (cells).
@@ -361,8 +364,10 @@ pub fn refresh(wb: &mut Workbook, sheet: usize, idx: usize, replace: bool) -> Re
             shm.cols.entry(col).or_default().size = Some(wpt);
         }
     }
+    let style_layout = style_layout_from_output(origin, area, k, &out);
     if let Some(p) = shm.pivots.get_mut(idx) {
         p.last_range = Some(area);
+        p.style_grid = PivotStyleGrid(Some(std::sync::Arc::new(style_layout)));
     }
     charts::rebind_charts(wb, &pt, &sheet_name, sheet, origin, &out, label_formats);
     // The index of the new report; its lookup hash is built on the first GETPIVOTDATA.
@@ -372,6 +377,51 @@ pub fn refresh(wb: &mut Workbook, sheet: usize, idx: usize, replace: bool) -> Re
         p.data_index = index;
     }
     Ok(area)
+}
+
+fn style_layout_from_output(origin: CellRef, area: RangeRef, body_offset: u32, out: &Output) -> PivotStyleLayout {
+    let body_start_row = origin.row.saturating_add(body_offset).min(area.end.row);
+    let body_range = RangeRef::new(CellRef::new(body_start_row, area.start.col), area.end);
+    let body_kinds = out.row_kinds.get(body_offset as usize..).unwrap_or(&[]);
+    let first_data_row = body_kinds.iter().take_while(|k| **k == RowKind::Header).count() as u32;
+    let mut row_roles = Vec::new();
+    let mut row_subheading = Vec::new();
+    for rk in body_kinds.get(first_data_row as usize..).unwrap_or(&[]) {
+        match *rk {
+            RowKind::Subtotal => {
+                row_roles.push(PivotRowRole::Subtotal(0));
+                row_subheading.push(None);
+            }
+            RowKind::Grand => {
+                row_roles.push(PivotRowRole::GrandTotal);
+                row_subheading.push(None);
+            }
+            RowKind::Blank => {
+                row_roles.push(PivotRowRole::Blank);
+                row_subheading.push(None);
+            }
+            RowKind::Item(parent) => {
+                row_roles.push(PivotRowRole::Data);
+                row_subheading.push(parent.then_some(0));
+            }
+            _ => {
+                row_roles.push(PivotRowRole::Data);
+                row_subheading.push(None);
+            }
+        }
+    }
+    let page_rows = body_offset.saturating_sub(1);
+    PivotStyleLayout {
+        body_range: Some(body_range),
+        first_header_row: 0,
+        first_data_row,
+        first_data_col: 1,
+        page_rows,
+        page_cols: 1,
+        row_roles,
+        row_subheading,
+        col_roles: vec![],
+    }
 }
 
 /// The value cells of a PivotTable's report, for GETPIVOTDATA when a refresh did not set the

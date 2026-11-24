@@ -1333,3 +1333,126 @@ fn separate_imported_caches_and_sheet_relative_defined_names_do_not_merge_caches
     assert!(parts.contains_key("xl/pivotCache/pivotCacheDefinition2.xml"));
     assert!(!parts.contains_key("xl/pivotCache/pivotCacheDefinition3.xml"));
 }
+
+#[test]
+fn pivot_style_options_round_trip_all_booleans() {
+    let mut wb = workbook();
+    {
+        let s = wb.sheet_mut(1).unwrap();
+        s.pivots[0].style = "PivotStyleMedium9".into();
+        s.pivots[0].style_options = PivotStyleOptions {
+            show_row_headers: false,
+            show_col_headers: true,
+            show_row_stripes: true,
+            show_col_stripes: false,
+            show_last_column: true,
+        };
+        s.pivots[1].style = "PivotStyleDark3".into();
+        s.pivots[1].style_options = PivotStyleOptions {
+            show_row_headers: true,
+            show_col_headers: false,
+            show_row_stripes: false,
+            show_col_stripes: true,
+            show_last_column: false,
+        };
+    }
+    let bytes = write_xlsx(&wb).unwrap();
+    let parts = unzip(&bytes);
+    let t1 = String::from_utf8(parts["xl/pivotTables/pivotTable1.xml"].clone()).unwrap();
+    assert!(
+        t1.contains(
+            "<pivotTableStyleInfo name=\"PivotStyleMedium9\" showRowHeaders=\"0\" showColHeaders=\"1\" showRowStripes=\"1\" showColStripes=\"0\" showLastColumn=\"1\"/>"
+        ),
+        "{t1}"
+    );
+    let (back, _) = read_xlsx(&bytes).unwrap();
+    assert_eq!(back.sheet(1).unwrap().pivots[0].style_options, wb.sheet(1).unwrap().pivots[0].style_options);
+    assert_eq!(back.sheet(1).unwrap().pivots[1].style_options, wb.sheet(1).unwrap().pivots[1].style_options);
+}
+
+#[test]
+fn imported_custom_table_style_and_row_col_items_are_parsed() {
+    let mut wb = workbook();
+    wb.sheet_mut(1).unwrap().pivots.truncate(1);
+    wb.sheet_mut(1).unwrap().pivots[0].style = "CustomPivotTheme".into();
+    let raw = write_xlsx(&wb).unwrap();
+
+    // Rewrite xl/styles.xml and xl/pivotTables/pivotTable1.xml inside the synthetic zip to include
+    // workbook-defined <dxfs>, <tableStyles> (both a pivot style and a pivot="0" slicer style),
+    // and explicit <rowItems>/<colItems> with data, subtotal, blank, and grand items.
+    let mut parts = unzip(&raw);
+    let styles = String::from_utf8(parts["xl/styles.xml"].clone()).unwrap();
+    let dxfs_and_tables = concat!(
+        "<dxfs count=\"5\">",
+        "<dxf><font><color theme=\"3\"/></font></dxf>",
+        "<dxf><font><b/><i val=\"0\"/><color theme=\"0\"/></font><fill><patternFill patternType=\"solid\"><fgColor theme=\"5\"/><bgColor theme=\"2\"/></patternFill></fill><border><bottom style=\"thin\"><color theme=\"4\"/></bottom></border></dxf>",
+        "<dxf><font><color theme=\"1\"/></font><fill><patternFill><bgColor theme=\"0\" tint=\"-0.05\"/></patternFill></fill></dxf>",
+        "<dxf><font><b/><color theme=\"1\"/></font><fill><patternFill><bgColor theme=\"0\" tint=\"-0.15\"/></patternFill></fill><border><top style=\"thin\"><color theme=\"4\"/></top><bottom style=\"thin\"><color theme=\"4\"/></bottom></border></dxf>",
+        "<dxf><font><b/><color theme=\"1\"/></font><fill><patternFill patternType=\"solid\"><bgColor theme=\"0\" tint=\"-0.05\"/></patternFill></fill></dxf>",
+        "</dxfs>",
+        "<tableStyles count=\"2\" defaultTableStyle=\"TableStyleMedium2\" defaultPivotStyle=\"PivotStyleLight16\">",
+        "<tableStyle name=\"CustomPivotTheme\" table=\"0\" count=\"5\">",
+        "<tableStyleElement type=\"wholeTable\" dxfId=\"0\"/>",
+        "<tableStyleElement type=\"headerRow\" dxfId=\"1\"/>",
+        "<tableStyleElement type=\"firstRowStripe\" size=\"2\" dxfId=\"2\"/>",
+        "<tableStyleElement type=\"firstSubtotalRow\" dxfId=\"3\"/>",
+        "<tableStyleElement type=\"totalRow\" dxfId=\"4\"/>",
+        "</tableStyle>",
+        "<tableStyle name=\"IgnoredSlicerStyle\" pivot=\"0\" table=\"0\" count=\"1\">",
+        "<tableStyleElement type=\"wholeTable\" dxfId=\"0\"/>",
+        "</tableStyle>",
+        "</tableStyles></styleSheet>"
+    );
+    let idx = styles.find("<dxfs").unwrap();
+    let patched_styles = format!("{}{}", &styles[..idx], dxfs_and_tables);
+    parts.insert("xl/styles.xml".into(), patched_styles.into_bytes());
+
+    let pt_xml = String::from_utf8(parts["xl/pivotTables/pivotTable1.xml"].clone()).unwrap();
+    let items_xml = concat!(
+        "<rowItems count=\"5\">",
+        "<i><x v=\"0\"/></i>",
+        "<i t=\"default\"><x v=\"0\"/></i>",
+        "<i t=\"blank\"/>",
+        "<i t=\"sum\" r=\"1\"><x v=\"0\"/></i>",
+        "<i t=\"grand\"><x/></i>",
+        "</rowItems>",
+        "<colItems count=\"3\">",
+        "<i><x v=\"0\"/></i>",
+        "<i t=\"default\"><x v=\"0\"/></i>",
+        "<i t=\"grand\"><x/></i>",
+        "</colItems>"
+    );
+    let patched_pt = pt_xml.replace("<pivotTableStyleInfo", &format!("{items_xml}<pivotTableStyleInfo"));
+    parts.insert("xl/pivotTables/pivotTable1.xml".into(), patched_pt.into_bytes());
+
+    let mut buf = std::io::Cursor::new(Vec::new());
+    {
+        let mut zw = zip::ZipWriter::new(&mut buf);
+        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (name, data) in &parts {
+            zw.start_file(name, opts).unwrap();
+            std::io::Write::write_all(&mut zw, data).unwrap();
+        }
+        zw.finish().unwrap();
+    }
+
+    let (back, _) = read_xlsx(buf.get_ref()).unwrap();
+    let pt = &back.sheet(1).unwrap().pivots[0];
+    let custom = pt.custom_style.0.as_ref().expect("custom style parsed");
+    assert_eq!(custom.len(), 5);
+    let header = custom.iter().find(|e| e.kind == "headerRow").unwrap();
+    assert!(header.style.font.bold);
+    assert_eq!(header.style.font.color, Color::Theme(0, 0));
+    assert_eq!(header.style.fill, Fill::solid(Color::Theme(2, 0)));
+    let stripe = custom.iter().find(|e| e.kind == "firstRowStripe").unwrap();
+    assert_eq!(stripe.size, 2);
+    // Explicit `<color theme="1"/>` must remain Theme(1, 0) rather than Auto so it overrides wholeTable.
+    assert_eq!(stripe.style.font.color, Color::Theme(1, 0));
+
+    let grid = pt.style_grid.0.as_ref().expect("style grid parsed");
+    assert_eq!(
+        grid.row_roles,
+        vec![PivotRowRole::Data, PivotRowRole::Subtotal(0), PivotRowRole::Blank, PivotRowRole::Subtotal(1), PivotRowRole::GrandTotal,]
+    );
+    assert_eq!(grid.col_roles, vec![PivotColRole::Data, PivotColRole::Subtotal(0), PivotColRole::GrandTotal]);
+}

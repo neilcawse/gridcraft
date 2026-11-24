@@ -1,8 +1,15 @@
+use std::sync::Arc;
+
 use super::{
     CUSTOM_SUBTOTALS, CellRef, Ctx, DateSystem, EXT_X14_FIELD, EXT_X14_TABLE, EXT_XPDL_TABLE, El, HashMap, IoError, MAX_FIELDS, PivotCalcField,
-    PivotDateGroup, PivotField, PivotFilter, PivotFunc, PivotLayout, PivotScopeItem, PivotShowAs, PivotSort, PivotTable, PivotValue, RangeRef,
-    VALUES_FIELD, abs_range, func_caption, func_from, number_to_text, quote_sheet, same, serial_from_iso_ymd,
+    PivotColRole, PivotCustomStyle, PivotDateGroup, PivotField, PivotFilter, PivotFunc, PivotLayout, PivotRowRole, PivotScopeItem, PivotShowAs,
+    PivotSort, PivotStyleElement, PivotStyleGrid, PivotStyleLayout, PivotStyleOptions, PivotTable, PivotValue, RangeRef, VALUES_FIELD, abs_range,
+    func_caption, func_from, number_to_text, quote_sheet, same, serial_from_iso_ymd,
 };
+
+/// Cap on custom `<tableStyle>` definitions and elements read from `styles.xml`.
+const MAX_TABLE_STYLES: usize = 512;
+const MAX_TABLE_STYLE_ELEMENTS: usize = 64;
 
 /// A cache field as read.
 #[derive(Clone, Debug, Default)]
@@ -42,6 +49,8 @@ pub struct CachesIn {
     parsed: HashMap<String, Option<CacheIn>>,
     next_id: u32,
     next_cache_id: u32,
+    styles_part: Option<String>,
+    table_styles: Option<HashMap<String, Arc<Vec<PivotStyleElement>>>>,
 }
 
 impl CachesIn {
@@ -56,7 +65,25 @@ impl CachesIn {
                 }
             }
         }
-        CachesIn { by_id, parsed: HashMap::new(), next_id: 1, next_cache_id: 1 }
+        let styles_part = wb_rels.iter().find(|r| r.kind == "styles" && !r.external).map(|r| r.target.clone());
+        CachesIn { by_id, parsed: HashMap::new(), next_id: 1, next_cache_id: 1, styles_part, table_styles: None }
+    }
+
+    /// Lazily reads custom `<tableStyle>` definitions from `styles.xml` using `cx.dxfs`.
+    fn custom_style(&mut self, cx: &mut Ctx<'_>, name: &str) -> Option<Arc<Vec<PivotStyleElement>>> {
+        if name.is_empty() {
+            return None;
+        }
+        if self.table_styles.is_none() {
+            let mut map = HashMap::new();
+            if let Some(part) = self.styles_part.as_deref()
+                && let Ok(Some(root)) = cx.pkg.read_xml(part)
+            {
+                read_custom_table_styles(&root, &cx.dxfs, &cx.palette, &mut map);
+            }
+            self.table_styles = Some(map);
+        }
+        self.table_styles.as_ref()?.get(&name.to_ascii_lowercase()).cloned()
     }
 
     /// Whether a slicer cache id resolves to a parsed PivotTable cache.
@@ -243,7 +270,10 @@ pub fn read_pivots(cx: &mut Ctx<'_>, caches: &mut CachesIn, sheet_part: &str, sh
             }
         };
         let Some(cache) = cache else { continue };
-        if let Some(pt) = read_table(cx, &x, &cache, caches.next_id) {
+        if let Some(mut pt) = read_table(cx, &x, &cache, caches.next_id) {
+            if !pt.style.is_empty() {
+                pt.custom_style = PivotCustomStyle(caches.custom_style(cx, &pt.style));
+            }
             caches.next_id = caches.next_id.saturating_add(1);
             out.push(pt);
         }
@@ -379,7 +409,7 @@ fn read_table(cx: &mut Ctx<'_>, x: &El, cache: &CacheIn, id: u32) -> Option<Pivo
     pt.grand_totals_cols = x.flag("rowGrandTotals", true);
     pt.show_headers = x.flag("showHeaders", true);
     pt.enable_show_details = x.flag("enableDrill", true);
-    pt.style = x.child("pivotTableStyleInfo").and_then(|s| s.attr("name")).unwrap_or("").to_string();
+    read_style_info(x, &mut pt);
     let caption = |a: &str| x.attr(a).filter(|c| !c.is_empty()).map(str::to_string);
     pt.row_header_caption = caption("rowHeaderCaption");
     pt.col_header_caption = caption("colHeaderCaption");
@@ -628,8 +658,11 @@ fn read_table(cx: &mut Ctx<'_>, x: &El, cache: &CacheIn, id: u32) -> Option<Pivo
         cx.warn(format!("PivotTable \"{}\": field lists past {MAX_FIELDS} entries were dropped; the table is incomplete", pt.name));
     }
     pt.anchor = loc.start;
-    let above = if pages.is_empty() { 0 } else { pages.len() as u32 + 1 };
+    let loc_el = x.child("location");
+    let page_rows = loc_el.and_then(|l| l.attr_u32("rowPageCount")).unwrap_or(pages.len() as u32);
+    let above = if page_rows == 0 { 0 } else { page_rows.saturating_add(1) };
     pt.last_range = Some(RangeRef::new(CellRef::new(loc.start.row.saturating_sub(above), loc.start.col), loc.end));
+    pt.style_grid = PivotStyleGrid(Some(Arc::new(read_style_layout(x, loc, loc_el, page_rows, row_x.len()))));
     Some(pt)
 }
 
@@ -641,4 +674,123 @@ fn capped<T>(items: impl Iterator<Item = T>, truncated: &mut bool) -> Vec<T> {
         *truncated = true;
     }
     v
+}
+
+/// Parses workbook-defined `<tableStyles>` elements that apply to PivotTables (`pivot != "0"`).
+fn read_custom_table_styles(root: &El, dxfs: &[gridcraft_model::Style], palette: &[u32], out: &mut HashMap<String, Arc<Vec<PivotStyleElement>>>) {
+    let Some(ts_list) = root.child("tableStyles") else { return };
+    let raw_dxfs: Vec<&El> = root.child("dxfs").map(|d| d.kids("dxf").collect()).unwrap_or_default();
+    for ts in ts_list.kids("tableStyle").take(MAX_TABLE_STYLES) {
+        if !ts.flag("pivot", true) {
+            continue;
+        }
+        let Some(name) = ts.attr("name").filter(|n| !n.is_empty()) else { continue };
+        let mut elems = Vec::new();
+        for el in ts.kids("tableStyleElement").take(MAX_TABLE_STYLE_ELEMENTS) {
+            let Some(kind) = el.attr("type").filter(|t| !t.is_empty()) else { continue };
+            let Some(dxf_id) = el.attr_u32("dxfId") else { continue };
+            let Some(base_style) = dxfs.get(dxf_id as usize) else { continue };
+            let mut style = base_style.clone();
+            // `read_font` normalizes `<color theme="1"/>` (dk1/black) to `Color::Auto`, which would
+            // look unset when layering higher-priority DXFs (e.g. `firstRowStripe`, `firstSubtotalRow`)
+            // over a coloured `wholeTable` DXF. Preserve any explicitly stated font color.
+            if style.font.color == gridcraft_model::Color::Auto
+                && let Some(raw_color) = raw_dxfs.get(dxf_id as usize).and_then(|d| d.child("font")).and_then(|f| f.child("color"))
+            {
+                let c = crate::styles::read_color(raw_color, palette);
+                style.font.color = if c == gridcraft_model::Color::Auto { gridcraft_model::Color::Theme(1, 0) } else { c };
+            }
+            let size = el.attr_u32("size").unwrap_or(1).max(1);
+            elems.push(PivotStyleElement { kind: kind.to_string(), size, style });
+        }
+        if !elems.is_empty() {
+            out.insert(name.to_ascii_lowercase(), Arc::new(elems));
+        }
+    }
+}
+
+fn is_subtotal_item_type(t: &str) -> bool {
+    matches!(t, "default" | "sum" | "countA" | "avg" | "max" | "min" | "product" | "count" | "stdDev" | "stdDevP" | "var" | "varP")
+}
+
+fn read_style_layout(x: &El, loc: RangeRef, loc_el: Option<&El>, page_rows: u32, row_field_count: usize) -> PivotStyleLayout {
+    let first_header_row = loc_el.and_then(|l| l.attr_u32("firstHeaderRow")).unwrap_or(0);
+    let first_data_row = loc_el.and_then(|l| l.attr_u32("firstDataRow")).unwrap_or(1);
+    let first_data_col = loc_el.and_then(|l| l.attr_u32("firstDataCol")).unwrap_or(1);
+    let page_cols = loc_el.and_then(|l| l.attr_u32("colPageCount")).unwrap_or(1).max(1);
+    let body_rows = loc.end.row.saturating_sub(loc.start.row).saturating_add(1) as usize;
+    let body_cols = loc.end.col.saturating_sub(loc.start.col).saturating_add(1) as usize;
+
+    let mut row_roles = Vec::new();
+    let mut row_subheading = Vec::new();
+    if let Some(ri) = x.child("rowItems") {
+        for item in ri.kids("i").take(body_rows) {
+            let t = item.attr("t").unwrap_or("data");
+            let r = item.attr_u32("r").unwrap_or(0);
+            let xc = item.kids("x").count() as u32;
+            let role = if t == "grand" {
+                PivotRowRole::GrandTotal
+            } else if t == "blank" {
+                PivotRowRole::Blank
+            } else if is_subtotal_item_type(t) {
+                PivotRowRole::Subtotal(r.saturating_add(xc.saturating_sub(1)).min(2) as u8)
+            } else {
+                PivotRowRole::Data
+            };
+            let sub = if role == PivotRowRole::Data && row_field_count > 1 && ((r + xc) as usize) < row_field_count {
+                Some(r.saturating_add(xc.saturating_sub(1)).min(2) as u8)
+            } else {
+                None
+            };
+            row_roles.push(role);
+            row_subheading.push(sub);
+        }
+    }
+
+    let mut col_roles = Vec::new();
+    if let Some(ci) = x.child("colItems") {
+        for item in ci.kids("i").take(body_cols) {
+            let t = item.attr("t").unwrap_or("data");
+            let r = item.attr_u32("r").unwrap_or(0);
+            let xc = item.kids("x").count() as u32;
+            let role = if t == "grand" {
+                PivotColRole::GrandTotal
+            } else if t == "blank" {
+                PivotColRole::Blank
+            } else if is_subtotal_item_type(t) {
+                PivotColRole::Subtotal(r.saturating_add(xc.saturating_sub(1)).min(2) as u8)
+            } else {
+                PivotColRole::Data
+            };
+            col_roles.push(role);
+        }
+    }
+
+    PivotStyleLayout {
+        body_range: Some(loc),
+        first_header_row,
+        first_data_row,
+        first_data_col,
+        page_rows,
+        page_cols,
+        row_roles,
+        row_subheading,
+        col_roles,
+    }
+}
+
+/// Reads `<pivotTableStyleInfo>` name and display flags into `pt`.
+fn read_style_info(x: &El, pt: &mut PivotTable) {
+    if let Some(si) = x.child("pivotTableStyleInfo") {
+        pt.style = si.attr("name").unwrap_or("").to_string();
+        pt.style_options = PivotStyleOptions {
+            show_row_headers: si.flag("showRowHeaders", false),
+            show_col_headers: si.flag("showColHeaders", false),
+            show_row_stripes: si.flag("showRowStripes", false),
+            show_col_stripes: si.flag("showColStripes", false),
+            show_last_column: si.flag("showLastColumn", false),
+        };
+    } else {
+        pt.style.clear();
+    }
 }
