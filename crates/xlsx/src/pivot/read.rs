@@ -662,7 +662,7 @@ fn read_table(cx: &mut Ctx<'_>, x: &El, cache: &CacheIn, id: u32) -> Option<Pivo
     let page_rows = loc_el.and_then(|l| l.attr_u32("rowPageCount")).unwrap_or(pages.len() as u32);
     let above = if page_rows == 0 { 0 } else { page_rows.saturating_add(1) };
     pt.last_range = Some(RangeRef::new(CellRef::new(loc.start.row.saturating_sub(above), loc.start.col), loc.end));
-    pt.style_grid = PivotStyleGrid(Some(Arc::new(read_style_layout(x, loc, loc_el, page_rows, row_x.len()))));
+    pt.style_grid = PivotStyleGrid(Some(Arc::new(read_style_layout(x, loc, loc_el, page_rows, row_x.len(), col_x.len()))));
     Some(pt)
 }
 
@@ -703,9 +703,7 @@ fn read_custom_table_styles(root: &El, dxfs: &[gridcraft_model::Style], palette:
             let size = el.attr_u32("size").unwrap_or(1).max(1);
             elems.push(PivotStyleElement { kind: kind.to_string(), size, style });
         }
-        if !elems.is_empty() {
-            out.insert(name.to_ascii_lowercase(), Arc::new(elems));
-        }
+        out.insert(name.to_ascii_lowercase(), Arc::new(elems));
     }
 }
 
@@ -713,7 +711,7 @@ fn is_subtotal_item_type(t: &str) -> bool {
     matches!(t, "default" | "sum" | "countA" | "avg" | "max" | "min" | "product" | "count" | "stdDev" | "stdDevP" | "var" | "varP")
 }
 
-fn read_style_layout(x: &El, loc: RangeRef, loc_el: Option<&El>, page_rows: u32, row_field_count: usize) -> PivotStyleLayout {
+fn read_style_layout(x: &El, loc: RangeRef, loc_el: Option<&El>, page_rows: u32, row_field_count: usize, col_field_count: usize) -> PivotStyleLayout {
     let first_header_row = loc_el.and_then(|l| l.attr_u32("firstHeaderRow")).unwrap_or(0);
     let first_data_row = loc_el.and_then(|l| l.attr_u32("firstDataRow")).unwrap_or(1);
     let first_data_col = loc_el.and_then(|l| l.attr_u32("firstDataCol")).unwrap_or(1);
@@ -737,7 +735,7 @@ fn read_style_layout(x: &El, loc: RangeRef, loc_el: Option<&El>, page_rows: u32,
             } else {
                 PivotRowRole::Data
             };
-            let sub = if role == PivotRowRole::Data && row_field_count > 1 && ((r + xc) as usize) < row_field_count {
+            let sub = if role == PivotRowRole::Data && row_field_count > 1 && (r.saturating_add(xc) as usize) < row_field_count {
                 Some(r.saturating_add(xc.saturating_sub(1)).min(2) as u8)
             } else {
                 None
@@ -748,6 +746,7 @@ fn read_style_layout(x: &El, loc: RangeRef, loc_el: Option<&El>, page_rows: u32,
     }
 
     let mut col_roles = Vec::new();
+    let mut col_subheading = Vec::new();
     if let Some(ci) = x.child("colItems") {
         for item in ci.kids("i").take(body_cols) {
             let t = item.attr("t").unwrap_or("data");
@@ -762,7 +761,13 @@ fn read_style_layout(x: &El, loc: RangeRef, loc_el: Option<&El>, page_rows: u32,
             } else {
                 PivotColRole::Data
             };
+            let sub = if role == PivotColRole::Data && col_field_count > 1 && (r.saturating_add(xc) as usize) < col_field_count {
+                Some(r.saturating_add(xc.saturating_sub(1)).min(2) as u8)
+            } else {
+                None
+            };
             col_roles.push(role);
+            col_subheading.push(sub);
         }
     }
 
@@ -776,6 +781,7 @@ fn read_style_layout(x: &El, loc: RangeRef, loc_el: Option<&El>, page_rows: u32,
         row_roles,
         row_subheading,
         col_roles,
+        col_subheading,
     }
 }
 

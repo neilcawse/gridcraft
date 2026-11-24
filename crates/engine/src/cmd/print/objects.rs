@@ -49,8 +49,13 @@ pub(super) fn fallback_lines(text: &str, h: f32, line_h: f32) -> impl Iterator<I
     text.lines().take(n)
 }
 
-fn anchor_rect(sh: &Sheet, a: &Anchor) -> (f64, f64, f64, f64) {
-    (sh.col_left(a.cell.col) + a.dx as f64, sh.row_top(a.cell.row) + a.dy as f64, a.width.max(0.0) as f64, a.height.max(0.0) as f64)
+fn anchor_rect(lay: &super::layout::SheetLayout, sh: &Sheet, a: &Anchor) -> (f64, f64, f64, f64) {
+    let y = if a.mode == gridcraft_model::AnchorMode::Absolute {
+        sh.row_top(a.cell.row) + a.dy as f64
+    } else {
+        lay.row_top(sh, a.cell.row) + a.dy as f64
+    };
+    (sh.col_left(a.cell.col) + a.dx as f64, y, a.width.max(0.0) as f64, a.height.max(0.0) as f64)
 }
 
 /// Decodes an embedded picture to RGBA, downscaled to at most `max_w`×`max_h` pixels.
@@ -71,21 +76,25 @@ fn decode_image(data: &[u8], max_w: u32, max_h: u32) -> Option<(Vec<u8>, u32, u3
 /// picture again, but the decode happens once).
 pub(super) fn draw_objects(pg: &mut Page, wb: &Workbook, si: usize, sh: &Sheet, b: &Block, pics: &mut super::PicCache) {
     let block = b.range();
-    let (sx0, sy0) = (sh.col_left(block.start.col), sh.row_top(block.start.row));
-    let (sx1, sy1) = (sh.col_left(block.end.col.saturating_add(1)), sh.row_top(block.end.row.saturating_add(1)));
+    let (sx0, sy0) = (sh.col_left(block.start.col), b.lay.row_top(sh, block.start.row));
+    let (sx1, sy1) = (sh.col_left(block.end.col.saturating_add(1)), b.lay.row_top(sh, block.end.row.saturating_add(1)));
     let (bx, by) = (b.xs.first().copied().unwrap_or(0.0), b.ys.first().copied().unwrap_or(0.0));
     let (bw, bh) = (b.xs.last().copied().unwrap_or(bx) - bx, b.ys.last().copied().unwrap_or(by) - by);
     let visible = |r: (f64, f64, f64, f64)| r.2 > 0.0 && r.3 > 0.0 && r.0 < sx1 && r.0 + r.2 > sx0 && r.1 < sy1 && r.1 + r.3 > sy0;
     let place = |a: &Anchor, r: (f64, f64, f64, f64)| {
-        let wk = if a.mode == gridcraft_model::AnchorMode::MoveOnly { b.k } else { b.kx };
+        let (ox, oy, wk, hk) = match a.mode {
+            gridcraft_model::AnchorMode::Absolute => (bx + ((r.0 - sx0) as f32) * b.k, by + ((r.1 - sy0) as f32) * b.k, b.k, b.k),
+            gridcraft_model::AnchorMode::MoveOnly => (bx + ((r.0 - sx0) as f32) * b.kx, by + ((r.1 - sy0) as f32) * b.ky, b.k, b.k),
+            gridcraft_model::AnchorMode::MoveAndSize => (bx + ((r.0 - sx0) as f32) * b.kx, by + ((r.1 - sy0) as f32) * b.ky, b.kx, b.ky),
+        };
         let w = r.2 as f32 * wk;
-        (b.text_x(bx + ((r.0 - sx0) as f32) * b.kx, w), by + ((r.1 - sy0) as f32) * b.k, w, r.3 as f32 * b.k)
+        (b.text_x(ox, w), oy, w, r.3 as f32 * hk)
     };
     pg.save();
     pg.clip_rect(b.text_x(bx, bw), by, bw, bh);
     draw_sparklines(pg, wb, si, sh, b, block);
     for shp in &sh.shapes {
-        let r = anchor_rect(sh, &shp.anchor);
+        let r = anchor_rect(b.lay, sh, &shp.anchor);
         if !visible(r) {
             continue;
         }
@@ -112,7 +121,7 @@ pub(super) fn draw_objects(pg: &mut Page, wb: &Workbook, si: usize, sh: &Sheet, 
         draw_shape(pg, wb, shp, b, (x, y, w, h));
     }
     for (imi, im) in sh.images.iter().enumerate() {
-        let r = anchor_rect(sh, &im.anchor);
+        let r = anchor_rect(b.lay, sh, &im.anchor);
         if !visible(r) {
             continue;
         }
@@ -130,7 +139,7 @@ pub(super) fn draw_objects(pg: &mut Page, wb: &Workbook, si: usize, sh: &Sheet, 
         }
     }
     for (chi, ch) in sh.charts.iter().enumerate() {
-        let r = anchor_rect(sh, &ch.anchor);
+        let r = anchor_rect(b.lay, sh, &ch.anchor);
         if !visible(r) {
             continue;
         }
