@@ -572,8 +572,8 @@ fn char_weight(c: char) -> u32 {
 /// and digits alone (Arabic marks, tatweel and invisible format characters skipped, Arabic-Indic
 /// digits read as digits); then, letter by letter, by the marks on each letter (none first, then in
 /// Excel's mark order) and the digit script (ASCII, Arabic-Indic, Extended Arabic-Indic); then, to
-/// break a remaining tie, by every character. Characters are weighed by [`char_weight`] at every
-/// level; only text that is equal at the last level compares equal.
+/// break a remaining tie, by every character. [`char_weight`] supplies the first and last
+/// levels; only text that matches at all three levels compares equal.
 pub fn compare_text(a: &str, b: &str) -> Ordering {
     if std::ptr::eq(a.as_ptr(), b.as_ptr()) && a.len() == b.len() {
         return Ordering::Equal;
