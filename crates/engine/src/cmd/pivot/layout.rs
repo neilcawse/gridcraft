@@ -184,7 +184,9 @@ pub(super) fn layout(s: &mut Session, p: &Json) -> Result<Json> {
                 pt.subtotals_top = t;
             }
         }
-        if let Some(st) = &style {
+        if let Some(st) = &style
+            && *st != pt.style
+        {
             pt.style = st.clone();
             pt.custom_style = gridcraft_model::PivotCustomStyle(None);
         }

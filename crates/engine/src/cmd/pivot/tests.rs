@@ -2549,6 +2549,13 @@ fn changing_pivot_style_clears_imported_custom_style() {
     }
     assert!(!s.doc().unwrap().wb.sheet(0).unwrap().pivots[0].custom_style.is_none());
 
+    // Re-sending the current custom style name must keep custom_style intact.
+    s.execute("pivot.style", json!({"style": "ImportedCustom1"})).unwrap();
+    let pt_same = &s.doc().unwrap().wb.sheet(0).unwrap().pivots[0];
+    assert_eq!(pt_same.style, "ImportedCustom1");
+    assert!(!pt_same.custom_style.is_none(), "re-sending the current custom style name must preserve custom_style");
+
+    // Switching to a different style name must clear imported custom_style.
     s.execute("pivot.style", json!({"style": "PivotStyleMedium9"})).unwrap();
     let pt = &s.doc().unwrap().wb.sheet(0).unwrap().pivots[0];
     assert_eq!(pt.style, "PivotStyleMedium9");

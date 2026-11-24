@@ -25,7 +25,7 @@ pub(super) struct Look {
     pub(super) cf: Option<crate::cf::CfLook>,
 }
 
-fn cell_look(wb: &Workbook, si: usize, sh: &Sheet, c: CellRef, cf: &mut crate::cf::CfCache) -> Look {
+fn cell_look(wb: &Workbook, si: usize, sh: &Sheet, c: CellRef, cf: &mut crate::cf::CfCache, cf_budget: &mut usize) -> Look {
     let mut style = match sh.table_at(c) {
         Some(t) => crate::tables::table_cell_shown_style(wb, si, t, cf.table_edges(sh, t), c),
         None => match sh.pivot_at(c) {
@@ -33,7 +33,7 @@ fn cell_look(wb: &Workbook, si: usize, sh: &Sheet, c: CellRef, cf: &mut crate::c
             None => wb.styles.get(sh.style_id(c)).clone(),
         },
     };
-    let cfl = cf.look(wb, si, c);
+    let cfl = if *cf_budget > 0 && cf.may_apply(wb, si, c) { cf.look_budgeted(wb, si, c, cf_budget) } else { None };
     if let Some(st) = cfl.as_ref().and_then(|l| l.style.as_ref()) {
         if st.align.reading_order.is_some() {
             style.align.reading_order = st.align.reading_order;
@@ -325,7 +325,7 @@ impl<'a> Covered<'a> {
 }
 
 /// Draws the cells of a block: fills, gridlines, data bars, borders and text.
-pub(super) fn draw_block(pg: &mut Page, b: &Block, gridlines: bool, cf: &mut crate::cf::CfCache) {
+pub(super) fn draw_block(pg: &mut Page, b: &Block, gridlines: bool, cf: &mut crate::cf::CfCache, cf_budget: &mut usize) {
     let (bx, by) = (b.xs.first().copied().unwrap_or(0.0), b.ys.first().copied().unwrap_or(0.0));
     let (bw, bh) = (b.xs.last().copied().unwrap_or(bx) - bx, b.ys.last().copied().unwrap_or(by) - by);
     if bw <= 0.0 || bh <= 0.0 {
@@ -360,27 +360,28 @@ pub(super) fn draw_block(pg: &mut Page, b: &Block, gridlines: bool, cf: &mut cra
         }
     }
     // Cheap pre-filter: blank, unstyled cells outside tables and conditional formats draw nothing.
-    let skip = |c: &CellRef| {
-        sh.cond_formats.is_empty()
-            && sh.value_ref(*c).is_none_or(|v| v.is_empty())
-            && sh.style_id(*c) == StyleId::DEFAULT
-            && (sh.tables.is_empty() || sh.table_at(*c).is_none())
-            && (sh.pivots.is_empty() || sh.pivot_at(*c).is_none())
-    };
-    let looks: Vec<(CellRef, Look)> = cells
-        .iter()
-        .filter(|c| !skip(c))
-        .chain(merges.iter().map(|m| &m.start))
-        .map(|c| (*c, cell_look(b.wb, b.si, sh, *c, cf)))
-        .filter(|(c, l)| {
-            l.fill.is_some()
-                || l.cf.is_some()
-                || by_start.contains_key(c)
-                || !sh.value(*c).is_empty()
-                || l.style.borders != Borders::default()
-                || l.style.num_fmt.as_str() == "checkbox"
-        })
-        .collect();
+    let mut looks: Vec<(CellRef, Look)> = Vec::new();
+    for &c in cells.iter().chain(merges.iter().map(|m| &m.start)) {
+        let skip = !by_start.contains_key(&c)
+            && (*cf_budget == 0 || !cf.may_apply(b.wb, b.si, c))
+            && sh.value_ref(c).is_none_or(|v| v.is_empty())
+            && sh.style_id(c) == StyleId::DEFAULT
+            && (sh.tables.is_empty() || sh.table_at(c).is_none())
+            && (sh.pivots.is_empty() || sh.pivot_at(c).is_none());
+        if skip {
+            continue;
+        }
+        let l = cell_look(b.wb, b.si, sh, c, cf, cf_budget);
+        if l.fill.is_some()
+            || l.cf.is_some()
+            || by_start.contains_key(&c)
+            || !sh.value(c).is_empty()
+            || l.style.borders != Borders::default()
+            || l.style.num_fmt.as_str() == "checkbox"
+        {
+            looks.push((c, l));
+        }
+    }
     let rect_of = |c: CellRef| -> (f32, f32, f32, f32, bool) {
         match by_start.get(&c) {
             Some(m) => {

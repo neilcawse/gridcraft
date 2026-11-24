@@ -2,11 +2,10 @@
 //! gets.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 
 use gridcraft_core::{CellRef, RangeRef, Value, compare};
-use gridcraft_model::{
-    CfOperator, CfRule, CfValueKind, Color, CondFormat, PatternType, Sheet, Style, Table, Underline, Workbook, default_icon_thresholds,
-};
+use gridcraft_model::{CfOperator, CfRule, CfValueKind, Color, PatternType, Sheet, Style, Table, Underline, Workbook, default_icon_thresholds};
 
 /// The conditional look of one cell.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -22,12 +21,301 @@ pub struct CfLook {
     pub hide_value: bool,
 }
 
-/// Precomputed statistics per rule (min/max/percentiles/top-N thresholds/duplicates), and each
-/// table's visible edges. The grid and print keep one per paint.
+/// Precomputed statistics per rule (min/max/percentiles/top-N thresholds/duplicates), each
+/// table's visible edges, and a per-sheet spatial index over conditional-format ranges.
+/// The grid and print keep one per paint.
 #[derive(Default)]
 pub struct CfCache {
     stats: HashMap<usize, RuleStats>,
     table_edges: HashMap<RangeRef, crate::tables::ShownEdges>,
+    index: Option<SheetCfIndex>,
+}
+
+struct RuleMeta {
+    orig_idx: usize,
+    first: Option<CellRef>,
+    sets_num_fmt: bool,
+}
+
+struct RangeGroup {
+    /// Rule ranks into `SheetCfIndex::rules` (already sorted by `(priority, orig_idx)`).
+    rule_ranks: Vec<u32>,
+    has_num_fmt: bool,
+}
+
+struct IntervalNode {
+    center: u32,
+    is_leaf: bool,
+    /// Multi-cell `(range, group_id)` entries sorted ascending by `range.start.row`.
+    by_start: Vec<(RangeRef, u32)>,
+    /// Multi-cell `(range, group_id)` entries sorted descending by `range.end.row` (empty for leaves).
+    by_end: Vec<(RangeRef, u32)>,
+    left: Option<usize>,
+    right: Option<usize>,
+}
+
+/// Spatial index over one sheet's conditional formats:
+/// - identical `sqref` lists across rules are grouped once (`RangeGroup`);
+/// - exact 1×1 ranges live in `single_cells` (`HashMap`) plus sorted `single_keys`;
+/// - multi-cell ranges live in a balanced row interval tree (`multi_tree`).
+struct SheetCfIndex {
+    sheet: usize,
+    rule_count: usize,
+    bbox: Option<RangeRef>,
+    any_num_fmt: bool,
+    rules: Vec<RuleMeta>,
+    groups: Vec<RangeGroup>,
+    single_cells: HashMap<CellRef, Vec<u32>>,
+    single_keys: Vec<CellRef>,
+    unique_multi: Vec<(RangeRef, u32)>,
+    multi_tree: Vec<IntervalNode>,
+}
+
+impl SheetCfIndex {
+    fn build(sh: &Sheet, sheet: usize) -> Self {
+        let mut order: Vec<(usize, u32)> = sh.cond_formats.iter().enumerate().map(|(i, cf)| (i, cf.priority)).collect();
+        order.sort_by_key(|&(orig_idx, priority)| (priority, orig_idx));
+
+        let mut rules = Vec::with_capacity(order.len());
+        let mut any_num_fmt = false;
+        for &(orig_idx, _) in &order {
+            let sets_num_fmt = rule_style(&sh.cond_formats[orig_idx].rule).is_some_and(style_sets_num_fmt);
+            any_num_fmt |= sets_num_fmt;
+            rules.push(RuleMeta { orig_idx, first: None, sets_num_fmt });
+        }
+
+        let mut groups: Vec<RangeGroup> = Vec::new();
+        let mut group_reps: Vec<usize> = Vec::new();
+        let mut buckets: HashMap<u64, Vec<(u32, usize)>> = HashMap::new();
+        for (rank, meta) in rules.iter().enumerate() {
+            let ranges = &sh.cond_formats[meta.orig_idx].ranges;
+            if ranges.is_empty() {
+                continue;
+            }
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            ranges.hash(&mut hasher);
+            let h = hasher.finish();
+            let bucket = buckets.entry(h).or_default();
+            if let Some(&(gid, _)) = bucket.iter().find(|&&(_, rep)| sh.cond_formats[rep].ranges == *ranges) {
+                let g = &mut groups[gid as usize];
+                g.rule_ranks.push(rank as u32);
+                g.has_num_fmt |= meta.sets_num_fmt;
+            } else {
+                let gid = groups.len() as u32;
+                groups.push(RangeGroup { rule_ranks: vec![rank as u32], has_num_fmt: meta.sets_num_fmt });
+                group_reps.push(meta.orig_idx);
+                bucket.push((gid, meta.orig_idx));
+            }
+        }
+
+        let mut bbox: Option<RangeRef> = None;
+        let mut single_cells: HashMap<CellRef, Vec<u32>> = HashMap::new();
+        let mut unique_multi: Vec<(RangeRef, u32)> = Vec::new();
+        for (gid, &rep_idx) in group_reps.iter().enumerate() {
+            let ranges = &sh.cond_formats[rep_idx].ranges;
+            let mut seen_in_group = (ranges.len() > 1).then(|| HashSet::with_capacity(ranges.len()));
+            let mut group_first: Option<CellRef> = None;
+            for &r in ranges {
+                if let Some(seen) = &mut seen_in_group
+                    && !seen.insert(r)
+                {
+                    continue;
+                }
+                group_first = Some(match group_first {
+                    None => r.start,
+                    Some(f) => CellRef::new(f.row.min(r.start.row), f.col.min(r.start.col)),
+                });
+                bbox = Some(bbox.map_or(r, |b| b.union(&r)));
+                if r.is_single() {
+                    single_cells.entry(r.start).or_default().push(gid as u32);
+                } else {
+                    unique_multi.push((r, gid as u32));
+                }
+            }
+            for &rank in &groups[gid].rule_ranks {
+                rules[rank as usize].first = group_first;
+            }
+        }
+
+        let mut single_keys: Vec<CellRef> = single_cells.keys().copied().collect();
+        single_keys.sort_unstable();
+        let multi_tree = build_interval_tree(unique_multi.clone());
+
+        Self { sheet, rule_count: sh.cond_formats.len(), bbox, any_num_fmt, rules, groups, single_cells, single_keys, unique_multi, multi_tree }
+    }
+
+    fn query_point_groups(&self, c: CellRef, mut emit: impl FnMut(u32)) {
+        if !self.bbox.is_some_and(|b| b.contains(c)) {
+            return;
+        }
+        if let Some(gs) = self.single_cells.get(&c) {
+            for &g in gs {
+                emit(g);
+            }
+        }
+        if self.multi_tree.is_empty() {
+            return;
+        }
+        let mut node_idx = Some(0usize);
+        while let Some(ni) = node_idx {
+            let node = &self.multi_tree[ni];
+            if node.is_leaf {
+                for &(r, g) in &node.by_start {
+                    if r.contains(c) {
+                        emit(g);
+                    }
+                }
+                break;
+            }
+            if c.row < node.center {
+                for &(r, g) in &node.by_start {
+                    if r.start.row > c.row {
+                        break;
+                    }
+                    if c.col >= r.start.col && c.col <= r.end.col {
+                        emit(g);
+                    }
+                }
+                node_idx = node.left;
+            } else if c.row > node.center {
+                for &(r, g) in &node.by_end {
+                    if r.end.row < c.row {
+                        break;
+                    }
+                    if c.col >= r.start.col && c.col <= r.end.col {
+                        emit(g);
+                    }
+                }
+                node_idx = node.right;
+            } else {
+                for &(r, g) in &node.by_start {
+                    if c.col >= r.start.col && c.col <= r.end.col {
+                        emit(g);
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    fn query_block_multi(&self, block: RangeRef, mut emit: impl FnMut(RangeRef, u32)) {
+        if self.multi_tree.is_empty() || !self.bbox.is_some_and(|b| b.intersects(&block)) {
+            return;
+        }
+        let mut stack = vec![0usize];
+        while let Some(ni) = stack.pop() {
+            let node = &self.multi_tree[ni];
+            if node.is_leaf {
+                for &(r, g) in &node.by_start {
+                    if let Some(sub) = r.intersection(&block) {
+                        emit(sub, g);
+                    }
+                }
+                continue;
+            }
+            if block.end.row < node.center {
+                for &(r, g) in &node.by_start {
+                    if r.start.row > block.end.row {
+                        break;
+                    }
+                    if let Some(sub) = r.intersection(&block) {
+                        emit(sub, g);
+                    }
+                }
+                if let Some(l) = node.left {
+                    stack.push(l);
+                }
+            } else if block.start.row > node.center {
+                for &(r, g) in &node.by_end {
+                    if r.end.row < block.start.row {
+                        break;
+                    }
+                    if let Some(sub) = r.intersection(&block) {
+                        emit(sub, g);
+                    }
+                }
+                if let Some(r) = node.right {
+                    stack.push(r);
+                }
+            } else {
+                for &(r, g) in &node.by_start {
+                    if let Some(sub) = r.intersection(&block) {
+                        emit(sub, g);
+                    }
+                }
+                if let Some(l) = node.left {
+                    stack.push(l);
+                }
+                if let Some(r) = node.right {
+                    stack.push(r);
+                }
+            }
+        }
+    }
+
+    fn matches_any(&self, c: CellRef) -> bool {
+        if !self.bbox.is_some_and(|b| b.contains(c)) {
+            return false;
+        }
+        if self.single_cells.contains_key(&c) {
+            return true;
+        }
+        let mut hit = false;
+        self.query_point_groups(c, |_| hit = true);
+        hit
+    }
+
+    fn has_num_fmt_at(&self, c: CellRef) -> bool {
+        if !self.any_num_fmt || !self.bbox.is_some_and(|b| b.contains(c)) {
+            return false;
+        }
+        let mut hit = false;
+        self.query_point_groups(c, |g| {
+            if self.groups[g as usize].has_num_fmt {
+                hit = true;
+            }
+        });
+        hit
+    }
+}
+
+fn build_interval_tree(entries: Vec<(RangeRef, u32)>) -> Vec<IntervalNode> {
+    fn rec(mut entries: Vec<(RangeRef, u32)>, nodes: &mut Vec<IntervalNode>) -> Option<usize> {
+        if entries.is_empty() {
+            return None;
+        }
+        let idx = nodes.len();
+        if entries.len() <= 8 {
+            entries.sort_unstable_by_key(|(r, _)| r.start.row);
+            nodes.push(IntervalNode { center: 0, is_leaf: true, by_start: entries, by_end: Vec::new(), left: None, right: None });
+            return Some(idx);
+        }
+        entries.sort_unstable_by_key(|(r, _)| r.start.row);
+        let center = entries[entries.len() / 2].0.start.row;
+        let mut left = Vec::new();
+        let mut mid = Vec::new();
+        let mut right = Vec::new();
+        for item in entries {
+            if item.0.end.row < center {
+                left.push(item);
+            } else if item.0.start.row > center {
+                right.push(item);
+            } else {
+                mid.push(item);
+            }
+        }
+        let mut by_end = mid.clone();
+        by_end.sort_unstable_by_key(|(a, _)| std::cmp::Reverse(a.end.row));
+        nodes.push(IntervalNode { center, is_leaf: false, by_start: mid, by_end, left: None, right: None });
+        let l = rec(left, nodes);
+        let r = rec(right, nodes);
+        nodes[idx].left = l;
+        nodes[idx].right = r;
+        Some(idx)
+    }
+    let mut nodes = Vec::new();
+    rec(entries, &mut nodes);
+    nodes
 }
 
 #[derive(Default, Clone)]
@@ -294,26 +582,166 @@ impl CfCache {
         *self.table_edges.entry(t.range).or_insert_with(|| crate::tables::shown_edges(sh, t))
     }
 
+    fn ensure_index(&mut self, sh: &Sheet, sheet: usize) {
+        let stale = self.index.as_ref().is_none_or(|idx| idx.sheet != sheet || idx.rule_count != sh.cond_formats.len());
+        if stale {
+            if self.index.as_ref().is_some_and(|idx| idx.sheet != sheet) {
+                self.stats.clear();
+            }
+            self.index = Some(SheetCfIndex::build(sh, sheet));
+        }
+    }
+
+    /// True when at least one conditional formatting rule on `sheet` covers `c`.
+    pub(crate) fn may_apply(&mut self, wb: &Workbook, sheet: usize, c: CellRef) -> bool {
+        let Some(sh) = wb.sheet(sheet) else { return false };
+        if sh.cond_formats.is_empty() {
+            return false;
+        }
+        self.ensure_index(sh, sheet);
+        self.index.as_ref().is_some_and(|idx| idx.matches_any(c))
+    }
+
+    /// Deduplicated `(single_cells, multi_ranges)` of rules on `sh` matching `rule_pred`,
+    /// optionally clipped to `block`. Uses the cached spatial index so repeated `sqref` lists
+    /// across many rules are scanned once.
+    pub(crate) fn indexed_ranges(
+        &mut self,
+        sh: &Sheet,
+        sheet: usize,
+        block: Option<RangeRef>,
+        rule_pred: impl Fn(&CfRule) -> bool,
+    ) -> (Vec<CellRef>, Vec<RangeRef>) {
+        if sh.cond_formats.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        self.ensure_index(sh, sheet);
+        let Some(index) = self.index.as_ref() else { return (Vec::new(), Vec::new()) };
+        if let Some(b) = block
+            && !index.bbox.is_some_and(|bb| bb.intersects(&b))
+        {
+            return (Vec::new(), Vec::new());
+        }
+        let mut group_ok = vec![false; index.groups.len()];
+        let mut any_group = false;
+        for (gid, grp) in index.groups.iter().enumerate() {
+            if grp.rule_ranks.iter().any(|&rank| rule_pred(&sh.cond_formats[index.rules[rank as usize].orig_idx].rule)) {
+                group_ok[gid] = true;
+                any_group = true;
+            }
+        }
+        if !any_group {
+            return (Vec::new(), Vec::new());
+        }
+        let mut singles = Vec::new();
+        match block {
+            Some(b) => {
+                let lo = index.single_keys.partition_point(|c| c.row < b.start.row);
+                let hi = index.single_keys.partition_point(|c| c.row <= b.end.row);
+                for &c in &index.single_keys[lo..hi] {
+                    if c.col >= b.start.col
+                        && c.col <= b.end.col
+                        && index.single_cells.get(&c).is_some_and(|gs| gs.iter().any(|&g| group_ok[g as usize]))
+                    {
+                        singles.push(c);
+                    }
+                }
+            }
+            None => {
+                for &c in &index.single_keys {
+                    if index.single_cells.get(&c).is_some_and(|gs| gs.iter().any(|&g| group_ok[g as usize])) {
+                        singles.push(c);
+                    }
+                }
+            }
+        }
+        let mut multi = Vec::new();
+        let mut seen_multi = HashSet::new();
+        match block {
+            Some(b) => {
+                index.query_block_multi(b, |sub, g| {
+                    if group_ok[g as usize] && seen_multi.insert(sub) {
+                        multi.push(sub);
+                    }
+                });
+            }
+            None => {
+                for &(r, g) in &index.unique_multi {
+                    if group_ok[g as usize] && seen_multi.insert(r) {
+                        multi.push(r);
+                    }
+                }
+            }
+        }
+        (singles, multi)
+    }
+
     /// Conditional look of `c`, or `None` when no rule applies.
     pub fn look(&mut self, wb: &Workbook, sheet: usize, c: CellRef) -> Option<CfLook> {
+        self.look_inner(wb, sheet, c, None)
+    }
+
+    /// Conditional look of `c`, bounded by a remaining rule-evaluation work budget. Returns `None`
+    /// immediately once `*budget == 0`.
+    pub(crate) fn look_budgeted(&mut self, wb: &Workbook, sheet: usize, c: CellRef, budget: &mut usize) -> Option<CfLook> {
+        self.look_inner(wb, sheet, c, Some(budget))
+    }
+
+    fn look_inner(&mut self, wb: &Workbook, sheet: usize, c: CellRef, mut budget: Option<&mut usize>) -> Option<CfLook> {
+        if let Some(rem) = budget.as_deref()
+            && *rem == 0
+        {
+            return None;
+        }
         let sh = wb.sheet(sheet)?;
         if sh.cond_formats.is_empty() {
             return None;
         }
+        self.ensure_index(sh, sheet);
+        let index = self.index.as_ref()?;
+        let mut matched_groups: Vec<u32> = Vec::new();
+        index.query_point_groups(c, |g| matched_groups.push(g));
+        if matched_groups.is_empty() {
+            if let Some(rem) = budget.as_deref_mut() {
+                *rem = rem.saturating_sub(1);
+            }
+            return None;
+        }
+        let owned_ranks: Vec<u32>;
+        let rule_ranks: &[u32] = if matched_groups.len() == 1 {
+            &index.groups[matched_groups[0] as usize].rule_ranks
+        } else {
+            matched_groups.sort_unstable();
+            matched_groups.dedup();
+            let mut ranks = Vec::new();
+            for g in matched_groups {
+                ranks.extend_from_slice(&index.groups[g as usize].rule_ranks);
+            }
+            ranks.sort_unstable();
+            owned_ranks = ranks;
+            &owned_ranks
+        };
         let mut out = CfLook::default();
         let mut any = false;
-        let mut rules: Vec<(usize, &CondFormat)> =
-            sh.cond_formats.iter().enumerate().filter(|(_, cf)| cf.ranges.iter().any(|r| r.contains(c))).collect();
-        rules.sort_by_key(|(_, cf)| cf.priority);
         let v = sh.value(c);
+        let text = v.display();
         let no_stats = RuleStats::default();
-        for (idx, cf) in rules {
-            let first = RangeRef::top_left(&cf.ranges).unwrap_or(c);
+        let stats_map = &mut self.stats;
+        for &rank in rule_ranks {
+            if let Some(rem) = budget.as_deref_mut() {
+                if *rem == 0 {
+                    break;
+                }
+                *rem -= 1;
+            }
+            let meta = &index.rules[rank as usize];
+            let idx = meta.orig_idx;
+            let cf = &sh.cond_formats[idx];
+            let first = meta.first.unwrap_or(c);
             let st: &RuleStats = match stats_need(&cf.rule) {
-                Some(need) => &*self.stats.entry(idx).or_insert_with(|| RuleStats::build(sh, &cf.ranges, need)),
+                Some(need) => &*stats_map.entry(idx).or_insert_with(|| RuleStats::build(sh, &cf.ranges, need)),
                 None => &no_stats,
             };
-            let text = v.display();
             let context = RuleEval { wb, sheet, cell: c, first, value: &v, text: &text, stats: st };
             let matched_style = simple_rule_style(&context, &cf.rule).or_else(|| match &cf.rule {
                 CfRule::Top10 { bottom, percent, rank, style } => match v.as_f64() {
@@ -433,7 +861,11 @@ impl CfCache {
     /// overrides. Zero overhead when no conditional formatting rule covering `c` specifies a `numFmt`.
     pub fn effective_num_fmt<'a>(&mut self, wb: &'a Workbook, sheet: usize, sh: &'a Sheet, c: CellRef) -> std::borrow::Cow<'a, str> {
         let base = wb.styles.get(sh.style_id(c)).num_fmt.as_str();
-        if !has_num_fmt_rule(sh, c) {
+        if sh.cond_formats.is_empty() {
+            return std::borrow::Cow::Borrowed(base);
+        }
+        self.ensure_index(sh, sheet);
+        if !self.index.as_ref().is_some_and(|idx| idx.has_num_fmt_at(c)) {
             return std::borrow::Cow::Borrowed(base);
         }
         if let Some(l) = self.look(wb, sheet, c)
@@ -532,6 +964,7 @@ fn relative(f: &str, first: CellRef, c: CellRef) -> String {
 
 #[cfg(test)]
 mod tests {
+    use gridcraft_model::CondFormat;
     use serde_json::json;
 
     use super::*;
@@ -857,5 +1290,62 @@ mod tests {
         assert_eq!([look("C1"), look("C2"), look("C3")], [false, true, false]);
         // Does not contain "a": #N/A and xyz, not abc.
         assert_eq!([look("D1"), look("D2"), look("D3")], [true, false, true]);
+    }
+
+    #[test]
+    fn spatial_index_handles_interval_tree_single_cells_numfmt_and_budget() {
+        let mut wb = Workbook::new();
+        let mk_fill = |rgb: u32| Style {
+            fill: gridcraft_model::Fill { pattern: PatternType::Solid, fg: Color::Rgb(rgb), bg: Color::Auto },
+            ..Default::default()
+        };
+        let mut num_style = mk_fill(0x112233);
+        num_style.num_fmt = gridcraft_model::NumFmt("0.00%".into());
+        let sh = wb.sheet_mut(0).unwrap();
+        for r in 0..40u32 {
+            sh.set_value(CellRef::new(r, 0), Value::Number(r as f64));
+            sh.set_value(CellRef::new(r, 1), Value::Number(r as f64));
+        }
+        // 20 disjoint multi-cell row bands (forces non-leaf interval tree nodes) + 1 full-column rule
+        // + 1 single-cell rule overlapping a multi-cell band + 1 numFmt rule.
+        for i in 0..20u32 {
+            sh.cond_formats.push(CondFormat {
+                ranges: vec![RangeRef::new(CellRef::new(i * 2, 0), CellRef::new(i * 2 + 1, 1))],
+                rule: CfRule::NoBlanks { style: Box::new(mk_fill(0xAA0000 + i)) },
+                priority: 10 + i,
+                stop_if_true: false,
+            });
+        }
+        sh.cond_formats.push(CondFormat {
+            ranges: vec![RangeRef::cols(0, 0)],
+            rule: CfRule::NoBlanks { style: Box::new(mk_fill(0x00FF00)) },
+            priority: 1,
+            stop_if_true: false,
+        });
+        sh.cond_formats.push(CondFormat {
+            ranges: vec![RangeRef::cell(CellRef::new(10, 1)), RangeRef::new(CellRef::new(10, 1), CellRef::new(11, 2))],
+            rule: CfRule::NoBlanks { style: Box::new(num_style) },
+            priority: 2,
+            stop_if_true: false,
+        });
+
+        let mut cache = CfCache::new();
+        // Column A gets priority-1 full-column fill (0x00FF00).
+        let a10 = cache.look(&wb, 0, CellRef::new(10, 0)).unwrap().style.unwrap();
+        assert_eq!(a10.fill.fg, Color::Rgb(0x00FF00));
+        // B11 (row 10, col 1) gets priority-2 numFmt rule (0x112233) over row-band rule (priority 15).
+        let b11 = cache.look(&wb, 0, CellRef::new(10, 1)).unwrap().style.unwrap();
+        assert_eq!(b11.fill.fg, Color::Rgb(0x112233));
+        assert_eq!(cache.effective_num_fmt(&wb, 0, wb.sheet(0).unwrap(), CellRef::new(10, 1)).as_ref(), "0.00%");
+        assert_eq!(cache.effective_num_fmt(&wb, 0, wb.sheet(0).unwrap(), CellRef::new(10, 0)).as_ref(), "General");
+        // Cell outside all ranges returns None and may_apply == false.
+        assert!(!cache.may_apply(&wb, 0, CellRef::new(10, 5)));
+        assert!(cache.look(&wb, 0, CellRef::new(10, 5)).is_none());
+
+        // Budgeted lookup stops once exhausted.
+        let mut budget = 1usize;
+        assert!(cache.look_budgeted(&wb, 0, CellRef::new(10, 0), &mut budget).is_some());
+        assert_eq!(budget, 0);
+        assert!(cache.look_budgeted(&wb, 0, CellRef::new(10, 0), &mut budget).is_none());
     }
 }

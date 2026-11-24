@@ -7,8 +7,9 @@ use super::{
 /// Cells in a page block above which only stored cells are visited (not every grid position).
 pub(super) const DENSE_BLOCK: u64 = 60_000;
 
-/// Total conditional-format `look()` calls allowed across one sheet's print layout.
-const MAX_CF_PRINT_LOOKS: usize = 60_000;
+/// Total conditional-format rule-evaluation work units allowed across one sheet's print layout
+/// (and independently across one sheet's PDF render pass).
+pub(super) const MAX_CF_PRINT_WORK: usize = 250_000;
 
 /// Windows Excel reserves 4 printer dots (0.48 pt at 600 dpi) on each edge of the cell grid,
 /// reducing the usable width and height between margins by 0.96 pt.
@@ -333,7 +334,7 @@ pub fn print_range(sh: &Sheet) -> Option<RangeRef> {
 /// alignment, or number-format styling do not expand the print range.
 pub(crate) fn sheet_print_range(wb: &Workbook, si: usize, sh: &Sheet) -> Option<RangeRef> {
     let mut cf = crate::cf::CfCache::new();
-    let mut cf_budget = MAX_CF_PRINT_LOOKS;
+    let mut cf_budget = MAX_CF_PRINT_WORK;
     sheet_print_range_with_cf(wb, si, sh, &mut cf, &mut cf_budget).0
 }
 
@@ -433,41 +434,45 @@ fn extend_printable_cf_cells(
     si: usize,
     sh: &Sheet,
     cf: &mut crate::cf::CfCache,
-    look_budget: &mut usize,
+    cf_budget: &mut usize,
     extend: &mut impl FnMut(RangeRef),
 ) {
-    if sh.cond_formats.is_empty() || *look_budget == 0 {
+    if sh.cond_formats.is_empty() || *cf_budget == 0 {
         return;
     }
-    let mut seen: std::collections::HashSet<RangeRef> = std::collections::HashSet::new();
-    for cond in &sh.cond_formats {
-        if !cf_rule_can_paint(wb, &cond.rule) {
+    let (single_cells, multi_ranges) = cf.indexed_ranges(sh, si, None, |r| cf_rule_can_paint(wb, r));
+    for pos in single_cells {
+        if sh.cells.get(pos).is_some_and(|cell| cell.has_content()) {
             continue;
         }
-        for &rng in &cond.ranges {
-            if !seen.insert(rng) {
-                continue;
+        if *cf_budget == 0 {
+            return;
+        }
+        if cf.look_budgeted(wb, si, pos, cf_budget).is_some_and(|l| cf_look_is_printable(wb, &l)) {
+            extend(RangeRef::cell(pos));
+        }
+    }
+    for rng in multi_ranges {
+        if rng.count() <= DENSE_BLOCK {
+            for pos in rng.iter() {
+                if sh.cells.get(pos).is_some_and(|cell| cell.has_content()) {
+                    continue;
+                }
+                if *cf_budget == 0 {
+                    return;
+                }
+                if cf.look_budgeted(wb, si, pos, cf_budget).is_some_and(|l| cf_look_is_printable(wb, &l)) {
+                    extend(RangeRef::cell(pos));
+                }
             }
-            if rng.count() <= DENSE_BLOCK {
-                for pos in rng.iter() {
-                    if *look_budget == 0 {
+        } else {
+            for (pos, cell) in sh.cells.iter_range(rng) {
+                if !cell.has_content() {
+                    if *cf_budget == 0 {
                         return;
                     }
-                    *look_budget -= 1;
-                    if cf.look(wb, si, pos).is_some_and(|l| cf_look_is_printable(wb, &l)) {
+                    if cf.look_budgeted(wb, si, pos, cf_budget).is_some_and(|l| cf_look_is_printable(wb, &l)) {
                         extend(RangeRef::cell(pos));
-                    }
-                }
-            } else {
-                for (pos, cell) in sh.cells.iter_range(rng) {
-                    if !cell.has_content() {
-                        if *look_budget == 0 {
-                            return;
-                        }
-                        *look_budget -= 1;
-                        if cf.look(wb, si, pos).is_some_and(|l| cf_look_is_printable(wb, &l)) {
-                            extend(RangeRef::cell(pos));
-                        }
                     }
                 }
             }
@@ -550,7 +555,7 @@ fn page_has_content(
     cband: (u32, u32),
     overflows: &[OverflowSpan],
     cf: &mut crate::cf::CfCache,
-    look_budget: &mut usize,
+    cf_budget: &mut usize,
 ) -> bool {
     if overflows.iter().any(|&(r, c0, c1)| r >= rband.0 && r <= rband.1 && c1 >= cband.0 && c0 <= cband.1) {
         return true;
@@ -589,36 +594,33 @@ fn page_has_content(
     }) {
         return true;
     }
-    if !sh.cond_formats.is_empty() && *look_budget > 0 {
-        let mut seen: std::collections::HashSet<RangeRef> = std::collections::HashSet::new();
-        'cf: for cond in &sh.cond_formats {
-            if !cf_rule_can_paint(wb, &cond.rule) {
-                continue;
+    if !sh.cond_formats.is_empty() && *cf_budget > 0 {
+        let (single_cells, multi_subs) = cf.indexed_ranges(sh, si, Some(block), |r| cf_rule_can_paint(wb, r));
+        for pos in single_cells {
+            if *cf_budget == 0 {
+                break;
             }
-            for &rng in &cond.ranges {
-                let Some(sub) = rng.intersection(&block) else { continue };
-                if !seen.insert(sub) {
-                    continue;
-                }
-                if sub.count() <= DENSE_BLOCK {
-                    for pos in sub.iter() {
-                        if *look_budget == 0 {
-                            break 'cf;
-                        }
-                        *look_budget -= 1;
-                        if cf.look(wb, si, pos).is_some_and(|l| cf_look_is_printable(wb, &l)) {
-                            return true;
-                        }
+            if cf.look_budgeted(wb, si, pos, cf_budget).is_some_and(|l| cf_look_is_printable(wb, &l)) {
+                return true;
+            }
+        }
+        'cf: for sub in multi_subs {
+            if sub.count() <= DENSE_BLOCK {
+                for pos in sub.iter() {
+                    if *cf_budget == 0 {
+                        break 'cf;
                     }
-                } else {
-                    for (pos, _) in sh.cells.iter_range(sub) {
-                        if *look_budget == 0 {
-                            break 'cf;
-                        }
-                        *look_budget -= 1;
-                        if cf.look(wb, si, pos).is_some_and(|l| cf_look_is_printable(wb, &l)) {
-                            return true;
-                        }
+                    if cf.look_budgeted(wb, si, pos, cf_budget).is_some_and(|l| cf_look_is_printable(wb, &l)) {
+                        return true;
+                    }
+                }
+            } else {
+                for (pos, _) in sh.cells.iter_range(sub) {
+                    if *cf_budget == 0 {
+                        break 'cf;
+                    }
+                    if cf.look_budgeted(wb, si, pos, cf_budget).is_some_and(|l| cf_look_is_printable(wb, &l)) {
+                        return true;
                     }
                 }
             }
@@ -707,7 +709,7 @@ pub fn layout_sheet(wb: &Workbook, si: usize, opts: &PrintOptions, range_overrid
         }
     }
     let mut cf = crate::cf::CfCache::new();
-    let mut cf_budget = MAX_CF_PRINT_LOOKS;
+    let mut cf_budget = MAX_CF_PRINT_WORK;
     let (area, overflows) = match range_override {
         Some(r) => {
             let (used, ov) = printable_cells_range(wb, si, sh, &mut cf, &mut cf_budget);
@@ -944,10 +946,14 @@ mod tests {
             stop_if_true: false,
         });
         let mut cf = crate::cf::CfCache::new();
-        let mut budget = MAX_CF_PRINT_LOOKS;
+        let mut budget = MAX_CF_PRINT_WORK;
         let sh_ref = wb.sheet(0).unwrap();
         extend_printable_cf_cells(&wb, 0, sh_ref, &mut cf, &mut budget, &mut |_| {});
-        assert_eq!(budget, MAX_CF_PRINT_LOOKS - 50_000, "2,000 repeated A1:Y2000 ranges must be deduplicated to one pass");
+        assert_eq!(
+            budget,
+            MAX_CF_PRINT_WORK - 49_999,
+            "2,000 repeated A1:Y2000 ranges must deduplicate to one pass and skip populated A1 before spending budget"
+        );
 
         let lay = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
         let pdf = super::super::render_pdf(&wb, &[lay], "test.xlsx", "").unwrap();
@@ -968,7 +974,86 @@ mod tests {
         let range = sheet_print_range(&wb, 0, sh).unwrap();
         assert_eq!(range.end.row, 0, "hidden row with row-level fill must not expand print range");
         let mut cf = crate::cf::CfCache::new();
-        let mut budget = MAX_CF_PRINT_LOOKS;
+        let mut budget = MAX_CF_PRINT_WORK;
         assert!(!page_has_content(&wb, 0, sh, (100, 160), (0, 5), &[], &mut cf, &mut budget));
+    }
+
+    fn minimal_xlsx_with_sheet_xml(sheet_xml: &str, styles_xml: &str) -> Vec<u8> {
+        use std::io::Write;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut zw = zip::ZipWriter::new(&mut buf);
+        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let files = [
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/workbook.xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#,
+            ),
+            ("xl/styles.xml", styles_xml),
+            ("xl/worksheets/sheet1.xml", sheet_xml),
+        ];
+        for (name, content) in files {
+            zw.start_file(name, opts).unwrap();
+            zw.write_all(content.as_bytes()).unwrap();
+        }
+        zw.finish().unwrap();
+        buf.into_inner()
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // tests run only off wasm, where the clock exists
+    fn hostile_10k_single_cells_x_400_blanks_rules_print_and_pdf_fast() {
+        // (1) Via XLSX parse: 10,000 distinct single cells x 400 containsBlanks rules with solid fill.
+        let sq = (1..=10_000).map(|r| format!("A{r}")).collect::<Vec<_>>().join(" ");
+        let rules = r#"<cfRule type="containsBlanks" dxfId="0" priority="1"/>"#.repeat(400);
+        let sheet_xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="B1"><v>42</v></c></row></sheetData><conditionalFormatting sqref="{sq}">{rules}</conditionalFormatting></worksheet>"#
+        );
+        let styles_xml = r#"<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs><dxfs count="1"><dxf><fill><patternFill patternType="solid"><bgColor rgb="FFFFCC00"/></patternFill></fill></dxf></dxfs></styleSheet>"#;
+        let xlsx = minimal_xlsx_with_sheet_xml(&sheet_xml, styles_xml);
+
+        let t0 = std::time::Instant::now();
+        let (wb_parsed, _) = gridcraft_xlsx::read_xlsx(&xlsx).unwrap();
+        assert_eq!(wb_parsed.sheets[0].cond_formats.len(), 10, "parse cap must keep 10 rules (100,000 range entries)");
+        let lay_parsed = layout_sheet(&wb_parsed, 0, &PrintOptions::default(), None).unwrap();
+        let pdf_parsed = super::super::render_pdf(&wb_parsed, &[lay_parsed], "hostile.xlsx", "").unwrap();
+        let parsed_elapsed = t0.elapsed();
+        assert!(pdf_parsed.bytes.starts_with(b"%PDF-"));
+        assert!(parsed_elapsed.as_secs_f64() < 2.0, "XLSX-parsed hostile sheet took {:?}", parsed_elapsed);
+
+        // (2) Directly in Workbook model (bypassing parse cap): all 400 rules x 10,000 single cells = 4,000,000 range entries.
+        let mut wb_direct = Workbook::new();
+        let fill = gridcraft_model::Style {
+            fill: gridcraft_model::Fill { pattern: PatternType::Solid, fg: gridcraft_model::Color::Rgb(0xFFCC00), bg: gridcraft_model::Color::Auto },
+            ..Default::default()
+        };
+        let ranges: Vec<RangeRef> = (0..10_000).map(|r| RangeRef::cell(CellRef::new(r, 0))).collect();
+        let sh = wb_direct.sheet_mut(0).unwrap();
+        sh.set_value(CellRef::new(0, 1), gridcraft_core::Value::Number(42.0));
+        for p in 1..=400u32 {
+            sh.cond_formats.push(gridcraft_model::CondFormat {
+                ranges: ranges.clone(),
+                rule: gridcraft_model::CfRule::Blanks { style: Box::new(fill.clone()) },
+                priority: p,
+                stop_if_true: false,
+            });
+        }
+        let t1 = std::time::Instant::now();
+        let lay_direct = layout_sheet(&wb_direct, 0, &PrintOptions::default(), None).unwrap();
+        let pdf_direct = super::super::render_pdf(&wb_direct, &[lay_direct], "hostile-direct.xlsx", "").unwrap();
+        let direct_elapsed = t1.elapsed();
+        assert!(pdf_direct.bytes.starts_with(b"%PDF-"));
+        assert!(direct_elapsed.as_secs_f64() < 2.0, "direct hostile Workbook took {:?}", direct_elapsed);
     }
 }
