@@ -442,6 +442,7 @@ fn forecast_sheet(s: &mut Session, p: &Json) -> Result<Json> {
                 number_format: None,
                 innermost_categories: false,
                 label_number_format: None,
+                ..Default::default()
             })
             .collect();
         sheet.charts.push(Chart {
@@ -464,6 +465,8 @@ fn forecast_sheet(s: &mut Session, p: &Json) -> Result<Json> {
             pivot: None,
             axis_number_formats: Default::default(),
             pivot_label_formats: Vec::new(),
+            area_style: Default::default(),
+            user_shapes: Vec::new(),
         });
         cx.wb.sheets.insert(at, Arc::new(sheet));
         for nm in cx.wb.names.iter_mut() {

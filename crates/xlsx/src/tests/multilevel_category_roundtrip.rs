@@ -41,6 +41,7 @@ fn workbook(categories: &str, values: &str) -> Workbook {
             number_format: None,
             innermost_categories: false,
             label_number_format: None,
+            ..Default::default()
         }],
         legend: LegendPos::Bottom,
         data_labels: false,
@@ -56,6 +57,8 @@ fn workbook(categories: &str, values: &str) -> Workbook {
         by_rows: false,
         axis_number_formats: Default::default(),
         pivot_label_formats: Vec::new(),
+        area_style: Default::default(),
+        user_shapes: Vec::new(),
     });
     Workbook { sheets: vec![Arc::new(s)], ..Workbook::default() }
 }

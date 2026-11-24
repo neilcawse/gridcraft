@@ -427,6 +427,7 @@ fn sample() -> Workbook {
             number_format: None,
             innermost_categories: false,
             label_number_format: None,
+            ..Default::default()
         }],
         legend: LegendPos::Bottom,
         data_labels: true,
@@ -442,6 +443,8 @@ fn sample() -> Workbook {
         pivot: None,
         axis_number_formats: Default::default(),
         pivot_label_formats: Vec::new(),
+        area_style: Default::default(),
+        user_shapes: Vec::new(),
     };
     for kind in [
         ChartKind::ColumnClustered,
@@ -2318,6 +2321,8 @@ fn issue_778_xlsx_xml_import_save_reopen_roundtrip() {
         pivot: None,
         axis_number_formats: Default::default(),
         pivot_label_formats: Vec::new(),
+        area_style: Default::default(),
+        user_shapes: Vec::new(),
     });
     wb.sheets[0] = Arc::new(s);
 

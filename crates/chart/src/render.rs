@@ -6,10 +6,9 @@ use std::f32::consts::{PI, TAU};
 use gridcraft_model::{Chart, ChartKind, LineDash, QuartileMethod, Theme, TrendlineKind};
 
 use crate::axis::{Fmt, Scale, clean, nice_scale};
-use crate::resolve::{MAX_POINTS, MAX_SERIES, MAX_TRENDLINES, points_per_series, series_color};
+use crate::resolve::{MAX_POINTS, MAX_SERIES, MAX_TRENDLINES, points_per_series, resolve_user_shape, series_color};
 use crate::trend::{auto_name, fit_trendline, moving_average};
-use crate::{ChartData, HAlign, Measure, Prim, Rgba, SeriesData, VAlign};
-
+use crate::{ChartData, HAlign, Measure, Prim, Rgba, SeriesData, UserShapeData, VAlign};
 mod cartesian;
 mod frame;
 mod kinds;
@@ -147,6 +146,9 @@ pub(crate) fn sanitize(d: &ChartData) -> ChartData {
         palette: d.palette.iter().take(MAX_POINTS).copied().collect(),
         categories: d.categories.iter().take(MAX_POINTS).cloned().collect(),
         category_levels: d.category_levels.iter().take(3).map(|l| l.iter().take(MAX_POINTS).cloned().collect()).collect(),
+        area_fill: d.area_fill,
+        area_stroke: d.area_stroke,
+        user_shapes: d.user_shapes.iter().take(256).cloned().collect(),
         series: d
             .series
             .iter()
@@ -163,11 +165,14 @@ pub(crate) fn sanitize(d: &ChartData) -> ChartData {
                 trendlines: s.trendlines.iter().take(MAX_TRENDLINES).cloned().collect(),
                 number_format: s.number_format.clone(),
                 label_number_format: s.label_number_format.clone(),
+                line: s.line,
+                no_line: s.no_line,
+                points: s.points.iter().take(4096).cloned().collect(),
+                data_labels: s.data_labels.clone(),
             })
             .collect(),
     }
 }
-
 /// Whether `v` survives `sanitize_vals` unchanged.
 fn is_clean(v: &Option<f64>) -> bool {
     v.is_none_or(|n| n.is_finite() && clean(n) == n)
@@ -218,6 +223,93 @@ pub(crate) fn sanitized(d: &ChartData) -> Cow<'_, ChartData> {
     if needs_sanitizing(d) { Cow::Owned(apply_budget(sanitize(d))) } else { Cow::Borrowed(d) }
 }
 
+fn draw_area_frame(ctx: &mut Ctx, chart: &Chart, data: &ChartData, w: f32, h: f32) {
+    let st = &chart.area_style;
+    let bg = if st.no_fill {
+        None
+    } else {
+        data.area_fill.or_else(|| st.fill.as_ref().and_then(|c| c.resolve(&Theme::default())).map(|[r, g, b]| [r, g, b, 0xFF])).or(Some(WHITE))
+    };
+    let border = if st.no_line {
+        None
+    } else {
+        data.area_stroke
+            .or_else(|| {
+                st.line_color
+                    .as_ref()
+                    .and_then(|c| c.resolve(&Theme::default()))
+                    .map(|[r, g, b]| ([r, g, b, 0xFF], st.line_width.filter(|w| w.is_finite() && *w > 0.0).unwrap_or(0.75)))
+            })
+            .or(Some((GRID, 1.0)))
+    };
+    if bg.is_some() || border.is_some() {
+        ctx.out.push(Prim::Rect { x: 0.0, y: 0.0, w, h, fill: bg, stroke: border, radius: 0.0 });
+    }
+}
+
+fn draw_user_shape(ctx: &mut Ctx, u: &UserShapeData, w: f32, h: f32) {
+    let rx = (u.x.clamp(0.0, 1.0)) * w;
+    let ry = (u.y.clamp(0.0, 1.0)) * h;
+    let rw = u.abs_width.unwrap_or(u.w.clamp(0.0, 1.0) * w).max(0.0).min(w - rx);
+    let rh = u.abs_height.unwrap_or(u.h.clamp(0.0, 1.0) * h).max(0.0).min(h - ry);
+    if rw < 1.0 || rh < 1.0 {
+        return;
+    }
+    if u.fill.is_some() || u.stroke.is_some() {
+        ctx.out.push(Prim::Rect { x: rx, y: ry, w: rw, h: rh, fill: u.fill, stroke: u.stroke, radius: 0.0 });
+    }
+    if u.text.is_empty() {
+        return;
+    }
+    let size = u.font_size.clamp(4.0, (rh * 0.9).max(4.0));
+    let lh = size * 1.25;
+    let lines: Vec<&str> = u.text.lines().take(64).collect();
+    if lines.is_empty() {
+        return;
+    }
+    let total_h = lines.len() as f32 * lh;
+    let y0 = match u.valign {
+        VAlign::Top => ry + 2.0,
+        VAlign::Middle => ry + (rh - total_h) / 2.0,
+        VAlign::Bottom => ry + rh - 2.0 - total_h,
+    };
+    let tx = match u.align {
+        HAlign::Left => rx + 2.0,
+        HAlign::Center => rx + rw / 2.0,
+        HAlign::Right => rx + rw - 2.0,
+    };
+    for (i, line) in lines.iter().enumerate() {
+        let fitted = ctx.fit(line, size, (rw - 4.0).max(size));
+        if !fitted.is_empty() {
+            ctx.out.push(Prim::Text {
+                x: tx,
+                y: y0 + i as f32 * lh + lh / 2.0,
+                text: fitted,
+                size,
+                color: u.text_color,
+                bold: u.bold,
+                align: u.align,
+                valign: VAlign::Middle,
+                rotation: 0.0,
+            });
+        }
+    }
+}
+
+fn draw_user_shapes(ctx: &mut Ctx, chart: &Chart, data: &ChartData, w: f32, h: f32) {
+    if !data.user_shapes.is_empty() {
+        for u in &data.user_shapes {
+            draw_user_shape(ctx, u, w, h);
+        }
+    } else if !chart.user_shapes.is_empty() {
+        let theme = Theme::default();
+        for u in chart.user_shapes.iter().take(256) {
+            let resolved = resolve_user_shape(None, &theme, u);
+            draw_user_shape(ctx, &resolved, w, h);
+        }
+    }
+}
+
 /// Lays out and draws a chart into a `w`×`h` box at the origin. Empty for a degenerate box.
 pub fn render(chart: &Chart, data: &ChartData, w: f32, h: f32, m: &dyn Measure) -> Vec<Prim> {
     if !(w.is_finite() && h.is_finite()) || w < 1.0 || h < 1.0 || w > 1e7 || h > 1e7 {
@@ -225,7 +317,7 @@ pub fn render(chart: &Chart, data: &ChartData, w: f32, h: f32, m: &dyn Measure) 
     }
     let data = sanitized(data);
     let mut ctx = Ctx { out: Vec::new(), m };
-    ctx.out.push(Prim::Rect { x: 0.0, y: 0.0, w, h, fill: Some(WHITE), stroke: Some((GRID, 1.0)), radius: 0.0 });
+    draw_area_frame(&mut ctx, chart, &data, w, h);
     let pad = (w.min(h) * 0.04).clamp(2.0, 10.0);
     let mut area = Bx { x: pad, y: pad, w: w - 2.0 * pad, h: h - 2.0 * pad };
     if let Some(t) = chart_title(chart, &data) {
@@ -236,13 +328,14 @@ pub fn render(chart: &Chart, data: &ChartData, w: f32, h: f32, m: &dyn Measure) 
         area.y += used;
         area.h -= used;
     }
-    let entries = legend_entries(chart, &data);
+    let entries = legend::legend_entries_styled(chart, &data);
     if !entries.is_empty() && area.ok() {
         area = draw_legend(&mut ctx, &entries, chart.legend, area);
     }
     if area.ok() && !data.series.is_empty() {
         draw_kind(&mut ctx, chart, &data, area);
     }
+    draw_user_shapes(&mut ctx, chart, &data, w, h);
     finalize(ctx.out, w, h)
 }
 

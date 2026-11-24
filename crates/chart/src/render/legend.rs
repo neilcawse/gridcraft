@@ -23,12 +23,28 @@ pub(super) fn plot_kind(chart: &Chart, s: &SeriesData, i: usize) -> ChartKind {
 
 /// Colour of point `j` for charts that colour by point (pie, doughnut, treemap, sunburst).
 pub(super) fn point_color(data: &ChartData, j: usize) -> Rgba {
+    if let Some(fill) = data.series.first().and_then(|s| s.point_style(j)).and_then(|p| p.fill) {
+        return fill;
+    }
     match (j, data.series.first()) {
         (0, Some(s)) => s.color,
         _ => j.checked_rem(data.palette.len()).and_then(|k| data.palette.get(k)).copied().unwrap_or_else(|| series_color(&Theme::default(), j)),
     }
 }
 
+/// Outline colour of point `j` for pie/doughnut legend swatches, when explicitly styled.
+pub(super) fn point_swatch_stroke(data: &ChartData, j: usize) -> Option<Rgba> {
+    let s = data.series.first()?;
+    if let Some(pt) = s.point_style(j) {
+        if pt.no_line {
+            return None;
+        }
+        if let Some((c, _)) = pt.stroke {
+            return Some(c);
+        }
+    }
+    if s.no_line { None } else { s.line.map(|(c, _)| c) }
+}
 fn first_len(data: &ChartData) -> usize {
     data.series.first().map(|s| s.values.len()).unwrap_or(0)
 }
@@ -37,8 +53,11 @@ pub(super) fn cat_label(data: &ChartData, j: usize) -> String {
     data.categories.get(j).cloned().unwrap_or_else(|| (j + 1).to_string())
 }
 
-/// Legend entries (text, colour, swatch) `render` draws for this chart; empty when hidden.
-pub fn legend_entries(chart: &Chart, data: &ChartData) -> Vec<(String, Rgba, Swatch)> {
+/// Styled legend entry: `(label, fill_or_line_color, optional_box_outline, swatch_kind)`.
+pub(super) type StyledEntry = (String, Rgba, Option<Rgba>, Swatch);
+
+/// Legend entries with optional swatch outline colours (used internally by `draw_legend`).
+pub(super) fn legend_entries_styled(chart: &Chart, data: &ChartData) -> Vec<StyledEntry> {
     if chart.legend == LegendPos::None {
         return vec![];
     }
@@ -47,7 +66,7 @@ pub fn legend_entries(chart: &Chart, data: &ChartData) -> Vec<(String, Rgba, Swa
         // and the legend names categories rather than series), treemap and sunburst.
         ChartKind::Pie | ChartKind::Doughnut | ChartKind::Treemap | ChartKind::Sunburst => {
             let n = first_len(data).min(MAX_CATS);
-            (0..n).map(|j| (cat_label(data, j), point_color(data, j), Swatch::Box)).collect()
+            (0..n).map(|j| (cat_label(data, j), point_color(data, j), point_swatch_stroke(data, j), Swatch::Box)).collect()
         }
         ChartKind::Histogram | ChartKind::Funnel | ChartKind::Stock => vec![],
         ChartKind::Waterfall => {
@@ -55,11 +74,11 @@ pub fn legend_entries(chart: &Chart, data: &ChartData) -> Vec<(String, Rgba, Swa
                 return vec![];
             }
             let total = data.series.first().map(|s| s.color).unwrap_or(TEXT);
-            vec![("Increase".into(), UP, Swatch::Box), ("Decrease".into(), DOWN, Swatch::Box), ("Total".into(), total, Swatch::Box)]
+            vec![("Increase".into(), UP, None, Swatch::Box), ("Decrease".into(), DOWN, None, Swatch::Box), ("Total".into(), total, None, Swatch::Box)]
         }
         _ => {
             let series = data.series.iter().take(MAX_SERIES);
-            let mut out: Vec<(String, Rgba, Swatch)> = series
+            let mut out: Vec<StyledEntry> = series
                 .clone()
                 .enumerate()
                 .map(|(i, s)| {
@@ -69,18 +88,24 @@ pub fn legend_entries(chart: &Chart, data: &ChartData) -> Vec<(String, Rgba, Swa
                         ChartKind::Scatter | ChartKind::Bubble => Swatch::Marker,
                         _ => Swatch::Box,
                     };
-                    (s.name.clone(), s.color, sw)
+                    let stroke = if sw == Swatch::Box && !s.no_line { s.line.map(|(c, _)| c) } else { None };
+                    (s.name.clone(), s.color, stroke, sw)
                 })
                 .collect();
             // Trendlines follow the series, named "Linear (Sales)" unless given a name.
             for (_, s) in series.enumerate().filter(|(i, s)| supports_trendline(plot_kind(chart, s, *i))) {
                 for t in s.trendlines.iter().take(MAX_TRENDLINES) {
-                    out.push((t.spec.name.clone().unwrap_or_else(|| auto_name(t.spec.kind, &s.name)), t.color, Swatch::Line));
+                    out.push((t.spec.name.clone().unwrap_or_else(|| auto_name(t.spec.kind, &s.name)), t.color, None, Swatch::Line));
                 }
             }
             out
         }
     }
+}
+
+/// Legend entries (text, colour, swatch) `render` draws for this chart; empty when hidden.
+pub fn legend_entries(chart: &Chart, data: &ChartData) -> Vec<(String, Rgba, Swatch)> {
+    legend_entries_styled(chart, data).into_iter().map(|(t, c, _, sw)| (t, c, sw)).collect()
 }
 
 // ---------------------------------------------------------------- legend
@@ -89,9 +114,9 @@ pub(super) fn swatch_w(sw: Swatch, s: f32) -> f32 {
     if sw == Swatch::Box { s } else { s * 2.0 }
 }
 
-pub(super) fn draw_swatch(ctx: &mut Ctx, sw: Swatch, x: f32, yc: f32, s: f32, color: Rgba) {
+pub(super) fn draw_swatch(ctx: &mut Ctx, sw: Swatch, x: f32, yc: f32, s: f32, color: Rgba, outline: Option<Rgba>) {
     match sw {
-        Swatch::Box => ctx.rect(x, yc - s / 2.0, s, s, color, None),
+        Swatch::Box => ctx.rect(x, yc - s / 2.0, s, s, color, outline.map(|c| (c, 1.0))),
         Swatch::Line => ctx.hline(x, x + 2.0 * s, yc, color, 2.0),
         Swatch::LineMarker => {
             ctx.hline(x, x + 2.0 * s, yc, color, 2.0);
@@ -101,13 +126,13 @@ pub(super) fn draw_swatch(ctx: &mut Ctx, sw: Swatch, x: f32, yc: f32, s: f32, co
     }
 }
 
-pub(super) fn draw_legend(ctx: &mut Ctx, entries: &[(String, Rgba, Swatch)], pos: LegendPos, area: Bx) -> Bx {
+pub(super) fn draw_legend(ctx: &mut Ctx, entries: &[StyledEntry], pos: LegendPos, area: Bx) -> Bx {
     let size = LABEL_SIZE;
     let row_h = size * 1.6;
     let s = size * 0.8;
     let gap = 4.0;
     let spacing = size * 1.3;
-    let item_w = |ctx: &Ctx, e: &(String, Rgba, Swatch)| swatch_w(e.2, s) + gap + ctx.tw(&e.0, size);
+    let item_w = |ctx: &Ctx, e: &StyledEntry| swatch_w(e.3, s) + gap + ctx.tw(&e.0, size);
     match pos {
         LegendPos::None => area,
         LegendPos::Top | LegendPos::Bottom => {
@@ -137,8 +162,8 @@ pub(super) fn draw_legend(ctx: &mut Ctx, entries: &[(String, Rgba, Swatch)], pos
                 let yc = y0 + ri as f32 * row_h + row_h / 2.0;
                 for &(i, iw) in row {
                     if let Some(e) = entries.get(i) {
-                        draw_swatch(ctx, e.2, x, yc, s, e.1);
-                        let sx = swatch_w(e.2, s) + gap;
+                        draw_swatch(ctx, e.3, x, yc, s, e.1, e.2);
+                        let sx = swatch_w(e.3, s) + gap;
                         let t = ctx.fit(&e.0, size, (iw - sx).max(0.0) + 0.5);
                         ctx.text(x + sx, yc, &t, size, TEXT, (HAlign::Left, VAlign::Middle));
                     }
@@ -166,8 +191,8 @@ pub(super) fn draw_legend(ctx: &mut Ctx, entries: &[(String, Rgba, Swatch)], pos
             let x0 = if pos == LegendPos::Right { area.right() - colw } else { area.x };
             for (i, e) in entries.iter().take(n).enumerate() {
                 let yc = y0 + i as f32 * row_h + row_h / 2.0;
-                draw_swatch(ctx, e.2, x0, yc, s, e.1);
-                let sx = swatch_w(e.2, s) + gap;
+                draw_swatch(ctx, e.3, x0, yc, s, e.1, e.2);
+                let sx = swatch_w(e.3, s) + gap;
                 let t = ctx.fit(&e.0, size, (colw - sx).max(0.0) + 0.5);
                 ctx.text(x0 + sx, yc, &t, size, TEXT, (HAlign::Left, VAlign::Middle));
             }

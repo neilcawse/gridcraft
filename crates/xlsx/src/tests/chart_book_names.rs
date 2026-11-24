@@ -50,6 +50,7 @@ fn series(name: &str, values: &str) -> Series {
         quartiles: Default::default(),
         number_format: None,
         innermost_categories: false,
+        ..Default::default()
     }
 }
 
@@ -90,6 +91,8 @@ fn chart_names_are_written_qualified() {
         pivot: None,
         axis_number_formats: Default::default(),
         pivot_label_formats: Vec::new(),
+        area_style: Default::default(),
+        user_shapes: Vec::new(),
     });
     wb.sheets = vec![Arc::new(s), Arc::new(Sheet::new("My Data"))];
     wb.names = vec![
@@ -173,6 +176,8 @@ fn chart_names_keep_spaces_around_a_quoted_sheet_name() {
         pivot: None,
         axis_number_formats: Default::default(),
         pivot_label_formats: Vec::new(),
+        area_style: Default::default(),
+        user_shapes: Vec::new(),
     });
     wb.sheets = vec![Arc::new(s), Arc::new(Sheet::new(" Sales "))];
     wb.names = vec![

@@ -6507,6 +6507,8 @@ fn a_multi_level_pivot_chart_draws_one_label_per_point_after_saves() {
         hole_size: 50,
         axis_number_formats: Default::default(),
         pivot_label_formats: Vec::new(),
+        area_style: Default::default(),
+        user_shapes: Vec::new(),
     });
     let labels = ["Ottawa", "Toronto", "Boston", "NYC"];
     for _ in 0..2 {

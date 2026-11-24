@@ -92,6 +92,7 @@ fn chart_series_items<'a>(sheet: &str, origin: CellRef, out: &'a Output) -> Vec<
                     number_format: None,
                     innermost_categories: false,
                     label_number_format: None,
+                    ..Default::default()
                 },
                 items.as_slice(),
             ))

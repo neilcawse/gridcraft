@@ -147,16 +147,16 @@ fn fit_measures_logarithmically() {
     assert_eq!(c2.1.get(), 1);
 }
 
-fn legend_entries(n: usize, label: &dyn Fn(usize) -> String) -> Vec<(String, Rgba, Swatch)> {
-    (0..n).map(|i| (label(i), [10, 20, 30, 255], if i % 3 == 0 { Swatch::Line } else { Swatch::Box })).collect()
+fn legend_entries(n: usize, label: &dyn Fn(usize) -> String) -> Vec<(String, Rgba, Option<Rgba>, Swatch)> {
+    (0..n).map(|i| (label(i), [10, 20, 30, 255], None, if i % 3 == 0 { Swatch::Line } else { Swatch::Box })).collect()
 }
 
 /// Colour column width as the old code computed it, from the returned remaining area.
-fn old_colw(m: &dyn Measure, entries: &[(String, Rgba, Swatch)], area: Bx) -> f32 {
+fn old_colw(m: &dyn Measure, entries: &[(String, Rgba, Option<Rgba>, Swatch)], area: Bx) -> f32 {
     let ctx = Ctx { out: vec![], m };
     let size = LABEL_SIZE;
     let s = size * 0.8;
-    entries.iter().map(|e| swatch_w(e.2, s) + 4.0 + ctx.tw(&e.0, size)).fold(0.0f32, f32::max).min(area.w * 0.35)
+    entries.iter().map(|e| swatch_w(e.3, s) + 4.0 + ctx.tw(&e.0, size)).fold(0.0f32, f32::max).min(area.w * 0.35)
 }
 
 #[test]

@@ -75,7 +75,8 @@ pub(super) fn draw(ctx: &mut Ctx, chart: &Chart, data: &ChartData, plot: Bx, lay
                 ChartKind::LineMarkers => Swatch::LineMarker,
                 _ => Swatch::Box,
             };
-            draw_swatch(ctx, swatch, x0 + 4.0, y, 7.0, series.color);
+            let outline = if !series.no_line { series.line.map(|(c, _)| c) } else { None };
+            draw_swatch(ctx, swatch, x0 + 4.0, y, 7.0, series.color, outline);
         }
         let name = ctx.fit(&series.name, LABEL_SIZE, plot.x - name_x - 4.0);
         ctx.text(name_x, y, &name, LABEL_SIZE, TEXT, (HAlign::Left, VAlign::Middle));
