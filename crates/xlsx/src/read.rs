@@ -183,6 +183,15 @@ impl Ctx<'_> {
     pub fn style(&self, xf: Option<u32>) -> StyleId {
         xf.and_then(|i| self.xf_map.get(i as usize).copied()).unwrap_or_default()
     }
+
+    /// Release the source indexes once neither worksheet import nor kept-sheet capture needs them.
+    fn release_shared_strings_unless_needed(&mut self, needed: bool) {
+        if !needed {
+            self.sst = Vec::new();
+            self.si_phonetics = Vec::new();
+        }
+    }
+
     /// Reads and parses an optional part: problems other than size limits become warnings.
     pub fn optional_xml(&mut self, part: &str) -> Result<Option<El>, IoError> {
         match self.pkg.read_xml(part) {
@@ -497,10 +506,7 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
         wb.sheets.push(Arc::new(sheet));
     }
     // Only kept macro sheets have a cell table whose shared string indexes are resolved later.
-    if !kept_sheet_needs_sst {
-        cx.sst = Vec::new();
-        cx.si_phonetics = Vec::new();
-    }
+    cx.release_shared_strings_unless_needed(kept_sheet_needs_sst);
     attach_pending_slicers(&mut cx, &mut wb);
     if wb.sheets.is_empty() {
         cx.warn("the workbook has no worksheets; added an empty sheet");
@@ -610,8 +616,7 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
     }
     // The kept macro sheets name their text by shared-string index: they are resolved here.
     wb.preserved = kept.workbook(&mut cx, &wb_part, &wb_xml, &file_to_model);
-    cx.sst = Vec::new();
-    cx.si_phonetics = Vec::new();
+    cx.release_shared_strings_unless_needed(false);
     if let Some(w) = cx.python.warning() {
         cx.warn(w);
     }
