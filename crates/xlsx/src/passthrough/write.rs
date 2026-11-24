@@ -342,23 +342,177 @@ pub fn write_package_rels(root: &mut Rels, out: &mut Out) {
 
 // ---------------------------------------------------------------- drawing & chart companions
 
+fn hash_f32(h: &mut sha2::Sha256, v: f32) {
+    use sha2::Digest as _;
+    let canonical = if v == 0.0 { 0.0f32 } else { v };
+    h.update(canonical.to_le_bytes());
+}
+
+fn hash_bytes(h: &mut sha2::Sha256, bytes: &[u8]) {
+    use sha2::Digest as _;
+    h.update((bytes.len() as u64).to_le_bytes());
+    h.update(bytes);
+}
+
+fn hash_color(h: &mut sha2::Sha256, color: gridcraft_model::Color) {
+    use sha2::Digest as _;
+    match color {
+        gridcraft_model::Color::Auto => h.update([0u8]),
+        gridcraft_model::Color::Rgb(rgb) => {
+            h.update([1u8]);
+            h.update(rgb.to_le_bytes());
+        }
+        gridcraft_model::Color::Theme(idx, tint) => {
+            h.update([2u8, idx]);
+            h.update(tint.to_le_bytes());
+        }
+    }
+}
+
+fn hash_anchor(h: &mut sha2::Sha256, anchor: &gridcraft_model::Anchor) {
+    use sha2::Digest as _;
+    let gridcraft_model::Anchor { cell, dx, dy, width, height, mode } = *anchor;
+    h.update(cell.row.to_le_bytes());
+    h.update(cell.col.to_le_bytes());
+    hash_f32(h, dx);
+    hash_f32(h, dy);
+    hash_f32(h, width);
+    hash_f32(h, height);
+    let mode_tag = match mode {
+        gridcraft_model::AnchorMode::MoveAndSize => 0u8,
+        gridcraft_model::AnchorMode::MoveOnly => 1u8,
+        gridcraft_model::AnchorMode::Absolute => 2u8,
+    };
+    h.update([mode_tag]);
+}
+
+fn finish_fingerprint(h: sha2::Sha256) -> u128 {
+    use sha2::Digest as _;
+    let digest = h.finalize();
+    let mut prefix = [0u8; 16];
+    prefix.copy_from_slice(&digest[..16]);
+    u128::from_le_bytes(prefix)
+}
+
+/// Deterministic fingerprint of a mirrored chart `userShapes` picture (anchor, bytes, mime, alt).
+pub(crate) fn fingerprint_image(img: &gridcraft_model::Image) -> u128 {
+    use sha2::Digest as _;
+    let gridcraft_model::Image { id: _, anchor, data, mime, alt } = img;
+    let mut h = sha2::Sha256::new();
+    h.update(b"chart-user-image:v1");
+    hash_anchor(&mut h, anchor);
+    hash_bytes(&mut h, data);
+    hash_bytes(&mut h, mime.as_bytes());
+    hash_bytes(&mut h, alt.as_bytes());
+    finish_fingerprint(h)
+}
+
+/// Deterministic fingerprint of a mirrored chart `userShapes` shape (kind, anchor, fill, line,
+/// text, rotation, and text/outline formatting).
+pub(crate) fn fingerprint_shape(shape: &gridcraft_model::Shape) -> u128 {
+    use gridcraft_model::{ShapeFormat, ShapeKind, ShapeTextAlign, ShapeTextAnchor};
+    use sha2::Digest as _;
+    let gridcraft_model::Shape { id: _, kind, anchor, fill, line, text, format, rotation, math: _ } = shape;
+    let mut h = sha2::Sha256::new();
+    h.update(b"chart-user-shape:v1");
+    let kind_tag = match kind {
+        ShapeKind::Rectangle => 0u8,
+        ShapeKind::RoundedRectangle => 1u8,
+        ShapeKind::Ellipse => 2u8,
+        ShapeKind::Triangle => 3u8,
+        ShapeKind::Line => 4u8,
+        ShapeKind::Arrow => 5u8,
+        ShapeKind::TextBox => 6u8,
+        ShapeKind::Icon => 7u8,
+        ShapeKind::Ink => 8u8,
+        ShapeKind::WordArt => 9u8,
+        ShapeKind::Equation => 10u8,
+    };
+    h.update([kind_tag]);
+    hash_anchor(&mut h, anchor);
+    hash_color(&mut h, *fill);
+    hash_color(&mut h, *line);
+    hash_bytes(&mut h, text.as_bytes());
+    hash_f32(&mut h, *rotation);
+    let ShapeFormat { no_line, font_size, bold, italic, font, text_color, text_outline, text_shadow, align, anchor: v_anchor, rtl } = format;
+    h.update([u8::from(*no_line), u8::from(*bold), u8::from(*italic), u8::from(*rtl)]);
+    match font_size {
+        Some(sz) => {
+            h.update([1u8]);
+            hash_f32(&mut h, *sz);
+        }
+        None => h.update([0u8]),
+    }
+    match font {
+        Some(name) => {
+            h.update([1u8]);
+            hash_bytes(&mut h, name.as_bytes());
+        }
+        None => h.update([0u8]),
+    }
+    match text_color {
+        Some(c) => {
+            h.update([1u8]);
+            hash_color(&mut h, *c);
+        }
+        None => h.update([0u8]),
+    }
+    match text_outline {
+        Some((c, w)) => {
+            h.update([1u8]);
+            hash_color(&mut h, *c);
+            hash_f32(&mut h, *w);
+        }
+        None => h.update([0u8]),
+    }
+    match text_shadow {
+        Some(c) => {
+            h.update([1u8]);
+            hash_color(&mut h, *c);
+        }
+        None => h.update([0u8]),
+    }
+    let align_tag = match align {
+        None => 0u8,
+        Some(ShapeTextAlign::Left) => 1u8,
+        Some(ShapeTextAlign::Center) => 2u8,
+        Some(ShapeTextAlign::Right) => 3u8,
+    };
+    let v_anchor_tag = match v_anchor {
+        None => 0u8,
+        Some(ShapeTextAnchor::Top) => 1u8,
+        Some(ShapeTextAnchor::Middle) => 2u8,
+        Some(ShapeTextAnchor::Bottom) => 3u8,
+    };
+    h.update([align_tag, v_anchor_tag]);
+    finish_fingerprint(h)
+}
+
 struct UserShapesMeta<'a> {
     chart_id: u32,
     target: &'a str,
-    mirrored_images: Vec<u32>,
-    mirrored_shapes: Vec<u32>,
+    mirrored_images: Vec<(u32, u128)>,
+    mirrored_shapes: Vec<(u32, u128)>,
 }
 
-fn parse_u32_list(s: &str) -> Vec<u32> {
-    s.split(',').filter(|x| !x.is_empty()).filter_map(|x| x.parse::<u32>().ok()).collect()
+fn parse_id_fp_list(s: &str) -> Option<Vec<(u32, u128)>> {
+    if s.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut out = Vec::new();
+    for item in s.split(',') {
+        let (id, fp) = item.split_once(':')?;
+        out.push((id.parse::<u32>().ok()?, u128::from_str_radix(fp, 16).ok()?));
+    }
+    Some(out)
 }
 
 fn parse_user_shapes_meta(xml: &str) -> Option<UserShapesMeta<'_>> {
     let mut it = xml.split('\t');
     let chart_id = it.next()?.parse::<u32>().ok()?;
     let target = it.next()?;
-    let mirrored_images = parse_u32_list(it.next()?);
-    let mirrored_shapes = parse_u32_list(it.next()?);
+    let mirrored_images = parse_id_fp_list(it.next()?)?;
+    let mirrored_shapes = parse_id_fp_list(it.next()?)?;
     Some(UserShapesMeta { chart_id, target, mirrored_images, mirrored_shapes })
 }
 
@@ -376,8 +530,8 @@ fn active_user_shapes<'a>(sheet: &Sheet, p: &'a Preserved) -> Vec<UserShapesMeta
             let key = normalize(m.target);
             sheet.charts.iter().any(|c| c.id == m.chart_id && !crate::chartex::is_chartex(c.kind))
                 && p.parts.iter().any(|q| normalize(&q.name) == key)
-                && m.mirrored_images.iter().all(|id| sheet.images.iter().any(|i| i.id == *id))
-                && m.mirrored_shapes.iter().all(|id| sheet.shapes.iter().any(|s| s.id == *id))
+                && m.mirrored_images.iter().all(|&(id, fp)| sheet.images.iter().find(|i| i.id == id).is_some_and(|i| fingerprint_image(i) == fp))
+                && m.mirrored_shapes.iter().all(|&(id, fp)| sheet.shapes.iter().find(|s| s.id == id).is_some_and(|s| fingerprint_shape(s) == fp))
         })
         .collect()
 }
@@ -402,10 +556,10 @@ pub fn mirrored_user_shape_refs(sheet: &Sheet) -> HashSet<gridcraft_model::Drawi
     let Some(p) = sheet.preserved.as_deref() else { return HashSet::new() };
     let mut out = HashSet::new();
     for m in active_user_shapes(sheet, p) {
-        for id in m.mirrored_images {
+        for (id, _) in m.mirrored_images {
             out.insert(gridcraft_model::DrawingRef::Image(id));
         }
-        for id in m.mirrored_shapes {
+        for (id, _) in m.mirrored_shapes {
             out.insert(gridcraft_model::DrawingRef::Shape(id));
         }
     }
@@ -586,7 +740,7 @@ fn attach_chart_user_shapes(sheet: &Sheet, p: &Preserved, user_shapes: &[UserSha
 pub fn attach_sheet_drawing_companions(sheet: &Sheet, drawing_num: u32, chart_before: u32, out: &mut Out) {
     let Some(p) = sheet.preserved.as_deref() else { return };
     let user_shapes = active_user_shapes(sheet, p);
-    let omitted_imgs: HashSet<u32> = user_shapes.iter().flat_map(|m| m.mirrored_images.iter().copied()).collect();
+    let omitted_imgs: HashSet<u32> = user_shapes.iter().flat_map(|m| m.mirrored_images.iter().map(|&(id, _)| id)).collect();
     attach_svg_blips(sheet, p, drawing_num, &omitted_imgs, out);
     attach_chart_user_shapes(sheet, p, &user_shapes, chart_before, out);
 }

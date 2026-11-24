@@ -18,15 +18,19 @@ impl WebQuery {
     /// renderer or sample flags.
     pub fn parse(search: &str) -> Self {
         let mut out = Self::default();
+        let mut seen_webgl = false;
+        let mut seen_chrome = false;
         for (key, value) in query_pairs(search) {
             match key.as_str() {
-                "webgl" => {
+                "webgl" if !seen_webgl => {
+                    seen_webgl = true;
                     out.webgl = !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no");
                 }
-                "sample" => {
+                "sample" if out.sample.is_none() => {
                     out.sample = Some(if value.is_empty() { "sales".to_string() } else { value });
                 }
-                "chrome" => {
+                "chrome" if !seen_chrome => {
+                    seen_chrome = true;
                     out.chrome = match value.as_str() {
                         "none" => Chrome { title_bar: false, file_tab: false },
                         "notitlebar" => Chrome { title_bar: false, file_tab: true },
@@ -34,7 +38,7 @@ impl WebQuery {
                         _ => Chrome::default(),
                     };
                 }
-                "author" => {
+                "author" if out.author.is_none() => {
                     out.author = Some(value);
                 }
                 _ => {}
@@ -148,6 +152,20 @@ mod tests {
 
         let unknown = WebQuery::parse("?chrome=invalid");
         assert!(unknown.chrome.title_bar && unknown.chrome.file_tab);
+    }
+
+    #[test]
+    fn duplicate_query_keys_are_first_wins() {
+        let q = WebQuery::parse("?sample=budget&sample=sales&author=Ada&author=Grace&chrome=none&chrome=notitlebar&webgl=0&webgl=1");
+        assert_eq!(q.sample.as_deref(), Some("budget"));
+        assert_eq!(q.author.as_deref(), Some("Ada"));
+        assert!(!q.chrome.title_bar && !q.chrome.file_tab);
+        assert!(!q.webgl);
+
+        let q2 = WebQuery::parse("?sample=&sample=budget&chrome=invalid&chrome=none&webgl=1&webgl=0");
+        assert_eq!(q2.sample.as_deref(), Some("sales"));
+        assert!(q2.chrome.title_bar && q2.chrome.file_tab);
+        assert!(q2.webgl);
     }
 
     #[test]

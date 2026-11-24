@@ -1322,3 +1322,154 @@ fn chart_user_shapes_round_trips_without_duplicating_shapes_or_media() {
     let d_del: Vec<&String> = u_del.parts.keys().filter(|k| k.starts_with("xl/drawings/") && k.ends_with(".xml")).collect();
     assert_eq!(d_del.len(), 1, "deleting chart should drop its userShapes part, got {d_del:?}");
 }
+
+#[test]
+fn chart_user_shapes_drops_passthrough_when_mirrored_object_modified_or_deleted() {
+    const BADGE_PNG: &[u8] = b"\x89PNG\r\n\x1a\nfake-badge-h2";
+    let ct = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="png" ContentType="image/png"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>
+  <Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>
+  <Override PartName="/xl/drawings/drawing2.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chartshapes+xml"/>
+</Types>"#;
+    let root_rels = rels(&[("rId1", "officeDocument", "xl/workbook.xml")]);
+    let wb_xml = format!(
+        r#"<?xml version="1.0"?><workbook xmlns="{NS_MAIN}" xmlns:r="{NS_R}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#
+    );
+    let wb_rels = rels(&[("rId1", "worksheet", "worksheets/sheet1.xml")]);
+    let sheet_xml = format!(
+        r#"<?xml version="1.0"?><worksheet xmlns="{NS_MAIN}" xmlns:r="{NS_R}"><sheetData><row r="1"><c r="A1"><v>42</v></c></row></sheetData><drawing r:id="rId1"/></worksheet>"#
+    );
+    let sheet_rels = rels(&[("rId1", "drawing", "../drawings/drawing1.xml")]);
+    let drawing1 = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <xdr:twoCellAnchor>
+    <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+    <xdr:to><xdr:col>6</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>12</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+    <xdr:graphicFrame>
+      <xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="Chart 1"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>
+      <xdr:xfrm/>
+      <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rId1"/></a:graphicData></a:graphic>
+    </xdr:graphicFrame>
+    <xdr:clientData/>
+  </xdr:twoCellAnchor>
+</xdr:wsDr>"#;
+    let drawing1_rels = rels(&[("rId1", "chart", "../charts/chart1.xml")]);
+    let chart1 = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <c:chart><c:plotArea><c:lineChart><c:grouping val="standard"/><c:ser><c:idx val="0"/><c:val><c:numRef><c:f>Sheet1!$A$1:$A$1</c:f></c:numRef></c:val></c:ser></c:lineChart></c:plotArea></c:chart>
+  <c:userShapes r:id="rId1"/>
+</c:chartSpace>"#;
+    let chart1_rels = rels(&[("rId1", "chartUserShapes", "../drawings/drawing2.xml")]);
+    let drawing2 = r#"<c:userShapes xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:cdr="http://schemas.openxmlformats.org/drawingml/2006/chartDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <cdr:relSizeAnchor>
+    <cdr:from><cdr:x>0.2</cdr:x><cdr:y>0.2</cdr:y></cdr:from>
+    <cdr:to><cdr:x>0.8</cdr:x><cdr:y>0.8</cdr:y></cdr:to>
+    <cdr:sp macro="" textlink=""><cdr:nvSpPr><cdr:cNvPr id="2" name="Callout 1"/><cdr:cNvSpPr txBox="1"/></cdr:nvSpPr><cdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></cdr:spPr><cdr:txBody><a:bodyPr/><a:p><a:r><a:t>OriginalCallout</a:t></a:r></a:p></cdr:txBody></cdr:sp>
+    <cdr:pic><cdr:nvPicPr><cdr:cNvPr id="3" name="Badge" descr="OriginalBadge"/><cdr:cNvPicPr/></cdr:nvPicPr><cdr:blipFill><a:blip r:embed="rId1"/></cdr:blipFill><cdr:spPr/></cdr:pic>
+  </cdr:relSizeAnchor>
+</c:userShapes>"#;
+    let drawing2_rels = rels(&[("rId1", "image", "../media/badge.png")]);
+    let bytes = make_zip(&[
+        ("[Content_Types].xml", ct.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("xl/workbook.xml", wb_xml.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", wb_rels.as_bytes()),
+        ("xl/worksheets/sheet1.xml", sheet_xml.as_bytes()),
+        ("xl/worksheets/_rels/sheet1.xml.rels", sheet_rels.as_bytes()),
+        ("xl/drawings/drawing1.xml", drawing1.as_bytes()),
+        ("xl/drawings/_rels/drawing1.xml.rels", drawing1_rels.as_bytes()),
+        ("xl/charts/chart1.xml", chart1.as_bytes()),
+        ("xl/charts/_rels/chart1.xml.rels", chart1_rels.as_bytes()),
+        ("xl/drawings/drawing2.xml", drawing2.as_bytes()),
+        ("xl/drawings/_rels/drawing2.xml.rels", drawing2_rels.as_bytes()),
+        ("xl/media/badge.png", BADGE_PNG),
+    ]);
+    let (wb_orig, _) = read_xlsx(&bytes).unwrap();
+
+    // (a) Unmodified workbook keeps chartUserShapes passthrough without duplicating shapes/media.
+    let saved_unmod = write_xlsx(&wb_orig).unwrap();
+    let u_unmod = Unpacked::new(&saved_unmod);
+    u_unmod.assert_valid();
+    let unmod_drawings: Vec<&String> = u_unmod.parts.keys().filter(|k| k.starts_with("xl/drawings/") && k.ends_with(".xml")).collect();
+    assert_eq!(unmod_drawings.len(), 2, "unmodified chartUserShapes should stay active: {unmod_drawings:?}");
+    assert!(String::from_utf8_lossy(&u_unmod.parts["xl/charts/chart1.xml"]).contains("<c:userShapes"));
+    let (wb_unmod_reopen, _) = read_xlsx(&saved_unmod).unwrap();
+    assert_eq!(wb_unmod_reopen.sheet(0).unwrap().shapes.len(), 1);
+    assert_eq!(wb_unmod_reopen.sheet(0).unwrap().images.len(), 1);
+    assert_eq!(wb_unmod_reopen.sheet(0).unwrap().shapes[0].text, "OriginalCallout");
+
+    let assert_passthrough_dropped = |saved: &[u8], label: &str| {
+        let u = Unpacked::new(saved);
+        u.assert_valid();
+        let drawings: Vec<&String> = u.parts.keys().filter(|k| k.starts_with("xl/drawings/") && k.ends_with(".xml")).collect();
+        assert_eq!(drawings.len(), 1, "{label}: stale chartUserShapes part must be dropped, got {drawings:?}");
+        let cxml = String::from_utf8_lossy(&u.parts["xl/charts/chart1.xml"]);
+        assert!(!cxml.contains("<c:userShapes"), "{label}: chart XML must not reference dropped userShapes: {cxml}");
+    };
+
+    // (b) Editing mirrored shape text drops passthrough and persists the edited text on reopen.
+    let mut wb_text = wb_orig.clone();
+    Arc::make_mut(&mut wb_text.sheets[0]).shapes[0].text = "EditedCallout".to_string();
+    let saved_text = write_xlsx(&wb_text).unwrap();
+    assert_passthrough_dropped(&saved_text, "text edit");
+    let (wb_text_reopen, _) = read_xlsx(&saved_text).unwrap();
+    let sh_text = wb_text_reopen.sheet(0).unwrap();
+    assert_eq!(sh_text.shapes.len(), 1);
+    assert_eq!(sh_text.images.len(), 1);
+    assert_eq!(sh_text.shapes[0].text, "EditedCallout");
+    assert_eq!(&*sh_text.images[0].data, BADGE_PNG);
+
+    // (c) Moving/resizing a mirrored shape drops passthrough and persists the new anchor.
+    let mut wb_anchor = wb_orig.clone();
+    {
+        let sh = &mut Arc::make_mut(&mut wb_anchor.sheets[0]).shapes[0];
+        sh.anchor.cell = gridcraft_core::CellRef::new(15, 8);
+        sh.anchor.width = 180.0;
+        sh.anchor.height = 72.0;
+    }
+    let saved_anchor = write_xlsx(&wb_anchor).unwrap();
+    assert_passthrough_dropped(&saved_anchor, "anchor edit");
+    let (wb_anchor_reopen, _) = read_xlsx(&saved_anchor).unwrap();
+    let sh_anchor = wb_anchor_reopen.sheet(0).unwrap();
+    assert_eq!(sh_anchor.shapes.len(), 1);
+    assert_eq!(sh_anchor.shapes[0].anchor.cell, gridcraft_core::CellRef::new(15, 8));
+    assert!((sh_anchor.shapes[0].anchor.width - 180.0).abs() < 1.0, "width={}", sh_anchor.shapes[0].anchor.width);
+
+    // (d) Recoloring a mirrored shape fill drops passthrough and persists the new fill.
+    let mut wb_fill = wb_orig.clone();
+    Arc::make_mut(&mut wb_fill.sheets[0]).shapes[0].fill = gridcraft_model::Color::Rgb(0x3366CC);
+    let saved_fill = write_xlsx(&wb_fill).unwrap();
+    assert_passthrough_dropped(&saved_fill, "fill edit");
+    let (wb_fill_reopen, _) = read_xlsx(&saved_fill).unwrap();
+    let sh_fill = wb_fill_reopen.sheet(0).unwrap();
+    assert_eq!(sh_fill.shapes.len(), 1);
+    assert_eq!(sh_fill.shapes[0].fill, gridcraft_model::Color::Rgb(0x3366CC));
+
+    // (e) Editing a mirrored image drops passthrough and persists the edited image metadata.
+    let mut wb_img = wb_orig.clone();
+    Arc::make_mut(&mut wb_img.sheets[0]).images[0].alt = "UpdatedBadge".to_string();
+    let saved_img = write_xlsx(&wb_img).unwrap();
+    assert_passthrough_dropped(&saved_img, "image edit");
+    let (wb_img_reopen, _) = read_xlsx(&saved_img).unwrap();
+    let sh_img = wb_img_reopen.sheet(0).unwrap();
+    assert_eq!(sh_img.shapes.len(), 1);
+    assert_eq!(sh_img.images.len(), 1);
+    assert_eq!(sh_img.images[0].alt, "UpdatedBadge");
+
+    // (f) Deleting a mirrored shape drops passthrough, keeps it deleted, and retains the sibling image.
+    let mut wb_del_shape = wb_orig.clone();
+    Arc::make_mut(&mut wb_del_shape.sheets[0]).shapes.clear();
+    let saved_del_shape = write_xlsx(&wb_del_shape).unwrap();
+    assert_passthrough_dropped(&saved_del_shape, "shape delete");
+    let (wb_del_reopen, _) = read_xlsx(&saved_del_shape).unwrap();
+    let sh_del = wb_del_reopen.sheet(0).unwrap();
+    assert!(sh_del.shapes.is_empty());
+    assert_eq!(sh_del.images.len(), 1);
+    assert_eq!(&*sh_del.images[0].data, BADGE_PNG);
+}

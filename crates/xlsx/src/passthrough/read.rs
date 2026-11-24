@@ -345,8 +345,8 @@ impl KeptReader {
             match self.keep_through(cx, &mut q, std::slice::from_ref(&entry.rel), seen, &["chartUserShapes"]) {
                 Ok(()) => {
                     p.parts.extend(q.parts);
-                    let imgs = entry.mirrored_images.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
-                    let shapes = entry.mirrored_shapes.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+                    let imgs = entry.mirrored_images.iter().map(|(id, fp)| format!("{id}:{fp:032x}")).collect::<Vec<_>>().join(",");
+                    let shapes = entry.mirrored_shapes.iter().map(|(id, fp)| format!("{id}:{fp:032x}")).collect::<Vec<_>>().join(",");
                     let xml = format!("{}\t{}\t{imgs}\t{shapes}", entry.chart_id, entry.rel.target);
                     p.elements.push(PreservedXml { slot: SLOT_CHART_USER_SHAPES.into(), xml });
                 }

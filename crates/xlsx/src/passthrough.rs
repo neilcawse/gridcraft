@@ -53,6 +53,7 @@ pub(crate) use write::sheet_names_in;
 pub use write::{
     KeptOut, SheetIds, WorkbookKept, attach_sheet_drawing_companions, mirrored_user_shape_refs, workbook_elements, write_package_rels, write_workbook,
 };
+pub(crate) use write::{fingerprint_image, fingerprint_shape};
 
 /// Slot for a picture's preserved Office 2016+ SVG companion (`asvg:svgBlip`).
 pub(crate) const SLOT_DRAWING_SVG_BLIP: &str = "drawingSvgBlip";

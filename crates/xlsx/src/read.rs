@@ -14,12 +14,14 @@ use crate::xml::{self, El};
 use crate::{IoError, ReadReport};
 
 /// A chart's `userShapes` drawing collected while reading a sheet, with the model object ids
-/// mirrored from it for display so saving can keep the chart drawing without duplicating them.
+/// and deterministic import fingerprints mirrored from it for display so saving can keep the
+/// chart drawing without duplicating them — and drop passthrough if any mirrored object is
+/// deleted or edited.
 pub struct ChartUserShapesIn {
     pub chart_id: u32,
     pub rel: gridcraft_model::PreservedRel,
-    pub mirrored_images: Vec<u32>,
-    pub mirrored_shapes: Vec<u32>,
+    pub mirrored_images: Vec<(u32, u128)>,
+    pub mirrored_shapes: Vec<(u32, u128)>,
 }
 
 /// State shared while reading one package.

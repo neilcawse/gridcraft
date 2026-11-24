@@ -631,14 +631,16 @@ fn read_user_shapes(
                     };
                     let alt = obj.path(&["nvPicPr", "cNvPr"]).and_then(|c| c.attr("descr")).unwrap_or("").to_string();
                     let id = cx.next_object_id();
-                    mirrored_images.push(id);
-                    sheet.images.push(Image { id, anchor: sub_anchor, data: data.into(), mime: mime_for(&target).to_string(), alt });
+                    let img = Image { id, anchor: sub_anchor, data: data.into(), mime: mime_for(&target).to_string(), alt };
+                    mirrored_images.push((id, crate::passthrough::fingerprint_image(&img)));
+                    sheet.images.push(img);
                 }
                 "sp" | "cxnSp" => {
                     if let Some(s) = read_shape(obj, sub_anchor, false) {
                         let id = cx.next_object_id();
-                        mirrored_shapes.push(id);
-                        sheet.shapes.push(Shape { id, ..s });
+                        let shape = Shape { id, ..s };
+                        mirrored_shapes.push((id, crate::passthrough::fingerprint_shape(&shape)));
+                        sheet.shapes.push(shape);
                     }
                 }
                 _ => {}

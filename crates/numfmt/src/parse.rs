@@ -522,11 +522,17 @@ fn bracket(p: &mut RawParts<'_>, content: &str) {
         if !sym.is_empty() {
             *p.currency = true;
             push_lit(p.toks, sym);
-        } else if let Some(code) = lcid.and_then(|s| u32::from_str_radix(s.trim(), 16).ok()) {
-            match code & 0xFFFF {
-                0xF800 => *p.system_fmt = Some(SystemDateFormat::LongDate),
-                0xF400 => *p.system_fmt = Some(SystemDateFormat::LongTime),
-                _ => {}
+        } else if let Some(tag) = lcid.map(str::trim) {
+            if tag.eq_ignore_ascii_case("x-sysdate") {
+                *p.system_fmt = Some(SystemDateFormat::LongDate);
+            } else if tag.eq_ignore_ascii_case("x-systime") {
+                *p.system_fmt = Some(SystemDateFormat::LongTime);
+            } else if let Ok(code) = u32::from_str_radix(tag, 16) {
+                match code & 0xFFFF {
+                    0xF800 => *p.system_fmt = Some(SystemDateFormat::LongDate),
+                    0xF400 => *p.system_fmt = Some(SystemDateFormat::LongTime),
+                    _ => {}
+                }
             }
         }
         return;
@@ -574,9 +580,12 @@ fn analyze(raw: Raw) -> Section {
         calendar,
         invalid,
     };
-    if is_date {
+    if is_date || system_fmt.is_some() {
         sec.kind = SecKind::Date;
         if let Some(sys_fmt) = system_fmt {
+            sec.has_at = false;
+            sec.fill = false;
+            sec.currency = false;
             toks = match sys_fmt {
                 SystemDateFormat::LongDate => vec![
                     Tok::Date(DatePart::Day(4)),
