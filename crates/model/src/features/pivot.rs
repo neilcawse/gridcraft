@@ -198,6 +198,16 @@ pub struct PivotTable {
     /// Subtotals at the top of each group (Compact/Outline); otherwise below it.
     pub subtotals_top: bool,
     pub style: String,
+    /// Style display flags from `<pivotTableStyleInfo>` (ECMA-376 §18.10.1.74).
+    #[serde(default)]
+    pub style_options: PivotStyleOptions,
+    /// Workbook-defined custom `<tableStyle>` elements from `xl/styles.xml`, when `style` names
+    /// a custom PivotTable style rather than a built-in `PivotStyleLight/Medium/Dark` name.
+    #[serde(default, skip_serializing_if = "PivotCustomStyle::is_none")]
+    pub custom_style: PivotCustomStyle,
+    /// Imported or refreshed grid layout metadata for non-destructive dynamic style resolution.
+    #[serde(default, skip_serializing_if = "PivotStyleGrid::is_none")]
+    pub style_grid: PivotStyleGrid,
     pub show_headers: bool,
     /// Area written by the last refresh.
     pub last_range: Option<RangeRef>,
@@ -255,6 +265,124 @@ impl PartialEq for PivotCacheId {
     }
 }
 impl Eq for PivotCacheId {}
+
+/// Style display flags from `<pivotTableStyleInfo>` (ECMA-376 §18.10.1.74).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PivotStyleOptions {
+    pub show_row_headers: bool,
+    pub show_col_headers: bool,
+    pub show_row_stripes: bool,
+    pub show_col_stripes: bool,
+    pub show_last_column: bool,
+}
+
+impl Default for PivotStyleOptions {
+    fn default() -> Self {
+        Self { show_row_headers: true, show_col_headers: true, show_row_stripes: false, show_col_stripes: false, show_last_column: true }
+    }
+}
+
+fn one_u32() -> u32 {
+    1
+}
+
+/// One `<tableStyleElement>` resolved from `xl/styles.xml` (`<tableStyles>` + `<dxfs>`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PivotStyleElement {
+    /// OOXML `ST_TableStyleType` (e.g. `"headerRow"`, `"firstRowStripe"`, `"firstSubtotalRow"`,
+    /// `"totalRow"`).
+    pub kind: String,
+    /// Band width in rows/columns for stripe elements (default 1).
+    #[serde(default = "one_u32")]
+    pub size: u32,
+    /// Differential format resolved from `<dxfs>`.
+    pub style: crate::style::Style,
+}
+
+/// Workbook-defined custom `<tableStyle>` attached to a [`PivotTable`]. Shared via [`std::sync::Arc`]
+/// so workbook clones stay cheap, and compares equal in [`PartialEq`] like [`PivotCacheId`] so
+/// logical model equality focuses on the PivotTable definition.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PivotCustomStyle(pub Option<std::sync::Arc<Vec<PivotStyleElement>>>);
+
+impl PivotCustomStyle {
+    pub fn is_none(&self) -> bool {
+        self.0.is_none()
+    }
+}
+
+impl PartialEq for PivotCustomStyle {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl Eq for PivotCustomStyle {}
+
+/// Role of one body row starting at `body_range.start.row + first_data_row`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PivotRowRole {
+    Data,
+    /// Subtotal row at nesting depth `0` (firstSubtotalRow), `1` (secondSubtotalRow), or `2+`.
+    Subtotal(u8),
+    GrandTotal,
+    Blank,
+}
+
+/// Role of one data column starting at `body_range.start.col + first_data_col`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PivotColRole {
+    Data,
+    /// Subtotal column at nesting depth `0`, `1`, or `2+`.
+    Subtotal(u8),
+    GrandTotal,
+    Blank,
+}
+
+/// Layout metadata of the PivotTable's rendered cells for dynamic style resolution without
+/// mutating underlying cell styles.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PivotStyleLayout {
+    /// Body range (`<location ref="..."/>`), excluding report filter rows above `anchor`.
+    pub body_range: Option<RangeRef>,
+    /// 0-based row offset from `body_range.start.row` where column headers start (`firstHeaderRow`).
+    pub first_header_row: u32,
+    /// 0-based row offset from `body_range.start.row` where data rows begin (`firstDataRow`).
+    pub first_data_row: u32,
+    /// 0-based column offset from `body_range.start.col` where data columns begin (`firstDataCol`).
+    pub first_data_col: u32,
+    /// Number of report filter rows above `body_range` (`rowPageCount`).
+    pub page_rows: u32,
+    /// Number of report filter column pairs (`colPageCount`).
+    pub page_cols: u32,
+    /// Role of each row starting at `body_range.start.row + first_data_row`.
+    pub row_roles: Vec<PivotRowRole>,
+    /// Subheading depth (`0`..=`2`) for parent-level group rows, used when `show_row_headers` is on.
+    pub row_subheading: Vec<Option<u8>>,
+    /// Role of each column starting at `body_range.start.col + first_data_col`.
+    pub col_roles: Vec<PivotColRole>,
+}
+
+/// Shared layout cache for PivotTable dynamic style resolution. Compares equal in [`PartialEq`]
+/// like [`PivotLookup`] and [`PivotCacheId`] so logical round-trip tests compare definitions.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PivotStyleGrid(pub Option<std::sync::Arc<PivotStyleLayout>>);
+
+impl PivotStyleGrid {
+    pub fn is_none(&self) -> bool {
+        self.0.is_none()
+    }
+}
+
+impl PartialEq for PivotStyleGrid {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl Eq for PivotStyleGrid {}
 
 /// A calculated field: a formula over other fields (`=Sales*0.1`, `='Unit Price'*Units`). As in
 /// Excel, it is evaluated on the sums of the fields it names for each report cell, not per record.
@@ -489,6 +617,9 @@ impl Default for PivotTable {
             subtotals: true,
             subtotals_top: true,
             style: "PivotStyleLight16".into(),
+            style_options: PivotStyleOptions::default(),
+            custom_style: PivotCustomStyle::default(),
+            style_grid: PivotStyleGrid::default(),
             show_headers: true,
             last_range: None,
             row_header_caption: None,
@@ -560,5 +691,76 @@ mod pivot_lookup_tests {
         assert_eq!(saved, "null", "an empty lookup saves no index: {saved}");
         let back: PivotLookup = serde_json::from_str("[]").unwrap();
         assert!(back.cells().is_none(), "an empty saved list restores no index");
+    }
+}
+
+#[cfg(test)]
+mod pivot_style_model_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::sheet::Sheet;
+    use crate::style::{Color, Fill, Style};
+
+    #[test]
+    fn style_options_defaults_and_serde_roundtrip() {
+        let opts = PivotStyleOptions::default();
+        assert!(opts.show_row_headers);
+        assert!(opts.show_col_headers);
+        assert!(!opts.show_row_stripes);
+        assert!(!opts.show_col_stripes);
+        assert!(opts.show_last_column);
+
+        let custom = PivotStyleOptions {
+            show_row_headers: false,
+            show_col_headers: true,
+            show_row_stripes: true,
+            show_col_stripes: true,
+            show_last_column: false,
+        };
+        let json = serde_json::to_string(&custom).unwrap();
+        let back: PivotStyleOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, custom);
+    }
+
+    #[test]
+    fn custom_style_and_style_grid_do_not_break_logical_equality() {
+        let mut a = PivotTable::default();
+        let mut b = PivotTable::default();
+        let mut hdr = Style::default();
+        hdr.fill = Fill::solid(Color::Rgb(0x1F4E79));
+        a.custom_style = PivotCustomStyle(Some(Arc::new(vec![PivotStyleElement { kind: "headerRow".into(), size: 1, style: hdr }])));
+        a.style_grid = PivotStyleGrid(Some(Arc::new(PivotStyleLayout {
+            body_range: Some(RangeRef::new(CellRef::new(1, 0), CellRef::new(5, 2))),
+            first_header_row: 0,
+            first_data_row: 1,
+            first_data_col: 1,
+            page_rows: 0,
+            page_cols: 1,
+            row_roles: vec![PivotRowRole::Data, PivotRowRole::Subtotal(0), PivotRowRole::Data, PivotRowRole::GrandTotal],
+            row_subheading: vec![None; 4],
+            col_roles: vec![PivotColRole::Data, PivotColRole::GrandTotal],
+        })));
+        assert_eq!(a, b);
+        // Changing style_options DOES affect equality.
+        b.style_options.show_row_stripes = true;
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn sheet_pivot_at_matches_last_range() {
+        let mut sh = Sheet::new("Summary");
+        let pt = PivotTable {
+            id: 1,
+            name: "PT1".into(),
+            anchor: CellRef::new(3, 1),
+            last_range: Some(RangeRef::new(CellRef::new(1, 1), CellRef::new(8, 4))),
+            ..PivotTable::default()
+        };
+        sh.pivots.push(pt);
+        assert!(sh.pivot_at(CellRef::new(1, 1)).is_some());
+        assert!(sh.pivot_at(CellRef::new(5, 3)).is_some());
+        assert!(sh.pivot_at(CellRef::new(0, 1)).is_none());
+        assert!(sh.pivot_at(CellRef::new(9, 1)).is_none());
     }
 }

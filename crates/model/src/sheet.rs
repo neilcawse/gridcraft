@@ -553,6 +553,9 @@ impl Sheet {
     pub fn table_at(&self, c: CellRef) -> Option<&Table> {
         self.tables.iter().find(|t| t.range.contains(c))
     }
+    pub fn pivot_at(&self, c: CellRef) -> Option<&PivotTable> {
+        self.pivots.iter().find(|p| p.last_range.is_some_and(|r| r.contains(c)))
+    }
     pub fn used_range(&self) -> Option<RangeRef> {
         let mut r = self.cells.used_range();
         for sr in self.spill_ranges.values() {

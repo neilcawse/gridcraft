@@ -28,7 +28,10 @@ pub(super) struct Look {
 fn cell_look(wb: &Workbook, si: usize, sh: &Sheet, c: CellRef, cf: &mut crate::cf::CfCache) -> Look {
     let mut style = match sh.table_at(c) {
         Some(t) => crate::tables::table_cell_shown_style(wb, si, t, cf.table_edges(sh, t), c),
-        None => wb.styles.get(sh.style_id(c)).clone(),
+        None => match sh.pivot_at(c) {
+            Some(pt) => crate::pivot::pivot_cell_style(wb, sh, pt, c),
+            None => wb.styles.get(sh.style_id(c)).clone(),
+        },
     };
     let cfl = cf.look(wb, si, c);
     if let Some(st) = cfl.as_ref().and_then(|l| l.style.as_ref()) {
@@ -359,6 +362,7 @@ pub(super) fn draw_block(pg: &mut Page, b: &Block, gridlines: bool, cf: &mut cra
             && sh.value_ref(*c).is_none_or(|v| v.is_empty())
             && sh.style_id(*c) == StyleId::DEFAULT
             && (sh.tables.is_empty() || sh.table_at(*c).is_none())
+            && (sh.pivots.is_empty() || sh.pivot_at(*c).is_none())
     };
     let looks: Vec<(CellRef, Look)> = cells
         .iter()

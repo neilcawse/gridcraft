@@ -17,8 +17,8 @@ use gridcraft_core::date::{datetime_from_serial, iso_ymd, serial_from_iso_ymd};
 use gridcraft_core::{CellRef, DateSystem, RangeRef, Value, number_to_text};
 use gridcraft_formula::quote_sheet;
 use gridcraft_model::{
-    PivotCalcField, PivotDateGroup, PivotField, PivotFilter, PivotFunc, PivotLayout, PivotScopeItem, PivotShowAs, PivotSort, PivotTable, PivotValue,
-    Workbook,
+    PivotCalcField, PivotColRole, PivotCustomStyle, PivotDateGroup, PivotField, PivotFilter, PivotFunc, PivotLayout, PivotRowRole, PivotScopeItem,
+    PivotShowAs, PivotSort, PivotStyleElement, PivotStyleGrid, PivotStyleLayout, PivotStyleOptions, PivotTable, PivotValue, Workbook,
 };
 
 use crate::IoError;
