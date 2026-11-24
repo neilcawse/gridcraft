@@ -211,8 +211,10 @@ pub struct SeriesData {
 }
 
 impl SeriesData {
+    /// O(log N) lookup into `points`, which [`resolve`] and [`render::sanitize`] keep sorted and
+    /// deduplicated by `idx`.
     pub(crate) fn point_style(&self, idx: usize) -> Option<&PointStyleData> {
-        self.points.iter().find(|p| p.idx == idx)
+        self.points.binary_search_by_key(&idx, |p| p.idx).ok().and_then(|i| self.points.get(i))
     }
 }
 /// A trendline to draw: the model settings with the line colour resolved against the theme.

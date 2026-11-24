@@ -84,24 +84,6 @@ pub(super) fn draw_objects(pg: &mut Page, wb: &Workbook, si: usize, sh: &Sheet, 
     pg.save();
     pg.clip_rect(b.text_x(bx, bw), by, bw, bh);
     draw_sparklines(pg, wb, si, sh, b, block);
-    for (imi, im) in sh.images.iter().enumerate() {
-        let r = anchor_rect(sh, &im.anchor);
-        if !visible(r) {
-            continue;
-        }
-        let (x, y, w, h) = place(&im.anchor, r);
-        // About 150 dpi is plenty for print.
-        let (mw, mh) = (((w / 72.0) * 150.0).ceil().clamp(1.0, 4000.0) as u32, ((h / 72.0) * 150.0).ceil().clamp(1.0, 4000.0) as u32);
-        let decoded = pics.decoded.entry((si, imi)).or_insert_with(|| decode_image(&im.data, mw, mh));
-        if let Some((px, pw, ph)) = decoded.as_ref() {
-            // Every page the picture touches embeds its own copy: past the budget it is left out.
-            let bytes = px.len();
-            if pics.image_bytes.saturating_add(bytes) <= super::MAX_EMBEDDED_IMAGE_BYTES {
-                pics.image_bytes += bytes;
-                pg.image_rgba(Rect::new(x, y, w, h), px, [*pw, *ph]);
-            }
-        }
-    }
     for shp in &sh.shapes {
         let r = anchor_rect(sh, &shp.anchor);
         if !visible(r) {
@@ -128,6 +110,24 @@ pub(super) fn draw_objects(pg: &mut Page, wb: &Workbook, si: usize, sh: &Sheet, 
             continue;
         }
         draw_shape(pg, wb, shp, b, (x, y, w, h));
+    }
+    for (imi, im) in sh.images.iter().enumerate() {
+        let r = anchor_rect(sh, &im.anchor);
+        if !visible(r) {
+            continue;
+        }
+        let (x, y, w, h) = place(&im.anchor, r);
+        // About 150 dpi is plenty for print.
+        let (mw, mh) = (((w / 72.0) * 150.0).ceil().clamp(1.0, 4000.0) as u32, ((h / 72.0) * 150.0).ceil().clamp(1.0, 4000.0) as u32);
+        let decoded = pics.decoded.entry((si, imi)).or_insert_with(|| decode_image(&im.data, mw, mh));
+        if let Some((px, pw, ph)) = decoded.as_ref() {
+            // Every page the picture touches embeds its own copy: past the budget it is left out.
+            let bytes = px.len();
+            if pics.image_bytes.saturating_add(bytes) <= super::MAX_EMBEDDED_IMAGE_BYTES {
+                pics.image_bytes += bytes;
+                pg.image_rgba(Rect::new(x, y, w, h), px, [*pw, *ph]);
+            }
+        }
     }
     for (chi, ch) in sh.charts.iter().enumerate() {
         let r = anchor_rect(sh, &ch.anchor);
@@ -225,22 +225,41 @@ fn draw_shape(pg: &mut Page, wb: &Workbook, shp: &gridcraft_model::Shape, b: &Bl
     let text_box = shp.kind == ShapeKind::TextBox;
     let size = fm.font_size.unwrap_or(11.0).clamp(1.0, 4000.0) * b.scale;
     let font = Font::styled(Font::family_for(fm.font.as_deref().unwrap_or("")), fm.bold, fm.italic);
-    let color = fm.text_color.and_then(|c| rgb_of(c, wb)).unwrap_or([0, 0, 0]);
+    let default_color = match fill {
+        Some([fr, fg, fb]) if shp.kind != ShapeKind::WordArt => {
+            let luma = 0.299 * f32::from(fr) + 0.587 * f32::from(fg) + 0.114 * f32::from(fb);
+            if luma < 128.0 { [255, 255, 255] } else { [0, 0, 0] }
+        }
+        _ => [0, 0, 0],
+    };
+    let color = fm.text_color.and_then(|c| rgb_of(c, wb)).unwrap_or(default_color);
     let align = fm.align.unwrap_or(if text_box { ShapeTextAlign::Left } else { ShapeTextAlign::Center });
     let anchor = fm.anchor.unwrap_or(if text_box { ShapeTextAnchor::Top } else { ShapeTextAnchor::Middle });
-    let lines = wrap_lines(&shp.text, font, size, (w - 4.0 * b.k).max(size), TextDirection::Auto);
+    let r_inset = 2.0 * b.k;
+    let l_indent =
+        if fm.left_indent.is_finite() && fm.left_indent > 0.0 { (fm.left_indent * b.scale).min((w - 2.0 * r_inset).max(0.0) * 0.6) } else { 0.0 };
+    let l_inset = r_inset + l_indent;
+    let wrap_w = (w - l_inset - r_inset).max(size);
+    let lines = wrap_lines(&shp.text, font, size, wrap_w, TextDirection::Auto);
     let block_h = lines.len().min(500) as f32 * size * 1.2;
     let mut yy = match anchor {
-        ShapeTextAnchor::Top => y + 2.0 * b.k,
+        ShapeTextAnchor::Top => y + r_inset,
         ShapeTextAnchor::Middle => y + (h - block_h) / 2.0,
-        ShapeTextAnchor::Bottom => y + h - 2.0 * b.k - block_h,
+        ShapeTextAnchor::Bottom => y + h - r_inset - block_h,
     } + size * 0.8;
+    let needs_clip = angle == 0.0
+        && (block_h + 2.0 * r_inset > h
+            || lines.iter().take(500).any(|l| gridcraft_pdf::text_width_with_direction(font, size, &l.text, l.direction) > w - l_inset - r_inset));
+    if needs_clip {
+        pg.save();
+        pg.clip_rect(x, y, w, h);
+    }
     for l in lines.iter().take(500) {
         let lw = gridcraft_pdf::text_width_with_direction(font, size, &l.text, l.direction);
         let lx = match align {
-            ShapeTextAlign::Left => x + 2.0 * b.k,
-            ShapeTextAlign::Center => x + (w - lw) / 2.0,
-            ShapeTextAlign::Right => x + w - 2.0 * b.k - lw,
+            ShapeTextAlign::Left => x + l_inset,
+            ShapeTextAlign::Center => x + l_inset + ((w - l_inset - r_inset) - lw) / 2.0,
+            ShapeTextAlign::Right => x + w - r_inset - lw,
         };
         // WordArt's drop shadow: the line again, offset, in the shadow colour (under the text).
         if let Some(sc) = fm.text_shadow.and_then(|c| rgb_of(c, wb)) {
@@ -262,5 +281,8 @@ fn draw_shape(pg: &mut Page, wb: &Workbook, shp: &gridcraft_model::Shape, b: &Bl
         let [tx, ty] = turn([lx, yy]);
         pg.text_rotated_with_direction(Baseline { origin: Point::new(tx, ty), angle }, size, font, color, &l.text, l.direction);
         yy += size * 1.2;
+    }
+    if needs_clip {
+        pg.restore();
     }
 }

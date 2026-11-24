@@ -456,31 +456,31 @@ fn conditional_format_range_copies_are_bounded() {
     assert!(rep.warnings.iter().any(|w| w.contains("kept range cells")), "{:?}", rep.warnings);
 }
 
-/// #2173: the kept-range-cell cap counts every block of the sheet. A large block that fills the
-/// cap leaves no room for a later one-cell block.
+/// #2173: the kept-range cap counts every block of the sheet. Blocks that fill the cap leave no
+/// room for a later block, while single full-column ranges like `F13:J1048576` cost one entry each.
 #[test]
 fn conditional_format_cap_holds_across_blocks() {
+    let sq = (1..=10_000).map(|r| format!("A{r}")).collect::<Vec<_>>().join(" ");
     let block = |sq: &str, n: usize| {
         format!(r#"<conditionalFormatting sqref="{sq}">{}</conditionalFormatting>"#, r#"<cfRule type="containsBlanks" priority="1"/>"#.repeat(n))
     };
-    let body = format!("<sheetData/>{}{}", block("A1:D1000000", 1), block("E1", 1));
+    let body = format!("<sheetData/>{}{}", block(&sq, 400), block("E1", 1));
     let (wb, rep) = read_xlsx(&minimal(&body, &[], "", "")).unwrap();
     let cfs = &wb.sheets[0].cond_formats;
-    assert_eq!(cfs.len(), 1, "4,000,000 cells fill the cap; the one-cell block would exceed it");
-    assert_eq!(cfs[0].ranges, vec![gridcraft_core::RangeRef::parse("A1:D1000000").unwrap()]);
+    assert_eq!(cfs.len(), 400, "4,000,000 range entries fill the cap; the extra block would exceed it");
     assert!(rep.warnings.iter().any(|w| w.contains("kept range cells")), "{:?}", rep.warnings);
 }
 
-/// #2173: earlier blocks are charged their own cells, not the later block's size times the rule
-/// count, so a large block after a few small rules still fits under the cap.
+/// #2173: earlier blocks are charged their own range entries, not the later block's size times the
+/// rule count, and legitimate multi-column full-sheet ranges (e.g. `F13:J1048576`) are retained.
 #[test]
 fn conditional_format_cap_admits_a_large_block_after_small_ones() {
     let block = |sq: &str, n: usize| {
         format!(r#"<conditionalFormatting sqref="{sq}">{}</conditionalFormatting>"#, r#"<cfRule type="containsBlanks" priority="1"/>"#.repeat(n))
     };
-    let body = format!("<sheetData/>{}{}", block("E1", 3), block("A1:C1000000", 1));
+    let body = format!("<sheetData/>{}{}", block("E1", 3), block("F13:J1048576", 3));
     let (wb, rep) = read_xlsx(&minimal(&body, &[], "", "")).unwrap();
-    assert_eq!(wb.sheets[0].cond_formats.len(), 4, "3 + 3,000,000 kept cells are under the cap");
+    assert_eq!(wb.sheets[0].cond_formats.len(), 6, "full-column sqref rules should all be kept");
     assert!(!rep.warnings.iter().any(|w| w.contains("kept range cells")), "{:?}", rep.warnings);
 }
 

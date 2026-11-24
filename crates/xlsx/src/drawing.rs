@@ -107,33 +107,17 @@ fn from_craft_el(e: &craft_xml::El) -> El {
     El { name, attrs, children, text }
 }
 
-/// Colour of a DrawingML colour choice inside `e` (e.g. a `solidFill`).
+/// Colour of a DrawingML colour choice inside `e` (e.g. a `solidFill`), honouring `srgbClr`,
+/// `sysClr`, `schemeClr`, and colour modifiers (`lumMod`, `lumOff`, `tint`, `shade`).
 pub fn dml_color(e: &El) -> Option<Color> {
-    if let Some(c) = e.child("srgbClr").and_then(|c| c.attr("val")) {
-        return Color::from_hex(c);
-    }
-    if let Some(c) = e.child("sysClr").and_then(|c| c.attr("lastClr")) {
-        return Color::from_hex(c);
-    }
-    if let Some(c) = e.child("schemeClr").and_then(|c| c.attr("val")) {
-        let i = match c {
-            "bg1" | "lt1" => 0,
-            "tx1" | "dk1" => 1,
-            "bg2" | "lt2" => 2,
-            "tx2" | "dk2" => 3,
-            "accent1" => 4,
-            "accent2" => 5,
-            "accent3" => 6,
-            "accent4" => 7,
-            "accent5" => 8,
-            "accent6" => 9,
-            "hlink" => 10,
-            "folHlink" => 11,
-            _ => return None,
-        };
-        return Some(Color::Theme(i, 0));
-    }
-    None
+    crate::chart::chart_color(e).or_else(|| {
+        let val = e.child("sysClr")?.attr("val")?;
+        match val {
+            "windowText" => Some(Color::Rgb(0x000000)),
+            "window" => Some(Color::Rgb(0xFFFFFF)),
+            _ => None,
+        }
+    })
 }
 
 fn mime_for(name: &str) -> &'static str {
@@ -720,7 +704,15 @@ fn read_shape(obj: &El, anchor: Anchor, grouped: bool) -> Option<Shape> {
             math: Default::default(),
         });
     }
-    let fill = sp.child("solidFill").and_then(dml_color).unwrap_or_default();
+    let fill = sp
+        .child("solidFill")
+        .and_then(dml_color)
+        .or_else(|| {
+            (sp.child("noFill").is_none())
+                .then(|| obj.path(&["style", "fillRef"]).filter(|r| r.attr_u32("idx").is_some_and(|i| i > 0)).and_then(dml_color))
+                .flatten()
+        })
+        .unwrap_or_default();
     let line = ln.and_then(|l| l.child("solidFill")).and_then(dml_color).unwrap_or_default();
     let text = tb.map(|tb| if has_math { math_body_text(tb) } else { body_text(tb) }).unwrap_or_default();
     let mut format = read_text_format(obj.child("txBody"));
@@ -745,13 +737,22 @@ fn read_text_format(body: Option<&El>) -> ShapeFormat {
         "b" => ShapeTextAnchor::Bottom,
         _ => ShapeTextAnchor::Top,
     });
-    let ppr = body.kids("p").next().and_then(|p| p.child("pPr"));
+    let first_p = body.kids("p").next();
+    let ppr = first_p.and_then(|p| p.child("pPr").or_else(|| p.child("fld").and_then(|fld| fld.child("pPr"))));
     f.align = ppr.and_then(|p| p.attr("algn")).map(|a| match a {
         "ctr" => ShapeTextAlign::Center,
         "r" => ShapeTextAlign::Right,
         _ => ShapeTextAlign::Left,
     });
     f.rtl = ppr.is_some_and(|p| p.flag("rtl", false));
+    if let Some(p) = ppr {
+        if let Some(mar_l) = p.attr_f64("marL").filter(|v| v.is_finite() && *v > 0.0) {
+            f.left_indent = (mar_l / 12_700.0).clamp(0.0, 1000.0) as f32;
+        } else if let Some(lvl) = p.attr_u32("lvl").filter(|&v| v > 0) {
+            // ECMA-376 default paragraph indent per outline level is 342,900 EMU (27 pt).
+            f.left_indent = (lvl.min(9) as f32) * 27.0;
+        }
+    }
     let rpr = body.kids("p").flat_map(|p| p.children.iter().filter(|c| c.name == "r" || c.name == "fld")).find_map(|r| r.child("rPr"));
     if let Some(r) = rpr {
         // `sz` is in hundredths of a point (100..=400000 in the schema).
@@ -863,11 +864,24 @@ fn plain_paragraphs(text: &str, rpr: &str) -> String {
     text.split('\n').map(|line| format!("<a:p><a:pPr algn=\"ctr\"/><a:r>{rpr}<a:t>{}</a:t></a:r></a:p>", esc(line))).collect()
 }
 
-/// The text of a text body: the runs of each paragraph, paragraphs joined with newlines.
+/// The text of a text body: the runs, fields, and line breaks (`<a:br>`) of each paragraph,
+/// paragraphs joined with newlines.
 fn body_text(tb: &El) -> String {
     tb.kids("p")
         .map(|p| {
-            p.children.iter().filter(|c| c.name == "r" || c.name == "fld").filter_map(|r| r.child("t")).map(|t| t.text.as_str()).collect::<String>()
+            let mut out = String::new();
+            for c in &p.children {
+                match c.name.as_str() {
+                    "r" | "fld" => {
+                        if let Some(t) = c.child("t") {
+                            out.push_str(&t.text);
+                        }
+                    }
+                    "br" => out.push('\n'),
+                    _ => {}
+                }
+            }
+            out
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -1402,7 +1416,12 @@ fn write_obj(s: &mut String, theme: &Theme, o: &Obj<'_>, id: usize, off: (i64, i
                     Some(ShapeTextAlign::Right) => " algn=\"r\"",
                 };
                 let rtl = if f.rtl { " rtl=\"1\"" } else { "" };
-                let ppr = if algn.is_empty() && rtl.is_empty() { String::new() } else { format!("<a:pPr{algn}{rtl}/>") };
+                let mar_l = if f.left_indent.is_finite() && f.left_indent > 0.0 {
+                    format!(" marL=\"{}\"", (f.left_indent.clamp(0.0, 1000.0) * 12_700.0).round() as u32)
+                } else {
+                    String::new()
+                };
+                let ppr = if algn.is_empty() && rtl.is_empty() && mar_l.is_empty() { String::new() } else { format!("<a:pPr{algn}{rtl}{mar_l}/>") };
                 let (rpr_attrs, rpr_body) = run_props(f, theme);
                 for line in sh.text.split('\n') {
                     if line.is_empty() {

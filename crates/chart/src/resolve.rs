@@ -597,7 +597,7 @@ pub fn resolve(wb: &Workbook, sheet: usize, chart: &Chart) -> ChartData {
             .collect::<Vec<_>>();
         trend_left = trend_left.saturating_sub(trendlines.len());
         let line = resolve_stroke(s.line_color.as_ref(), s.line_width, s.no_line, &wb.theme);
-        let points = s
+        let mut points: Vec<PointStyleData> = s
             .points
             .iter()
             .take(4096)
@@ -609,6 +609,33 @@ pub fn resolve(wb: &Workbook, sheet: usize, chart: &Chart) -> ChartData {
                 no_line: p.no_line,
             })
             .collect();
+        // Keep sorted and deduplicated (last wins on duplicate idx) for O(log N) lookup in `point_style`.
+        points.sort_by_key(|p| p.idx);
+        if !points.is_empty() {
+            let mut deduped: Vec<PointStyleData> = Vec::with_capacity(points.len());
+            for p in points {
+                if let Some(last) = deduped.last_mut().filter(|l| l.idx == p.idx) {
+                    *last = p;
+                } else {
+                    deduped.push(p);
+                }
+            }
+            points = deduped;
+        }
+        let data_labels = s.data_labels.clone().map(|mut dl| {
+            dl.points.truncate(4096);
+            dl.points.sort_by_key(|p| p.idx);
+            let mut deduped = Vec::with_capacity(dl.points.len());
+            for p in dl.points {
+                if let Some(last) = deduped.last_mut().filter(|l: &&mut gridcraft_model::DataLabelOverride| l.idx == p.idx) {
+                    *last = p;
+                } else {
+                    deduped.push(p);
+                }
+            }
+            dl.points = deduped;
+            dl
+        });
         series.push(SeriesData {
             name,
             values,
@@ -627,7 +654,7 @@ pub fn resolve(wb: &Workbook, sheet: usize, chart: &Chart) -> ChartData {
             line,
             no_line: s.no_line,
             points,
-            data_labels: s.data_labels.clone(),
+            data_labels,
         });
     }
     let n = series.iter().map(|s| s.values.len()).max().unwrap_or(0);

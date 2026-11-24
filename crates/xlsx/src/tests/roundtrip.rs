@@ -405,6 +405,7 @@ fn sample() -> Workbook {
             align: Some(ShapeTextAlign::Right),
             anchor: Some(ShapeTextAnchor::Bottom),
             rtl: true,
+            left_indent: 0.0,
         },
         rotation: 0.0,
     });

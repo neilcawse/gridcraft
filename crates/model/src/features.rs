@@ -1234,6 +1234,13 @@ pub struct ShapeFormat {
     pub anchor: Option<ShapeTextAnchor>,
     /// Paragraphs run right to left (`a:pPr rtl`).
     pub rtl: bool,
+    /// Left paragraph indent in points (`a:pPr/@marL` in EMU/12700, or `a:pPr/@lvl` × 27 pt).
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub left_indent: f32,
+}
+
+fn is_zero_f32(v: &f32) -> bool {
+    *v == 0.0
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

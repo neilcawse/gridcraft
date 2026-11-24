@@ -418,6 +418,56 @@ impl CfCache {
         }
         any.then_some(out)
     }
+
+    /// Effective number format code of `c`, honouring matching conditional formatting `<dxf><numFmt>`
+    /// overrides. Zero overhead when no conditional formatting rule covering `c` specifies a `numFmt`.
+    pub fn effective_num_fmt<'a>(&mut self, wb: &'a Workbook, sheet: usize, sh: &'a Sheet, c: CellRef) -> std::borrow::Cow<'a, str> {
+        let base = wb.styles.get(sh.style_id(c)).num_fmt.as_str();
+        if !has_num_fmt_rule(sh, c) {
+            return std::borrow::Cow::Borrowed(base);
+        }
+        if let Some(l) = self.look(wb, sheet, c)
+            && let Some(st) = l.style
+            && style_sets_num_fmt(&st)
+        {
+            return std::borrow::Cow::Owned(st.num_fmt.as_str().to_string());
+        }
+        std::borrow::Cow::Borrowed(base)
+    }
+}
+
+/// Whether a differential style explicitly sets a number format override (non-General, or stated General).
+pub(crate) fn style_sets_num_fmt(st: &Style) -> bool {
+    st.num_fmt.as_str() != "General" || st.dxf_stated.num_fmt
+}
+
+/// Whether any conditional formatting rule on `sh` covering `c` carries a differential `numFmt`.
+pub(crate) fn has_num_fmt_rule(sh: &Sheet, c: CellRef) -> bool {
+    if sh.cond_formats.is_empty() {
+        return false;
+    }
+    sh.cond_formats.iter().any(|cf| rule_style(&cf.rule).is_some_and(style_sets_num_fmt) && cf.ranges.iter().any(|r| r.contains(c)))
+}
+
+fn rule_style(rule: &CfRule) -> Option<&Style> {
+    match rule {
+        CfRule::CellIs { style, .. }
+        | CfRule::Expression { style, .. }
+        | CfRule::ContainsText { style, .. }
+        | CfRule::NotContainsText { style, .. }
+        | CfRule::BeginsWith { style, .. }
+        | CfRule::EndsWith { style, .. }
+        | CfRule::Blanks { style }
+        | CfRule::NoBlanks { style }
+        | CfRule::Errors { style }
+        | CfRule::NoErrors { style }
+        | CfRule::Duplicate { style }
+        | CfRule::Unique { style }
+        | CfRule::Top10 { style, .. }
+        | CfRule::AboveAverage { style, .. }
+        | CfRule::TimePeriod { style, .. } => Some(style.as_ref()),
+        CfRule::ColorScale { .. } | CfRule::DataBar { .. } | CfRule::IconSet { .. } => None,
+    }
 }
 
 /// Adds the parts `lower` sets that `style` leaves unset (differential styles: default parts
@@ -451,8 +501,9 @@ fn layer_under(style: &mut Style, lower: &Style) {
             *dst = src;
         }
     }
-    if style.num_fmt.as_str() == "General" {
+    if !style_sets_num_fmt(style) {
         style.num_fmt = lower.num_fmt.clone();
+        style.dxf_stated.num_fmt = lower.dxf_stated.num_fmt;
     }
 }
 

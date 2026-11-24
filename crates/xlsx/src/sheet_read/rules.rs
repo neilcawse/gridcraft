@@ -46,14 +46,14 @@ fn cfvos(e: &El) -> Vec<CfValueKind> {
 }
 
 /// One `conditionalFormatting` block. Every rule keeps its own copy of the block's ranges, so
-/// `kept_cells` counts the range cells the sheet's retained rules hold so far, across blocks; a
+/// `kept_ranges` counts the range entries the sheet's retained rules hold so far, across blocks; a
 /// rule that would take it past [`MAX_COND_CELLS`] is dropped. Unsupported rules cost nothing.
 pub(super) fn read_cf(cx: &mut Ctx<'_>, e: &El, sheet: &mut Sheet, kept_cells: &mut u64) {
     let ranges = parse_sqref(e.attr("sqref"));
     if ranges.is_empty() {
         return;
     }
-    let block_cells = ranges.iter().map(RangeRef::count).fold(0u64, u64::saturating_add);
+    let block_cells = ranges.len() as u64;
     for r in e.kids("cfRule") {
         let style = Box::new(r.attr_u32("dxfId").and_then(|i| cx.dxfs.get(i as usize)).cloned().unwrap_or_default());
         let formulas: Vec<String> = r.kids("formula").map(|f| from_file(f.text.trim())).collect();
@@ -161,7 +161,7 @@ fn cf_rule(cx: &Ctx<'_>, r: &El, ty: &str, formulas: Vec<String>, style: Box<Sty
 pub(super) fn read_x14_cf(cx: &mut Ctx<'_>, e: &El, sheet: &mut Sheet, kept_cells: &mut u64) {
     for cf in e.kids("conditionalFormatting") {
         let ranges = parse_sqref(cf.child("sqref").map(|s| s.text.as_str()));
-        let block_cells = ranges.iter().map(RangeRef::count).fold(0u64, u64::saturating_add);
+        let block_cells = ranges.len() as u64;
         for r in cf.kids("cfRule") {
             let ty = r.attr("type").unwrap_or("");
             let linked = r.attr("id").and_then(|id| cx.cf_ext_ids.iter().find(|(i, _)| i == id.trim())).map(|(_, n)| *n);

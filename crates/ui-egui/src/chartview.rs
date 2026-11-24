@@ -209,23 +209,41 @@ fn area_mesh(v: &[Pos2], col: Color32) -> egui::Mesh {
     mesh
 }
 
+/// Contrast-aware default text colour when a shape's run omits an explicit fill.
+fn shape_default_text_color(sp: &gridcraft_engine::model::Shape, wb: &Workbook) -> Color32 {
+    if sp.kind == ShapeKind::WordArt {
+        return Color32::BLACK;
+    }
+    match sp.fill.resolve(&wb.theme) {
+        Some([fr, fg, fb]) => {
+            let luma = 0.299 * f32::from(fr) + 0.587 * f32::from(fg) + 0.114 * f32::from(fb);
+            if luma < 128.0 { Color32::WHITE } else { Color32::BLACK }
+        }
+        None => Color32::BLACK,
+    }
+}
+
 /// A shape's text with its formatting: size, bold/italic, typeface, colour, outline, horizontal
-/// alignment and vertical anchor. Shapes other than text boxes default to white text centred in
-/// the shape; text boxes to black text at the top left.
+/// alignment and vertical anchor.
 fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Shape, r: Rect, z: f32) {
     use gridcraft_engine::model::{ShapeTextAlign, ShapeTextAnchor};
     let f = &sp.format;
-    let word_art = sp.kind == ShapeKind::WordArt;
     let text_box = sp.kind == ShapeKind::TextBox;
     let align = f.align.unwrap_or(if text_box { ShapeTextAlign::Left } else { ShapeTextAlign::Center });
     let anchor = f.anchor.unwrap_or(if text_box { ShapeTextAnchor::Top } else { ShapeTextAnchor::Middle });
-    let default_color = if text_box || word_art { Color32::BLACK } else { Color32::WHITE };
+    let default_color = shape_default_text_color(sp, wb);
     let color = f.text_color.and_then(|c| c.resolve(&wb.theme)).map(theme::color32).unwrap_or(default_color);
     // Default 14 px (as before); a set size is in points.
     let size = f.font_size.map_or(14.0, |pt| pt * 96.0 / 72.0).clamp(1.0, 2000.0) * z;
     let family = theme::cell_family(f.font.as_deref().unwrap_or(""), f.bold, f.italic);
-    let inset = 4.0;
-    let width = (r.width() - 2.0 * inset).max(1.0);
+    let inset = 4.0 * z;
+    let l_indent = if f.left_indent.is_finite() && f.left_indent > 0.0 {
+        (f.left_indent * 96.0 / 72.0 * z).min((r.width() - 2.0 * inset).max(0.0) * 0.6)
+    } else {
+        0.0
+    };
+    let l_inset = inset + l_indent;
+    let width = (r.width() - l_inset - inset).max(1.0);
     let mut job = egui::text::LayoutJob::simple(sp.text.clone(), FontId::new(size, family), color, width);
     job.halign = match align {
         ShapeTextAlign::Left => egui::Align::LEFT,
@@ -234,9 +252,9 @@ fn paint_shape_text(p: &Painter, wb: &Workbook, sp: &gridcraft_engine::model::Sh
     };
     let g = p.layout_job(job);
     let x = match align {
-        ShapeTextAlign::Left => r.left() + inset,
-        ShapeTextAlign::Center => r.center().x,
-        ShapeTextAlign::Right => r.right() - inset,
+        ShapeTextAlign::Left => r.left() + l_inset - g.rect.left(),
+        ShapeTextAlign::Center => (r.left() + l_inset + r.right() - inset) / 2.0 - g.rect.center().x,
+        ShapeTextAlign::Right => r.right() - inset - g.rect.right(),
     };
     let y = match anchor {
         ShapeTextAnchor::Top => r.top() + inset,
@@ -427,9 +445,11 @@ pub(crate) fn paint_objects(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Arc
             continue;
         }
         let start = p.add(egui::Shape::Noop);
-        // Soft shadow + white card.
-        p.rect_filled(r.translate(vec2(0.0, 1.5)), 2.0, Color32::from_black_alpha(18));
-        p.rect_filled(r, 0.0, Tokens::get(p.ctx()).grid_bg);
+        // Soft shadow + white card, unless the chart area explicitly has noFill (transparent).
+        if !ch.area_style.no_fill {
+            p.rect_filled(r.translate(vec2(0.0, 1.5)), 2.0, Color32::from_black_alpha(18));
+            p.rect_filled(r, 0.0, Tokens::get(p.ctx()).grid_bg);
+        }
         let prims = chart_prims(app, p, geo.z, wb, si, ci, ch);
         paint_prims(&p.with_clip_rect(r.intersect(p.clip_rect())), r.min, &prims, geo.z);
         done(start, r);
@@ -915,5 +935,27 @@ pub(crate) mod tests {
             out.textures_delta.clear();
         }
         assert!(checked);
+    }
+
+    #[test]
+    fn shape_default_text_color_contrasts_with_fill() {
+        use gridcraft_engine::model::{Color, Shape, ShapeKind};
+        let wb = Workbook::new();
+        let mut sp = Shape {
+            id: 1,
+            kind: ShapeKind::RoundedRectangle,
+            anchor: Anchor::default(),
+            fill: Color::Rgb(0xCCF0FC),
+            line: Color::Auto,
+            text: "Light callout".into(),
+            format: Default::default(),
+            rotation: 0.0,
+            math: Default::default(),
+        };
+        assert_eq!(shape_default_text_color(&sp, &wb), Color32::BLACK);
+        sp.fill = Color::Rgb(0x1B365D);
+        assert_eq!(shape_default_text_color(&sp, &wb), Color32::WHITE);
+        sp.fill = Color::Auto;
+        assert_eq!(shape_default_text_color(&sp, &wb), Color32::BLACK);
     }
 }

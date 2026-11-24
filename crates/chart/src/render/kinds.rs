@@ -199,7 +199,7 @@ pub(super) fn format_point_label(chart: &Chart, data: &ChartData, s: &SeriesData
     if dl.delete {
         return None;
     }
-    let ov = dl.points.iter().find(|p| p.idx == j);
+    let ov = dl.points.binary_search_by_key(&j, |p| p.idx).ok().and_then(|i| dl.points.get(i));
     if ov.is_some_and(|p| p.delete) {
         return None;
     }
