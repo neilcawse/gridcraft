@@ -147,7 +147,7 @@ impl<'a> ZipParts<'a> {
         let zip_error = |e| IoError::Zip(format!("{part}: {e}"));
         let size = self.zip.by_index_raw(idx).map_err(zip_error)?.size();
         if size > maximum {
-            return Err(IoError::TooLarge(format!("{part} expands to {size} bytes")));
+            return Err(IoError::TooLarge(format!("{part} expands to more than {maximum} bytes")));
         }
         if size == 0 {
             return Ok(Some(Vec::new()));
