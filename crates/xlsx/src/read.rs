@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use gridcraft_core::{DateSystem, RangeRef};
 use gridcraft_model::{
-    CalcMode, CellPicture, DefinedName, PhoneticString, Sheet, ShowObjects, Style, StyleId, StyleTable, Visibility, Workbook, WorkbookView,
+    CalcMode, CellPicture, DefinedName, PhoneticString, PreservedSheetKind, Sheet, ShowObjects, Style, StyleId, StyleTable, Visibility, Workbook,
+    WorkbookView,
 };
 
 use crate::package::{Package, Rel};
@@ -440,6 +441,7 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
         rel_by_id.entry(r.id.as_str()).or_insert(r);
     }
     let mut names = SheetNames::default();
+    let mut kept_sheet_needs_sst = false;
     for (i, se) in sheet_els.iter().enumerate() {
         let name = se.attr("name").unwrap_or("").to_string();
         let rel = se.attr("id").and_then(|id| rel_by_id.get(id).copied()).cloned();
@@ -451,7 +453,8 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
             file_to_model.push(None);
             continue;
         };
-        if crate::passthrough::sheet_kind(&rel.kind).is_some() {
+        if let Some(kind) = crate::passthrough::sheet_kind(&rel.kind) {
+            kept_sheet_needs_sst |= kind == PreservedSheetKind::Macro;
             // Chart, dialog and macro sheets: kept as they are and written back in place (see
             // `passthrough`); nothing to model.
             file_to_model.push(None);
@@ -492,6 +495,11 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
         file_to_model.push(Some(wb.sheets.len()));
         collect_sheet_slicers(&mut cx, wb.sheets.len());
         wb.sheets.push(Arc::new(sheet));
+    }
+    // Only kept macro sheets have a cell table whose shared string indexes are resolved later.
+    if !kept_sheet_needs_sst {
+        cx.sst = Vec::new();
+        cx.si_phonetics = Vec::new();
     }
     attach_pending_slicers(&mut cx, &mut wb);
     if wb.sheets.is_empty() {
