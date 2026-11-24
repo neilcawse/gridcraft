@@ -22,7 +22,6 @@ craft-cfb = { workspace = true }
 craft-csv = { workspace = true }
 craft-drawingml = { workspace = true }
 craft-math = { workspace = true }
-craft-ods = { workspace = true }
 craft-offcrypto = { workspace = true }
 craft-opc = { workspace = true }
 craft-xls = { workspace = true }

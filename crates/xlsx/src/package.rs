@@ -18,11 +18,17 @@ pub const MAX_ENTRIES: usize = 200_000;
 
 const LIMITS: craft_opc::Limits = craft_opc::Limits::new(MAX_ENTRIES, MAX_PART, MAX_TOTAL);
 
-pub struct Package<'a> {
-    zip: zip::ZipArchive<Cursor<&'a [u8]>>,
+pub(crate) type ZipArchive<'a> = zip::ZipArchive<Cursor<&'a [u8]>>;
+
+pub(crate) struct Package<'a> {
+    parts: ZipParts<'a>,
+    craft: craft_xlsx::Package<'a>,
+}
+
+pub(crate) struct ZipParts<'a> {
+    zip: ZipArchive<'a>,
     names: HashMap<String, usize>,
     total: u64,
-    craft: craft_xlsx::Package<'a>,
 }
 
 /// A relationship.
@@ -62,25 +68,50 @@ pub(crate) fn craft_error(e: craft_xlsx::Error) -> IoError {
     }
 }
 
+pub(crate) fn open_zip(bytes: &[u8]) -> Result<ZipArchive<'_>, IoError> {
+    craft_opc::check_entry_count(bytes, MAX_ENTRIES as u64).map_err(error)?;
+    let zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| IoError::Zip(e.to_string()))?;
+    if zip.len() > MAX_ENTRIES {
+        return Err(IoError::TooLarge(format!("{} zip entries", zip.len())));
+    }
+    Ok(zip)
+}
+
 impl<'a> Package<'a> {
     pub fn open(bytes: &'a [u8]) -> Result<Package<'a>, IoError> {
-        craft_opc::check_entry_count(bytes, MAX_ENTRIES as u64).map_err(error)?;
-        let zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| IoError::Zip(e.to_string()))?;
-        if zip.len() > MAX_ENTRIES {
-            return Err(IoError::TooLarge(format!("{} zip entries", zip.len())));
-        }
+        let parts = ZipParts::new(open_zip(bytes)?);
+        let craft = craft_xlsx::Package::open(bytes, &craft_xlsx::Limits::default()).map_err(craft_error)?;
+        Ok(Package { parts, craft })
+    }
+
+    pub(crate) fn craft_mut(&mut self) -> &mut craft_xlsx::Package<'a> {
+        &mut self.craft
+    }
+}
+
+impl<'a> std::ops::Deref for Package<'a> {
+    type Target = ZipParts<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.parts
+    }
+}
+
+impl std::ops::DerefMut for Package<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.parts
+    }
+}
+
+impl<'a> ZipParts<'a> {
+    pub(crate) fn new(zip: ZipArchive<'a>) -> Self {
         let mut names = HashMap::with_capacity(zip.len());
         for idx in 0..zip.len() {
             if let Some(name) = zip.name_for_index(idx) {
                 names.entry(normalize(name)).or_insert(idx);
             }
         }
-        let craft = craft_xlsx::Package::open(bytes, &craft_xlsx::Limits::default()).map_err(craft_error)?;
-        Ok(Package { zip, names, total: 0, craft })
-    }
-
-    pub(crate) fn craft_mut(&mut self) -> &mut craft_xlsx::Package<'a> {
-        &mut self.craft
+        Self { zip, names, total: 0 }
     }
 
     /// Every part's (normalized) name, sorted.

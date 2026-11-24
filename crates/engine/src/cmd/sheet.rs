@@ -244,6 +244,7 @@ fn shift_sheet_features(sh: &mut Sheet, axis: Axis, at: u32, count: u32, insert:
             }
         }
     }
+    sh.unimported_pivots = std::mem::take(&mut sh.unimported_pivots).into_iter().filter_map(map_range).collect();
 }
 
 /// Whether a formula's 3-D references cover a different set of sheets after a structural edit.

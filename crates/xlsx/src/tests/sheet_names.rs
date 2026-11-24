@@ -36,6 +36,17 @@ fn sheet_ids_survive_a_save() {
     assert_eq!(again.sheets.iter().map(|s| s.file_id).collect::<Vec<_>>(), ids);
 }
 
+/// A name of spaces only is one Excel takes (and writes): it is read as it is, so the sheet
+/// after it that the file calls `Sheet2` keeps that name instead of becoming `Sheet2 (2)`.
+#[test]
+fn space_only_sheet_names_survive_a_read() {
+    let wb = book(&["Data", " ", "Sheet2"]);
+    let (read, report) = crate::read_xlsx(&write_xlsx(&wb).unwrap()).unwrap();
+    let names: Vec<&str> = read.sheets.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["Data", " ", "Sheet2"]);
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+}
+
 /// Repairing repeated names takes one set lookup per candidate, so thousands of sheets sharing
 /// a name are renamed without rescanning the workbook for every suffix tried.
 #[test]

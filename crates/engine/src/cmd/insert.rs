@@ -252,6 +252,7 @@ fn block(s: &Session, p: &Json) -> Result<RangeRef> {
     }
     Ok(current_region(sh, d.selection.active))
 }
+
 /// Largest offset (points) `object.move` accepts from the anchor cell.
 const MAX_OBJECT_OFFSET: f64 = 100_000.0;
 
@@ -419,7 +420,9 @@ mod tests {
         assert!(e.to_string().contains("already exists"), "{e}");
         let e = s.execute("table.rename", json!({"table": "Table1", "name": "rate"})).unwrap_err();
         assert!(e.to_string().contains("already exists"), "{e}");
-        for n in ["R2C3", "c", "r", "RC", "C5"] {
+        // Excel's table names are its defined names': R1x, C1x, R2D2 and the booleans are refused too
+        // (live Excel 16.115 doesn't load a table named so; `RCx` it takes).
+        for n in ["R2C3", "c", "r", "RC", "C5", "R1x", "C1x", "R2D2", "TRUE", "false", "a?b"] {
             let e = s.execute("table.rename", json!({"table": "Table1", "name": n})).unwrap_err();
             assert!(e.to_string().contains("not valid"), "{n}: {e}");
             let e = s.execute("insert.table", json!({"range": "C1:C2", "name": n})).unwrap_err();
