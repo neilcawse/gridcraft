@@ -752,7 +752,7 @@ fn read_text_format(body: Option<&El>) -> ShapeFormat {
         _ => ShapeTextAlign::Left,
     });
     f.rtl = ppr.is_some_and(|p| p.flag("rtl", false));
-    let rpr = body.kids("p").flat_map(|p| p.kids("r")).find_map(|r| r.child("rPr"));
+    let rpr = body.kids("p").flat_map(|p| p.children.iter().filter(|c| c.name == "r" || c.name == "fld")).find_map(|r| r.child("rPr"));
     if let Some(r) = rpr {
         // `sz` is in hundredths of a point (100..=400000 in the schema).
         f.font_size = r.attr_f64("sz").filter(|v| v.is_finite()).map(|v| (v / 100.0).clamp(1.0, 4000.0) as f32);
@@ -865,7 +865,12 @@ fn plain_paragraphs(text: &str, rpr: &str) -> String {
 
 /// The text of a text body: the runs of each paragraph, paragraphs joined with newlines.
 fn body_text(tb: &El) -> String {
-    tb.kids("p").map(|p| p.kids("r").filter_map(|r| r.child("t")).map(|t| t.text.as_str()).collect::<String>()).collect::<Vec<_>>().join("\n")
+    tb.kids("p")
+        .map(|p| {
+            p.children.iter().filter(|c| c.name == "r" || c.name == "fld").filter_map(|r| r.child("t")).map(|t| t.text.as_str()).collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// A rejected Office Math box still needs its visible run text. Do not reinterpret
@@ -1507,5 +1512,19 @@ mod math_fallback_tests {
         let text = math_body_text(&tb);
         assert_eq!(text.len(), (1 << 20) - 1);
         assert!(text.starts_with('a') && text.ends_with('λ'));
+    }
+
+    #[test]
+    fn fld_runs_are_read_for_body_text_and_format() {
+        let tb = crate::xml::parse(
+            br#"<txBody><bodyPr anchor="ctr"/><p><pPr algn="ctr"/><fld id="{00000000-0000-0000-0000-000000000001}" type="TxLink"><rPr lang="en-US" sz="1400" b="1"/><t>Linked Title</t></fld></p></txBody>"#,
+        )
+        .unwrap();
+        assert_eq!(body_text(&tb), "Linked Title");
+        let fmt = read_text_format(Some(&tb));
+        assert_eq!(fmt.font_size, Some(14.0));
+        assert!(fmt.bold);
+        assert_eq!(fmt.align, Some(ShapeTextAlign::Center));
+        assert_eq!(fmt.anchor, Some(ShapeTextAnchor::Middle));
     }
 }
