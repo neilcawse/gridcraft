@@ -7,7 +7,7 @@ use super::lines::{decimate_area, draw_markers, draw_runs};
 use super::trend::{draw_trend_labels, draw_trendlines, max_backward, max_forward, max_forward_slots, supports_trendline};
 use super::{
     Chart, ChartData, ChartKind, Ctx, Fmt, HAlign, LABEL_SIZE, MAX_CATS, MAX_LABELS, MAX_LINE_PTS, MAX_MARKERS, MIN_BAR_PX, Prim, Rgba, Scale,
-    SeriesData, TEXT, VAlign, WHITE, axis_fmt, clean, label_fmt, nice_scale,
+    SeriesData, TEXT, VAlign, WHITE, axis_fmt, clean, nice_scale,
 };
 
 // ---------------------------------------------------------------- cartesian (column/bar/line/area/combo)
@@ -632,11 +632,13 @@ pub(super) fn scatter(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx) 
                 draw_markers(ctx, px.iter().flatten().copied(), 3.5, s.color);
             }
         }
-        if chart.data_labels && pts.len() <= MAX_LABELS {
-            let fl = label_fmt(s);
-            for (p, raw) in px.iter().zip(pts) {
-                if let (Some(p), Some((_, y))) = (p, raw) {
-                    ctx.text(p[0], p[1] - 6.0, &fl.format(*y, None), LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Bottom));
+        let show_labels = (chart.data_labels || s.data_labels.as_ref().is_some_and(|d| d.shows_any())) && pts.len() <= MAX_LABELS;
+        if show_labels {
+            for (j, (p, raw)) in px.iter().zip(pts).enumerate() {
+                if let (Some(p), Some((_, y))) = (p, raw)
+                    && let Some(lbl) = format_point_label(chart, data, s, j, *y, None)
+                {
+                    ctx.text(p[0], p[1] - 6.0, &lbl, LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Bottom));
                 }
             }
         }

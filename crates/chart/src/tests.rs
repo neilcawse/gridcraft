@@ -2252,3 +2252,152 @@ fn unnamed_single_series_does_not_fabricate_series1_title() {
     let t = texts(&prims);
     assert!(!t.contains(&"Series1"), "must not render fabricated Series1 title: {t:?}");
 }
+
+#[test]
+fn empty_transparent_chart_with_no_title_renders_zero_primitives() {
+    let wb = Workbook::new();
+    let mut c = chart(ChartKind::ColumnClustered);
+    c.title = None;
+    c.legend = LegendPos::None;
+    c.series.clear();
+    c.area_style = gridcraft_model::ChartAreaStyle { no_fill: true, no_line: true, ..Default::default() };
+    let data = resolve(&wb, 0, &c);
+    let prims = render(&c, &data, 400.0, 240.0, &ApproxMeasure);
+    assert!(prims.is_empty(), "transparent 0-series chart should render nothing, got {prims:?}");
+}
+
+#[test]
+fn single_series_column_with_varied_dpt_colors_uses_category_legend() {
+    use gridcraft_model::DataPointStyle;
+
+    let mut wb = Workbook::new();
+    let sh = wb.sheet_mut(0).unwrap();
+    for (i, (cat, val)) in [("Low", 2.0), ("Mid", 5.0), ("High", 9.0)].into_iter().enumerate() {
+        sh.set_value(CellRef::new(i as u32, 0), Value::text(cat));
+        sh.set_value(CellRef::new(i as u32, 1), Value::Number(val));
+    }
+    let mut c = chart(ChartKind::ColumnClustered);
+    c.legend = LegendPos::Right;
+    c.series = vec![Series {
+        name: Some("Count".into()),
+        categories: Some("Sheet1!$A$1:$A$3".into()),
+        values: "Sheet1!$B$1:$B$3".into(),
+        points: vec![
+            DataPointStyle { idx: 0, fill: Some(Color::Rgb(0x66CCFF)), line_color: Some(Color::Rgb(0x0088CC)), ..Default::default() },
+            DataPointStyle { idx: 1, fill: Some(Color::Rgb(0x99DD66)), line_color: Some(Color::Rgb(0x44AA00)), ..Default::default() },
+            DataPointStyle { idx: 2, fill: Some(Color::Rgb(0xFFAA44)), line_color: Some(Color::Rgb(0xCC6600)), ..Default::default() },
+        ],
+        ..Series::default()
+    }];
+    let data = resolve(&wb, 0, &c);
+    let entries = legend_entries(&c, &data);
+    let names: Vec<&str> = entries.iter().map(|(t, _, _)| t.as_str()).collect();
+    assert_eq!(names, vec!["Low", "Mid", "High"]);
+    assert_eq!(entries[0].1, [0x66, 0xCC, 0xFF, 0xFF]);
+    assert_eq!(entries[1].1, [0x99, 0xDD, 0x66, 0xFF]);
+    assert_eq!(entries[2].1, [0xFF, 0xAA, 0x44, 0xFF]);
+}
+
+#[test]
+fn legend_swatch_honors_no_fill_point_style_while_preserving_outline() {
+    use gridcraft_model::DataPointStyle;
+
+    let mut wb = Workbook::new();
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.set_value(CellRef::new(0, 0), Value::text("Filled"));
+    sh.set_value(CellRef::new(0, 1), Value::Number(60.0));
+    sh.set_value(CellRef::new(1, 0), Value::text("Hollow"));
+    sh.set_value(CellRef::new(1, 1), Value::Number(40.0));
+    let mut c = chart(ChartKind::Doughnut);
+    c.title = Some(String::new());
+    c.legend = LegendPos::Right;
+    c.series = vec![Series {
+        categories: Some("Sheet1!$A$1:$A$2".into()),
+        values: "Sheet1!$B$1:$B$2".into(),
+        points: vec![
+            DataPointStyle { idx: 0, fill: Some(Color::Rgb(0x228833)), ..Default::default() },
+            DataPointStyle { idx: 1, no_fill: true, line_color: Some(Color::Rgb(0xCC3311)), ..Default::default() },
+        ],
+        ..Series::default()
+    }];
+    let data = resolve(&wb, 0, &c);
+    let entries = legend_entries(&c, &data);
+    assert_eq!(entries[1].1, [0, 0, 0, 0], "no_fill slice swatch must be transparent");
+    let prims = render(&c, &data, 320.0, 220.0, &ApproxMeasure);
+    assert!(
+        prims.iter().any(|p| matches!(p, Prim::Rect { fill: None, stroke: Some(([0xCC, 0x33, 0x11, 0xFF], _)), .. })),
+        "hollow legend swatch should have fill: None and keep its stroke"
+    );
+}
+
+#[test]
+fn scatter_and_bubble_honor_structured_data_labels_and_point_deletes() {
+    use gridcraft_model::{DataLabelOverride, DataLabels};
+
+    for kind in [ChartKind::Scatter, ChartKind::Bubble] {
+        let mut c = chart(kind);
+        c.title = Some(String::new());
+        c.legend = LegendPos::None;
+        c.data_labels = false;
+        let data = ChartData {
+            categories: vec!["Alpha".into(), "Beta".into(), "Gamma".into()],
+            series: vec![SeriesData {
+                name: "S".into(),
+                x: Some(vec![Some(1.0), Some(2.0), Some(3.0)]),
+                values: vec![Some(10.0), Some(20.0), Some(30.0)],
+                sizes: (kind == ChartKind::Bubble).then(|| vec![Some(4.0), Some(9.0), Some(16.0)]),
+                kind,
+                data_labels: Some(DataLabels {
+                    show_cat_name: true,
+                    points: vec![
+                        DataLabelOverride { idx: 1, delete: true, ..Default::default() },
+                        DataLabelOverride { idx: 2, text: Some("Custom".into()), ..Default::default() },
+                    ],
+                    ..Default::default()
+                }),
+                ..SeriesData::default()
+            }],
+            ..ChartData::default()
+        };
+        let prims = render(&c, &data, 360.0, 240.0, &ApproxMeasure);
+        let t = texts(&prims);
+        assert!(t.contains(&"Alpha"), "{kind:?}: expected showCatName label Alpha in {t:?}");
+        assert!(!t.contains(&"Beta"), "{kind:?}: deleted point Beta must not render in {t:?}");
+        assert!(t.contains(&"Custom"), "{kind:?}: per-point custom text must render in {t:?}");
+    }
+}
+
+#[test]
+fn sanitize_normalizes_unsorted_points_and_caps_user_shapes_and_label_overrides() {
+    use gridcraft_model::{DataLabelOverride, DataLabels};
+
+    let mut c = chart(ChartKind::ColumnClustered);
+    c.title = Some(String::new());
+    c.legend = LegendPos::None;
+    // Directly constructed ChartData with >256 user shapes, unsorted/duplicate points (>4096),
+    // and unsorted/over-cap data label overrides (>4096).
+    let mut pts: Vec<PointStyleData> = (0..4200).rev().map(|i| PointStyleData { idx: i, fill: Some([1, 2, 3, 255]), ..Default::default() }).collect();
+    // Duplicate idx=0 later in the list (within first 4096) should win after normalization.
+    pts[10] = PointStyleData { idx: 0, fill: Some([0x11, 0x22, 0x33, 0xFF]), ..Default::default() };
+    pts[20] = PointStyleData { idx: 0, fill: Some([0xAA, 0xBB, 0xCC, 0xFF]), ..Default::default() };
+    let dl_pts: Vec<DataLabelOverride> = (0..4200).rev().map(|i| DataLabelOverride { idx: i, ..Default::default() }).collect();
+    let data = ChartData {
+        categories: vec!["A".into(), "B".into()],
+        user_shapes: vec![UserShapeData { x: 0.1, y: 0.1, w: 0.2, h: 0.2, text: "x".into(), ..Default::default() }; 300],
+        series: vec![SeriesData {
+            values: vec![Some(5.0), Some(8.0)],
+            points: pts,
+            data_labels: Some(DataLabels { show_val: true, points: dl_pts, ..Default::default() }),
+            ..SeriesData::default()
+        }],
+        ..ChartData::default()
+    };
+    let clean = crate::render::sanitized(&data);
+    assert_eq!(clean.user_shapes.len(), 256);
+    assert!(clean.series[0].points.len() <= 4096);
+    assert!(clean.series[0].points.windows(2).all(|w| w[0].idx < w[1].idx));
+    assert_eq!(clean.series[0].point_style(0).and_then(|p| p.fill), Some([0xAA, 0xBB, 0xCC, 0xFF]));
+    let dl = clean.series[0].data_labels.as_ref().unwrap();
+    assert!(dl.points.len() <= 4096);
+    assert!(dl.points.windows(2).all(|w| w[0].idx < w[1].idx));
+}

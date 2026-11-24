@@ -166,8 +166,9 @@ const MAX_DYNAMIC_CELLS: u64 = 16_000_000;
 /// so adversarial range counts can't make each cell scan a long list (a real workbook has a
 /// handful of ranges).
 const MAX_DYNAMIC_CHECKS: u64 = 16_000_000;
-/// Most conditional-format range cells one sheet keeps, over all rules of an element: every
-/// rule copies its element's whole range list, so rules × ranges must stay bounded.
+/// Most conditional-format range entries one sheet keeps across all rules: every rule copies its
+/// element's range list, so rules × ranges must stay bounded without dropping legitimate full-column
+/// ranges such as `F13:J1048576`.
 const MAX_COND_CELLS: u64 = 4_000_000;
 
 fn from_craft_el(e: &craft_xml::El) -> El {

@@ -141,6 +141,48 @@ fn axis_fmt(typed: Option<&str>, data: &ChartData) -> Fmt {
     Fmt::new(typed.or_else(|| data.series.first().map(|s| s.number_format.as_str())).unwrap_or("General"))
 }
 
+const MAX_POINT_STYLES: usize = 4096;
+const MAX_USER_SHAPES: usize = 256;
+
+/// Caps, sorts, and deduplicates `points` by `idx` (last entry wins) for O(log N) lookup.
+fn normalize_points(pts: &[crate::PointStyleData]) -> Vec<crate::PointStyleData> {
+    let mut out: Vec<crate::PointStyleData> = pts.iter().take(MAX_POINT_STYLES).cloned().collect();
+    out.sort_by_key(|p| p.idx);
+    let mut deduped: Vec<crate::PointStyleData> = Vec::with_capacity(out.len());
+    for p in out {
+        if let Some(last) = deduped.last_mut().filter(|l| l.idx == p.idx) {
+            *last = p;
+        } else {
+            deduped.push(p);
+        }
+    }
+    deduped
+}
+
+fn points_normalized(pts: &[crate::PointStyleData]) -> bool {
+    pts.len() <= MAX_POINT_STYLES && pts.windows(2).all(|w| w[0].idx < w[1].idx)
+}
+
+fn normalize_dlbls(dl: &gridcraft_model::DataLabels) -> gridcraft_model::DataLabels {
+    let mut out = dl.clone();
+    out.points.truncate(MAX_POINT_STYLES);
+    out.points.sort_by_key(|p| p.idx);
+    let mut deduped: Vec<gridcraft_model::DataLabelOverride> = Vec::with_capacity(out.points.len());
+    for p in out.points {
+        if let Some(last) = deduped.last_mut().filter(|l| l.idx == p.idx) {
+            *last = p;
+        } else {
+            deduped.push(p);
+        }
+    }
+    out.points = deduped;
+    out
+}
+
+fn dlbl_points_normalized(pts: &[gridcraft_model::DataLabelOverride]) -> bool {
+    pts.len() <= MAX_POINT_STYLES && pts.windows(2).all(|w| w[0].idx < w[1].idx)
+}
+
 pub(crate) fn sanitize(d: &ChartData) -> ChartData {
     ChartData {
         palette: d.palette.iter().take(MAX_POINTS).copied().collect(),
@@ -148,7 +190,7 @@ pub(crate) fn sanitize(d: &ChartData) -> ChartData {
         category_levels: d.category_levels.iter().take(3).map(|l| l.iter().take(MAX_POINTS).cloned().collect()).collect(),
         area_fill: d.area_fill,
         area_stroke: d.area_stroke,
-        user_shapes: d.user_shapes.iter().take(256).cloned().collect(),
+        user_shapes: d.user_shapes.iter().take(MAX_USER_SHAPES).cloned().collect(),
         series: d
             .series
             .iter()
@@ -167,8 +209,8 @@ pub(crate) fn sanitize(d: &ChartData) -> ChartData {
                 label_number_format: s.label_number_format.clone(),
                 line: s.line,
                 no_line: s.no_line,
-                points: s.points.iter().take(4096).cloned().collect(),
-                data_labels: s.data_labels.clone(),
+                points: normalize_points(&s.points),
+                data_labels: s.data_labels.as_ref().map(normalize_dlbls),
             })
             .collect(),
     }
@@ -187,6 +229,7 @@ fn needs_sanitizing(d: &ChartData) -> bool {
         || long(d.categories.len())
         || d.category_levels.len() > 3
         || d.category_levels.iter().any(|l| l.len() > MAX_POINTS)
+        || d.user_shapes.len() > MAX_USER_SHAPES
         || d.series.len() > MAX_SERIES
         || d.series.iter().any(|s| {
             trendlines += s.trendlines.len();
@@ -195,6 +238,8 @@ fn needs_sanitizing(d: &ChartData) -> bool {
                 || s.x.as_ref().is_some_and(|x| long(x.len()) || !x.iter().all(is_clean))
                 || s.sizes.as_ref().is_some_and(|x| long(x.len()) || !x.iter().all(is_clean))
                 || s.trendlines.len() > MAX_TRENDLINES
+                || !points_normalized(&s.points)
+                || s.data_labels.as_ref().is_some_and(|dl| !dlbl_points_normalized(&dl.points))
         })
         || trendlines > MAX_TRENDLINES
 }

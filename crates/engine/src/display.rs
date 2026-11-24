@@ -128,6 +128,32 @@ pub fn cell_text(wb: &Workbook, sheet: &Sheet, c: CellRef) -> String {
     shown_text(wb, sheet, c)
 }
 
+/// Like [`cell_text`], reusing a caller-owned [`crate::cf::CfCache`] across a range so conditional
+/// formatting `<dxf><numFmt>` overrides are evaluated efficiently.
+pub fn cell_text_with_cf(wb: &Workbook, sheet: usize, sh: &Sheet, c: CellRef, cf: &mut crate::cf::CfCache) -> String {
+    if sh.show_formulas
+        && let Some(f) = sh.cell(c).and_then(|x| x.formula.as_ref())
+        && !formula_hidden(wb, sh, c)
+    {
+        return format!("={}", f.text);
+    }
+    let code = cf.effective_num_fmt(wb, sheet, sh, c);
+    value_text_as(wb, &sh.value(c), &code)
+}
+
+/// Effective number format code of `c` on `sheet`, resolving any matching conditional formatting
+/// `<dxf><numFmt>` override when `sheet` belongs to `wb`.
+fn effective_code<'a>(wb: &'a Workbook, sheet: &'a Sheet, c: CellRef) -> std::borrow::Cow<'a, str> {
+    let base = wb.styles.get(sheet.style_id(c)).num_fmt.as_str();
+    if crate::cf::has_num_fmt_rule(sheet, c)
+        && let Some(si) = wb.sheets.iter().position(|s| std::ptr::eq(s.as_ref(), sheet))
+    {
+        let mut cf = crate::cf::CfCache::new();
+        return cf.effective_num_fmt(wb, si, sheet, c);
+    }
+    std::borrow::Cow::Borrowed(base)
+}
+
 /// A cell's value with its number format applied, independent of column width: no `#####`
 /// and no General narrowing (Save As CSV/Text writes this). Formulas give their result. A number
 /// shown as General (also through a coloured or sectioned General, or a Text format) is written
@@ -135,14 +161,14 @@ pub fn cell_text(wb: &Workbook, sheet: &Sheet, c: CellRef) -> String {
 /// 1E+15 (`124412140710`, not `1.24412E+11`), the shortest round-trip digits from 1E+15 (every
 /// integer below 1e16 exactly). Excel writes the cell display.
 pub fn value_text(wb: &Workbook, sheet: &Sheet, c: CellRef) -> String {
-    let style = wb.styles.get(sheet.style_id(c));
-    with_fill_space(format_value_full(&sheet.value(c), &parsed(style.num_fmt.as_str()), wb.date_system))
+    let code = effective_code(wb, sheet, c);
+    with_fill_space(format_value_full(&sheet.value(c), &parsed(&code), wb.date_system))
 }
 
 /// A cell's value through its number format, General at the 11-character cell width.
 fn shown_text(wb: &Workbook, sheet: &Sheet, c: CellRef) -> String {
-    let style = wb.styles.get(sheet.style_id(c));
-    value_text_as(wb, &sheet.value(c), style.num_fmt.as_str())
+    let code = effective_code(wb, sheet, c);
+    value_text_as(wb, &sheet.value(c), &code)
 }
 
 /// A value through a format code given apart from a cell, as a cell shows it (General at the
@@ -170,6 +196,7 @@ fn with_fill_space(f: Formatted) -> String {
 pub fn range_text(wb: &Workbook, sheet: usize, r: RangeRef) -> String {
     let Some(sh) = wb.sheet(sheet) else { return String::new() };
     let mut out = String::new();
+    let mut cf = crate::cf::CfCache::new();
     let r = clipboard_range(r);
     for row in r.start.row..=r.end.row {
         if sh.is_row_hidden(row) {
@@ -181,7 +208,7 @@ pub fn range_text(wb: &Workbook, sheet: usize, r: RangeRef) -> String {
                 out.push('\t');
             }
             first = false;
-            let t = cell_text(wb, sh, CellRef::new(row, col));
+            let t = cell_text_with_cf(wb, sheet, sh, CellRef::new(row, col), &mut cf);
             // Like Excel, only text with a tab or line break is quoted (its quotes doubled);
             // `say "hi"` is copied as it is (#2225).
             if t.contains(['\t', '\n', '\r']) {
@@ -280,5 +307,70 @@ mod tests {
         assert!(f.is_general());
         assert_eq!(f.code(), code);
         assert_ne!(f, number_format("General"));
+    }
+
+    #[test]
+    fn conditional_format_dxf_num_fmt_overrides_display_and_range_text() {
+        use gridcraft_model::{CfOperator, CfRule, CondFormat, NumFmt, Style};
+
+        let mut wb = Workbook::new();
+        let base_style = wb.styles.intern(Style { num_fmt: NumFmt::new("0.0000"), ..Style::default() });
+        let sh = wb.sheet_mut(0).unwrap();
+        // Duration serials: 30s, 15m, 2h 10m, and a value overriding back to General.
+        for (row, val) in [(0, 30.0 / 86_400.0), (1, 15.0 / 1440.0), (2, (2.0 * 60.0 + 10.0) / 1440.0), (3, 5.0)] {
+            let c = CellRef::new(row, 0);
+            sh.set_value(c, Value::Number(val));
+            sh.set_style(c, base_style);
+        }
+        let r_dur = vec![RangeRef::new(CellRef::new(0, 0), CellRef::new(2, 0))];
+        sh.cond_formats.push(CondFormat {
+            ranges: r_dur.clone(),
+            priority: 1,
+            stop_if_true: true,
+            rule: CfRule::CellIs {
+                op: CfOperator::Less,
+                a: "0.0006944".into(),
+                b: None,
+                style: Box::new(Style { num_fmt: NumFmt::new("s\"s\""), ..Style::default() }),
+            },
+        });
+        sh.cond_formats.push(CondFormat {
+            ranges: r_dur.clone(),
+            priority: 2,
+            stop_if_true: true,
+            rule: CfRule::CellIs {
+                op: CfOperator::Less,
+                a: "0.04166".into(),
+                b: None,
+                style: Box::new(Style { num_fmt: NumFmt::new("[m]\"m\""), ..Style::default() }),
+            },
+        });
+        sh.cond_formats.push(CondFormat {
+            ranges: r_dur,
+            priority: 3,
+            stop_if_true: true,
+            rule: CfRule::CellIs {
+                op: CfOperator::GreaterOrEqual,
+                a: "0.04166".into(),
+                b: None,
+                style: Box::new(Style { num_fmt: NumFmt::new("[h]\"h, \"m\"m\""), ..Style::default() }),
+            },
+        });
+        let mut gen_style = Style::default();
+        gen_style.dxf_stated.num_fmt = true;
+        sh.cond_formats.push(CondFormat {
+            ranges: vec![RangeRef::cell(CellRef::new(3, 0))],
+            priority: 4,
+            stop_if_true: true,
+            rule: CfRule::CellIs { op: CfOperator::Equal, a: "5".into(), b: None, style: Box::new(gen_style) },
+        });
+
+        let sh = wb.sheet(0).unwrap();
+        assert_eq!(cell_text(&wb, sh, CellRef::new(0, 0)), "30s");
+        assert_eq!(cell_text(&wb, sh, CellRef::new(1, 0)), "15m");
+        assert_eq!(cell_text(&wb, sh, CellRef::new(2, 0)), "2h, 10m");
+        assert_eq!(cell_text(&wb, sh, CellRef::new(3, 0)), "5");
+        assert_eq!(value_text(&wb, sh, CellRef::new(2, 0)), "2h, 10m");
+        assert_eq!(range_text(&wb, 0, RangeRef::new(CellRef::new(0, 0), CellRef::new(3, 0))), "30s\n15m\n2h, 10m\n5\n");
     }
 }

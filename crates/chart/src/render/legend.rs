@@ -22,9 +22,15 @@ pub(super) fn plot_kind(chart: &Chart, s: &SeriesData, i: usize) -> ChartKind {
 }
 
 /// Colour of point `j` for charts that colour by point (pie, doughnut, treemap, sunburst).
+/// Returns transparent `[0, 0, 0, 0]` when the point explicitly has `no_fill`.
 pub(super) fn point_color(data: &ChartData, j: usize) -> Rgba {
-    if let Some(fill) = data.series.first().and_then(|s| s.point_style(j)).and_then(|p| p.fill) {
-        return fill;
+    if let Some(pt) = data.series.first().and_then(|s| s.point_style(j)) {
+        if pt.no_fill {
+            return [0, 0, 0, 0];
+        }
+        if let Some(fill) = pt.fill {
+            return fill;
+        }
     }
     match (j, data.series.first()) {
         (0, Some(s)) => s.color,
@@ -56,6 +62,43 @@ pub(super) fn cat_label(data: &ChartData, j: usize) -> String {
 /// Styled legend entry: `(label, fill_or_line_color, optional_box_outline, swatch_kind)`.
 pub(super) type StyledEntry = (String, Rgba, Option<Rgba>, Swatch);
 
+/// Whether a single-series bar/column chart colours its points individually (via `<c:dPt>` fills
+/// or `<c:varyColors val="1"/>`), so Excel shows one legend entry per category rather than one
+/// series swatch.
+fn single_series_varied_points(chart: &Chart, data: &ChartData) -> bool {
+    if data.series.len() != 1 {
+        return false;
+    }
+    let Some(s) = data.series.first() else { return false };
+    if !matches!(
+        plot_kind(chart, s, 0),
+        ChartKind::ColumnClustered
+            | ChartKind::ColumnStacked
+            | ChartKind::ColumnStacked100
+            | ChartKind::BarClustered
+            | ChartKind::BarStacked
+            | ChartKind::BarStacked100
+    ) {
+        return false;
+    }
+    let n = s.values.len().min(MAX_CATS);
+    if n < 2 || s.points.is_empty() {
+        return false;
+    }
+    let mut first: Option<Rgba> = None;
+    let mut varied = false;
+    for j in 0..n {
+        let Some(fill) = s.point_style(j).filter(|p| !p.no_fill).and_then(|p| p.fill) else {
+            return false;
+        };
+        match first {
+            None => first = Some(fill),
+            Some(f) if f != fill => varied = true,
+            _ => {}
+        }
+    }
+    varied
+}
 /// Legend entries with optional swatch outline colours (used internally by `draw_legend`).
 pub(super) fn legend_entries_styled(chart: &Chart, data: &ChartData) -> Vec<StyledEntry> {
     if chart.legend == LegendPos::None {
@@ -75,6 +118,10 @@ pub(super) fn legend_entries_styled(chart: &Chart, data: &ChartData) -> Vec<Styl
             }
             let total = data.series.first().map(|s| s.color).unwrap_or(TEXT);
             vec![("Increase".into(), UP, None, Swatch::Box), ("Decrease".into(), DOWN, None, Swatch::Box), ("Total".into(), total, None, Swatch::Box)]
+        }
+        _ if single_series_varied_points(chart, data) => {
+            let n = first_len(data).min(MAX_CATS);
+            (0..n).map(|j| (cat_label(data, j), point_color(data, j), point_swatch_stroke(data, j), Swatch::Box)).collect()
         }
         _ => {
             let series = data.series.iter().take(MAX_SERIES);
@@ -116,7 +163,15 @@ pub(super) fn swatch_w(sw: Swatch, s: f32) -> f32 {
 
 pub(super) fn draw_swatch(ctx: &mut Ctx, sw: Swatch, x: f32, yc: f32, s: f32, color: Rgba, outline: Option<Rgba>) {
     match sw {
-        Swatch::Box => ctx.rect(x, yc - s / 2.0, s, s, color, outline.map(|c| (c, 1.0))),
+        Swatch::Box => ctx.out.push(Prim::Rect {
+            x,
+            y: yc - s / 2.0,
+            w: s,
+            h: s,
+            fill: (color[3] > 0).then_some(color),
+            stroke: outline.map(|c| (c, 1.0)),
+            radius: 0.0,
+        }),
         Swatch::Line => ctx.hline(x, x + 2.0 * s, yc, color, 2.0),
         Swatch::LineMarker => {
             ctx.hline(x, x + 2.0 * s, yc, color, 2.0);
