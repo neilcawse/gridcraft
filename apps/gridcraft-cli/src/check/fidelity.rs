@@ -1,26 +1,42 @@
 use super::calc::formula_text;
-use super::package::{REBUILT_KINDS, relationship_kinds, validate_package};
-use super::{BTreeSet, Category, Cell, CellError, CellRef, Diffs, Options, RoundTrip, Sheet, Value, Workbook, number_text, quote_sheet};
+use super::package::validate_package;
+use super::rels::{lost_relationships, relationship_tree};
+use super::{
+    BTreeMap, BTreeSet, Category, Cell, CellError, CellRef, Diffs, HashMap, Options, RoundTrip, Sheet, Value, Workbook, number_text, quote_sheet,
+};
 
 // ---------------------------------------------------------------- round trip
 
-/// Writes `wb` with GridCraft's XLSX writer, validates the package against itself and against
-/// `source` (the file `wb` was read from), reads it back and compares.
+/// Writes `wb` as an `.xlsx` with GridCraft's XLSX writer, validates the package against itself and
+/// against `source` (the file `wb` was read from), reads it back and compares. [`round_trip_owned`]
+/// takes the name to save under.
 #[cfg(test)]
 pub fn round_trip(wb: &Workbook, source: &[u8], opts: &Options) -> RoundTrip {
-    round_trip_owned(wb.clone(), source, opts)
+    round_trip_owned(wb.clone(), source, "roundtrip.xlsx", opts)
+}
+
+/// The name the round trip saves under: the checked file's own extension when it names an XLSX
+/// package kind (`.xlsm` stays `.xlsm`, so the VBA project is expected to come back), else `.xlsx`.
+pub(super) fn output_name(path: &str) -> &'static str {
+    let ext = std::path::Path::new(path).extension().and_then(std::ffi::OsStr::to_str).unwrap_or_default().to_ascii_lowercase();
+    match ext.as_str() {
+        "xlsm" => "roundtrip.xlsm",
+        "xltx" => "roundtrip.xltx",
+        "xltm" => "roundtrip.xltm",
+        _ => "roundtrip.xlsx",
+    }
 }
 
 /// Like [`round_trip`], consuming `wb` into a compact per-sheet snapshot and freeing all cell
 /// B-trees, formula ASTs and preserved parts before reading back the written file.
-pub(super) fn round_trip_owned(wb: Workbook, source: &[u8], opts: &Options) -> RoundTrip {
-    let bytes = match gridcraft_engine::io::save_bytes(&wb, "roundtrip.xlsx") {
+pub(super) fn round_trip_owned(wb: Workbook, source: &[u8], name: &str, opts: &Options) -> RoundTrip {
+    let bytes = match gridcraft_engine::io::save_bytes(&wb, name) {
         Ok(b) => b,
         Err(e) => return RoundTrip { error: Some(format!("write failed: {e}")), categories: vec![] },
     };
-    let package = validate_round_trip_package(source, &bytes, opts.max_report);
+    let package = validate_round_trip_package(source, &bytes, opts);
     let snap = WorkbookSnap::from_workbook(wb);
-    let back = match gridcraft_engine::io::open_bytes("roundtrip.xlsx", &bytes) {
+    let back = match gridcraft_engine::io::open_bytes(name, &bytes) {
         Ok((b, _)) => b,
         Err(e) => return RoundTrip { error: Some(format!("reading the written file failed: {e}")), categories: vec![package.done()] },
     };
@@ -30,20 +46,41 @@ pub(super) fn round_trip_owned(wb: Workbook, source: &[u8], opts: &Options) -> R
     RoundTrip { error: None, categories }
 }
 
-fn validate_round_trip_package(source: &[u8], bytes: &[u8], max_report: usize) -> Diffs {
-    let mut package = Diffs::new("package", max_report);
+fn validate_round_trip_package(source: &[u8], bytes: &[u8], opts: &Options) -> Diffs {
+    let mut package = Diffs::new("package", opts.max_report);
     match validate_package(bytes) {
         Ok(issues) => issues.into_iter().for_each(|i| package.push(|| i)),
         Err(e) => package.push(|| e),
     }
-    if let (Ok(before), Ok(after)) = (relationship_kinds(source, false), relationship_kinds(bytes, true)) {
-        for (key, kind) in &before {
-            if !after.contains_key(key) && !REBUILT_KINDS.contains(&key.as_str()) {
-                package.push(|| format!("lost relationship {kind}"));
+    // Relationships compare only between two SpreadsheetML packages: an XLSB's binary parts and
+    // an XLS or ODS file have no counterpart in the XLSX written from them part by part.
+    if spreadsheetml_package(source) {
+        match (relationship_tree(source, opts.relationship_limits), relationship_tree(bytes, opts.relationship_limits)) {
+            (Ok(before), Ok(after)) => {
+                for lost in lost_relationships(&before, &after) {
+                    package.push(|| lost);
+                }
+            }
+            // A check that stopped at a limit listed only the relationships it reached, so it
+            // can neither find a loss nor rule one out: that is a difference, not a pass.
+            (before, after) => {
+                for (whose, tree) in [("the checked file", before), ("the written file", after)] {
+                    if let Err(why) = tree {
+                        package.push(|| format!("relationships of {whose} not compared: {why}"));
+                    }
+                }
             }
         }
     }
     package
+}
+
+/// Whether `bytes` is a package whose workbook part is SpreadsheetML XML (XLSX and its macro and
+/// template kinds), not XLSB's binary `workbook.bin`.
+fn spreadsheetml_package(bytes: &[u8]) -> bool {
+    let Some(mut zip) = super::package::zip_package(bytes) else { return false };
+    let names = super::package::zip_names(&mut zip);
+    super::package::workbook_entry(&mut zip, &names).is_some_and(|w| names.contains(&w) && !w.to_ascii_lowercase().ends_with(".bin"))
 }
 
 pub(super) fn value_show(v: &Value) -> String {
@@ -83,6 +120,46 @@ fn diff_count(d: &mut Diffs, sheet: &str, a: usize, b: usize) {
     if a != b {
         d.push(|| format!("{sheet}: {a} → {b}"));
     }
+}
+
+/// The header cells of a sheet's tables with the column name each holds. Excel requires the header
+/// cell of a table column to hold that column's name as text, so a column whose header cell is
+/// blank in the file comes back with its name in the cell. The writer makes that repair on
+/// purpose; it isn't a difference (see [`is_header_repair`]).
+fn table_headers(sheet: &Sheet) -> BTreeMap<CellRef, &str> {
+    let mut out = BTreeMap::new();
+    for t in sheet.tables.iter().filter(|t| t.header_row) {
+        for (i, col) in t.columns.iter().enumerate() {
+            if let Some(c) = u32::try_from(i).ok().and_then(|i| t.range.start.col.checked_add(i)) {
+                out.insert(CellRef::new(t.range.start.row, c), col.name.as_str());
+            }
+        }
+    }
+    out
+}
+
+/// Whether the cell at `c`, blank before (`before`) and holding `after` now, is a table header the
+/// writer filled with its column name.
+fn is_header_repair(headers: &BTreeMap<CellRef, &str>, c: CellRef, before: &Value, after: &Value) -> bool {
+    matches!((before, after), (Value::Empty, Value::Text(t)) if headers.get(&c).is_some_and(|name| *name == t.as_ref()))
+}
+
+/// Which sheet of the written workbook each sheet of the source came back as: the one with the
+/// same name (sheet names compare without regard to case, as in Excel), then, among the sheets
+/// left on both sides, the next in order, so that a renamed sheet still meets itself. A sheet that
+/// is gone has no partner and doesn't shift the partners of the sheets after it.
+fn pair_sheets(a: &[&str], b: &[&str]) -> Vec<Option<usize>> {
+    let mut by_name: HashMap<String, usize> = HashMap::new();
+    for (j, name) in b.iter().enumerate() {
+        by_name.entry(name.to_lowercase()).or_insert(j);
+    }
+    let mut pairs: Vec<Option<usize>> = a.iter().map(|name| by_name.remove(&name.to_lowercase())).collect();
+    let paired: BTreeSet<usize> = pairs.iter().flatten().copied().collect();
+    let mut left = (0..b.len()).filter(|j| !paired.contains(j));
+    for slot in pairs.iter_mut().filter(|p| p.is_none()) {
+        *slot = left.next();
+    }
+    pairs
 }
 
 /// A value as the file format can hold it: `#SPILL!`/`#CALC!` are cached as `#VALUE!` and an
@@ -184,15 +261,15 @@ fn diff_snap_with_workbook(a: WorkbookSnap, mut b: Workbook, opts: &Options) -> 
     if an != bn {
         sheets.push(|| format!("{an:?} → {bn:?}"));
     }
+    let pairs = pair_sheets(&an, &bn);
     let mut names = Diffs::new("names", m);
     diff_sets(&mut names, "workbook", &a.names, &workbook_name_set(&b));
     b.preserved = None;
     b.vba_project = None;
     let styles_a = a.styles;
     let styles_b = std::mem::take(&mut b.styles);
-    let sheets_b = std::mem::take(&mut b.sheets);
+    let mut sheets_b: Vec<Option<std::sync::Arc<Sheet>>> = std::mem::take(&mut b.sheets).into_iter().map(Some).collect();
     drop(b);
-
     let mut values = Diffs::new("values", m);
     let mut formulas = Diffs::new("formulas", m);
     let mut num_fmts = Diffs::new("numFmts", m);
@@ -205,13 +282,15 @@ fn diff_snap_with_workbook(a: WorkbookSnap, mut b: Workbook, opts: &Options) -> 
     let mut hyperlinks = Diffs::new("hyperlinks", m);
     let mut pivots = Diffs::new("pivots", m);
 
-    for (sa, sb_arc) in a.sheets.into_iter().zip(sheets_b) {
+    for (sa, partner) in a.sheets.into_iter().zip(pairs) {
+        let Some(sb_arc) = partner.and_then(|j| sheets_b.get_mut(j)).and_then(Option::take) else { continue };
         let sb = std::sync::Arc::unwrap_or_clone(sb_arc);
+        let headers = table_headers(&sb);
         let name = quote_sheet(&sa.raw_name);
         for &(c, ref va, style_a, ref fa) in &sa.cells {
             let cb = sb.cell(c);
             let vb = as_cached(cb.map(|x| x.value.scalar()).unwrap_or_default());
-            if *va != vb {
+            if *va != vb && !is_header_repair(&headers, c, va, &vb) {
                 values.push(|| format!("{name}!{}: {} → {}", c.a1(), value_show(va), value_show(&vb)));
             }
             let fa_str = fa.as_deref().unwrap_or("");
@@ -231,7 +310,7 @@ fn diff_snap_with_workbook(a: WorkbookSnap, mut b: Workbook, opts: &Options) -> 
             if sa.cells.binary_search_by_key(&c, |(pos, _, _, _)| *pos).is_err() {
                 let va = Value::Empty;
                 let vb = as_cached(cb.value.scalar());
-                if va != vb {
+                if va != vb && !is_header_repair(&headers, c, &va, &vb) {
                     values.push(|| format!("{name}!{}: {} → {}", c.a1(), value_show(&va), value_show(&vb)));
                 }
                 if cb.formula.is_some() {

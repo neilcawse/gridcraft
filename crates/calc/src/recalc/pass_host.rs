@@ -1,5 +1,5 @@
 use super::graph::{HashMap, HashSet, Key};
-use super::{Evaluator, Host, Workbook, reads_linked, stack_position};
+use super::{Evaluator, Host, OneCellReading, Workbook, reads_linked, stack_position};
 use crate::spill_index::{Cover, SpillIndex};
 use gridcraft_core::{Array, CellError, CellRef, RangeRef, Value};
 use gridcraft_formula::Expr;
@@ -106,6 +106,9 @@ pub(super) struct PassHost<'a> {
     /// result is laid out (an array spills from the cell, as a formula's does). Each one is in
     /// `pending` until it is laid out, so a formula that reads it first gets its new value.
     python: HashMap<Key, Value>,
+    /// How SUMPRODUCT reads a reference that holds one cell: the current Excel's, unless
+    /// [`evaluate_expr_as`](super::evaluate_expr_as) reads an older Excel's cache again.
+    pub(super) reading: OneCellReading,
 }
 
 impl<'a> PassHost<'a> {
@@ -157,6 +160,7 @@ impl<'a> PassHost<'a> {
             out_of_stack: false,
             sums: HashMap::default(),
             python: HashMap::default(),
+            reading: OneCellReading::default(),
         }
     }
 
@@ -650,6 +654,9 @@ impl Host for PassHost<'_> {
             return !arr.get(dr, dc).is_none_or(Value::is_empty);
         }
         self.wb.sheet(sheet).is_some_and(|s| s.cell(c).is_some_and(|cell| cell.formula.is_some() || cell.py.is_some()) || !s.value(c).is_empty())
+    }
+    fn one_cell_reading(&self) -> OneCellReading {
+        self.reading
     }
     fn spill_range(&mut self, sheet: usize, anchor: CellRef) -> Option<RangeRef> {
         let k = (sheet, anchor);

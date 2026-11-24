@@ -59,8 +59,24 @@ pub use csv::{MAX_CSV_BYTES, decode_text, read_csv, read_csv_with_report, write_
 pub use ods::{read_ods, read_ods_with};
 pub use package::MAX_PART;
 pub use passthrough::{rebase_links, rewrite_kept_names};
+pub use tables::file_function_name;
 pub use xls::{read_xls, read_xls_with};
 pub use xlsb::read_xlsb;
+
+/// Reads a named stream directly under the compound file's root storage, case-insensitively.
+pub fn compound_root_stream(bytes: &[u8], name: &str) -> Option<Vec<u8>> {
+    let file = craft_cfb::CompoundFile::open(bytes).ok()?;
+    file.read(file.child(0, name)?).ok()
+}
+
+#[cfg(test)]
+#[test]
+fn a_root_stream_is_read_by_name_from_the_file() {
+    let file = testing::compound_file(&[("Workbook", b"biff"), ("\u{5}SummaryInformation", b"props")]);
+    assert_eq!(compound_root_stream(&file, "\u{5}summaryinformation").as_deref(), Some(&b"props"[..]));
+    assert_eq!(compound_root_stream(&file, "Book"), None);
+    assert_eq!(compound_root_stream(b"not a compound file", "Workbook"), None);
+}
 
 /// Errors from reading or writing files.
 #[derive(Debug, thiserror::Error)]

@@ -161,7 +161,7 @@ fn check_exit_codes_and_json() {
     assert_eq!(o.status.code(), Some(0), "{out}");
     assert!(out.contains("1 checked: 1 matched, 0 mismatched"), "{out}");
     let v: serde_json::Value = serde_json::from_str(&ok(&["check", book_s, "--json"])).unwrap();
-    assert_eq!(v["schema"], "gridcraft-check/1");
+    assert_eq!(v["schema"], "gridcraft-check/2");
     assert_eq!(v["totals"]["matched"], 1);
     // A file that can't be opened is reported, not fatal, and fails the check.
     let o = run(&["check", book_s, "/no/such/file.xlsx"]);

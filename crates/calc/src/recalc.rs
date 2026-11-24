@@ -16,7 +16,7 @@ use gridcraft_core::{Array, CellError, CellRef, RangeRef, Value};
 use gridcraft_formula::Expr;
 use gridcraft_model::{CalcMode, Workbook};
 
-use crate::eval::{Area, Evaluator, Host, precedents_at, stack_position};
+use crate::eval::{Area, Evaluator, Host, OneCellReading, precedents_at, stack_position};
 use crate::spill_index::{SpillIndex, indexing_pays};
 
 /// Whether a formula reads a linked workbook (`[1]Data!B:B`, `[1]!Rates`, `[1]Data!#REF!`),
@@ -970,9 +970,17 @@ pub fn evaluate(wb: &Workbook, sheet: usize, at: CellRef, formula: &str) -> Valu
 }
 
 pub fn evaluate_expr(wb: &Workbook, sheet: usize, at: CellRef, expr: &Expr) -> Value {
+    evaluate_expr_as(wb, sheet, at, expr, OneCellReading::default())
+}
+
+/// [`evaluate_expr`] with SUMPRODUCT reading a reference that holds one cell as `reading` says: as
+/// the current Excel does ([`OneCellReading::Array`]) or as Excel 2013 and earlier did
+/// ([`OneCellReading::Scalar`]), to read such a cache again from the values it was saved with.
+pub fn evaluate_expr_as(wb: &Workbook, sheet: usize, at: CellRef, expr: &Expr, reading: OneCellReading) -> Value {
     let exprs = HashMap::default();
     let mut rng = 0x1234_5678_9ABC_DEF0u64;
     let mut host = PassHost::new(wb, &exprs, &mut rng, now_serial(), None);
+    host.reading = reading;
     let mut ev = Evaluator::new(&mut host, sheet, at);
     ev.value(expr)
 }
