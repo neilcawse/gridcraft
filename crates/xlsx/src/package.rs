@@ -135,33 +135,45 @@ impl<'a> ZipParts<'a> {
     /// whose directory entry declares no bytes is empty and is not decompressed: some producers
     /// write an empty file as a deflate entry with no stream at all, which no reader can decode.
     ///
-    /// The package budget is charged the bytes this read produced, whether it succeeded or failed
-    /// partway: a damaged part costs what was decompressed of it and no more, so it can't make the
-    /// parts read after it fail. Only a package that really expands past [`MAX_TOTAL`] has no
-    /// budget left.
+    /// Success charges decoded bytes; ZIP failures charge the entire attempted read allowance.
     pub fn read_limited(&mut self, part: &str, maximum: u64) -> Result<Option<Vec<u8>>, IoError> {
         let maximum = maximum.min(MAX_PART);
         let Some(&idx) = self.names.get(&normalize(part)) else {
             return Ok(None);
         };
         let zip_error = |e| IoError::Zip(format!("{part}: {e}"));
-        let size = self.zip.by_index_raw(idx).map_err(zip_error)?.size();
+        let remaining = MAX_TOTAL - self.total;
+        let limit = maximum.min(remaining);
+        let failed_charge = (limit + 1).min(remaining);
+        let size = match self.zip.by_index_raw(idx) {
+            Ok(f) => f.size(),
+            Err(e) if remaining != 0 => {
+                self.total += failed_charge;
+                return Err(zip_error(e));
+            }
+            Err(_) => return Err(IoError::TooLarge("package expands to more than 1 GB".into())),
+        };
         if size > maximum {
             return Err(IoError::TooLarge(format!("{part} expands to more than {maximum} bytes")));
         }
         if size == 0 {
             return Ok(Some(Vec::new()));
         }
-        let remaining = MAX_TOTAL.saturating_sub(self.total);
-        let limit = maximum.min(remaining);
-        let mut f = self.zip.by_index(idx).map_err(zip_error)?;
+        if remaining == 0 {
+            return Err(IoError::TooLarge("package expands to more than 1 GB".into()));
+        }
+        let mut f = match self.zip.by_index(idx) {
+            Ok(f) => f,
+            Err(e) => {
+                self.total += failed_charge;
+                return Err(zip_error(e));
+            }
+        };
         let mut out = Vec::with_capacity(size.min(limit).min(16 * 1024 * 1024) as usize);
         let read = (&mut f).take(limit + 1).read_to_end(&mut out);
-        // What was produced is spent, however the read ended; the byte past `limit` that shows an
-        // overrun is part of it, so repeated attempts at an oversized part can't decompress it
-        // for free.
-        self.total = self.total.saturating_add(out.len() as u64).min(MAX_TOTAL);
-        if out.len() as u64 > limit {
+        let decoded = out.len() as u64;
+        self.total += if read.is_err() { failed_charge } else { decoded.min(remaining) };
+        if decoded > limit {
             return Err(IoError::TooLarge(if remaining < maximum {
                 "package expands to more than 1 GB".into()
             } else {
@@ -264,32 +276,31 @@ mod tests {
         assert!(matches!(pkg.read("b.xml"), Err(IoError::TooLarge(_))));
     }
 
-    /// A part that fails to read is charged the bytes that were read of it, not the package's
-    /// whole allowance: the parts read after it still open, with their true error or content.
     #[test]
-    fn a_damaged_part_costs_only_what_was_read_of_it() {
+    fn a_damaged_part_spends_its_allowance_but_not_the_whole_budget() {
         let z = damaged_zip(&[Entry::BadChecksum("a.xml", b"<a>damaged</a>"), Entry::Intact("b.xml", b"hello")]);
         let mut pkg = Package::open(&z).unwrap();
         assert!(matches!(pkg.read_limited("a.xml", 1024), Err(IoError::Zip(_))));
-        assert_eq!(pkg.total, 14, "the failed read is charged what it produced");
+        assert_eq!(pkg.total, 1025);
         assert_eq!(pkg.read("b.xml").unwrap().as_deref(), Some(&b"hello"[..]));
         // Reading the damaged part again fails the same way, never as an exhausted package.
         assert!(matches!(pkg.read("a.xml"), Err(IoError::Zip(_))));
-        assert_eq!(pkg.total, 14 + 5 + 14);
+        assert_eq!(pkg.total, 1025 + 5 + MAX_PART + 1);
     }
 
-    /// A stream that fails before it produces anything costs nothing, and the parts after it are
-    /// read with the whole budget: the old accounting made the next read fail with "the package
-    /// expands to more than 1 GB".
     #[test]
-    fn an_undecodable_part_leaves_the_budget_for_the_parts_after_it() {
+    fn a_failed_read_without_output_still_spends_the_budget() {
         let z = damaged_zip(&[Entry::BadStream("a.bin", 40), Entry::Intact("b.xml", b"hello")]);
         let mut pkg = Package::open(&z).unwrap();
         assert!(matches!(pkg.read_limited("a.bin", 1024), Err(IoError::Zip(_))));
-        assert_eq!(pkg.total, 0);
+        assert_eq!(pkg.total, 1025);
         assert_eq!(pkg.read_limited("b.xml", 1024).unwrap().as_deref(), Some(&b"hello"[..]));
-        assert!(pkg.read("a.bin").is_err());
-        assert_eq!(pkg.read("b.xml").unwrap().as_deref(), Some(&b"hello"[..]));
+        pkg.total = MAX_TOTAL - 2;
+        assert!(matches!(pkg.read_limited("a.bin", 1024), Err(IoError::Zip(_))));
+        assert_eq!(pkg.total, MAX_TOTAL);
+        for part in ["a.bin", "b.xml"] {
+            assert!(matches!(pkg.read(part), Err(IoError::TooLarge(m)) if m.contains("1 GB")));
+        }
     }
 
     /// A part whose directory entry declares 0 bytes is an empty part, read as such even when its
