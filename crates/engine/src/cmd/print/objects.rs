@@ -76,8 +76,10 @@ pub(super) fn draw_objects(pg: &mut Page, wb: &Workbook, si: usize, sh: &Sheet, 
     let (bx, by) = (b.xs.first().copied().unwrap_or(0.0), b.ys.first().copied().unwrap_or(0.0));
     let (bw, bh) = (b.xs.last().copied().unwrap_or(bx) - bx, b.ys.last().copied().unwrap_or(by) - by);
     let visible = |r: (f64, f64, f64, f64)| r.2 > 0.0 && r.3 > 0.0 && r.0 < sx1 && r.0 + r.2 > sx0 && r.1 < sy1 && r.1 + r.3 > sy0;
-    let place = |r: (f64, f64, f64, f64)| {
-        (b.text_x(bx + ((r.0 - sx0) as f32) * b.k, r.2 as f32 * b.k), by + ((r.1 - sy0) as f32) * b.k, r.2 as f32 * b.k, r.3 as f32 * b.k)
+    let place = |a: &Anchor, r: (f64, f64, f64, f64)| {
+        let wk = if a.mode == gridcraft_model::AnchorMode::MoveOnly { b.k } else { b.kx };
+        let w = r.2 as f32 * wk;
+        (b.text_x(bx + ((r.0 - sx0) as f32) * b.kx, w), by + ((r.1 - sy0) as f32) * b.k, w, r.3 as f32 * b.k)
     };
     pg.save();
     pg.clip_rect(b.text_x(bx, bw), by, bw, bh);
@@ -87,7 +89,7 @@ pub(super) fn draw_objects(pg: &mut Page, wb: &Workbook, si: usize, sh: &Sheet, 
         if !visible(r) {
             continue;
         }
-        let (x, y, w, h) = place(r);
+        let (x, y, w, h) = place(&im.anchor, r);
         // About 150 dpi is plenty for print.
         let (mw, mh) = (((w / 72.0) * 150.0).ceil().clamp(1.0, 4000.0) as u32, ((h / 72.0) * 150.0).ceil().clamp(1.0, 4000.0) as u32);
         let decoded = pics.decoded.entry((si, imi)).or_insert_with(|| decode_image(&im.data, mw, mh));
@@ -105,7 +107,7 @@ pub(super) fn draw_objects(pg: &mut Page, wb: &Workbook, si: usize, sh: &Sheet, 
         if !visible(r) {
             continue;
         }
-        let (x, y, w, h) = place(r);
+        let (x, y, w, h) = place(&shp.anchor, r);
         if shp.kind == ShapeKind::Equation {
             let ink = rgb_of(shp.line, wb).unwrap_or([0, 0, 0]);
             match shp.math.get(&shp.text) {
@@ -132,11 +134,13 @@ pub(super) fn draw_objects(pg: &mut Page, wb: &Workbook, si: usize, sh: &Sheet, 
         if !visible(r) {
             continue;
         }
-        let (x, y, _, _) = place(r);
+        let (x, y, w, h) = place(&ch.anchor, r);
+        let chart_w = if b.k > 0.0 { w / b.k } else { r.2 as f32 };
+        let chart_h = if b.k > 0.0 { h / b.k } else { r.3 as f32 };
         // As for pictures, each page gets its own copy of the drawing commands.
         let prims = pics.chart((si, chi), || {
             let data = gridcraft_chart::resolve(wb, si, ch);
-            gridcraft_chart::render(ch, &data, r.2 as f32, r.3 as f32, &PdfMeasure)
+            gridcraft_chart::render(ch, &data, chart_w, chart_h, &PdfMeasure)
         });
         if let Some(prims) = prims {
             draw_prims(pg, prims, Xf { ox: x, oy: y, k: b.k });

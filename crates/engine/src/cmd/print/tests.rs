@@ -411,11 +411,11 @@ fn wide_sheet_goes_down_then_over() {
     let rows: Vec<Vec<Json>> = (0..60).map(|r| (0..15).map(|c| json!(r * 100 + c)).collect()).collect();
     s.execute("range.setValues", json!({"range": "A1", "values": rows})).unwrap();
     let pv = s.execute("file.printPreview", json!({})).unwrap();
-    // 511.2pt / 48pt = 10 columns per page; 45 rows per page.
+    // Default Calibri 11pt columns are ~51.57pt wide on paper: 511.2pt / 51.57pt = 9 columns (A:I); 45 rows per page.
     assert_eq!(pv["pages"], 4);
-    assert_eq!(pv["pageList"][0]["range"], "A1:J45");
-    assert_eq!(pv["pageList"][1]["range"], "A46:J60");
-    assert_eq!(pv["pageList"][2]["range"], "K1:O45");
+    assert_eq!(pv["pageList"][0]["range"], "A1:I45");
+    assert_eq!(pv["pageList"][1]["range"], "A46:I60");
+    assert_eq!(pv["pageList"][2]["range"], "J1:O45");
 }
 
 /// The ranges of the printed pages, in print order.
@@ -536,7 +536,7 @@ fn page_order_without_breaks_and_with_print_titles() {
         s.execute("pageLayout.pageSetup", json!({"pageOrder": "downThenOver"})).unwrap();
         let down = page_ranges(&mut s);
         if !titles {
-            assert_eq!(down, ["A1:J45", "A46:J60", "K1:O45", "K46:O60"]);
+            assert_eq!(down, ["A1:I45", "A46:I60", "J1:O45", "J46:O60"]);
         }
         s.execute("pageLayout.pageSetup", json!({"pageOrder": "overThenDown"})).unwrap();
         let over = page_ranges(&mut s);
@@ -1249,4 +1249,138 @@ fn chart_budget_counts_path_points_and_drops_charts_that_do_not_fit() {
     let mut pics = PicCache { chart_prims: MAX_CHART_PRIMS - 10, ..Default::default() };
     assert!(pics.chart((0, 1), || vec![line(1000)]).is_none());
     assert!(pics.charts.is_empty() && pics.rejected_charts.contains(&(0, 1)));
+}
+
+#[test]
+fn empty_invisibly_styled_cells_do_not_blow_up_pagination() {
+    let mut wb = Workbook::new();
+    let mut invisible = Style::default();
+    invisible.font.bold = true;
+    invisible.num_fmt = gridcraft_model::NumFmt::new("0.00");
+    let invisible_id = wb.styles.intern(invisible);
+
+    let mut filled = Style::default();
+    filled.fill.pattern = PatternType::Solid;
+    filled.fill.fg = Color::Rgb(0x25477B);
+    let filled_id = wb.styles.intern(filled);
+
+    let mut bordered = Style::default();
+    bordered.borders.bottom = BorderLine { style: BorderStyle::Thin, color: Color::Rgb(0x000000) };
+    let bordered_id = wb.styles.intern(bordered);
+
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.set_value(CellRef::new(0, 0), Value::text("Title"));
+    sh.set_value(CellRef::new(4, 2), Value::Number(42.0));
+    // 1000 rows × 20 columns of empty cells with invisible (font/numfmt-only) styling.
+    for r in 5..1000 {
+        for c in 0..20 {
+            sh.cells.set(CellRef::new(r, c), gridcraft_model::Cell::styled(Value::Empty, invisible_id));
+        }
+    }
+    let lay = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
+    assert_eq!(lay.area, RangeRef::new(CellRef::new(0, 0), CellRef::new(4, 2)));
+    assert_eq!(lay.pages.len(), 1);
+
+    // Adding a visible fill or visible border extends the print range to include it.
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.cells.set(CellRef::new(6, 4), gridcraft_model::Cell::styled(Value::Empty, filled_id));
+    let lay = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
+    assert_eq!(lay.area, RangeRef::new(CellRef::new(0, 0), CellRef::new(6, 4)));
+
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.cells.set(CellRef::new(8, 5), gridcraft_model::Cell::styled(Value::Empty, bordered_id));
+    let lay = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
+    assert_eq!(lay.area, RangeRef::new(CellRef::new(0, 0), CellRef::new(8, 5)));
+}
+
+#[test]
+fn blank_trailing_pages_are_trimmed_on_sparse_l_shaped_sheet() {
+    let mut wb = Workbook::new();
+    let sh = wb.sheet_mut(0).unwrap();
+    // Tall column A spanning 2 vertical pages (60 rows), plus a wide header in row 1 spanning 2 horizontal pages (12 cols).
+    // Page grid is 2×2 in DownThenOver order: (r0,c0) data, (r1,c0) data, (r0,c1) header, (r1,c1) completely blank trailing page.
+    for r in 0..60 {
+        sh.set_value(CellRef::new(r, 0), Value::Number(r as f64));
+    }
+    sh.set_value(CellRef::new(0, 11), Value::text("Wide header"));
+    let lay = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
+    assert_eq!(lay.row_bands.len(), 2);
+    assert_eq!(lay.col_bands.len(), 2);
+    assert_eq!(lay.pages, vec![(0, 0), (1, 0), (0, 1)], "trailing blank page (1, 1) must be omitted");
+}
+
+#[test]
+fn column_width_geometry_matches_excel_normal_font_pagination() {
+    // Reproduces horizontal page-break geometry with Arial 10pt Normal font on Letter portrait
+    // (0.7" side margins => 511.2 pt printable width):
+    // cols A,B = 178 px (25.5 chars), col C = 213 px (30.5 chars), col D = 101 px (14.5 chars).
+    // At legacy 0.75 pt/px all 4 columns summed to 502.5 pt and leaked col D onto page 1;
+    // with Excel's 600-dpi Arial 10pt MDW (46 dots = 5.52 pt/char), A..C = 448.7 pt and A..D = 528.3 pt > 511.2 pt,
+    // so col D cleanly breaks to page 2.
+    let mut normal = Style::default();
+    normal.font.name = "Arial".into();
+    normal.font.size = 10.0;
+    let mut wb = Workbook::new();
+    wb.styles = StyleTable::with_default(normal);
+    let sh = wb.sheet_mut(0).unwrap();
+    for (c, w) in [(0, 178.0), (1, 178.0), (2, 213.0), (3, 101.0)] {
+        sh.cols.entry(c).or_default().size = Some(w);
+        sh.set_value(CellRef::new(0, c), Value::text(format!("Col{c}")));
+    }
+    let lay = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
+    assert_eq!(lay.col_bands, vec![(0, 2), (3, 3)]);
+}
+
+#[test]
+fn contiguous_solid_fill_banner_coalesces_into_one_rect_without_seams() {
+    let mut wb = Workbook::new();
+    let mut banner = Style::default();
+    banner.fill.pattern = PatternType::Solid;
+    banner.fill.fg = Color::Rgb(0x25477B);
+    let banner_id = wb.styles.intern(banner);
+
+    let sh = wb.sheet_mut(0).unwrap();
+    for c in 0..4 {
+        sh.cells.set(CellRef::new(0, c), gridcraft_model::Cell::styled(Value::Empty, banner_id));
+    }
+    sh.set_value(CellRef::new(0, 0), Value::text("Banner"));
+
+    let lays = layouts(&wb, &PrintOptions::default());
+    let pdf = render_pdf(&wb, &lays, "", "").unwrap().bytes;
+    let stream = String::from_utf8_lossy(&pdf);
+    let fill_ops: Vec<&str> = stream.lines().filter(|l| l.ends_with(" re f")).collect();
+    assert_eq!(fill_ops.len(), 1, "4 contiguous same-colour cells must emit one coalesced fill rect, got: {fill_ops:?}");
+}
+
+#[test]
+fn unwrapped_text_overflows_across_empty_and_hidden_neighbours_at_print_column_scale() {
+    let mut normal = Style::default();
+    normal.font.name = "Arial".into();
+    normal.font.size = 10.0;
+    let mut wb = Workbook::new();
+    wb.styles = StyleTable::with_default(normal);
+
+    let mut title_style = Style::default();
+    title_style.font.name = "Arial".into();
+    title_style.font.size = 18.0;
+    let title_id = wb.styles.intern(title_style);
+
+    let sh = wb.sheet_mut(0).unwrap();
+    for (c, w) in [(0, 178.0), (1, 178.0), (2, 213.0)] {
+        sh.cols.entry(c).or_default().size = Some(w);
+    }
+    let title = "Long Report Header Title Spanning Columns";
+    sh.cells.set(CellRef::new(0, 0), gridcraft_model::Cell::styled(Value::text(title), title_id));
+    // Col B is empty (allows overflow), Col C is populated (stops overflow).
+    sh.set_value(CellRef::new(0, 2), Value::text("Date"));
+
+    let lays = layouts(&wb, &PrintOptions::default());
+    let pdf = render_pdf(&wb, &lays, "", "").unwrap().bytes;
+    let stream = String::from_utf8_lossy(&pdf);
+    let title_pos = stream.find(&format!("({title}) Tj")).expect("title text in PDF");
+    let clip_line = stream[..title_pos].lines().rev().find(|l| l.ends_with(" re W n")).expect("clip rect before title");
+    let parts: Vec<f32> = clip_line.split_whitespace().take(4).filter_map(|t| t.parse().ok()).collect();
+    let clip_w = parts[2];
+    let expected_ab_w = (178.0 + 178.0) * lays[0].col_px_to_pt;
+    assert!((clip_w - expected_ab_w).abs() < 0.2, "overflow clip width {clip_w} should span A+B ({expected_ab_w})");
 }

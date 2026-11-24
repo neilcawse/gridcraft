@@ -176,6 +176,7 @@ pub(super) struct Block<'a> {
     /// Page x of each column's left edge, plus the right edge of the last.
     pub(super) xs: Vec<f32>,
     pub(super) ys: Vec<f32>,
+    pub(super) kx: f32,
     pub(super) k: f32,
     pub(super) scale: f32,
     pub(super) mirror_axis: f32,
@@ -197,7 +198,7 @@ impl Block<'_> {
             return self.xs.get((col - self.cols.0) as usize).copied().unwrap_or(0.0);
         }
         let x0 = self.xs.first().copied().unwrap_or(0.0);
-        x0 + ((self.sh.col_left(col) - self.sh.col_left(self.cols.0)) as f32) * self.k
+        x0 + ((self.sh.col_left(col) - self.sh.col_left(self.cols.0)) as f32) * self.kx
     }
     fn y(&self, row: u32) -> f32 {
         if row >= self.rows.0 && row <= self.rows.1 + 1 {
@@ -390,18 +391,62 @@ pub(super) fn draw_block(pg: &mut Page, b: &Block, gridlines: bool, cf: &mut cra
             }
         }
     };
-    // Fills (merged blocks hide the gridlines inside them).
+    // Fills (coalesce contiguous same-colour cells horizontally and vertically so solid banners
+    // emit a single rectangle with zero anti-aliasing seams, plus Excel's 0.06 pt bleed on each
+    // side so abutting differently-coloured fills never show subpixel white/gridline hairlines).
+    const FILL_BLEED: f32 = 0.06;
+    let mut fill_rects: Vec<(f32, f32, f32, f32, Rgb)> = Vec::new();
     for (c, l) in &looks {
         let (x, y, w, h, merged) = rect_of(*c);
         if w <= 0.0 || h <= 0.0 {
             continue;
         }
+        let rx = b.text_x(x, w);
         if let Some(f) = l.fill {
-            pg.fill_rect(b.text_x(x, w), y, w, h, f);
+            fill_rects.push((rx, y, rx + w, y + h, f));
         } else if merged && gridlines {
-            pg.fill_rect(b.text_x(x, w), y, w, h, [255, 255, 255]);
+            fill_rects.push((rx, y, rx + w, y + h, [255, 255, 255]));
         }
-        if merged && gridlines {
+    }
+    // 1. Merge horizontally adjacent rects of the same row span and colour.
+    fill_rects.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.3.total_cmp(&b.3)).then_with(|| a.4.cmp(&b.4)).then_with(|| a.0.total_cmp(&b.0)));
+    let mut h_merged: Vec<(f32, f32, f32, f32, Rgb)> = Vec::with_capacity(fill_rects.len());
+    for rect in fill_rects {
+        if let Some(prev) = h_merged.last_mut()
+            && prev.4 == rect.4
+            && (prev.1 - rect.1).abs() <= 0.01
+            && (prev.3 - rect.3).abs() <= 0.01
+            && rect.0 <= prev.2 + 0.02
+        {
+            prev.2 = prev.2.max(rect.2);
+        } else {
+            h_merged.push(rect);
+        }
+    }
+    // 2. Merge vertically adjacent strips of the same column span and colour.
+    h_merged.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.2.total_cmp(&b.2)).then_with(|| a.4.cmp(&b.4)).then_with(|| a.1.total_cmp(&b.1)));
+    let mut v_merged: Vec<(f32, f32, f32, f32, Rgb)> = Vec::with_capacity(h_merged.len());
+    for rect in h_merged {
+        if let Some(prev) = v_merged.last_mut()
+            && prev.4 == rect.4
+            && (prev.0 - rect.0).abs() <= 0.01
+            && (prev.2 - rect.2).abs() <= 0.01
+            && rect.1 <= prev.3 + 0.02
+        {
+            prev.3 = prev.3.max(rect.3);
+        } else {
+            v_merged.push(rect);
+        }
+    }
+    for (x0, y0, x1, y1, f) in v_merged {
+        pg.fill_rect(x0 - FILL_BLEED, y0 - FILL_BLEED, (x1 - x0) + 2.0 * FILL_BLEED, (y1 - y0) + 2.0 * FILL_BLEED, f);
+    }
+    for (c, l) in &looks {
+        let (x, y, w, h, merged) = rect_of(*c);
+        if w <= 0.0 || h <= 0.0 {
+            continue;
+        }
+        if merged && gridlines && l.fill.is_none() {
             pg.rect_stroke(b.text_x(x, w), y, w, h, (0.35 * b.scale).clamp(0.1, 0.5), [0xB0, 0xB0, 0xB0]);
         }
         if let Some((frac, rgb, _)) = l.cf.as_ref().and_then(|cf| cf.bar) {
@@ -493,6 +538,7 @@ pub(super) struct PrintedBlock {
     pub(super) cols: (u32, u32),
     pub(super) x: f32,
     pub(super) y: f32,
+    pub(super) kx: f32,
     pub(super) k: f32,
     /// The page x that right-to-left sheets are mirrored about; `None` for left-to-right sheets.
     pub(super) mirror_axis: Option<f32>,
@@ -533,9 +579,9 @@ pub(super) fn printed_target(wb: &Workbook, blocks: &[PrintedBlock], source_shee
     let cell = RangeRef::parse(&range.replace('$', ""))?.start;
     let sh = wb.sheet(sheet)?;
     let block = blocks.iter().find(|b| b.sheet == sheet && (b.rows.0..=b.rows.1).contains(&cell.row) && (b.cols.0..=b.cols.1).contains(&cell.col))?;
-    let x = block.x + (sh.col_left(cell.col) - sh.col_left(block.cols.0)) as f32 * block.k;
+    let x = block.x + (sh.col_left(cell.col) - sh.col_left(block.cols.0)) as f32 * block.kx;
     let x = match block.mirror_axis {
-        Some(axis) => axis - x - (sh.col_left(cell.col.saturating_add(1)) - sh.col_left(cell.col)) as f32 * block.k,
+        Some(axis) => axis - x - (sh.col_left(cell.col.saturating_add(1)) - sh.col_left(cell.col)) as f32 * block.kx,
         None => x,
     };
     let y = block.y + (sh.row_top(cell.row) - sh.row_top(block.rows.0)) as f32 * block.k;
@@ -588,12 +634,13 @@ pub(super) fn make_block<'a>(
     lay: &SheetLayout,
 ) -> Block<'a> {
     let (x, y) = origin;
+    let kx = lay.kx();
     let k = lay.k();
     let mut xs = Vec::with_capacity((cols.1 - cols.0 + 2) as usize);
     let mut acc = x;
     xs.push(acc);
     for c in cols.0..=cols.1 {
-        acc += sh.col_width(c) * k;
+        acc += sh.col_width(c) * kx;
         xs.push(acc);
     }
     let mut ys = Vec::with_capacity((rows.1 - rows.0 + 2) as usize);
@@ -603,7 +650,7 @@ pub(super) fn make_block<'a>(
         acc += sh.row_height(r) * k;
         ys.push(acc);
     }
-    Block { wb, si, sh, rows, cols, xs, ys, k, scale: lay.scale, mirror_axis: lay.page_w }
+    Block { wb, si, sh, rows, cols, xs, ys, kx, k, scale: lay.scale, mirror_axis: lay.page_w }
 }
 
 #[cfg(test)]
