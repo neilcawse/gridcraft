@@ -380,8 +380,9 @@ behaviour that makes the two values one answer:
   `#N/A:lookupNotFound:Toxic` or `#VALUE!:notNumber:FILL IN` in a `t="str"` cell; the part before the first colon is
   an error code, the rest says why. In a workbook Google Sheets wrote (see *Producer*), the text matches when its
   code is the error GridCraft computes: Excel shows the code and drops the reason, and a full recalculation in Excel
-  gives the same error. A different code, or text that isn't an error code, still mismatches. From any other
-  producer a text is a text result, whatever it spells (Excel writes an error as `t="e"`), and differs from an error.
+  gives the same error. Unknown and unclassified producers can match a bare error literal, but not a reason suffix.
+  Surrounding whitespace is ignored and `#N/A!` is an alias for `#N/A`. A different code still mismatches. Other
+  identified producers' text does not match an error (Excel writes an error as `t="e"`).
 - *Whitespace a writer other than Excel dropped* (`whitespaceCache`). In a workbook another product wrote (WPS,
   LibreOffice…), a cached text that is the result without the spaces, tabs and line breaks around it matches when the
   cell's `<v>` has no `xml:space="preserve"`: such writers save `CONCATENATE(A2," ",B2," ")` as `AA AB`. Excel writes
@@ -478,10 +479,8 @@ doesn't: `lost relationship printerSettings in sheet "Data"`. For charts, tables
 "Data" > drawing (1 of 3)`. Each excused case is a rule with the Excel behaviour it rests on, and nothing else is
 excused:
 
-- *Rebuilt, so not a loss:* the calculation chain (Excel rebuilds it), chart style / colour / user-shape sidecars and
-  theme overrides (written inline), PivotTable cache records (rebuilt with the cache), shared strings (written from the
-  cells; absent when no string is left) and the workbook metadata that only flags dynamic-array formulas (rebuilt from
-  the formulas it flagged).
+- *Rebuilt, so not a loss:* the calculation chain (Excel rebuilds it). Missing PivotTable cache records are excused
+  only when the saved cache at that owner explicitly requests refresh on load.
 - *Holds nothing, so not a loss:* a link to a place in the workbook (`#Sheet1!A1`, written as the cell's `location`),
   a relationship to a part the package doesn't contain, to an XML part with no content (a comments part without
   comments, a drawing or VML without shapes) and the relationships of parts nothing leads to (Excel drops them on save
@@ -551,7 +550,7 @@ added, a changed meaning bumps the version: in version 2, `staleCache` means tha
       "untrustedMatched": 0, "untrustedMismatched": 0,  // compared against an untrusted cache: not in the counts above
       "untrustedSignatures": {},
       "boolAsNumber": 0,               // matched TRUE/FALSE results the producer saved as 1/0 (no t="b")
-      "errorDetailCache": 0,           // matched errors Google Sheets saved as text `#CODE` / `#CODE:reason`
+      "errorDetailCache": 0,           // matched errors saved as text, including Google Sheets' reason suffix
       "whitespaceCache": 0,            // matched texts a non-Excel writer saved without their surrounding whitespace
       "solverTolerance": 0,            // matched numbers within a solver's 1e-7 carried through the formula
       "cancellationResidue": 0,        // matched numbers within the rounding the formula's operations propagate

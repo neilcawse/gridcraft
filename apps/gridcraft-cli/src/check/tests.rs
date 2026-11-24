@@ -141,10 +141,11 @@ fn errors_compare_by_kind() {
     assert!(!values_match(&Value::Error(CellError::NA), &Value::Error(CellError::Value), 0.0));
 }
 #[test]
-fn error_text_is_an_error_only_as_google_sheets_writes_it() {
+fn error_text_recognizes_legacy_literals_and_google_details() {
     for (literal, error) in [
         ("#DIV/0!", CellError::Div0),
         ("#N/A", CellError::NA),
+        (" \t#N/A!\n", CellError::NA),
         ("#VALUE!", CellError::Value),
         ("#REF!", CellError::Ref),
         ("#NAME?", CellError::Name),
@@ -159,9 +160,16 @@ fn error_text_is_an_error_only_as_google_sheets_writes_it() {
         assert!(!values_match(&expected, &actual, 0.0), "{literal}");
         assert!(!error_text_cached(ProducerKind::Excel, &expected, &actual), "{literal}");
         assert!(error_text_cached(ProducerKind::GoogleSheets, &expected, &actual), "{literal}");
+        for producer in [ProducerKind::Other, ProducerKind::Unknown] {
+            assert!(error_text_cached(producer, &expected, &actual), "{literal}");
+        }
     }
     assert!(!error_text_cached(ProducerKind::GoogleSheets, &Value::text("#N/A"), &Value::Error(CellError::Value)));
-    assert!(!error_text_cached(ProducerKind::GoogleSheets, &Value::text(" #N/A "), &Value::Error(CellError::NA)));
+    let detail = Value::text(" #N/A!:lookupNotFound ");
+    let error = Value::Error(CellError::NA);
+    assert!(error_text_cached(ProducerKind::GoogleSheets, &detail, &error));
+    assert!(!error_text_cached(ProducerKind::Unknown, &detail, &error));
+    assert!(!error_text_cached(ProducerKind::Other, &detail, &error));
 }
 
 /// `wb` saved as a package that `app` (an `<Application>` element, or nothing) names, saved by it.
@@ -888,14 +896,13 @@ fn a_mismatch_that_reads_a_mismatch_through_a_name_is_not_primary() {
     assert_eq!(primary, ["Sheet1!A2", "Sheet1!C1"]);
 }
 
-/// Google Sheets saves an error as the text `#CODE` or `#CODE:reason:detail`; Excel shows the
-/// code. Any other producer's text is a text result, whatever it spells.
+/// Google Sheets alone can append a reason to an error saved as text.
 #[test]
-fn errors_cached_as_text_match_by_their_code_only_from_google_sheets() {
+fn only_google_sheets_matches_error_text_with_a_reason() {
     let wb = book(&[
         ("A1", "=NA()", Value::text("#N/A:lookupNotFound:Toxic")),
         ("A2", "=1/0", Value::text("#DIV/0!:divZero")),
-        ("A3", "=NA()", Value::text("#N/A")),
+        ("A3", "=NA()", Value::text(" #N/A! ")),
         ("A4", "=NA()", Value::text("#VALUE!:notNumber:x")),
         ("A5", "=NA()", Value::text("N/A: not an error")),
     ]);
@@ -906,6 +913,9 @@ fn errors_cached_as_text_match_by_their_code_only_from_google_sheets() {
     let mut wrong: Vec<&str> = google.calc.mismatches.iter().map(|m| m.cell.as_str()).collect();
     wrong.sort();
     assert_eq!(wrong, ["Sheet1!A4", "Sheet1!A5"]);
+    let unknown = check_bytes("t.xlsx", &saved_by(&wb, ""), &Options::default());
+    assert_eq!(unknown.producer.kind, ProducerKind::Unknown);
+    assert_eq!((unknown.calc.checked, unknown.calc.matched, unknown.calc.mismatched, unknown.calc.error_detail_cache), (5, 1, 4, 1), "{unknown:?}");
     // Excel writes an error as `t="e"`: text that spells one (`=IF(…,"#DIV/0!:literal",1/0)`) is text.
     let excel = check_bytes("t.xlsx", &saved_by(&wb, "<Application>Microsoft Excel</Application>"), &Options::default());
     assert_eq!((excel.calc.checked, excel.calc.matched, excel.calc.mismatched, excel.calc.error_detail_cache), (5, 0, 5, 0), "{excel:?}");
@@ -1250,8 +1260,11 @@ fn package_reports_relationship_kinds_the_output_lost() {
     // (Excel rebuilds it), so its absence isn't a loss.
     let calc_chain =
         r#"<Relationship Id="rId91" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/calcChain" Target="calcChain.xml"/>"#;
-    let source =
-        with_rels(&plain(), &[(WB_RELS, &format!("{MADE_UP}{calc_chain}"))], &[MADE_UP_PART, MADE_UP_RELS, ("xl/calcChain.xml", "<calcChain/>")]);
+    let source = with_rels(
+        &plain(),
+        &[(WB_RELS, &format!("{MADE_UP}{calc_chain}"))],
+        &[MADE_UP_PART, MADE_UP_RELS, ("xl/calcChain.xml", "<calcChain><c/></calcChain>")],
+    );
     assert_eq!(package_of(&source), ["lost relationship madeUp in workbook"]);
     assert!(check_bytes("t.xlsx", &plain(), &Options::default()).round_trip.is_clean());
 }
@@ -1475,10 +1488,7 @@ fn strict_and_transitional_relationship_names_are_one_kind() {
 }
 
 #[test]
-fn rebuilt_parts_are_not_losses() {
-    // Shared strings are rebuilt from the cells, the dynamic-array metadata from the formulas.
-    // The made-up kind is a relationship GridCraft doesn't keep, so the comparison is known to
-    // look at the workbook's relationships.
+fn rebuilt_parts_other_than_the_calc_chain_still_report_losses() {
     let pkg = |rebuilt: bool, made_up: bool| {
         let mut rels = Vec::new();
         if made_up {
@@ -1499,9 +1509,33 @@ fn rebuilt_parts_are_not_losses() {
         }
         zip_owned(&parts)
     };
-    assert_eq!(lost(&pkg(true, false), &pkg(false, false)), Vec::<String>::new());
+    let losses = ["lost relationship sharedStrings in workbook", "lost relationship sheetMetadata in workbook"];
+    assert_eq!(lost(&pkg(true, false), &pkg(false, false)), losses);
     assert_eq!(lost(&pkg(false, false), &pkg(true, false)), Vec::<String>::new());
-    assert_eq!(lost(&pkg(true, true), &pkg(false, false)), ["lost relationship madeUp in workbook"]);
+    assert_eq!(lost(&pkg(true, true), &pkg(false, false)), ["lost relationship madeUp in workbook", losses[0], losses[1]]);
+}
+
+#[test]
+fn missing_pivot_records_need_refresh_on_the_saved_cache() {
+    let pkg = |records: bool, refresh: &str| {
+        let mut parts = vec![
+            part("_rels/.rels", rels_part(&[("rId1", "officeDocument", "xl/workbook.xml")])),
+            part("xl/workbook.xml", "<workbook><sheets/></workbook>"),
+            part("xl/_rels/workbook.xml.rels", rels_part(&[("rId1", "pivotCacheDefinition", "cache.xml")])),
+            part("xl/cache.xml", format!(r#"<pivotCacheDefinition refreshOnLoad="{refresh}"><cacheSource/></pivotCacheDefinition>"#)),
+        ];
+        if records {
+            parts.push(part("xl/_rels/cache.xml.rels", rels_part(&[("rId1", "pivotCacheRecords", "records.xml")])));
+            parts.push(part("xl/records.xml", "<pivotCacheRecords><r/></pivotCacheRecords>"));
+        }
+        zip_owned(&parts)
+    };
+    let source = pkg(true, "1");
+    assert_eq!(lost(&source, &pkg(false, "0")), ["lost relationship pivotCacheRecords in pivotCacheDefinition"]);
+    for refresh in ["1", "true"] {
+        assert!(lost(&source, &pkg(false, refresh)).is_empty());
+    }
+    assert!(lost(&source, &pkg(true, "0")).is_empty());
 }
 
 #[test]

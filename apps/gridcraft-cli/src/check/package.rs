@@ -304,15 +304,11 @@ pub(super) fn holds_something(
     verdicts: &mut HashMap<(String, &'static str), bool>,
     budget: &mut u64,
 ) -> Option<bool> {
-    let wanted: Option<&'static [u8]> = match kind.to_ascii_lowercase().as_str() {
-        "comments" => Some(b"comment"),
-        "vmldrawing" => Some(b"shape"),
-        _ => None,
-    };
-    let marker = match wanted {
-        Some(b"comment") => "comment",
-        Some(_) => "shape",
-        None => "any",
+    let marker = match kind.to_ascii_lowercase().as_str() {
+        "comments" => "comment",
+        "vmldrawing" => "shape",
+        "refreshonload" => "refreshonload",
+        _ => "any",
     };
     if let Some(v) = verdicts.get(&(name.to_ascii_lowercase(), marker)) {
         return Some(*v);
@@ -323,7 +319,7 @@ pub(super) fn holds_something(
 }
 
 fn holds_something_uncached(zip: &mut Zip<'_>, name: &str, marker: &'static str, budget: &mut u64) -> Option<bool> {
-    let Ok(f) = zip.by_name(name) else { return Some(true) };
+    let Ok(f) = zip.by_name(name) else { return Some(marker != "refreshonload") };
     // The directory says the part has no bytes: it is empty, whatever its (possibly missing)
     // compressed stream looks like. Some producers write an empty file as a deflate entry with no
     // stream at all, which can't be decoded and must not be mistaken for an unreadable part.
@@ -355,7 +351,7 @@ fn has_content(mut input: impl std::io::BufRead, marker: &str) -> bool {
     if let Some(first) = head.iter().find(|b| !b.is_ascii_whitespace())
         && *first != b'<'
     {
-        return true;
+        return marker != "refreshonload";
     }
     let mut reader = quick_xml::Reader::from_reader(input);
     let wanted: Option<&'static [u8]> = match marker {
@@ -368,6 +364,13 @@ fn has_content(mut input: impl std::io::BufRead, marker: &str) -> bool {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                if marker == "refreshonload" {
+                    return e
+                        .attributes()
+                        .with_checks(false)
+                        .flatten()
+                        .any(|a| local_name(a.key.as_ref()) == b"refreshOnLoad" && matches!(a.value.as_ref(), b"1" | b"true"));
+                }
                 let found = match wanted {
                     Some(w) => local_name(e.name().as_ref()) == w,
                     None => in_root,
@@ -379,7 +382,7 @@ fn has_content(mut input: impl std::io::BufRead, marker: &str) -> bool {
             }
             Ok(Event::Eof) => return false,
             Ok(_) => {}
-            Err(_) => return true,
+            Err(_) => return marker != "refreshonload",
         }
         buf.clear();
     }

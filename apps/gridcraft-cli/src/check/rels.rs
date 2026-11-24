@@ -11,23 +11,8 @@ use super::package::{
 };
 use super::{BTreeMap, BTreeSet, Cursor, HashMap, HashSet};
 
-/// Relationship kinds whose absence after a save isn't a loss, in the folded spelling of
-/// [`fold_kind`]: the calculation chain is a cache Excel rebuilds; chart style / user-shape /
-/// theme-override sidecars are spelled out inline; pivot cache records are rebuilt with the
-/// cache; the shared strings part is rebuilt from the cells (and absent when no string remains);
-/// the workbook metadata that holds only dynamic-array flags is rebuilt from the formulas it
-/// flagged.
-pub(super) const REBUILT_KINDS: [&str; 9] = [
-    "calcchain",
-    "chartcolorstyle",
-    "chartstyle",
-    "chartusershapes",
-    "pivotcacherecords",
-    "sharedstrings",
-    "sheetmetadata",
-    "themeoverride",
-    "workbookmetadata",
-];
+/// The calculation chain is the only kind Excel can always rebuild when it is absent.
+const REBUILT_KIND: &str = "calcchain";
 
 /// Kinds whose number per owner is compared. Each relationship of these kinds is one part that
 /// GridCraft writes once per object (a chart, a table, a pivot table, a sheet that isn't a
@@ -99,6 +84,8 @@ pub(super) struct RelTree {
     reached: BTreeSet<Vec<String>>,
     /// Folded kind → the kind as first written.
     labels: HashMap<String, String>,
+    /// Whether every definition grouped under an owner explicitly requests a refresh on open.
+    refreshing_caches: BTreeMap<Vec<String>, bool>,
 }
 
 /// One relationship of a rels part.
@@ -321,6 +308,10 @@ pub(super) fn relationship_tree(bytes: &[u8], limits: Limits) -> Result<RelTree,
                 };
                 let mut child = path.clone();
                 child.push(segment);
+                if cache && let Some(part) = part {
+                    let refresh = holds_something(&mut zip, part, "refreshonload", &mut verdicts, &mut budget).ok_or_else(|| over_budget(part))?;
+                    tree.refreshing_caches.entry(child.clone()).and_modify(|all| *all &= refresh).or_insert(refresh);
+                }
                 tree.reached.insert(child.clone());
                 if !chain.contains(&resolved) {
                     queue.push_back(Pending { path: child, source: resolved, chain: chain.clone() });
@@ -366,7 +357,7 @@ pub(super) fn lost_relationships(source: &RelTree, written: &RelTree) -> Vec<Str
         }
         let kept = written.owners.get(path);
         for (key, &had) in kinds {
-            if REBUILT_KINDS.contains(&key.as_str()) {
+            if key == REBUILT_KIND || (key == "pivotcacherecords" && written.refreshing_caches.get(path) == Some(&true)) {
                 continue;
             }
             let have = kept.and_then(|k| k.get(key)).copied().unwrap_or(0);

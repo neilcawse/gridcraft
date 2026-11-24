@@ -40,11 +40,12 @@ pub fn bool_cached_as_number(expected: &Value, actual: &Value) -> bool {
     matches!((expected, actual), (Value::Number(n), Value::Bool(b)) if *n == if *b { 1.0 } else { 0.0 })
 }
 
-/// The error a Google Sheets text cache entry spells: `#N/A`, or `#N/A:lookupNotFound:Attract`,
-/// the form Google Sheets writes, which gives the reason after the code (the code is what the
-/// cell shows).
-fn google_error_text(s: &str) -> Option<CellError> {
-    let code = s.split_once(':').map_or(s, |(code, _)| code);
+/// The base's bare error literals, also used by Google Sheets before its optional detail suffix.
+fn cached_error_code(code: &str) -> Option<CellError> {
+    let code = match code.trim() {
+        "#N/A!" => "#N/A",
+        code => code,
+    };
     [
         CellError::Div0,
         CellError::NA,
@@ -61,12 +62,16 @@ fn google_error_text(s: &str) -> Option<CellError> {
     .find(|e| e.as_str() == code)
 }
 
-/// Whether `expected`, cached by a `producer` of that kind, is the error `actual` written as
-/// text: Google Sheets saves an error as `#CODE` or `#CODE:reason:…` text in a `t="str"` cell.
-/// Any other producer's text is text, whatever it spells: Excel writes an error as `t="e"`, so a
-/// text cache that reads like one is a text result, and a different value than the error.
+/// Google Sheets can append a reason after the error code. Older or unidentified writers may
+/// cache a bare error literal. Keep the distinction for known typed producers, including Excel.
 pub(super) fn error_text_cached(producer: ProducerKind, expected: &Value, actual: &Value) -> bool {
-    producer == ProducerKind::GoogleSheets && matches!((expected, actual), (Value::Text(s), Value::Error(e)) if google_error_text(s) == Some(*e))
+    let (Value::Text(text), Value::Error(error)) = (expected, actual) else { return false };
+    let code = match producer {
+        ProducerKind::GoogleSheets => text.split_once(':').map_or(text.as_ref(), |(code, _)| code),
+        ProducerKind::Other | ProducerKind::Unknown => text.as_ref(),
+        _ => return false,
+    };
+    cached_error_code(code) == Some(*error)
 }
 
 /// The whitespace XML treats as insignificant around element text.
@@ -224,7 +229,7 @@ enum Grade {
     Same,
     /// The producer saved TRUE/FALSE as 1/0 without `t="b"` ([`bool_cached_as_number`]).
     BoolAsNumber,
-    /// Google Sheets cached an error as `#CODE` or `#CODE:reason:…` text ([`error_text_cached`]).
+    /// A producer cached an error as text instead of a typed error ([`error_text_cached`]).
     ErrorDetail,
     /// Within a solver's documented accuracy carried through the formula ([`settle_undecided`]).
     Solver,
