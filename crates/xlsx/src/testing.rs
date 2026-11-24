@@ -38,6 +38,8 @@ pub enum Entry<'a> {
     BadStream(&'a str, u32),
     /// A stored entry whose checksum is wrong.
     BadChecksum(&'a str, &'a [u8]),
+    /// A stored entry with a correct checksum but the wrong uncompressed size.
+    BadSize(&'a str, &'a [u8], u32),
 }
 
 fn crc32(data: &[u8]) -> u32 {
@@ -70,6 +72,7 @@ pub fn damaged_zip(entries: &[Entry<'_>]) -> Vec<u8> {
             // Block type 3 is reserved: the first byte (final block, type 11) is not deflate.
             Entry::BadStream(name, size) => Item { name, flags: 0, method: 8, crc: 0, compressed: &[0x07, 0xFF, 0xFF, 0xFF], size },
             Entry::BadChecksum(name, data) => Item { name, flags: 0, method: 0, crc: crc32(data) ^ 1, compressed: data, size: data.len() as u32 },
+            Entry::BadSize(name, data, size) => Item { name, flags: 0, method: 0, crc: crc32(data), compressed: data, size },
         })
         .collect();
     let mut out: Vec<u8> = vec![];

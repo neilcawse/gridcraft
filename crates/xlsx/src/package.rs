@@ -172,7 +172,7 @@ impl<'a> ZipParts<'a> {
         let mut out = Vec::with_capacity(size.min(limit).min(16 * 1024 * 1024) as usize);
         let read = (&mut f).take(limit + 1).read_to_end(&mut out);
         let decoded = out.len() as u64;
-        self.total += if read.is_err() { failed_charge } else { decoded.min(remaining) };
+        self.total += if read.is_err() || decoded != size { failed_charge } else { decoded.min(remaining) };
         if decoded > limit {
             return Err(IoError::TooLarge(if remaining < maximum {
                 "package expands to more than 1 GB".into()
@@ -181,6 +181,9 @@ impl<'a> ZipParts<'a> {
             }));
         }
         read.map_err(|e| IoError::Zip(format!("{part}: {e}")))?;
+        if decoded != size {
+            return Err(IoError::Zip(format!("{part}: decoded {decoded} bytes, expected {size}")));
+        }
         Ok(Some(out))
     }
 
@@ -301,6 +304,14 @@ mod tests {
         for part in ["a.bin", "b.xml"] {
             assert!(matches!(pkg.read(part), Err(IoError::TooLarge(m)) if m.contains("1 GB")));
         }
+    }
+
+    #[test]
+    fn a_size_mismatch_with_valid_checksum_spends_the_failed_read_allowance() {
+        let z = damaged_zip(&[Entry::BadSize("a.bin", b"a", 2)]);
+        let mut pkg = Package::open(&z).unwrap();
+        assert!(matches!(pkg.read_limited("a.bin", 8), Err(IoError::Zip(m)) if m == "a.bin: decoded 1 bytes, expected 2"));
+        assert_eq!(pkg.total, 9);
     }
 
     /// A part whose directory entry declares 0 bytes is an empty part, read as such even when its
