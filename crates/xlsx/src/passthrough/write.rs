@@ -339,3 +339,254 @@ pub fn write_package_rels(root: &mut Rels, out: &mut Out) {
         root.add_raw(&ty, &target, external);
     }
 }
+
+// ---------------------------------------------------------------- drawing & chart companions
+
+struct UserShapesMeta<'a> {
+    chart_id: u32,
+    target: &'a str,
+    mirrored_images: Vec<u32>,
+    mirrored_shapes: Vec<u32>,
+}
+
+fn parse_u32_list(s: &str) -> Vec<u32> {
+    s.split(',').filter(|x| !x.is_empty()).filter_map(|x| x.parse::<u32>().ok()).collect()
+}
+
+fn parse_user_shapes_meta(xml: &str) -> Option<UserShapesMeta<'_>> {
+    let mut it = xml.split('\t');
+    let chart_id = it.next()?.parse::<u32>().ok()?;
+    let target = it.next()?;
+    let mirrored_images = parse_u32_list(it.next()?);
+    let mirrored_shapes = parse_u32_list(it.next()?);
+    Some(UserShapesMeta { chart_id, target, mirrored_images, mirrored_shapes })
+}
+
+fn parse_svg_blip_meta(xml: &str) -> Option<(u32, &str)> {
+    let (id, target) = xml.split_once('\t')?;
+    Some((id.parse::<u32>().ok()?, target))
+}
+
+fn active_user_shapes<'a>(sheet: &Sheet, p: &'a Preserved) -> Vec<UserShapesMeta<'a>> {
+    p.elements
+        .iter()
+        .filter(|e| e.slot == SLOT_CHART_USER_SHAPES)
+        .filter_map(|e| parse_user_shapes_meta(&e.xml))
+        .filter(|m| {
+            let key = normalize(m.target);
+            sheet.charts.iter().any(|c| c.id == m.chart_id && !crate::chartex::is_chartex(c.kind))
+                && p.parts.iter().any(|q| normalize(&q.name) == key)
+                && m.mirrored_images.iter().all(|id| sheet.images.iter().any(|i| i.id == *id))
+                && m.mirrored_shapes.iter().all(|id| sheet.shapes.iter().any(|s| s.id == *id))
+        })
+        .collect()
+}
+
+/// Sheet-level kept parts (excluding drawing SVG companions and chart `userShapes` graphs, which
+/// are written alongside their owning drawing/chart parts).
+pub(super) fn sheet_owned_parts(p: &Preserved) -> Vec<PreservedPart> {
+    let has_companions = p.elements.iter().any(|e| e.slot == SLOT_DRAWING_SVG_BLIP || e.slot == SLOT_CHART_USER_SHAPES);
+    if !has_companions {
+        return p.parts.clone();
+    }
+    let mut keep: HashSet<String> = HashSet::new();
+    for r in p.rels.iter().chain(p.vml.iter().flat_map(|v| v.rels.iter())) {
+        keep.extend(reachable(p, r));
+    }
+    p.parts.iter().filter(|q| keep.contains(&normalize(&q.name))).cloned().collect()
+}
+
+/// Model drawing objects mirrored from preserved chart `userShapes` drawings on `sheet`, omitted
+/// from the sheet's own drawing XML so the chart drawing can round-trip without duplicating them.
+pub fn mirrored_user_shape_refs(sheet: &Sheet) -> HashSet<gridcraft_model::DrawingRef> {
+    let Some(p) = sheet.preserved.as_deref() else { return HashSet::new() };
+    let mut out = HashSet::new();
+    for m in active_user_shapes(sheet, p) {
+        for id in m.mirrored_images {
+            out.insert(gridcraft_model::DrawingRef::Image(id));
+        }
+        for id in m.mirrored_shapes {
+            out.insert(gridcraft_model::DrawingRef::Shape(id));
+        }
+    }
+    out
+}
+
+fn parse_rels_bytes(bytes: &[u8]) -> Vec<(String, String, String, bool)> {
+    let Ok(root) = xml::parse(bytes) else { return Vec::new() };
+    root.kids("Relationship")
+        .filter_map(|r| {
+            let id = r.attr("Id")?.to_string();
+            let ty = r.attr("Type")?.to_string();
+            let target = r.attr("Target")?.to_string();
+            let ext = r.attr("TargetMode").is_some_and(|m| m.eq_ignore_ascii_case("external"));
+            Some((id, ty, target, ext))
+        })
+        .collect()
+}
+
+fn format_rels_xml(items: &[(String, String, String, bool)]) -> String {
+    let mut s = format!("{XML_DECL}<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">");
+    for (id, ty, target, ext) in items {
+        let _ = write!(
+            s,
+            "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"{}/>",
+            esc_attr(id),
+            esc_attr(ty),
+            esc_attr(target),
+            if *ext { " TargetMode=\"External\"" } else { "" }
+        );
+    }
+    s.push_str("</Relationships>");
+    s
+}
+
+fn next_rid_num(items: &[(String, String, String, bool)]) -> u32 {
+    items.iter().filter_map(|(id, _, _, _)| id.strip_prefix("rId").and_then(|n| n.parse::<u32>().ok())).max().unwrap_or(0).saturating_add(1)
+}
+
+fn write_user_shapes_subparts(p: &Preserved, root_part: &PreservedPart, out: &mut Out) -> NameMap {
+    let mut sub_keys: HashSet<String> = HashSet::new();
+    for r in &root_part.rels {
+        sub_keys.extend(reachable(p, r));
+    }
+    sub_keys.remove(&normalize(&root_part.name));
+    let mut names = NameMap::new();
+    let mut non_media: Vec<PreservedPart> = Vec::new();
+    for q in &p.parts {
+        let key = normalize(&q.name);
+        if !sub_keys.contains(&key) {
+            continue;
+        }
+        if key.starts_with("xl/media/") {
+            let ext = crate::drawing::image_ext(&q.content_type, &q.data);
+            out.default_type(ext, crate::drawing::image_content_type(ext));
+            let file = out.image_part(ext, &q.data);
+            names.insert(key, format!("xl/media/{file}"));
+        } else {
+            names.entry(key).or_insert_with(|| out.kept.claim(&q.name));
+            non_media.push(q.clone());
+        }
+    }
+    let mut written = HashSet::new();
+    for q in &non_media {
+        let Some(new) = names.get(&normalize(&q.name)).cloned() else { continue };
+        if !written.insert(new.clone()) {
+            continue;
+        }
+        out.part(&new, Some(&q.content_type), q.data.to_vec());
+        if !q.rels.is_empty() {
+            out.part(&rels_part_name(&new), None, part_rels_xml(&q.rels, &names).into_bytes());
+        }
+    }
+    names
+}
+
+fn attach_svg_blips(sheet: &Sheet, p: &Preserved, drawing_num: u32, omitted_imgs: &HashSet<u32>, out: &mut Out) {
+    let svg_map: HashMap<u32, &str> =
+        p.elements.iter().filter(|e| e.slot == SLOT_DRAWING_SVG_BLIP).filter_map(|e| parse_svg_blip_meta(&e.xml)).collect();
+    if svg_map.is_empty() && omitted_imgs.is_empty() {
+        return;
+    }
+    let drawing_part = format!("xl/drawings/drawing{drawing_num}.xml");
+    let drels_part = format!("xl/drawings/_rels/drawing{drawing_num}.xml.rels");
+    let mut rel_items = out.part_mut(&drels_part).map(|b| parse_rels_bytes(b)).unwrap_or_default();
+    let mut next_rid = next_rid_num(&rel_items);
+    let mut rels_changed = false;
+    let mut omitted_rids: HashSet<String> = HashSet::new();
+    let mut svg_patches: Vec<(String, String)> = Vec::new();
+    for (idx, img) in sheet.images.iter().filter(|i| !i.data.is_empty()).enumerate() {
+        let img_rid = format!("rId{}", idx + 1);
+        if omitted_imgs.contains(&img.id) {
+            omitted_rids.insert(img_rid);
+            continue;
+        }
+        let Some(&target) = svg_map.get(&img.id) else { continue };
+        let key = normalize(target);
+        let Some(svg_part) = p.parts.iter().find(|q| normalize(&q.name) == key) else { continue };
+        out.default_type("svg", "image/svg+xml");
+        let file = out.image_part("svg", &svg_part.data);
+        let svg_rid = format!("rId{next_rid}");
+        next_rid = next_rid.saturating_add(1);
+        rel_items.push((svg_rid.clone(), format!("{NS_REL}/image"), format!("../media/{file}"), false));
+        svg_patches.push((img_rid, svg_rid));
+        rels_changed = true;
+    }
+    if !omitted_rids.is_empty() {
+        rel_items.retain(|(id, _, _, _)| !omitted_rids.contains(id));
+        rels_changed = true;
+    }
+    if rels_changed {
+        let xml_bytes = format_rels_xml(&rel_items).into_bytes();
+        if let Some(slot) = out.part_mut(&drels_part) {
+            *slot = xml_bytes;
+        } else if !rel_items.is_empty() {
+            out.part(&drels_part, None, xml_bytes);
+        }
+    }
+    if !svg_patches.is_empty()
+        && let Some(bytes) = out.part_mut(&drawing_part)
+        && let Ok(mut xml) = String::from_utf8(std::mem::take(bytes))
+    {
+        for (img_rid, svg_rid) in svg_patches {
+            let needle = format!("<a:blip r:embed=\"{img_rid}\"/>");
+            let replacement = format!(
+                "<a:blip r:embed=\"{img_rid}\"><a:extLst><a:ext uri=\"{SVG_BLIP_EXT_URI}\"><asvg:svgBlip xmlns:asvg=\"{NS_ASVG}\" r:embed=\"{svg_rid}\"/></a:ext></a:extLst></a:blip>"
+            );
+            if let Some(pos) = xml.find(&needle) {
+                xml.replace_range(pos..pos + needle.len(), &replacement);
+            }
+        }
+        *bytes = xml.into_bytes();
+    }
+}
+
+fn attach_chart_user_shapes(sheet: &Sheet, p: &Preserved, user_shapes: &[UserShapesMeta<'_>], chart_before: u32, out: &mut Out) {
+    for meta in user_shapes {
+        let Some(chart_idx) = sheet.charts.iter().position(|c| c.id == meta.chart_id) else { continue };
+        let chart_num = chart_before + chart_idx as u32 + 1;
+        let chart_part = format!("xl/charts/chart{chart_num}.xml");
+        if !out.has_part(&chart_part) {
+            continue;
+        }
+        let key = normalize(meta.target);
+        let Some(us_part_data) = p.parts.iter().find(|q| normalize(&q.name) == key) else { continue };
+        let sub_names = write_user_shapes_subparts(p, us_part_data, out);
+        out.drawings += 1;
+        let us_dn = out.drawings;
+        let us_part = format!("xl/drawings/drawing{us_dn}.xml");
+        out.part(&us_part, Some(&us_part_data.content_type), us_part_data.data.to_vec());
+        if !us_part_data.rels.is_empty() {
+            out.part(&rels_part_name(&us_part), None, part_rels_xml(&us_part_data.rels, &sub_names).into_bytes());
+        }
+        let crels_part = format!("xl/charts/_rels/chart{chart_num}.xml.rels");
+        let mut crels = out.part_mut(&crels_part).map(|b| parse_rels_bytes(b)).unwrap_or_default();
+        let us_rid = format!("rId{}", next_rid_num(&crels));
+        crels.push((us_rid.clone(), REL_CHART_USER_SHAPES.to_string(), format!("../drawings/drawing{us_dn}.xml"), false));
+        let crels_bytes = format_rels_xml(&crels).into_bytes();
+        if let Some(slot) = out.part_mut(&crels_part) {
+            *slot = crels_bytes;
+        } else {
+            out.part(&crels_part, None, crels_bytes);
+        }
+        if let Some(bytes) = out.part_mut(&chart_part)
+            && let Ok(mut xml) = String::from_utf8(std::mem::take(bytes))
+        {
+            if let Some(pos) = xml.rfind("</c:chartSpace>") {
+                let tag = format!("<c:userShapes r:id=\"{us_rid}\"/>");
+                xml.insert_str(pos, &tag);
+            }
+            *bytes = xml.into_bytes();
+        }
+    }
+}
+
+/// Attaches preserved drawing SVG companions (`asvg:svgBlip`) and chart `userShapes` drawings for
+/// the sheet whose drawing was just written as `xl/drawings/drawing{drawing_num}.xml`.
+pub fn attach_sheet_drawing_companions(sheet: &Sheet, drawing_num: u32, chart_before: u32, out: &mut Out) {
+    let Some(p) = sheet.preserved.as_deref() else { return };
+    let user_shapes = active_user_shapes(sheet, p);
+    let omitted_imgs: HashSet<u32> = user_shapes.iter().flat_map(|m| m.mirrored_images.iter().copied()).collect();
+    attach_svg_blips(sheet, p, drawing_num, &omitted_imgs, out);
+    attach_chart_user_shapes(sheet, p, &user_shapes, chart_before, out);
+}

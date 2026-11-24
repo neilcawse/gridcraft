@@ -13,6 +13,15 @@ use crate::styles::{StylesIn, read_styles};
 use crate::xml::{self, El};
 use crate::{IoError, ReadReport};
 
+/// A chart's `userShapes` drawing collected while reading a sheet, with the model object ids
+/// mirrored from it for display so saving can keep the chart drawing without duplicating them.
+pub struct ChartUserShapesIn {
+    pub chart_id: u32,
+    pub rel: gridcraft_model::PreservedRel,
+    pub mirrored_images: Vec<u32>,
+    pub mirrored_shapes: Vec<u32>,
+}
+
 /// State shared while reading one package.
 pub struct Ctx<'a> {
     pub pkg: Package<'a>,
@@ -65,6 +74,10 @@ pub struct Ctx<'a> {
     pub pending_slicers: Vec<(usize, String, String, gridcraft_model::Anchor, u32)>,
     /// Cell elements read so far, across every sheet (capped by `sheet_read::MAX_CELLS`).
     pub cells: u64,
+    /// Current sheet's picture SVG companions (`asvg:svgBlip`): `(image_id, target_part, bytes)`.
+    pub sheet_svg_blips: Vec<(u32, String, Vec<u8>)>,
+    /// Current sheet's chart `userShapes` drawings, to be preserved alongside their charts.
+    pub sheet_chart_user_shapes: Vec<ChartUserShapesIn>,
 }
 
 /// The most worksheets read from one workbook (as the XLS reader allows).
@@ -349,6 +362,8 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
         sheet_slicer_frames: Default::default(),
         pending_slicers: Default::default(),
         cells: 0,
+        sheet_svg_blips: vec![],
+        sheet_chart_user_shapes: vec![],
     };
     let root_rels = cx.pkg.rels("")?;
     let wb_part = find_rel(&root_rels, "officeDocument").map(|r| r.target.clone()).unwrap_or_else(|| "xl/workbook.xml".into());
@@ -431,12 +446,16 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
         }
         let name = names.unique(&name, i);
         cx.legacy_formulas.clear();
+        cx.sheet_svg_blips.clear();
+        cx.sheet_chart_user_shapes.clear();
         let (mut sheet, read_controls) = match crate::sheet_read::read_sheet(&mut cx, &rel.target, &name) {
             Ok(s) => s,
             Err(IoError::TooLarge(m)) => return Err(IoError::TooLarge(m)),
             Err(e) => {
                 cx.warn(format!("sheet \"{name}\" could not be read: {e}"));
                 cx.legacy_formulas.clear();
+                cx.sheet_svg_blips.clear();
+                cx.sheet_chart_user_shapes.clear();
                 (Sheet::new(name.clone()), Default::default())
             }
         };

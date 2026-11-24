@@ -1161,6 +1161,8 @@ mod tests {
             sheet_slicer_defs: Default::default(),
             sheet_slicer_frames: Default::default(),
             pending_slicers: Default::default(),
+            sheet_svg_blips: vec![],
+            sheet_chart_user_shapes: vec![],
         }
     }
 

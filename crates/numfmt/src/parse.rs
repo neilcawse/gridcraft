@@ -273,6 +273,15 @@ fn parse_cond(s: &str) -> Option<Cond> {
     value.is_finite().then_some(Cond { op, value })
 }
 
+/// OS-dependent date/time override signaled by Excel's pseudo-LCID tags (`[$-F800]` / `[$-F400]`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SystemDateFormat {
+    /// `[$-F800]`: OS System Long Date (en-US: `dddd, mmmm d, yyyy`).
+    LongDate,
+    /// `[$-F400]`: OS System Long Time (en-US: `h:mm:ss AM/PM`).
+    LongTime,
+}
+
 struct Raw {
     toks: Vec<Tok>,
     color: Option<FormatColor>,
@@ -284,6 +293,8 @@ struct Raw {
     prefix: Option<char>,
     /// An unquoted `B` and digit that is not a calendar prefix: Excel rejects the code.
     invalid: bool,
+    /// System long-date or long-time override from `[$-F800]` / `[$-F400]`.
+    system_fmt: Option<SystemDateFormat>,
 }
 
 /// Where a section's body starts: after its leading `[...]` tags, read as `tokenize` reads them.
@@ -305,7 +316,16 @@ fn after_leading_brackets(cs: &[char]) -> (usize, bool) {
 
 fn tokenize(src: &str) -> Raw {
     let cs: Vec<char> = src.chars().collect();
-    let mut raw = Raw { toks: Vec::new(), color: None, cond: None, currency: false, calendar: Calendar::Gregorian, prefix: None, invalid: false };
+    let mut raw = Raw {
+        toks: Vec::new(),
+        color: None,
+        cond: None,
+        currency: false,
+        calendar: Calendar::Gregorian,
+        prefix: None,
+        invalid: false,
+        system_fmt: None,
+    };
     let toks = &mut raw.toks;
     // With no `]` at or after a `[`, that `[` is a literal; checking this once keeps the scan linear.
     let last_close = cs.iter().rposition(|&c| c == ']');
@@ -378,7 +398,7 @@ fn tokenize(src: &str) -> Raw {
                 let close = if last_close.is_some_and(|l| l > i) { cs.get(i + 1..).and_then(|r| r.iter().position(|&d| d == ']')) } else { None };
                 if let Some(p) = close {
                     let content: String = cs.get(i + 1..i + 1 + p).unwrap_or(&[]).iter().collect();
-                    bracket(&mut raw_parts(toks, &mut raw.color, &mut raw.cond, &mut raw.currency), &content);
+                    bracket(&mut raw_parts(toks, &mut raw.color, &mut raw.cond, &mut raw.currency, &mut raw.system_fmt), &content);
                     i += p + 2;
                 } else {
                     push_lit(toks, "[");
@@ -468,10 +488,17 @@ struct RawParts<'a> {
     color: &'a mut Option<FormatColor>,
     cond: &'a mut Option<Cond>,
     currency: &'a mut bool,
+    system_fmt: &'a mut Option<SystemDateFormat>,
 }
 
-fn raw_parts<'a>(toks: &'a mut Vec<Tok>, color: &'a mut Option<FormatColor>, cond: &'a mut Option<Cond>, currency: &'a mut bool) -> RawParts<'a> {
-    RawParts { toks, color, cond, currency }
+fn raw_parts<'a>(
+    toks: &'a mut Vec<Tok>,
+    color: &'a mut Option<FormatColor>,
+    cond: &'a mut Option<Cond>,
+    currency: &'a mut bool,
+    system_fmt: &'a mut Option<SystemDateFormat>,
+) -> RawParts<'a> {
+    RawParts { toks, color, cond, currency, system_fmt }
 }
 
 /// Handles the content of a `[...]` tag.
@@ -488,10 +515,19 @@ fn bracket(p: &mut RawParts<'_>, content: &str) {
         return;
     }
     if let Some(body) = content.strip_prefix('$') {
-        let sym = body.split('-').next().unwrap_or("");
+        let (sym, lcid) = match body.split_once('-') {
+            Some((s, l)) => (s, Some(l)),
+            None => (body, None),
+        };
         if !sym.is_empty() {
             *p.currency = true;
             push_lit(p.toks, sym);
+        } else if let Some(code) = lcid.and_then(|s| u32::from_str_radix(s.trim(), 16).ok()) {
+            match code & 0xFFFF {
+                0xF800 => *p.system_fmt = Some(SystemDateFormat::LongDate),
+                0xF400 => *p.system_fmt = Some(SystemDateFormat::LongTime),
+                _ => {}
+            }
         }
         return;
     }
@@ -515,7 +551,7 @@ fn date_part(t: &Tok) -> Option<DatePart> {
 }
 
 fn analyze(raw: Raw) -> Section {
-    let Raw { toks, color, cond, currency, calendar, prefix, invalid } = raw;
+    let Raw { mut toks, color, cond, currency, calendar, prefix, invalid, system_fmt } = raw;
     let is_date = toks.iter().any(|t| matches!(t, Tok::Date(_)));
     let has_general = toks.iter().any(|t| matches!(t, Tok::General));
     let mut sec = Section {
@@ -540,6 +576,28 @@ fn analyze(raw: Raw) -> Section {
     };
     if is_date {
         sec.kind = SecKind::Date;
+        if let Some(sys_fmt) = system_fmt {
+            toks = match sys_fmt {
+                SystemDateFormat::LongDate => vec![
+                    Tok::Date(DatePart::Day(4)),
+                    Tok::Lit(", ".into()),
+                    Tok::Date(DatePart::Month(4)),
+                    Tok::Lit(" ".into()),
+                    Tok::Date(DatePart::Day(1)),
+                    Tok::Lit(", ".into()),
+                    Tok::Date(DatePart::Year(4)),
+                ],
+                SystemDateFormat::LongTime => vec![
+                    Tok::Date(DatePart::Hour(1)),
+                    Tok::Lit(":".into()),
+                    Tok::Date(DatePart::Minute(2)),
+                    Tok::Lit(":".into()),
+                    Tok::Date(DatePart::Second(2)),
+                    Tok::Lit(" ".into()),
+                    Tok::Date(DatePart::AmPm),
+                ],
+            };
+        }
         return analyze_date(toks, sec);
     }
     if has_general {

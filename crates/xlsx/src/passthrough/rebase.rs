@@ -1,5 +1,5 @@
 use super::read::{first_free_block, merge_vml};
-use super::write::{NameMap, attach, part_rels_xml, remap, write_parts};
+use super::write::{NameMap, attach, part_rels_xml, remap, sheet_owned_parts, write_parts};
 use super::*;
 
 /// A sheet's kept content being written.
@@ -13,7 +13,8 @@ impl<'a> SheetKept<'a> {
     /// Writes the sheet's kept parts and adds their relationships to the sheet's.
     pub fn write(sheet: &'a Sheet, rels: &mut Rels, out: &mut Out) -> SheetKept<'a> {
         let Some(p) = sheet.preserved.as_deref() else { return SheetKept { p: None, names: NameMap::new(), ids: HashMap::new() } };
-        let names = write_parts(out, &p.parts);
+        let parts = sheet_owned_parts(p);
+        let names = write_parts(out, &parts);
         let ids = attach(rels, &p.rels, &names);
         SheetKept { p: Some(p), names, ids }
     }

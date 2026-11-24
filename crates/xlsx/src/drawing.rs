@@ -151,6 +151,11 @@ fn mime_for(name: &str) -> &'static str {
         _ => "application/octet-stream",
     }
 }
+/// Relationship id of an embedded Office 2016+ SVG companion (`<asvg:svgBlip r:embed="…"/>`)
+/// inside a picture's `<a:blip><a:extLst>`.
+fn blip_svg_rid(blip: &El) -> Option<&str> {
+    blip.child("extLst")?.kids("ext").find_map(|ext| ext.child("svgBlip").and_then(|svg| svg.attr("embed")))
+}
 
 /// Where a drawing object goes: the model anchor pictures, charts and shapes take, the pixel box
 /// a group lays its children out in, and the enclosing space's scale (pixels per EMU) and flips.
@@ -340,7 +345,8 @@ fn read_object(
     let anchor = place.anchor;
     match obj.name.as_str() {
         "pic" => {
-            let Some(rid) = obj.path(&["blipFill", "blip"]).and_then(|b| b.attr("embed")) else { return Ok(None) };
+            let Some(blip) = obj.path(&["blipFill", "blip"]) else { return Ok(None) };
+            let Some(rid) = blip.attr("embed") else { return Ok(None) };
             let Some(rel) = rels.iter().find(|r| r.id == rid && !r.external) else {
                 cx.warn("a linked (not embedded) picture was skipped");
                 return Ok(None);
@@ -352,6 +358,16 @@ fn read_object(
             };
             let alt = obj.path(&["nvPicPr", "cNvPr"]).and_then(|c| c.attr("descr")).unwrap_or("").to_string();
             let id = cx.next_object_id();
+            if let Some(svg_rid) = blip_svg_rid(blip)
+                && let Some(svg_rel) = rels.iter().find(|r| r.id == svg_rid && !r.external)
+            {
+                let svg_target = svg_rel.target.clone();
+                match cx.pkg.read_limited(&svg_target, crate::passthrough::MAX_KEPT_PART) {
+                    Ok(Some(svg_data)) => cx.sheet_svg_blips.push((id, svg_target, svg_data)),
+                    Ok(None) => cx.warn(format!("missing SVG picture {svg_target}")),
+                    Err(e) => cx.warn(format!("skipped SVG picture {svg_target}: {e}")),
+                }
+            }
             sheet.images.push(Image { id, anchor, data: data.into(), mime: mime_for(&target).to_string(), alt });
             Ok(Some(DrawingRef::Image(id)))
         }
@@ -384,7 +400,7 @@ fn read_object(
                                 cx.pivot_charts.push((id, caches));
                             }
                             sheet.charts.push(ch);
-                            read_user_shapes(cx, &target, &cx_xml, anchor, sheet)?;
+                            read_user_shapes(cx, (!chartex).then_some(id), &target, &cx_xml, anchor, sheet)?;
                             return Ok(Some(DrawingRef::Chart(id)));
                         }
                         None => cx.warn(format!("chart {target} has no supported plot and was skipped")),
@@ -554,13 +570,22 @@ fn optional_annotation_xml(cx: &mut Ctx<'_>, part: &str) -> Result<Option<El>, I
         }
     }
 }
-fn read_user_shapes(cx: &mut Ctx<'_>, chart_part: &str, chart_xml: &El, chart_anchor: Anchor, sheet: &mut Sheet) -> Result<(), IoError> {
+fn read_user_shapes(
+    cx: &mut Ctx<'_>,
+    chart_id: Option<u32>,
+    chart_part: &str,
+    chart_xml: &El,
+    chart_anchor: Anchor,
+    sheet: &mut Sheet,
+) -> Result<(), IoError> {
     let Some(rid) = chart_xml.child("userShapes").and_then(|u| u.attr("id")) else { return Ok(()) };
     let Some(chart_rels) = optional_annotation_rels(cx, chart_part)? else { return Ok(()) };
     let Some(rel) = chart_rels.iter().find(|r| r.id == rid && !r.external) else { return Ok(()) };
     let us_part = rel.target.clone();
     let Some(us_xml) = optional_annotation_xml(cx, &us_part)? else { return Ok(()) };
     let Some(us_rels) = optional_annotation_rels(cx, &us_part)? else { return Ok(()) };
+    let mut mirrored_images = Vec::new();
+    let mut mirrored_shapes = Vec::new();
     let chart_x = sheet.col_left(chart_anchor.cell.col) + chart_anchor.dx as f64;
     let chart_y = sheet.row_top(chart_anchor.cell.row) + chart_anchor.dy as f64;
     let chart_w = chart_anchor.width.max(0.0) as f64;
@@ -606,17 +631,32 @@ fn read_user_shapes(cx: &mut Ctx<'_>, chart_part: &str, chart_xml: &El, chart_an
                     };
                     let alt = obj.path(&["nvPicPr", "cNvPr"]).and_then(|c| c.attr("descr")).unwrap_or("").to_string();
                     let id = cx.next_object_id();
+                    mirrored_images.push(id);
                     sheet.images.push(Image { id, anchor: sub_anchor, data: data.into(), mime: mime_for(&target).to_string(), alt });
                 }
                 "sp" | "cxnSp" => {
                     if let Some(s) = read_shape(obj, sub_anchor, false) {
                         let id = cx.next_object_id();
+                        mirrored_shapes.push(id);
                         sheet.shapes.push(Shape { id, ..s });
                     }
                 }
                 _ => {}
             }
         }
+    }
+    if let Some(chart_id) = chart_id {
+        cx.sheet_chart_user_shapes.push(crate::read::ChartUserShapesIn {
+            chart_id,
+            rel: gridcraft_model::PreservedRel {
+                id: rid.to_string(),
+                rel_type: crate::passthrough::REL_CHART_USER_SHAPES.to_string(),
+                target: us_part,
+                external: false,
+            },
+            mirrored_images,
+            mirrored_shapes,
+        });
     }
     Ok(())
 }
@@ -1212,7 +1252,11 @@ pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>]) -> String {
         groups_done: HashSet::new(),
         next_id: 2,
     };
+    let mirrored = crate::passthrough::mirrored_user_shape_refs(sheet);
     for (i, o) in objs.iter().enumerate() {
+        if o.drawing_ref().is_some_and(|r| mirrored.contains(&r)) {
+            continue;
+        }
         if let Some(dref) = o.drawing_ref()
             && let Some(gid) = out.outer_group(dref)
             && !out.groups_done.contains(&gid)

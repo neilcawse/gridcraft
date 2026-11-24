@@ -1135,3 +1135,190 @@ fn sheet_document_tasks_survive_a_save() {
     let sheet = sheet_part(&u, "TasksSheet");
     assert!(u.rels(&sheet).iter().any(|r| r.1.ends_with("/documenttask") && u.parts.get(&r.2).is_some_and(|b| b == task_xml.as_bytes())));
 }
+
+#[test]
+fn svg_blip_picture_round_trips_both_raster_and_svg() {
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\nfake-png-fallback";
+    const SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><circle cx="12" cy="12" r="10"/></svg>"#;
+    let ct = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="png" ContentType="image/png"/>
+  <Default Extension="svg" ContentType="image/svg+xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>
+</Types>"#;
+    let root_rels = rels(&[("rId1", "officeDocument", "xl/workbook.xml")]);
+    let wb_xml = format!(
+        r#"<?xml version="1.0"?><workbook xmlns="{NS_MAIN}" xmlns:r="{NS_R}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#
+    );
+    let wb_rels = rels(&[("rId1", "worksheet", "worksheets/sheet1.xml")]);
+    let sheet_xml = format!(r#"<?xml version="1.0"?><worksheet xmlns="{NS_MAIN}" xmlns:r="{NS_R}"><sheetData/><drawing r:id="rId1"/></worksheet>"#);
+    let sheet_rels = rels(&[("rId1", "drawing", "../drawings/drawing1.xml")]);
+    let drawing_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <xdr:twoCellAnchor>
+    <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+    <xdr:to><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+    <xdr:pic>
+      <xdr:nvPicPr><xdr:cNvPr id="2" name="Graphic 1" descr="VectorGauge"/><xdr:cNvPicPr/></xdr:nvPicPr>
+      <xdr:blipFill>
+        <a:blip r:embed="rId1">
+          <a:extLst>
+            <a:ext uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}">
+              <asvg:svgBlip xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main" r:embed="rId2"/>
+            </a:ext>
+          </a:extLst>
+        </a:blip>
+        <a:stretch><a:fillRect/></a:stretch>
+      </xdr:blipFill>
+      <xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100000" cy="100000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>
+    </xdr:pic>
+    <xdr:clientData/>
+  </xdr:twoCellAnchor>
+</xdr:wsDr>"#;
+    let drawing_rels = rels(&[("rId1", "image", "../media/image1.png"), ("rId2", "image", "../media/image2.svg")]);
+    let bytes = make_zip(&[
+        ("[Content_Types].xml", ct.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("xl/workbook.xml", wb_xml.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", wb_rels.as_bytes()),
+        ("xl/worksheets/sheet1.xml", sheet_xml.as_bytes()),
+        ("xl/worksheets/_rels/sheet1.xml.rels", sheet_rels.as_bytes()),
+        ("xl/drawings/drawing1.xml", drawing_xml.as_bytes()),
+        ("xl/drawings/_rels/drawing1.xml.rels", drawing_rels.as_bytes()),
+        ("xl/media/image1.png", PNG),
+        ("xl/media/image2.svg", SVG),
+    ]);
+    // Double round-trip: read -> write -> read -> write.
+    let (wb1, rep1) = read_xlsx(&bytes).unwrap();
+    assert!(!rep1.warnings.iter().any(|w| w.contains("SVG")), "{:?}", rep1.warnings);
+    let saved1 = write_xlsx(&wb1).unwrap();
+    let (wb2, _) = read_xlsx(&saved1).unwrap();
+    let saved2 = write_xlsx(&wb2).unwrap();
+    for saved in [&saved1, &saved2] {
+        let u = Unpacked::new(saved);
+        u.assert_valid();
+        let media: Vec<&String> = u.parts.keys().filter(|k| k.starts_with("xl/media/")).collect();
+        assert_eq!(media.len(), 2, "expected PNG + SVG media parts, got {media:?}");
+        let svg_part = media.iter().find(|k| k.ends_with(".svg")).expect("SVG part missing");
+        assert_eq!(u.parts[*svg_part], SVG);
+        let png_part = media.iter().find(|k| k.ends_with(".png")).expect("PNG part missing");
+        assert_eq!(u.parts[*png_part], PNG);
+        let dxml = String::from_utf8_lossy(&u.parts["xl/drawings/drawing1.xml"]);
+        assert!(dxml.contains("asvg:svgBlip"), "drawing XML missing svgBlip: {dxml}");
+        let drels = u.rels("xl/drawings/drawing1.xml");
+        assert_eq!(drels.len(), 2, "expected 2 drawing image rels, got {drels:?}");
+    }
+}
+
+#[test]
+fn chart_user_shapes_round_trips_without_duplicating_shapes_or_media() {
+    const BADGE_PNG: &[u8] = b"\x89PNG\r\n\x1a\nfake-badge";
+    let ct = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="png" ContentType="image/png"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>
+  <Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>
+  <Override PartName="/xl/drawings/drawing2.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chartshapes+xml"/>
+</Types>"#;
+    let root_rels = rels(&[("rId1", "officeDocument", "xl/workbook.xml")]);
+    let wb_xml = format!(
+        r#"<?xml version="1.0"?><workbook xmlns="{NS_MAIN}" xmlns:r="{NS_R}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#
+    );
+    let wb_rels = rels(&[("rId1", "worksheet", "worksheets/sheet1.xml")]);
+    let sheet_xml = format!(
+        r#"<?xml version="1.0"?><worksheet xmlns="{NS_MAIN}" xmlns:r="{NS_R}"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData><drawing r:id="rId1"/></worksheet>"#
+    );
+    let sheet_rels = rels(&[("rId1", "drawing", "../drawings/drawing1.xml")]);
+    let drawing1 = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <xdr:twoCellAnchor>
+    <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+    <xdr:to><xdr:col>6</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>12</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+    <xdr:graphicFrame>
+      <xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="Chart 1"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>
+      <xdr:xfrm/>
+      <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rId1"/></a:graphicData></a:graphic>
+    </xdr:graphicFrame>
+    <xdr:clientData/>
+  </xdr:twoCellAnchor>
+</xdr:wsDr>"#;
+    let drawing1_rels = rels(&[("rId1", "chart", "../charts/chart1.xml")]);
+    let chart1 = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <c:chart><c:plotArea><c:lineChart><c:grouping val="standard"/><c:ser><c:idx val="0"/><c:val><c:numRef><c:f>Sheet1!$A$1:$A$1</c:f></c:numRef></c:val></c:ser></c:lineChart></c:plotArea></c:chart>
+  <c:userShapes r:id="rId1"/>
+</c:chartSpace>"#;
+    let chart1_rels = rels(&[("rId1", "chartUserShapes", "../drawings/drawing2.xml")]);
+    let drawing2 = r#"<c:userShapes xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:cdr="http://schemas.openxmlformats.org/drawingml/2006/chartDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <cdr:relSizeAnchor>
+    <cdr:from><cdr:x>0.2</cdr:x><cdr:y>0.2</cdr:y></cdr:from>
+    <cdr:to><cdr:x>0.8</cdr:x><cdr:y>0.8</cdr:y></cdr:to>
+    <cdr:sp macro="" textlink=""><cdr:nvSpPr><cdr:cNvPr id="2" name="TextBox 1"/><cdr:cNvSpPr txBox="1"/></cdr:nvSpPr><cdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></cdr:spPr><cdr:txBody><a:bodyPr/><a:p><a:r><a:t>OverlayNote</a:t></a:r></a:p></cdr:txBody></cdr:sp>
+    <cdr:pic><cdr:nvPicPr><cdr:cNvPr id="3" name="Badge" descr="ChartBadge"/><cdr:cNvPicPr/></cdr:nvPicPr><cdr:blipFill><a:blip r:embed="rId1"/></cdr:blipFill><cdr:spPr/></cdr:pic>
+  </cdr:relSizeAnchor>
+</c:userShapes>"#;
+    let drawing2_rels = rels(&[("rId1", "image", "../media/badge.png")]);
+    let bytes = make_zip(&[
+        ("[Content_Types].xml", ct.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("xl/workbook.xml", wb_xml.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", wb_rels.as_bytes()),
+        ("xl/worksheets/sheet1.xml", sheet_xml.as_bytes()),
+        ("xl/worksheets/_rels/sheet1.xml.rels", sheet_rels.as_bytes()),
+        ("xl/drawings/drawing1.xml", drawing1.as_bytes()),
+        ("xl/drawings/_rels/drawing1.xml.rels", drawing1_rels.as_bytes()),
+        ("xl/charts/chart1.xml", chart1.as_bytes()),
+        ("xl/charts/_rels/chart1.xml.rels", chart1_rels.as_bytes()),
+        ("xl/drawings/drawing2.xml", drawing2.as_bytes()),
+        ("xl/drawings/_rels/drawing2.xml.rels", drawing2_rels.as_bytes()),
+        ("xl/media/badge.png", BADGE_PNG),
+    ]);
+    let (wb1, rep1) = read_xlsx(&bytes).unwrap();
+    assert!(!rep1.warnings.iter().any(|w| w.contains("dropped")), "{:?}", rep1.warnings);
+    let sh1 = wb1.sheet(0).unwrap();
+    assert_eq!(sh1.charts.len(), 1);
+    assert_eq!(sh1.shapes.len(), 1);
+    assert_eq!(sh1.images.len(), 1);
+
+    let saved1 = write_xlsx(&wb1).unwrap();
+    let (wb2, _) = read_xlsx(&saved1).unwrap();
+    let sh2 = wb2.sheet(0).unwrap();
+    assert_eq!(sh2.charts.len(), 1, "chart count after round-trip");
+    assert_eq!(sh2.shapes.len(), 1, "overlay shape must not duplicate on round-trip");
+    assert_eq!(sh2.images.len(), 1, "overlay image must not duplicate on round-trip");
+    let saved2 = write_xlsx(&wb2).unwrap();
+
+    for saved in [&saved1, &saved2] {
+        let u = Unpacked::new(saved);
+        u.assert_valid();
+        let drawings: Vec<&String> = u.parts.keys().filter(|k| k.starts_with("xl/drawings/") && k.ends_with(".xml")).collect();
+        assert_eq!(drawings.len(), 2, "expected sheet drawing + chart userShapes drawing, got {drawings:?}");
+        let media: Vec<&String> = u.parts.keys().filter(|k| k.starts_with("xl/media/")).collect();
+        assert_eq!(media.len(), 1, "expected 1 deduplicated media part, got {media:?}");
+        assert_eq!(u.parts[media[0]], BADGE_PNG);
+        let d1 = String::from_utf8_lossy(&u.parts["xl/drawings/drawing1.xml"]);
+        assert!(!d1.contains("<xdr:sp"), "sheet drawing must not duplicate chart userShapes shape");
+        assert!(!d1.contains("<xdr:pic"), "sheet drawing must not duplicate chart userShapes picture");
+        let cxml = String::from_utf8_lossy(&u.parts["xl/charts/chart1.xml"]);
+        assert!(cxml.contains("<c:userShapes r:id=\"rId1\"/>"), "chart XML missing userShapes ref: {cxml}");
+        let crels = u.rels("xl/charts/chart1.xml");
+        assert!(crels.iter().any(|r| r.1.ends_with("/chartUserShapes") && r.2 == "xl/drawings/drawing2.xml"), "{crels:?}");
+    }
+
+    // Deleting the chart drops its chartUserShapes drawing cleanly.
+    let mut wb_del = wb1.clone();
+    Arc::make_mut(&mut wb_del.sheets[0]).charts.clear();
+    let saved_del = write_xlsx(&wb_del).unwrap();
+    let u_del = Unpacked::new(&saved_del);
+    u_del.assert_valid();
+    let d_del: Vec<&String> = u_del.parts.keys().filter(|k| k.starts_with("xl/drawings/") && k.ends_with(".xml")).collect();
+    assert_eq!(d_del.len(), 1, "deleting chart should drop its userShapes part, got {d_del:?}");
+}

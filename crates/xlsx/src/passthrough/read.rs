@@ -287,6 +287,8 @@ impl KeptReader {
     /// sheet reader modelled (their VML shapes are left out of the kept content) and whether the
     /// VML drawing holds others that only it lists.
     pub fn sheet(&mut self, cx: &mut Ctx<'_>, part: &str, name: &str, controls: &crate::controls::ReadControls) -> Option<Arc<Preserved>> {
+        let svg_blips = std::mem::take(&mut cx.sheet_svg_blips);
+        let chart_user_shapes = std::mem::take(&mut cx.sheet_chart_user_shapes);
         if !self.on {
             return None;
         }
@@ -310,7 +312,47 @@ impl KeptReader {
         if rels.iter().any(|r| is_kind(r, SHEET_ELEMENT_KINDS)) || vml_drawings > notes || controls.vml_only_unmodelled {
             self.sheet_elements(cx, part, name, &rels, &mut p, &mut seen, controls);
         }
+        self.keep_drawing_companions(cx, name, &mut p, &mut seen, svg_blips, chart_user_shapes);
         (!p.is_empty()).then(|| Arc::new(p))
+    }
+
+    fn keep_drawing_companions(
+        &mut self,
+        cx: &mut Ctx<'_>,
+        name: &str,
+        p: &mut Preserved,
+        seen: &mut HashSet<String>,
+        svg_blips: Vec<(u32, String, Vec<u8>)>,
+        chart_user_shapes: Vec<crate::read::ChartUserShapesIn>,
+    ) {
+        for (img_id, target, data) in svg_blips {
+            let key = normalize(&target);
+            if !seen.contains(&key) {
+                if self.parts_left == 0 || data.len() > self.budget {
+                    cx.warn(format!("sheet \"{name}\": SVG picture {target} was dropped: budget exceeded"));
+                    continue;
+                }
+                let content_type = self.content_type(&target).unwrap_or_else(|| "image/svg+xml".into());
+                self.budget = self.budget.saturating_sub(data.len());
+                self.parts_left = self.parts_left.saturating_sub(1);
+                seen.insert(key);
+                p.parts.push(PreservedPart { name: target.clone(), content_type, data: Arc::from(data), rels: vec![] });
+            }
+            p.elements.push(PreservedXml { slot: SLOT_DRAWING_SVG_BLIP.into(), xml: format!("{img_id}\t{target}") });
+        }
+        for entry in chart_user_shapes {
+            let mut q = Preserved::default();
+            match self.keep_through(cx, &mut q, std::slice::from_ref(&entry.rel), seen, &["chartUserShapes"]) {
+                Ok(()) => {
+                    p.parts.extend(q.parts);
+                    let imgs = entry.mirrored_images.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+                    let shapes = entry.mirrored_shapes.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+                    let xml = format!("{}\t{}\t{imgs}\t{shapes}", entry.chart_id, entry.rel.target);
+                    p.elements.push(PreservedXml { slot: SLOT_CHART_USER_SHAPES.into(), xml });
+                }
+                Err(why) => cx.warn(format!("sheet \"{name}\": chart drawing {} was dropped: {why}", entry.rel.target)),
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

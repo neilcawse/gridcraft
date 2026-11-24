@@ -50,8 +50,20 @@ pub use read::KeptReader;
 pub use rebase::{SheetKept, rebase_links};
 #[cfg(test)]
 pub(crate) use write::sheet_names_in;
-pub use write::{KeptOut, SheetIds, WorkbookKept, workbook_elements, write_package_rels, write_workbook};
+pub use write::{
+    KeptOut, SheetIds, WorkbookKept, attach_sheet_drawing_companions, mirrored_user_shape_refs, workbook_elements, write_package_rels, write_workbook,
+};
 
+/// Slot for a picture's preserved Office 2016+ SVG companion (`asvg:svgBlip`).
+pub(crate) const SLOT_DRAWING_SVG_BLIP: &str = "drawingSvgBlip";
+/// Slot for a chart's preserved `chartUserShapes` drawing part.
+pub(crate) const SLOT_CHART_USER_SHAPES: &str = "chartUserShapes";
+/// Relationship URI of a chart's user shapes drawing part.
+pub(crate) const REL_CHART_USER_SHAPES: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartUserShapes";
+/// Extension URI for `<asvg:svgBlip>` inside `<a:blip><a:extLst>`.
+pub(crate) const SVG_BLIP_EXT_URI: &str = "{96DAC541-7B7A-43D3-8B79-37D633B846F1}";
+/// Namespace URI of `<asvg:svgBlip>`.
+pub(crate) const NS_ASVG: &str = "http://schemas.microsoft.com/office/drawing/2016/SVG/main";
 /// Most bytes kept for one workbook.
 pub const MAX_KEPT_TOTAL: usize = 256 * 1024 * 1024;
 /// Largest single kept part.

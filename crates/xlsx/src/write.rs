@@ -179,6 +179,12 @@ impl Out {
     pub fn default_type(&mut self, ext: &str, ct: &str) {
         self.defaults.entry(ext.to_string()).or_insert_with(|| ct.to_string());
     }
+    pub fn part_mut(&mut self, name: &str) -> Option<&mut Vec<u8>> {
+        self.parts.iter_mut().find(|(n, _)| n == name).map(|(_, data)| data)
+    }
+    pub fn has_part(&self, name: &str) -> bool {
+        self.parts.iter().any(|(n, _)| n == name)
+    }
 }
 
 /// Id of the i-th person of `xl/persons/person.xml`: a GUID-shaped, deterministic id (the
@@ -497,7 +503,12 @@ fn write_sheets(
     let mut ids = crate::passthrough::SheetIds::new(wb, &kept);
     for (i, sheet) in wb.sheets.iter().enumerate() {
         sheets_xml.push_str(&kept.sheet_entries(i, false, &mut ids));
+        let drawing_before = out.drawings;
+        let chart_before = out.charts;
         let (xml, mut rels) = crate::sheet_write::write_sheet(wb, i, i == active, out);
+        if out.drawings > drawing_before {
+            crate::passthrough::attach_sheet_drawing_companions(sheet, out.drawings, chart_before, out);
+        }
         pivots.add_sheet(wb, i, out, &mut rels);
         let name = format!("xl/worksheets/sheet{}.xml", i + 1);
         out.part(&name, Some(CT_WORKSHEET), xml.into_bytes());
