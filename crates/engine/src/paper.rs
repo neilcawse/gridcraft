@@ -47,6 +47,9 @@ pub struct PageGrid {
     pub data_cols: (usize, usize),
     /// The sheet's page order, which numbers the printed pages.
     pub page_order: PageOrder,
+    /// Printed pages in print order, indexed into `row_bands` × `col_bands` (matching the
+    /// trimmed page list from PDF export).
+    printed_pages: Vec<(usize, usize)>,
     ri: LineIndex,
     ci: LineIndex,
 }
@@ -83,6 +86,17 @@ impl PageGrid {
         let area = printed.area;
         let data_rows = band_range(&row_bands, area.start.row, area.end.row);
         let data_cols = band_range(&col_bands, area.start.col, area.end.col);
+        let printed_pages: Vec<(usize, usize)> = printed
+            .pages
+            .iter()
+            .filter_map(|&(ri, ci)| {
+                let rb = printed.row_bands.get(ri)?;
+                let cb = printed.col_bands.get(ci)?;
+                let gi = row_bands.iter().position(|b| b.1 >= rb.0)?;
+                let gj = col_bands.iter().position(|b| b.1 >= cb.0)?;
+                Some((gi, gj))
+            })
+            .collect();
         Some(PageGrid {
             page_w: to_layout(lay.page_w),
             page_h: to_layout(lay.page_h),
@@ -99,6 +113,7 @@ impl PageGrid {
             data_rows,
             data_cols,
             page_order: printed.settings.page_order,
+            printed_pages,
             ri: LineIndex::new(&sh.rows, sh.default_row_height, MAX_ROWS),
             ci: LineIndex::new(&sh.cols, sh.default_col_width, MAX_COLS),
         })
@@ -207,16 +222,11 @@ impl PageGrid {
 
     /// Page `(i, j)` holds printed data (others are "Click to add data" pages).
     pub fn is_data_page(&self, i: usize, j: usize) -> bool {
-        (self.data_rows.0..=self.data_rows.1).contains(&i) && (self.data_cols.0..=self.data_cols.1).contains(&j)
+        self.printed_pages.contains(&(i, j))
     }
     /// Printed page number of page `(i, j)` (in the sheet's page order) and the printed page count.
     pub fn page_number(&self, i: usize, j: usize) -> Option<(usize, usize)> {
-        if !self.is_data_page(i, j) {
-            return None;
-        }
-        let rows = self.data_rows.1 - self.data_rows.0 + 1;
-        let cols = self.data_cols.1 - self.data_cols.0 + 1;
-        Some((self.page_order.index(i - self.data_rows.0, j - self.data_cols.0, rows, cols) + 1, rows * cols))
+        self.printed_pages.iter().position(|&p| p == (i, j)).map(|idx| (idx + 1, self.printed_pages.len()))
     }
 
     /// Page rows and columns overlapping the layout rectangle `[x0, x1] × [y0, y1]`.
@@ -372,5 +382,24 @@ mod tests {
         assert_eq!(g.col_at(-5.0), 0);
         assert_eq!(need_for(&Sheet::new("S"), f64::MAX, f64::MAX), (MAX_ROWS - 1, MAX_COLS - 1));
         assert!(PageGrid::build(&wb, 7, 0, 0).is_none());
+    }
+
+    #[test]
+    fn page_grid_numbering_matches_trimmed_printed_pages() {
+        let mut wb = Workbook::new();
+        let sh = wb.sheet_mut(0).unwrap();
+        // Sparse L-shaped sheet: 60 rows in col A + wide header in col L => 2×2 bands with blank trailing (1, 1) trimmed.
+        for r in 0..60 {
+            sh.set_value(CellRef::new(r, 0), gridcraft_core::Value::Number(r as f64));
+        }
+        sh.set_value(CellRef::new(0, 11), gridcraft_core::Value::text("Wide header"));
+        let printed = print::layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
+        assert_eq!(printed.pages, vec![(0, 0), (1, 0), (0, 1)]);
+        let g = PageGrid::build(&wb, 0, 100, 20).unwrap();
+        assert_eq!(g.page_number(0, 0), Some((1, 3)));
+        assert_eq!(g.page_number(1, 0), Some((2, 3)));
+        assert_eq!(g.page_number(0, 1), Some((3, 3)));
+        assert_eq!(g.page_number(1, 1), None);
+        assert!(!g.is_data_page(1, 1));
     }
 }

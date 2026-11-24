@@ -363,6 +363,8 @@ pub struct PivotStyleLayout {
     pub row_subheading: Vec<Option<u8>>,
     /// Role of each column starting at `body_range.start.col + first_data_col`.
     pub col_roles: Vec<PivotColRole>,
+    /// Subheading depth (`0`..=`2`) for parent-level column groups, used when `show_col_headers` is on.
+    pub col_subheading: Vec<Option<u8>>,
 }
 
 /// Shared layout cache for PivotTable dynamic style resolution. Compares equal in [`PartialEq`]
@@ -727,8 +729,7 @@ mod pivot_style_model_tests {
     fn custom_style_and_style_grid_do_not_break_logical_equality() {
         let mut a = PivotTable::default();
         let mut b = PivotTable::default();
-        let mut hdr = Style::default();
-        hdr.fill = Fill::solid(Color::Rgb(0x1F4E79));
+        let hdr = Style { fill: Fill::solid(Color::Rgb(0x1F4E79)), ..Style::default() };
         a.custom_style = PivotCustomStyle(Some(Arc::new(vec![PivotStyleElement { kind: "headerRow".into(), size: 1, style: hdr }])));
         a.style_grid = PivotStyleGrid(Some(Arc::new(PivotStyleLayout {
             body_range: Some(RangeRef::new(CellRef::new(1, 0), CellRef::new(5, 2))),
@@ -740,6 +741,7 @@ mod pivot_style_model_tests {
             row_roles: vec![PivotRowRole::Data, PivotRowRole::Subtotal(0), PivotRowRole::Data, PivotRowRole::GrandTotal],
             row_subheading: vec![None; 4],
             col_roles: vec![PivotColRole::Data, PivotColRole::GrandTotal],
+            col_subheading: vec![None; 2],
         })));
         assert_eq!(a, b);
         // Changing style_options DOES affect equality.

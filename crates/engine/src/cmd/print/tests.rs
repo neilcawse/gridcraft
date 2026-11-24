@@ -379,20 +379,20 @@ fn page_count_300_rows_letter_portrait() {
     let mut s = s();
     let rows: Vec<Vec<Json>> = (1..=300).map(|i| vec![json!(i)]).collect();
     s.execute("range.setValues", json!({"range": "A1", "values": rows})).unwrap();
-    // 684pt of printable height / 15pt rows = 45 rows per page → 7 pages.
+    // Calibri 11pt 600-dpi row height is 14.52pt (121 dots): 683.04pt / 14.52pt = 47 rows per page → 7 pages.
     let (pdf, pages) = pdf_of(&mut s, json!({}));
     assert_eq!(pages, 7);
     assert!(pdf.starts_with(b"%PDF-1.7"));
     assert!(contains(&pdf, "/Count 7"));
     let pv = s.execute("file.printPreview", json!({})).unwrap();
     assert_eq!(pv["pages"], 7);
-    assert_eq!(pv["pageList"][0]["rows"], "1:45");
-    assert_eq!(pv["pageList"][1]["rows"], "46:90");
-    assert_eq!(s.execute("file.printPreview", json!({"page": 7})).unwrap()["page"]["rows"], "271:300");
+    assert_eq!(pv["pageList"][0]["rows"], "1:47");
+    assert_eq!(pv["pageList"][1]["rows"], "48:94");
+    assert_eq!(s.execute("file.printPreview", json!({"page": 7})).unwrap()["page"]["rows"], "283:300");
     assert!(s.execute("file.printPreview", json!({"page": 8})).is_err());
-    // Landscape: 504pt / 15 = 33 rows per page → 10 pages.
+    // Landscape: 503.04pt / 14.52pt = 34 rows per page → 9 pages.
     s.execute("pageLayout.pageSetup", json!({"orientation": "landscape"})).unwrap();
-    assert_eq!(pdf_of(&mut s, json!({})).1, 10);
+    assert_eq!(pdf_of(&mut s, json!({})).1, 9);
     // Fit to one page.
     assert_eq!(pdf_of(&mut s, json!({"fitToPage": true})).1, 1);
     s.execute("pageLayout.pageSetup", json!({"fitWidth": 1, "fitHeight": 2, "orientation": "portrait"})).unwrap();
@@ -401,8 +401,8 @@ fn page_count_300_rows_letter_portrait() {
     s.execute("pageLayout.pageSetup", json!({"scale": 100, "rowBreaks": [11], "titleRows": "1:1"})).unwrap();
     let pv = s.execute("file.printPreview", json!({})).unwrap();
     assert_eq!(pv["pageList"][0]["rows"], "1:10");
-    // Title row takes one line on later pages: 44 body rows.
-    assert_eq!(pv["pageList"][1]["rows"], "11:54");
+    // Title row takes one line on later pages: 46 body rows.
+    assert_eq!(pv["pageList"][1]["rows"], "11:56");
 }
 
 #[test]
@@ -411,11 +411,11 @@ fn wide_sheet_goes_down_then_over() {
     let rows: Vec<Vec<Json>> = (0..60).map(|r| (0..15).map(|c| json!(r * 100 + c)).collect()).collect();
     s.execute("range.setValues", json!({"range": "A1", "values": rows})).unwrap();
     let pv = s.execute("file.printPreview", json!({})).unwrap();
-    // Default Calibri 11pt columns are ~51.57pt wide on paper: 511.2pt / 51.57pt = 9 columns (A:I); 45 rows per page.
+    // Default Calibri 11pt columns are ~51.57pt wide on paper (9 cols A:I); 14.52pt rows (47 rows per page).
     assert_eq!(pv["pages"], 4);
-    assert_eq!(pv["pageList"][0]["range"], "A1:I45");
-    assert_eq!(pv["pageList"][1]["range"], "A46:I60");
-    assert_eq!(pv["pageList"][2]["range"], "J1:O45");
+    assert_eq!(pv["pageList"][0]["range"], "A1:I47");
+    assert_eq!(pv["pageList"][1]["range"], "A48:I60");
+    assert_eq!(pv["pageList"][2]["range"], "J1:O47");
 }
 
 /// The ranges of the printed pages, in print order.
@@ -536,7 +536,7 @@ fn page_order_without_breaks_and_with_print_titles() {
         s.execute("pageLayout.pageSetup", json!({"pageOrder": "downThenOver"})).unwrap();
         let down = page_ranges(&mut s);
         if !titles {
-            assert_eq!(down, ["A1:I45", "A46:I60", "J1:O45", "J46:O60"]);
+            assert_eq!(down, ["A1:I47", "A48:I60", "J1:O47", "J48:O60"]);
         }
         s.execute("pageLayout.pageSetup", json!({"pageOrder": "overThenDown"})).unwrap();
         let over = page_ranges(&mut s);
@@ -1383,4 +1383,118 @@ fn unwrapped_text_overflows_across_empty_and_hidden_neighbours_at_print_column_s
     let clip_w = parts[2];
     let expected_ab_w = (178.0 + 178.0) * lays[0].col_px_to_pt;
     assert!((clip_w - expected_ab_w).abs() < 0.2, "overflow clip width {clip_w} should span A+B ({expected_ab_w})");
+}
+
+#[test]
+fn range_override_and_print_titles_suppress_blank_trailing_page_trimming() {
+    let mut wb = Workbook::new();
+    let sh = wb.sheet_mut(0).unwrap();
+    for r in 0..60 {
+        sh.set_value(CellRef::new(r, 0), Value::Number(r as f64));
+    }
+    sh.set_value(CellRef::new(0, 11), Value::text("Wide header"));
+
+    // Explicit range override keeps all 4 pages, including blank trailing (1, 1).
+    let ovr = RangeRef::new(CellRef::new(0, 0), CellRef::new(59, 11));
+    let lay_ovr = layout_sheet(&wb, 0, &PrintOptions::default(), Some(ovr)).unwrap();
+    assert_eq!(lay_ovr.pages.len(), 4);
+
+    // Repeated title rows/cols keep trailing pages because titles print on them.
+    wb.sheet_mut(0).unwrap().print.title_rows = Some((0, 0));
+    let lay_titles = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
+    assert_eq!(lay_titles.pages.len(), 4);
+}
+
+#[test]
+fn visible_conditional_formatting_expands_print_range_and_prevents_trimming() {
+    let mut wb = Workbook::new();
+    let fill_style = Style { fill: gridcraft_model::Fill::solid(Color::Rgb(0xDCE6F1)), ..Style::default() };
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.set_value(CellRef::new(0, 0), Value::text("Top"));
+    sh.cond_formats.push(gridcraft_model::CondFormat {
+        ranges: vec![RangeRef::new(CellRef::new(55, 11), CellRef::new(55, 11))],
+        rule: gridcraft_model::CfRule::Blanks { style: Box::new(fill_style) },
+        priority: 1,
+        stop_if_true: false,
+    });
+    let lay = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
+    assert_eq!(lay.area, RangeRef::new(CellRef::new(0, 0), CellRef::new(55, 11)));
+    assert_eq!(lay.pages.len(), 4, "trailing page (1, 1) holds visible CF fill and must not be trimmed");
+}
+
+#[test]
+fn absolute_anchor_keeps_physical_position_and_size_under_column_scaling() {
+    let mut normal = Style::default();
+    normal.font.name = "Arial".into();
+    normal.font.size = 10.0;
+    let mut wb = Workbook::new();
+    wb.styles = StyleTable::with_default(normal);
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.set_value(CellRef::new(0, 0), Value::text("A"));
+    sh.shapes.push(gridcraft_model::Shape {
+        id: 1,
+        kind: ShapeKind::Rectangle,
+        anchor: Anchor { cell: CellRef::new(0, 0), dx: 100.0, dy: 40.0, width: 80.0, height: 40.0, mode: gridcraft_model::AnchorMode::Absolute },
+        fill: Color::Rgb(0xFF0000),
+        line: Color::Auto,
+        text: String::new(),
+        format: gridcraft_model::ShapeFormat::default(),
+        rotation: 0.0,
+        math: gridcraft_model::EquationCache::default(),
+    });
+    let lays = layouts(&wb, &PrintOptions::default());
+    let pdf = render_pdf(&wb, &lays, "", "").unwrap().bytes;
+    let stream = String::from_utf8_lossy(&pdf);
+    // Red polygon vertices must use physical 0.75 pt/px (dx=75pt, width=60pt), not col_px_to_pt (~0.7886).
+    let expected_x0 = lays[0].margins[0] + layout::GRID_EDGE_INSET_PT + 100.0 * PX_TO_PT;
+    let expected_x1 = expected_x0 + 80.0 * PX_TO_PT;
+    assert!(
+        stream.contains(&format!("{expected_x0:.2} ")) || stream.contains(&format!("{expected_x0:.1} ")),
+        "expected physical x0={expected_x0:.2} in stream"
+    );
+    assert!(
+        stream.contains(&format!("{expected_x1:.2} ")) || stream.contains(&format!("{expected_x1:.1} ")),
+        "expected physical x1={expected_x1:.2} in stream"
+    );
+}
+
+#[test]
+fn vertical_row_scaling_and_non_custom_font_autofit_match_excel_geometry() {
+    let mut normal = Style::default();
+    normal.font.name = "Arial".into();
+    normal.font.size = 10.0;
+    let mut wb = Workbook::new();
+    wb.styles = StyleTable::with_default(normal);
+    let mut segoe11 = Style::default();
+    segoe11.font.name = "Segoe UI".into();
+    segoe11.font.size = 11.0;
+    let segoe11_id = wb.styles.intern(segoe11);
+
+    let sh = wb.sheet_mut(0).unwrap();
+    // Row 0: explicit customHeight=25.5pt (34 px); Row 1: non-custom ht=16pt (21.33 px) with Segoe UI 11.
+    sh.rows.insert(0, gridcraft_model::LineInfo { size: Some(34.0), custom: true, ..Default::default() });
+    sh.rows.insert(1, gridcraft_model::LineInfo { size: Some(16.0 * 4.0 / 3.0), custom: false, ..Default::default() });
+    sh.cells.set(CellRef::new(0, 0), gridcraft_model::Cell::styled(Value::text("Banner"), segoe11_id));
+    sh.cells.set(CellRef::new(1, 0), gridcraft_model::Cell::styled(Value::text("Data"), segoe11_id));
+    let lay = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
+    // Custom row stays at 34 px and scales by ~0.726 pt/px (~24.7pt); non-custom Segoe UI 11 auto-fits to 22 px (~15.97pt).
+    let r0_pt = lay.row_height(wb.sheet(0).unwrap(), 0) * lay.ky();
+    let r1_pt = lay.row_height(wb.sheet(0).unwrap(), 1) * lay.ky();
+    assert!((r0_pt - 24.7).abs() < 0.15, "row 0 height {r0_pt}pt");
+    assert!((r1_pt - 15.97).abs() < 0.15, "row 1 height {r1_pt}pt");
+}
+
+#[test]
+fn unwrapped_text_overflowing_past_right_edge_expands_print_range_and_survives_trim() {
+    let mut wb = Workbook::new();
+    let sh = wb.sheet_mut(0).unwrap();
+    for c in 0..8 {
+        sh.cols.entry(c).or_default().size = Some(80.0);
+    }
+    // Last populated column H (col 7) sits near right edge of page 1; long unwrapped text overflows into col I/J (page 2).
+    sh.set_value(CellRef::new(0, 0), Value::text("Start"));
+    sh.set_value(CellRef::new(0, 7), Value::text("This unwrapped description clearly overflows into adjacent empty columns on page two"));
+    let lay = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
+    assert!(lay.area.end.col > 7, "overflow should expand area past col H, got {:?}", lay.area);
+    assert_eq!(lay.pages.len(), 2, "overflow page must not be trimmed as blank");
 }

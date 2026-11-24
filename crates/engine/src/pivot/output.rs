@@ -1,8 +1,5 @@
 use super::items::{Acc, FieldItems, Node, is_collapsed};
-use super::{
-    BorderLine, BorderStyle, Color, Fill, HAlign, HashMap, MAX_COLS, MAX_OUTPUT_CELLS, MAX_ROWS, NumFmt, PivotDataCell, PivotField, PivotLayout,
-    PivotTable, Style, Value,
-};
+use super::{Color, HAlign, HashMap, MAX_COLS, MAX_OUTPUT_CELLS, MAX_ROWS, NumFmt, PivotDataCell, PivotField, PivotLayout, PivotTable, Style, Value};
 
 // ---------------------------------------------------------------- output
 
@@ -416,60 +413,15 @@ pub(super) fn data_cols_exceed_sheet(col_groups: usize, grand_total: bool, value
 
 // ---------------------------------------------------------------- styling and writing
 
-/// Colours for a PivotTable style name (our own palette, keyed by the familiar
-/// `PivotStyleLight1…28 / Medium1…28 / Dark1…28` names).
-pub(super) struct Look {
-    header_fill: Color,
-    header_font: Color,
-    line: Color,
-    filter_fill: Color,
-}
-
-pub(super) fn look(style: &str) -> Look {
-    let rest = style.strip_prefix("PivotStyle").unwrap_or(style);
-    let (fam, n) = ["Light", "Medium", "Dark"]
-        .iter()
-        .find_map(|f| rest.strip_prefix(f).map(|num| (*f, num.parse::<u32>().unwrap_or(16))))
-        .unwrap_or(("Light", 16));
-    let k = n.saturating_sub(1) % 7;
-    let acc = if k == 0 { None } else { Some(3 + k as u8) };
-    let tone = |tint: i16| match acc {
-        Some(a) => Color::Theme(a, tint),
-        None => Color::Theme(1, tint.clamp(-1000, 1000)),
-    };
-    match fam {
-        "Dark" => Look { header_fill: Color::Theme(1, 0), header_font: Color::Theme(0, 0), line: tone(0), filter_fill: tone(600) },
-        "Medium" => Look { header_fill: tone(0), header_font: Color::Theme(0, 0), line: tone(0), filter_fill: tone(800) },
-        _ => Look { header_fill: tone(800), header_font: Color::Auto, line: tone(400), filter_fill: tone(800) },
-    }
-}
-
-pub(super) fn cell_style(lk: &Look, rk: RowKind, cell: &OutCell, last_header: bool) -> Style {
+/// Structural cell style written by `refresh`: alignment, indent, number format, and placeholder
+/// hint only. Visual fills, font colours, bold, and borders are layered dynamically by
+/// [`crate::pivot::pivot_cell_style`] so refreshed and unrefreshed PivotTables share one source of
+/// truth.
+pub(super) fn cell_style(rk: RowKind, cell: &OutCell) -> Style {
     let mut s = Style::default();
-    match rk {
-        RowKind::Header => {
-            s.font.bold = true;
-            s.fill = Fill::solid(lk.header_fill);
-            s.font.color = lk.header_font;
-            if last_header {
-                s.borders.bottom = BorderLine { style: BorderStyle::Thin, color: lk.line };
-            }
-        }
-        RowKind::Filter => {
-            s.fill = Fill::solid(lk.filter_fill);
-            s.font.bold = last_header;
-        }
-        RowKind::Item(parent) => s.font.bold = parent,
-        RowKind::Subtotal => s.font.bold = true,
-        RowKind::Grand => {
-            s.font.bold = true;
-            s.borders.top = BorderLine { style: BorderStyle::Thin, color: lk.line };
-        }
-        RowKind::Placeholder => {
-            s.font.italic = true;
-            s.font.color = Color::Theme(1, 500);
-        }
-        RowKind::Blank => {}
+    if rk == RowKind::Placeholder {
+        s.font.italic = true;
+        s.font.color = Color::Theme(1, 500);
     }
     if matches!(cell.kind, CellKind::RowLabel | CellKind::ColLabel | CellKind::Subtotal | CellKind::GrandTotal) && !cell.value.is_number() {
         s.align.h = HAlign::Left;

@@ -12,9 +12,9 @@ use gridcraft_core::date::datetime_from_serial;
 pub use gridcraft_core::quote_sheet;
 use gridcraft_core::{CellError, CellRef, MAX_COLS, MAX_ROWS, RangeRef, Value, number_to_text, split_sheet};
 use gridcraft_model::{
-    BorderLine, BorderStyle, Cell, Chart, Color, Fill, HAlign, NumFmt, PivotDataCell, PivotDateGroup, PivotField, PivotFilter, PivotFunc,
-    PivotItemRef, PivotLayout, PivotLookup, PivotRowRole, PivotShowAs, PivotSort, PivotStyleGrid, PivotStyleLayout, PivotTable, PivotValue, Series,
-    SlicerCrossFilter, Style, StyleId, Workbook,
+    Cell, Chart, Color, HAlign, NumFmt, PivotDataCell, PivotDateGroup, PivotField, PivotFilter, PivotFunc, PivotItemRef, PivotLayout, PivotLookup,
+    PivotRowRole, PivotShowAs, PivotSort, PivotStyleGrid, PivotStyleLayout, PivotTable, PivotValue, Series, SlicerCrossFilter, Style, StyleId,
+    Workbook,
 };
 
 use crate::pivot_calc::CalcSet;
@@ -29,10 +29,10 @@ pub use charts::{chart_link, chart_series, clear_output, links_to, parse_chart_l
 use compute::compute_from;
 pub use compute::{NOT_A_VALUE_CELL, detail_cells, detail_records};
 pub use items::{SlicerTile, distinct_labels, func_caption, item_label, slicer_tiles};
+use output::cell_style;
 #[cfg(test)]
 use output::data_cols_exceed_sheet;
 pub use output::{CellKind, OutCell, Output, RowKind};
-use output::{cell_style, look};
 pub use style::{BuiltinPivotLook, builtin_look, parse_pivot_style_name, pivot_cell_style};
 /// Largest source block read (cells).
 pub const MAX_SOURCE_CELLS: u64 = 10_000_000;
@@ -295,8 +295,6 @@ pub fn refresh(wb: &mut Workbook, sheet: usize, idx: usize, replace: bool) -> Re
         }
     }
     // Styles first (the style table is workbook-wide).
-    let lk = look(&pt.style);
-    let header_last = out.row_kinds.iter().rposition(|k| *k == RowKind::Header);
     let mut cache: HashMap<Style, StyleId> = HashMap::new();
     let mut cells: Vec<(CellRef, Cell)> = Vec::new();
     for (ri, row) in out.grid.iter().enumerate() {
@@ -311,12 +309,7 @@ pub fn refresh(wb: &mut Workbook, sheet: usize, idx: usize, replace: bool) -> Re
             if rk == RowKind::Placeholder && oc.value.is_empty() {
                 continue;
             }
-            let flag = match rk {
-                RowKind::Header => Some(ri) == header_last,
-                RowKind::Filter => ci == 0,
-                _ => false,
-            };
-            let st = cell_style(&lk, rk, oc, flag);
+            let st = cell_style(rk, oc);
             let id = match cache.get(&st) {
                 Some(id) => *id,
                 None => {
@@ -421,6 +414,7 @@ fn style_layout_from_output(origin: CellRef, area: RangeRef, body_offset: u32, o
         row_roles,
         row_subheading,
         col_roles: vec![],
+        col_subheading: vec![],
     }
 }
 

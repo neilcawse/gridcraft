@@ -7,6 +7,10 @@ use super::{
 /// Cells in a page block above which only stored cells are visited (not every grid position).
 pub(super) const DENSE_BLOCK: u64 = 60_000;
 
+/// Windows Excel reserves 4 printer dots (0.48 pt at 600 dpi) on each edge of the cell grid,
+/// reducing the usable width and height between margins by 0.96 pt.
+pub(super) const GRID_EDGE_INSET_PT: f32 = 0.48;
+
 // ---------------------------------------------------------------- paper
 
 /// Paper size in points (portrait) for a paper name; unknown names fall back to Letter.
@@ -60,8 +64,14 @@ pub struct SheetLayout {
     /// Left, right, top, bottom, header, footer margins in points.
     pub margins: [f32; 6],
     /// Horizontal points per sheet column pixel (at 100% scale), matching Excel's Normal-font
-    /// printer digit-width geometry. Vertical row heights always use [`PX_TO_PT`].
+    /// printer digit-width geometry.
     pub col_px_to_pt: f32,
+    /// Vertical points per sheet row pixel (at 100% scale), matching Excel's Normal-font
+    /// 600-dpi printer-to-96-dpi screen row-height ratio.
+    pub row_px_to_pt: f32,
+    /// Rows without `customHeight` whose content font requires a taller 96-dpi row height than
+    /// stored: sorted `(row, effective_px, cumulative_delta_px_including_row)`.
+    pub(crate) row_deltas: Vec<(u32, f32, f64)>,
     pub scale: f32,
     pub area: RangeRef,
     pub row_bands: Vec<(u32, u32)>,
@@ -78,7 +88,7 @@ pub struct SheetLayout {
 }
 
 impl SheetLayout {
-    /// Vertical points per sheet pixel at the page scale.
+    /// Physical points per 96-dpi pixel at the page scale (borders, padding, MoveOnly/Absolute objects).
     pub(super) fn k(&self) -> f32 {
         PX_TO_PT * self.scale
     }
@@ -86,9 +96,26 @@ impl SheetLayout {
     pub(super) fn kx(&self) -> f32 {
         self.col_px_to_pt * self.scale
     }
+    /// Vertical points per sheet row pixel at the page scale.
+    pub(super) fn ky(&self) -> f32 {
+        self.row_px_to_pt * self.scale
+    }
+    /// Effective print height of `row` in 96-dpi sheet pixels (auto-fitted for non-custom rows).
+    pub(super) fn row_height(&self, sh: &Sheet, row: u32) -> f32 {
+        if let Ok(i) = self.row_deltas.binary_search_by_key(&row, |e| e.0) {
+            return self.row_deltas[i].1;
+        }
+        sh.row_height(row)
+    }
+    /// Effective top offset of `row` in 96-dpi sheet pixels, including auto-fitted row deltas.
+    pub(super) fn row_top(&self, sh: &Sheet, row: u32) -> f64 {
+        let idx = self.row_deltas.partition_point(|e| e.0 < row);
+        let delta = if idx > 0 { self.row_deltas[idx - 1].2 } else { 0.0 };
+        sh.row_top(row) + delta
+    }
     pub(crate) fn avail(&self) -> (f32, f32) {
         let [l, r, t, b, ..] = self.margins;
-        ((self.page_w - l - r).max(36.0), (self.page_h - t - b).max(36.0))
+        ((self.page_w - l - r - 2.0 * GRID_EDGE_INSET_PT).max(36.0), (self.page_h - t - b - 2.0 * GRID_EDGE_INSET_PT).max(36.0))
     }
     /// Left and right margins, in points, that header and footer sections line up with: the
     /// page's side margins with Align with Page Margins on, otherwise 0.7 inch on each side, at
@@ -158,16 +185,115 @@ pub(crate) fn excel_col_px_to_pt(wb: &Workbook) -> f32 {
     mdw_pt / 7.0
 }
 
+/// Excel's printer vertical row-height scale (points per 96-dpi sheet row pixel at 100% scale).
+///
+/// Windows Excel prints row heights using the ratio of the workbook Normal font's 600-dpi
+/// printer standard row height to its 96-dpi screen row height:
+/// - Arial 10 pt:   103 dots (12.36 pt) / 17 px => 0.72706 pt/px (~0.9694 × 0.75)
+/// - Calibri 11 pt: 121 dots (14.52 pt) / 20 px => 0.72600 pt/px (~0.9680 × 0.75)
+pub(crate) fn excel_row_px_to_pt(wb: &Workbook) -> f32 {
+    let font = &wb.styles.get(StyleId::DEFAULT).font;
+    let size = if font.size.is_finite() && font.size > 0.0 { font.size.clamp(1.0, 409.0) } else { 11.0 };
+    let lower = font.name.trim().to_ascii_lowercase();
+    let (ad96, ad600, pad96, pad600): (f32, f32, f32, f32) = match lower.as_str() {
+        "arial" | "arial narrow" | "helvetica" | "liberation sans" | "arimo" => (2288.0 / 2048.0, 2355.0 / 2048.0, 2.0, 8.0),
+        "calibri" | "calibri light" | "carlito" => (2500.0 / 2048.0, 2500.0 / 2048.0, 2.0, 9.0),
+        "segoe ui" => (2724.0 / 2048.0, 2724.0 / 2048.0, 2.0, 9.0),
+        "verdana" => (2489.0 / 2048.0, 2489.0 / 2048.0, 2.0, 9.0),
+        "tahoma" => (2472.0 / 2048.0, 2472.0 / 2048.0, 2.0, 9.0),
+        "times new roman" | "times" | "liberation serif" => (2268.0 / 2048.0, 2268.0 / 2048.0, 2.0, 9.0),
+        _ => return PX_TO_PT * (121.0 / 125.0),
+    };
+    let lf96 = (size * (96.0 / 72.0)).round().max(1.0);
+    let px96 = ((lf96 * ad96).round() + pad96).max(1.0);
+    let lf600 = (size * (600.0 / 72.0)).round().max(1.0);
+    let dots600 = ((lf600 * ad600).round() + pad600).max(1.0);
+    (dots600 * (72.0 / 600.0)) / px96
+}
+
+/// Windows 96-dpi single-line auto-fit row height in pixels for a cell font.
+fn font_autofit_row_px(font: &gridcraft_model::Font) -> f32 {
+    let size = if font.size.is_finite() && font.size > 0.0 { font.size.clamp(1.0, 409.0) } else { 11.0 };
+    let lower = font.name.trim().to_ascii_lowercase();
+    let ad96: f32 = match lower.as_str() {
+        "segoe ui" => 2724.0 / 2048.0,
+        "calibri" | "calibri light" | "carlito" => 2500.0 / 2048.0,
+        "verdana" => 2489.0 / 2048.0,
+        "tahoma" => 2472.0 / 2048.0,
+        "arial" | "arial narrow" | "helvetica" | "liberation sans" | "arimo" => 2288.0 / 2048.0,
+        "times new roman" | "times" | "liberation serif" => 2268.0 / 2048.0,
+        _ => 2500.0 / 2048.0,
+    };
+    let lf96 = (size * (96.0 / 72.0)).round().max(1.0);
+    ((lf96 * ad96).round() + 2.0).max(1.0)
+}
+
+/// Computes auto-fit row height deltas for non-custom, non-hidden rows in `0..=end_row` whose
+/// content cells require a taller Windows 96-dpi single-line height than stored.
+fn compute_row_deltas(wb: &Workbook, sh: &Sheet, end_row: u32) -> Vec<(u32, f32, f64)> {
+    let mut max_px: std::collections::BTreeMap<u32, f32> = std::collections::BTreeMap::new();
+    for (&row, info) in sh.rows.range(0..=end_row) {
+        if info.hidden || info.custom {
+            continue;
+        }
+        if let Some(sid) = info.style {
+            let px = font_autofit_row_px(&wb.styles.get(sid).font);
+            let e = max_px.entry(row).or_insert(0.0);
+            if px > *e {
+                *e = px;
+            }
+        }
+    }
+    let scan = RangeRef::new(CellRef::new(0, 0), CellRef::new(end_row, MAX_COLS - 1));
+    for (pos, cell) in sh.cells.iter_range(scan) {
+        if !cell.has_content() {
+            continue;
+        }
+        if sh.rows.get(&pos.row).is_some_and(|info| info.hidden || info.custom) {
+            continue;
+        }
+        let px = font_autofit_row_px(&wb.styles.get(sh.style_id(pos)).font);
+        let e = max_px.entry(pos.row).or_insert(0.0);
+        if px > *e {
+            *e = px;
+        }
+    }
+    let mut out = Vec::new();
+    let mut cum = 0.0f64;
+    for (row, auto_px) in max_px {
+        let stored = sh.row_height(row);
+        if auto_px > stored + 0.01 {
+            cum += f64::from(auto_px - stored);
+            out.push((row, auto_px, cum));
+        }
+    }
+    out
+}
+
 /// True when `sid` paints something visible on paper even for an empty cell: a visible fill,
 /// any border, or a cell checkbox format.
-fn style_is_printable(wb: &Workbook, sid: StyleId) -> bool {
-    let style = wb.styles.get(sid);
+fn style_ref_is_printable(wb: &Workbook, style: &super::Style) -> bool {
     let has_fill = match style.fill.pattern {
         PatternType::None => false,
         PatternType::Solid => style.fill.fg.resolve(&wb.theme).is_some(),
         _ => true,
     };
     has_fill || style.borders != Borders::default() || style.num_fmt.as_str() == "checkbox"
+}
+
+fn style_is_printable(wb: &Workbook, sid: StyleId) -> bool {
+    style_ref_is_printable(wb, wb.styles.get(sid))
+}
+
+fn cf_rule_can_paint(wb: &Workbook, rule: &gridcraft_model::CfRule) -> bool {
+    match rule {
+        gridcraft_model::CfRule::ColorScale { .. } | gridcraft_model::CfRule::DataBar { .. } => true,
+        _ => rule.style().is_some_and(|s| style_ref_is_printable(wb, s)),
+    }
+}
+
+fn cf_look_is_printable(wb: &Workbook, look: &crate::cf::CfLook) -> bool {
+    look.scale_fill.is_some() || look.bar.is_some() || look.style.as_ref().is_some_and(|s| style_ref_is_printable(wb, s))
 }
 
 fn union_anchor(sh: &Sheet, r: &mut Option<RangeRef>, a: &Anchor) {
@@ -202,11 +328,19 @@ pub fn print_range(sh: &Sheet) -> Option<RangeRef> {
 /// covering cells with values/formulas/visible fills/visible borders, spills, cell pictures,
 /// sparklines, tables, printable merges, and floating objects. Empty cells carrying only font,
 /// alignment, or number-format styling do not expand the print range.
-pub(crate) fn sheet_print_range(wb: &Workbook, sh: &Sheet) -> Option<RangeRef> {
+pub(crate) fn sheet_print_range(wb: &Workbook, si: usize, sh: &Sheet) -> Option<RangeRef> {
+    let mut cf = crate::cf::CfCache::new();
+    sheet_print_range_with_cf(wb, si, sh, &mut cf).0
+}
+
+type OverflowSpan = (u32, u32, u32);
+
+fn sheet_print_range_with_cf(wb: &Workbook, si: usize, sh: &Sheet, cf: &mut crate::cf::CfCache) -> (Option<RangeRef>, Vec<OverflowSpan>) {
     if let Some(a) = sh.print.print_area {
-        return Some(trim_full_used(printable_cells_range(wb, sh), a));
+        let (used, overflows) = printable_cells_range(wb, si, sh, cf);
+        return (Some(trim_full_used(used, a)), overflows);
     }
-    let mut r = printable_cells_range(wb, sh);
+    let (mut r, overflows) = printable_cells_range(wb, si, sh, cf);
     for c in &sh.charts {
         union_anchor(sh, &mut r, &c.anchor);
     }
@@ -216,15 +350,18 @@ pub(crate) fn sheet_print_range(wb: &Workbook, sh: &Sheet) -> Option<RangeRef> {
     for s in &sh.shapes {
         union_anchor(sh, &mut r, &s.anchor);
     }
-    r
+    (r, overflows)
 }
 
-fn printable_cells_range(wb: &Workbook, sh: &Sheet) -> Option<RangeRef> {
+fn printable_cells_range(wb: &Workbook, si: usize, sh: &Sheet, cf: &mut crate::cf::CfCache) -> (Option<RangeRef>, Vec<OverflowSpan>) {
     let mut out: Option<RangeRef> = None;
     let mut extend = |rng: RangeRef| {
         out = Some(out.map_or(rng, |u| u.union(&rng)));
     };
     for (pos, cell) in sh.cells.iter() {
+        if sh.is_row_hidden(pos.row) || sh.is_col_hidden(pos.col) {
+            continue;
+        }
         if cell.has_content() || style_is_printable(wb, sh.style_id(pos)) {
             extend(RangeRef::cell(pos));
         }
@@ -261,14 +398,129 @@ fn printable_cells_range(wb: &Workbook, sh: &Sheet) -> Option<RangeRef> {
             extend(*m);
         }
     }
-    out
+    extend_printable_cf_cells(wb, si, sh, cf, &mut extend);
+    let overflows = if let Some(cur_out) = out {
+        let (ovs, max_col) = collect_text_overflows(wb, sh, cur_out.end.col);
+        if max_col > cur_out.end.col {
+            out = Some(cur_out.union(&RangeRef::cell(CellRef::new(cur_out.start.row, max_col))));
+        }
+        ovs
+    } else {
+        Vec::new()
+    };
+    (out, overflows)
+}
+
+/// Includes cells whose conditional format produces a visible fill, border, colour scale, or data bar.
+fn extend_printable_cf_cells(wb: &Workbook, si: usize, sh: &Sheet, cf: &mut crate::cf::CfCache, extend: &mut impl FnMut(RangeRef)) {
+    if sh.cond_formats.is_empty() {
+        return;
+    }
+    for cond in &sh.cond_formats {
+        if !cf_rule_can_paint(wb, &cond.rule) {
+            continue;
+        }
+        for &rng in &cond.ranges {
+            if rng.count() <= DENSE_BLOCK {
+                for pos in rng.iter() {
+                    if cf.look(wb, si, pos).is_some_and(|l| cf_look_is_printable(wb, &l)) {
+                        extend(RangeRef::cell(pos));
+                    }
+                }
+            } else {
+                for (pos, cell) in sh.cells.iter_range(rng) {
+                    if !cell.has_content() && cf.look(wb, si, pos).is_some_and(|l| cf_look_is_printable(wb, &l)) {
+                        extend(RangeRef::cell(pos));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Collects rightward overflow spans of unwrapped text cells into empty neighbours and returns
+/// the furthest column reached beyond `initial_max_col`.
+fn collect_text_overflows(wb: &Workbook, sh: &Sheet, initial_max_col: u32) -> (Vec<OverflowSpan>, u32) {
+    let col_kx = excel_col_px_to_pt(wb);
+    let pad = 2.0 * PX_TO_PT;
+    let mut overflows = Vec::new();
+    let mut max_col = initial_max_col;
+    for (pos, cell) in sh.cells.iter() {
+        if sh.is_row_hidden(pos.row) || sh.is_col_hidden(pos.col) {
+            continue;
+        }
+        if !matches!(&cell.value, gridcraft_core::Value::Text(_)) && !sh.show_formulas {
+            continue;
+        }
+        let st = wb.styles.get(sh.style_id(pos));
+        if st.align.wrap
+            || st.align.shrink
+            || st.align.rotation != 0
+            || matches!(st.align.h, super::HAlign::Fill | super::HAlign::Right | super::HAlign::CenterAcross)
+        {
+            continue;
+        }
+        let cell_w = sh.col_width(pos.col) * col_kx;
+        let text = if sh.show_formulas {
+            crate::display::cell_text(wb, sh, pos)
+        } else {
+            crate::display::value_text_as(wb, &cell.value, st.num_fmt.as_str())
+        };
+        let text = text.replace(['\n', '\r'], " ");
+        let size = st.font.size.clamp(1.0, 409.0);
+        if text.is_empty() || (text.len() as f32) * size * 0.85 <= cell_w || sh.merges.iter().any(|m| m.contains(pos)) {
+            continue;
+        }
+        let font = Font::styled(Font::family_for(&st.font.name), st.font.bold, st.font.italic);
+        let indent = st.align.indent as f32 * 9.0 * PX_TO_PT;
+        let excess = gridcraft_pdf::text_width(font, size, &text) + 2.0 * pad + indent - cell_w;
+        if excess <= 0.5 {
+            continue;
+        }
+        let mut rem = if matches!(st.align.h, super::HAlign::Center | super::HAlign::Distributed) { excess / 2.0 } else { excess };
+        let mut col = pos.col + 1;
+        let mut reached = pos.col;
+        while rem > 0.5 && col < MAX_COLS {
+            let nc = CellRef::new(pos.row, col);
+            if sh.is_col_hidden(col) {
+                col += 1;
+                continue;
+            }
+            if sh.value_ref(nc).is_some_and(|v| !v.is_empty()) || sh.merges.iter().any(|m| m.contains(nc)) {
+                break;
+            }
+            reached = col;
+            rem -= sh.col_width(col) * col_kx;
+            col += 1;
+        }
+        if reached > pos.col {
+            overflows.push((pos.row, pos.col, reached));
+            max_col = max_col.max(reached);
+        }
+    }
+    (overflows, max_col)
 }
 
 /// True when page `(rband, cband)` contains at least one printable cell, visible style, merge,
-/// table, or floating object. Used to trim completely blank trailing pages from a sheet.
-fn page_has_content(wb: &Workbook, sh: &Sheet, rband: (u32, u32), cband: (u32, u32)) -> bool {
+/// table, conditional format, overflowing text span, or floating object. Used to trim completely
+/// blank trailing pages.
+fn page_has_content(
+    wb: &Workbook,
+    si: usize,
+    sh: &Sheet,
+    rband: (u32, u32),
+    cband: (u32, u32),
+    overflows: &[OverflowSpan],
+    cf: &mut crate::cf::CfCache,
+) -> bool {
+    if overflows.iter().any(|&(r, c0, c1)| r >= rband.0 && r <= rband.1 && c1 >= cband.0 && c0 <= cband.1) {
+        return true;
+    }
     let block = RangeRef::new(CellRef::new(rband.0, cband.0), CellRef::new(rband.1, cband.1));
     for (pos, cell) in sh.cells.iter_range(block) {
+        if sh.is_row_hidden(pos.row) || sh.is_col_hidden(pos.col) {
+            continue;
+        }
         if cell.has_content() || style_is_printable(wb, sh.style_id(pos)) {
             return true;
         }
@@ -297,6 +549,23 @@ fn page_has_content(wb: &Workbook, sh: &Sheet, rband: (u32, u32), cband: (u32, u
                 || style_is_printable(wb, sh.style_id(m.end)))
     }) {
         return true;
+    }
+    if !sh.cond_formats.is_empty() {
+        for cond in &sh.cond_formats {
+            if !cf_rule_can_paint(wb, &cond.rule) {
+                continue;
+            }
+            for &rng in &cond.ranges {
+                let Some(sub) = rng.intersection(&block) else { continue };
+                if sub.count() <= DENSE_BLOCK {
+                    if sub.iter().any(|pos| cf.look(wb, si, pos).is_some_and(|l| cf_look_is_printable(wb, &l))) {
+                        return true;
+                    }
+                } else if sh.cells.iter_range(sub).any(|(pos, _)| cf.look(wb, si, pos).is_some_and(|l| cf_look_is_printable(wb, &l))) {
+                    return true;
+                }
+            }
+        }
     }
     let (sx0, sy0) = (sh.col_left(block.start.col), sh.row_top(block.start.row));
     let (sx1, sy1) = (sh.col_left(block.end.col.saturating_add(1)), sh.row_top(block.end.row.saturating_add(1)));
@@ -380,9 +649,16 @@ pub fn layout_sheet(wb: &Workbook, si: usize, opts: &PrintOptions, range_overrid
             margins[b] *= f;
         }
     }
-    let area = match range_override {
-        Some(r) => trim_full_used(printable_cells_range(wb, sh), r),
-        None => sheet_print_range(wb, sh).unwrap_or(RangeRef::cell(CellRef::new(0, 0))),
+    let mut cf = crate::cf::CfCache::new();
+    let (area, overflows) = match range_override {
+        Some(r) => {
+            let (used, ov) = printable_cells_range(wb, si, sh, &mut cf);
+            (trim_full_used(used, r), ov)
+        }
+        None => {
+            let (used, ov) = sheet_print_range_with_cf(wb, si, sh, &mut cf);
+            (used.unwrap_or(RangeRef::cell(CellRef::new(0, 0))), ov)
+        }
     };
     // A print area from a file or JSON can name coordinates past the grid; pagination walks every
     // line of the area (zero-height rows never fill a band), so it is held to the grid first.
@@ -400,6 +676,9 @@ pub fn layout_sheet(wb: &Workbook, si: usize, opts: &PrintOptions, range_overrid
         None => st.fit_to.filter(|(w, h)| *w > 0 || *h > 0),
     };
     let col_px_to_pt = excel_col_px_to_pt(wb);
+    let row_px_to_pt = excel_row_px_to_pt(wb);
+    let delta_end = title_rows.map_or(area.end.row, |(_, b)| area.end.row.max(b));
+    let row_deltas = compute_row_deltas(wb, sh, delta_end);
     let mut lay = SheetLayout {
         sheet: si,
         settings: st.clone(),
@@ -407,6 +686,8 @@ pub fn layout_sheet(wb: &Workbook, si: usize, opts: &PrintOptions, range_overrid
         page_h: ph,
         margins,
         col_px_to_pt,
+        row_px_to_pt,
+        row_deltas,
         scale: (st.scale.clamp(10, 400) as f32) / 100.0,
         area,
         row_bands: vec![],
@@ -418,16 +699,23 @@ pub fn layout_sheet(wb: &Workbook, si: usize, opts: &PrintOptions, range_overrid
         heading_h,
         manual_breaks: fit.is_none(),
     };
-    let paginate = |lay: &mut SheetLayout, manual: bool| {
+    let can_trim = !lay.settings.gridlines
+        && !lay.settings.headings
+        && !lay.settings.has_header_footer()
+        && sh.print.print_area.is_none()
+        && range_override.is_none()
+        && lay.title_rows.is_none()
+        && lay.title_cols.is_none();
+    let mut paginate = |lay: &mut SheetLayout, manual: bool| {
         lay.manual_breaks = manual;
         (lay.row_bands, lay.col_bands) = split_bands(sh, lay, MAX_PAGES);
         lay.pages = page_sequence(lay.row_bands.len(), lay.col_bands.len(), lay.settings.page_order, MAX_PAGES);
         let truncated = lay.row_bands.len().saturating_mul(lay.col_bands.len()) > lay.pages.len();
-        if !truncated && !lay.settings.gridlines && !lay.settings.headings && !lay.settings.has_header_footer() && sh.print.print_area.is_none() {
+        if !truncated && can_trim {
             while lay.pages.len() > 1 {
                 let Some(&(ri, ci)) = lay.pages.last() else { break };
                 let (Some(&rb), Some(&cb)) = (lay.row_bands.get(ri), lay.col_bands.get(ci)) else { break };
-                if page_has_content(wb, sh, rb, cb) {
+                if page_has_content(wb, si, sh, rb, cb, &overflows, &mut cf) {
                     break;
                 }
                 lay.pages.pop();
@@ -440,11 +728,11 @@ pub fn layout_sheet(wb: &Workbook, si: usize, opts: &PrintOptions, range_overrid
             let total_h: f32 = if area.height() > 200_000 {
                 f32::INFINITY
             } else {
-                (area.start.row..=area.end.row).map(|r| sh.row_height(r)).sum::<f32>() + heading_h
+                (area.start.row..=area.end.row).map(|r| lay.row_height(sh, r)).sum::<f32>() + heading_h
             };
             let (aw, ah) = lay.avail();
             let sw = if fw > 0 { aw * fw as f32 / (total_w * col_px_to_pt).max(1.0) } else { f32::INFINITY };
-            let sh_ = if fh > 0 { ah * fh as f32 / (total_h * PX_TO_PT).max(1.0) } else { f32::INFINITY };
+            let sh_ = if fh > 0 { ah * fh as f32 / (total_h * row_px_to_pt).max(1.0) } else { f32::INFINITY };
             lay.scale = sw.min(sh_).min(1.0).clamp(0.1, 1.0);
             for _ in 0..40 {
                 paginate(&mut lay, false);
@@ -488,7 +776,7 @@ pub(crate) type Bands = Vec<(u32, u32)>;
 /// one pagination rule shared by printing, PDF export, Page Break Preview and Page Layout view.
 pub(crate) fn split_bands(sh: &Sheet, lay: &SheetLayout, cap: usize) -> (Bands, Bands) {
     let kx = lay.kx();
-    let ky = lay.k();
+    let ky = lay.ky();
     let (aw, ah) = lay.avail();
     let (aw, ah) = (aw / kx, ah / ky);
     let st = &lay.settings;
@@ -499,7 +787,7 @@ pub(crate) fn split_bands(sh: &Sheet, lay: &SheetLayout, cap: usize) -> (Bands, 
     let (title_rows, title_cols) = (lay.title_rows, lay.title_cols);
     let title_h = |start: u32| -> f32 {
         match title_rows {
-            Some((a, b)) if a < start => (a..=b.min(start - 1)).map(|r| sh.row_height(r)).sum(),
+            Some((a, b)) if a < start => (a..=b.min(start - 1)).map(|r| lay.row_height(sh, r)).sum(),
             _ => 0.0,
         }
     };
@@ -510,9 +798,9 @@ pub(crate) fn split_bands(sh: &Sheet, lay: &SheetLayout, cap: usize) -> (Bands, 
         }
     };
     let area = lay.area;
-    let mut rows = bands(area.start.row, area.end.row, |r| sh.row_height(r), |start| (ah - lay.heading_h - title_h(start)).max(1.0), &rb, cap);
+    let mut rows = bands(area.start.row, area.end.row, |r| lay.row_height(sh, r), |start| (ah - lay.heading_h - title_h(start)).max(1.0), &rb, cap);
     let mut cols = bands(area.start.col, area.end.col, |c| sh.col_width(c), |start| (aw - lay.heading_w - title_w(start)).max(1.0), &cb, cap);
-    while rows.len() > 1 && rows.last().is_some_and(|&(a, b)| (a..=b).all(|r| sh.row_height(r) <= 0.0)) {
+    while rows.len() > 1 && rows.last().is_some_and(|&(a, b)| (a..=b).all(|r| lay.row_height(sh, r) <= 0.0)) {
         rows.pop();
     }
     while cols.len() > 1 && cols.last().is_some_and(|&(a, b)| (a..=b).all(|c| sh.col_width(c) <= 0.0)) {
@@ -535,7 +823,7 @@ pub fn layouts(wb: &Workbook, opts: &PrintOptions) -> Vec<SheetLayout> {
             break;
         }
         let ovr = if si == wb.active_sheet() { opts.range } else { None };
-        if opts.all_sheets && ovr.is_none() && wb.sheet(si).is_some_and(|s| sheet_print_range(wb, s).is_none()) {
+        if opts.all_sheets && ovr.is_none() && wb.sheet(si).is_some_and(|s| sheet_print_range(wb, si, s).is_none()) {
             continue;
         }
         if let Some(mut l) = layout_sheet(wb, si, opts, ovr) {
@@ -562,8 +850,8 @@ pub(super) fn segments(titles: Option<(u32, u32)>, band: (u32, u32)) -> Vec<(u32
     v
 }
 
-pub(super) fn seg_size(sh: &Sheet, seg: (u32, u32), rows: bool) -> f32 {
-    if rows { (seg.0..=seg.1).map(|r| sh.row_height(r)).sum() } else { (seg.0..=seg.1).map(|c| sh.col_width(c)).sum() }
+pub(super) fn seg_size(lay: &SheetLayout, sh: &Sheet, seg: (u32, u32), rows: bool) -> f32 {
+    if rows { (seg.0..=seg.1).map(|r| lay.row_height(sh, r)).sum() } else { (seg.0..=seg.1).map(|c| sh.col_width(c)).sum() }
 }
 
 #[cfg(test)]

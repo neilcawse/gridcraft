@@ -91,11 +91,14 @@ fn region_by_product_sum_of_sales() {
     assert_eq!(sum, TOTAL);
     let rows: f64 = ["E5", "E6", "E7"].iter().map(|a| val(&s, a).as_f64().unwrap()).sum();
     assert_eq!(rows, TOTAL);
-    // Styles: header bold, grand total bold with a top border.
+    // Styles: resolved dynamically via pivot_cell_style (refresh does not bake fills/bold into cell xf).
     let d = s.doc().unwrap();
     let sh = d.wb.active().unwrap();
-    assert!(d.wb.styles.get(sh.style_id(CellRef::parse("A4").unwrap())).font.bold);
-    let g = d.wb.styles.get(sh.style_id(CellRef::parse("B8").unwrap()));
+    let p = &sh.pivots[0];
+    let a4 = CellRef::parse("A4").unwrap();
+    assert!(!d.wb.styles.get(sh.style_id(a4)).font.bold);
+    assert!(crate::pivot::pivot_cell_style(&d.wb, sh, p, a4).font.bold);
+    let g = crate::pivot::pivot_cell_style(&d.wb, sh, p, CellRef::parse("B8").unwrap());
     assert!(g.font.bold && !g.borders.top.is_none());
     // Listing.
     let l = s.execute("pivot.list", json!({})).unwrap();
@@ -288,7 +291,7 @@ fn compact_vs_tabular_shapes() {
     let d = s.doc().unwrap();
     let sh = d.wb.active().unwrap();
     assert_eq!(d.wb.styles.get(sh.style_id(CellRef::parse("A5").unwrap())).align.indent, 1);
-    assert!(d.wb.styles.get(sh.style_id(CellRef::parse("A4").unwrap())).font.bold);
+    assert!(crate::pivot::pivot_cell_style(&d.wb, sh, &sh.pivots[0], CellRef::parse("A4").unwrap()).font.bold);
     // Outline: one column per field.
     s.execute("pivot.layout", json!({"layout": "outline"})).unwrap();
     let r = pt(&s).last_range.unwrap();

@@ -1456,3 +1456,38 @@ fn imported_custom_table_style_and_row_col_items_are_parsed() {
     );
     assert_eq!(grid.col_roles, vec![PivotColRole::Data, PivotColRole::Subtotal(0), PivotColRole::GrandTotal]);
 }
+
+#[test]
+fn hostile_row_item_repeat_count_does_not_overflow_and_empty_custom_table_style_is_kept() {
+    let mut wb = workbook();
+    wb.sheet_mut(1).unwrap().pivots.truncate(1);
+    wb.sheet_mut(1).unwrap().pivots[0].style = "EmptyCustomPivot".into();
+    let raw = write_xlsx(&wb).unwrap();
+    let mut parts = unzip(&raw);
+    let styles = String::from_utf8(parts["xl/styles.xml"].clone()).unwrap();
+    let idx = styles.find("<dxfs").unwrap();
+    let patched_styles = format!(
+        "{}<dxfs count=\"0\"/><tableStyles count=\"1\"><tableStyle name=\"EmptyCustomPivot\" pivot=\"1\" count=\"0\"/></tableStyles></styleSheet>",
+        &styles[..idx]
+    );
+    parts.insert("xl/styles.xml".into(), patched_styles.into_bytes());
+    let pt_xml = String::from_utf8(parts["xl/pivotTables/pivotTable1.xml"].clone()).unwrap();
+    let patched_pt = pt_xml.replace("<pivotTableStyleInfo", r#"<rowItems count="1"><i r="4294967295"><x v="0"/></i></rowItems><pivotTableStyleInfo"#);
+    parts.insert("xl/pivotTables/pivotTable1.xml".into(), patched_pt.into_bytes());
+    let mut buf = std::io::Cursor::new(Vec::new());
+    {
+        let mut zw = zip::ZipWriter::new(&mut buf);
+        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (name, data) in &parts {
+            zw.start_file(name, opts).unwrap();
+            std::io::Write::write_all(&mut zw, data).unwrap();
+        }
+        zw.finish().unwrap();
+    }
+    let (back, _) = read_xlsx(buf.get_ref()).unwrap();
+    let pt = &back.sheet(1).unwrap().pivots[0];
+    let custom = pt.custom_style.0.as_ref().expect("empty custom style must be preserved");
+    assert!(custom.is_empty());
+    let grid = pt.style_grid.0.as_ref().expect("style grid parsed without overflow");
+    assert_eq!(grid.row_roles, vec![PivotRowRole::Data]);
+}

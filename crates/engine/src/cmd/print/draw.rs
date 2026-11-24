@@ -171,12 +171,14 @@ pub(super) struct Block<'a> {
     pub(super) wb: &'a Workbook,
     si: usize,
     pub(super) sh: &'a Sheet,
+    pub(super) lay: &'a SheetLayout,
     rows: (u32, u32),
     cols: (u32, u32),
     /// Page x of each column's left edge, plus the right edge of the last.
     pub(super) xs: Vec<f32>,
     pub(super) ys: Vec<f32>,
     pub(super) kx: f32,
+    pub(super) ky: f32,
     pub(super) k: f32,
     pub(super) scale: f32,
     pub(super) mirror_axis: f32,
@@ -205,7 +207,7 @@ impl Block<'_> {
             return self.ys.get((row - self.rows.0) as usize).copied().unwrap_or(0.0);
         }
         let y0 = self.ys.first().copied().unwrap_or(0.0);
-        y0 + ((self.sh.row_top(row) - self.sh.row_top(self.rows.0)) as f32) * self.k
+        y0 + ((self.lay.row_top(self.sh, row) - self.lay.row_top(self.sh, self.rows.0)) as f32) * self.ky
     }
     pub(super) fn rect(&self, r: RangeRef) -> (f32, f32, f32, f32) {
         let (x0, y0) = (self.x(r.start.col), self.y(r.start.row));
@@ -531,15 +533,16 @@ pub(super) struct PendingPdfLink {
     pub(super) target: String,
 }
 
-pub(super) struct PrintedBlock {
+pub(super) struct PrintedBlock<'a> {
     pub(super) page: usize,
     pub(super) sheet: usize,
+    pub(super) lay: &'a SheetLayout,
     pub(super) rows: (u32, u32),
     pub(super) cols: (u32, u32),
     pub(super) x: f32,
     pub(super) y: f32,
     pub(super) kx: f32,
-    pub(super) k: f32,
+    pub(super) ky: f32,
     /// The page x that right-to-left sheets are mirrored about; `None` for left-to-right sheets.
     pub(super) mirror_axis: Option<f32>,
 }
@@ -572,7 +575,7 @@ pub(super) fn draw_block_links(pg: &mut Page, b: &Block, page: usize, pending: &
     }
 }
 
-pub(super) fn printed_target(wb: &Workbook, blocks: &[PrintedBlock], source_sheet: usize, target: &str) -> Option<(usize, f32, f32)> {
+pub(super) fn printed_target(wb: &Workbook, blocks: &[PrintedBlock<'_>], source_sheet: usize, target: &str) -> Option<(usize, f32, f32)> {
     let target = target.trim().trim_start_matches('#').trim_start_matches('=');
     let (sheet_name, range) = split_sheet(target);
     let sheet = sheet_name.map_or(Some(source_sheet), |name| wb.sheet_index(&name))?;
@@ -584,7 +587,7 @@ pub(super) fn printed_target(wb: &Workbook, blocks: &[PrintedBlock], source_shee
         Some(axis) => axis - x - (sh.col_left(cell.col.saturating_add(1)) - sh.col_left(cell.col)) as f32 * block.kx,
         None => x,
     };
-    let y = block.y + (sh.row_top(cell.row) - sh.row_top(block.rows.0)) as f32 * block.k;
+    let y = block.y + (block.lay.row_top(sh, cell.row) - block.lay.row_top(sh, block.rows.0)) as f32 * block.ky;
     Some((block.page, x, y))
 }
 
@@ -631,10 +634,11 @@ pub(super) fn make_block<'a>(
     rows: (u32, u32),
     cols: (u32, u32),
     origin: (f32, f32),
-    lay: &SheetLayout,
+    lay: &'a SheetLayout,
 ) -> Block<'a> {
     let (x, y) = origin;
     let kx = lay.kx();
+    let ky = lay.ky();
     let k = lay.k();
     let mut xs = Vec::with_capacity((cols.1 - cols.0 + 2) as usize);
     let mut acc = x;
@@ -647,10 +651,10 @@ pub(super) fn make_block<'a>(
     let mut acc = y;
     ys.push(acc);
     for r in rows.0..=rows.1 {
-        acc += sh.row_height(r) * k;
+        acc += lay.row_height(sh, r) * ky;
         ys.push(acc);
     }
-    Block { wb, si, sh, rows, cols, xs, ys, kx, k, scale: lay.scale, mirror_axis: lay.page_w }
+    Block { wb, si, sh, lay, rows, cols, xs, ys, kx, ky, k, scale: lay.scale, mirror_axis: lay.page_w }
 }
 
 #[cfg(test)]

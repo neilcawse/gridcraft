@@ -61,6 +61,7 @@ fn fallback_layout(pt: &PivotTable) -> Option<PivotStyleLayout> {
         row_roles: vec![],
         row_subheading: vec![],
         col_roles: vec![],
+        col_subheading: vec![],
     })
 }
 
@@ -71,6 +72,7 @@ struct CellRole {
     page_label: bool,
     page_value: bool,
     is_header: bool,
+    is_first_header_cell: bool,
     is_total_row: bool,
     is_blank_row: bool,
     subtotal_row: Option<u8>,
@@ -78,6 +80,9 @@ struct CellRole {
     is_first_col: bool,
     is_total_col: bool,
     subtotal_col: Option<u8>,
+    col_subheading: Option<u8>,
+    /// True when the PivotTable body includes at least one data column (`first_data_col < body_cols`).
+    has_data_cols: bool,
     /// 0-based row index inside the data area (for row stripe parity).
     data_row: u32,
     /// 0-based column index inside the body (for column stripe parity).
@@ -105,6 +110,7 @@ fn classify_cell(pt: &PivotTable, layout: &PivotStyleLayout, body: RangeRef, c: 
             page_label: rel_c.is_multiple_of(2),
             page_value: !rel_c.is_multiple_of(2),
             is_header: false,
+            is_first_header_cell: false,
             is_total_row: false,
             is_blank_row: false,
             subtotal_row: None,
@@ -112,6 +118,8 @@ fn classify_cell(pt: &PivotTable, layout: &PivotStyleLayout, body: RangeRef, c: 
             is_first_col: false,
             is_total_col: false,
             subtotal_col: None,
+            col_subheading: None,
+            has_data_cols: false,
             data_row: 0,
             rel_col: rel_c,
         });
@@ -142,22 +150,26 @@ fn classify_cell(pt: &PivotTable, layout: &PivotStyleLayout, body: RangeRef, c: 
         (total, false, None, None)
     };
 
+    let has_data_cols = layout.first_data_col < body_cols;
     let row_label_cols = layout.first_data_col.max(1);
     let is_first_col = rel_c < row_label_cols;
-    let (is_total_col, subtotal_col) = if rel_c >= layout.first_data_col {
+    let is_first_header_cell = is_header && rel_r == 0 && rel_c == 0;
+    let (is_total_col, subtotal_col, col_subheading) = if rel_c >= layout.first_data_col {
         let dc = (rel_c - layout.first_data_col) as usize;
+        let csub = layout.col_subheading.get(dc).copied().flatten();
         if let Some(&role) = layout.col_roles.get(dc) {
             match role {
-                PivotColRole::GrandTotal => (true, None),
-                PivotColRole::Subtotal(d) => (false, Some(d)),
-                PivotColRole::Data | PivotColRole::Blank => (false, None),
+                PivotColRole::GrandTotal => (true, None, None),
+                PivotColRole::Subtotal(d) => (false, Some(d), None),
+                PivotColRole::Data => (false, None, csub),
+                PivotColRole::Blank => (false, None, None),
             }
         } else {
             let total = pt.grand_totals_rows && body_cols > layout.first_data_col && rel_c + 1 == body_cols;
-            (total, None)
+            (total, None, csub)
         }
     } else {
-        (false, None)
+        (false, None, None)
     };
 
     Some(CellRole {
@@ -165,6 +177,7 @@ fn classify_cell(pt: &PivotTable, layout: &PivotStyleLayout, body: RangeRef, c: 
         page_label: false,
         page_value: false,
         is_header,
+        is_first_header_cell,
         is_total_row,
         is_blank_row,
         subtotal_row,
@@ -172,6 +185,8 @@ fn classify_cell(pt: &PivotTable, layout: &PivotStyleLayout, body: RangeRef, c: 
         is_first_col,
         is_total_col,
         subtotal_col,
+        col_subheading,
+        has_data_cols,
         data_row,
         rel_col: rel_c,
     })
@@ -214,6 +229,14 @@ fn subheading_row_kind(depth: u8) -> &'static str {
     }
 }
 
+fn subheading_col_kind(depth: u8) -> &'static str {
+    match depth {
+        0 => "firstColumnSubheading",
+        1 => "secondColumnSubheading",
+        _ => "thirdColumnSubheading",
+    }
+}
+
 fn resolve_custom_style(elems: &[PivotStyleElement], pt: &PivotTable, layout: &PivotStyleLayout, body: RangeRef, c: CellRef) -> Option<Style> {
     let role = classify_cell(pt, layout, body, c)?;
     let opts = pt.style_options;
@@ -243,7 +266,7 @@ fn resolve_custom_style(elems: &[PivotStyleElement], pt: &PivotTable, layout: &P
     }
 
     if !role.is_header && !role.is_total_row {
-        if opts.show_row_stripes {
+        if opts.show_row_stripes && role.has_data_cols {
             apply(stripe_kind(elems, "firstRowStripe", "secondRowStripe", role.data_row));
         }
         if opts.show_col_stripes {
@@ -274,6 +297,12 @@ fn resolve_custom_style(elems: &[PivotStyleElement], pt: &PivotTable, layout: &P
 
     if role.is_header && opts.show_col_headers {
         apply("headerRow");
+        if let Some(d) = role.col_subheading {
+            apply(subheading_col_kind(d));
+        }
+        if role.is_first_header_cell {
+            apply("firstHeaderCell");
+        }
     }
     if role.is_total_row {
         apply("totalRow");
@@ -368,6 +397,7 @@ pub fn parse_pivot_style_name(name: &str) -> Option<(&'static str, u32)> {
 /// Palette for a built-in `PivotStyleLight1…28 / Medium1…28 / Dark1…28` style.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BuiltinPivotLook {
+    pub whole_table: Option<Color>,
     pub header_fill: Option<Color>,
     pub header_font: Color,
     pub header_bottom: Option<Color>,
@@ -386,9 +416,9 @@ pub struct BuiltinPivotLook {
     pub filter_fill: Option<Color>,
 }
 
-/// Built-in palette for a PivotTable style name (falls back to `PivotStyleLight16` if unrecognized).
-pub fn builtin_look(style: &str) -> BuiltinPivotLook {
-    let (fam, n) = parse_pivot_style_name(style).unwrap_or(("Light", 16));
+/// Built-in palette for a PivotTable style name (`None` for unrecognized/custom names).
+pub fn builtin_look(style: &str) -> Option<BuiltinPivotLook> {
+    let (fam, n) = parse_pivot_style_name(style)?;
     let k = n.saturating_sub(1) % 7;
     let acc = if k == 0 { None } else { Some(3 + k as u8) };
     let a = |tint: i16, neutral: Color| acc.map_or(neutral, |a| Color::Theme(a, tint));
@@ -403,9 +433,10 @@ pub fn builtin_look(style: &str) -> BuiltinPivotLook {
     let line = a(400, dark_grey);
     let group = (n.saturating_sub(1) / 7).min(3);
 
-    match (fam, group) {
+    let lk = match (fam, group) {
         // Light 1-7: clean header with top/bottom rules, subtle banded rows.
         ("Light", 0) => BuiltinPivotLook {
+            whole_table: None,
             header_fill: None,
             header_font: black,
             header_bottom: Some(main),
@@ -425,6 +456,7 @@ pub fn builtin_look(style: &str) -> BuiltinPivotLook {
         },
         // Light 8-14: solid accent header, white bold text, horizontal grid lines.
         ("Light", 1) => BuiltinPivotLook {
+            whole_table: None,
             header_fill: Some(main),
             header_font: white,
             header_bottom: Some(main),
@@ -444,6 +476,7 @@ pub fn builtin_look(style: &str) -> BuiltinPivotLook {
         },
         // Light 15-21 (Light16 = Excel default): soft pale header, light stripe, tinted total.
         ("Light", 2) => BuiltinPivotLook {
+            whole_table: None,
             header_fill: Some(pale),
             header_font: black,
             header_bottom: Some(line),
@@ -463,6 +496,7 @@ pub fn builtin_look(style: &str) -> BuiltinPivotLook {
         },
         // Light 22-28: clean header with outer frame and vertical dividers.
         ("Light", _) => BuiltinPivotLook {
+            whole_table: None,
             header_fill: None,
             header_font: black,
             header_bottom: Some(main),
@@ -482,6 +516,7 @@ pub fn builtin_look(style: &str) -> BuiltinPivotLook {
         },
         // Medium 1-7: solid accent header, white text, light bands, framed outer border.
         ("Medium", 0) => BuiltinPivotLook {
+            whole_table: None,
             header_fill: Some(main),
             header_font: white,
             header_bottom: Some(main),
@@ -501,6 +536,7 @@ pub fn builtin_look(style: &str) -> BuiltinPivotLook {
         },
         // Medium 8-14 (Medium9 = classic dark blue header + banded rows + bold accent total).
         ("Medium", 1) => BuiltinPivotLook {
+            whole_table: None,
             header_fill: Some(main),
             header_font: white,
             header_bottom: Some(main),
@@ -520,6 +556,7 @@ pub fn builtin_look(style: &str) -> BuiltinPivotLook {
         },
         // Medium 15-21: solid accent header, neutral grey bands, bold accent total.
         ("Medium", 2) => BuiltinPivotLook {
+            whole_table: None,
             header_fill: Some(main),
             header_font: white,
             header_bottom: Some(black),
@@ -539,6 +576,7 @@ pub fn builtin_look(style: &str) -> BuiltinPivotLook {
         },
         // Medium 22-28: pale header with grid lines, two-tone bands.
         ("Medium", _) => BuiltinPivotLook {
+            whole_table: Some(pale),
             header_fill: Some(pale),
             header_font: black,
             header_bottom: Some(line),
@@ -558,6 +596,7 @@ pub fn builtin_look(style: &str) -> BuiltinPivotLook {
         },
         // Dark 1-7: black header, dark accent body bands with white text, black total.
         ("Dark", 0) => BuiltinPivotLook {
+            whole_table: Some(a(0, Color::Theme(1, 450))),
             header_fill: Some(black),
             header_font: white,
             header_bottom: Some(main),
@@ -577,6 +616,7 @@ pub fn builtin_look(style: &str) -> BuiltinPivotLook {
         },
         // Dark 8-14: solid accent header, mid/pale body bands, solid accent total.
         ("Dark", 1) => BuiltinPivotLook {
+            whole_table: Some(pale),
             header_fill: Some(main),
             header_font: white,
             header_bottom: Some(white),
@@ -596,6 +636,7 @@ pub fn builtin_look(style: &str) -> BuiltinPivotLook {
         },
         // Dark 15-21: black header, mid/pale body bands, black total.
         ("Dark", 2) => BuiltinPivotLook {
+            whole_table: Some(pale),
             header_fill: Some(black),
             header_font: white,
             header_bottom: Some(main),
@@ -615,6 +656,7 @@ pub fn builtin_look(style: &str) -> BuiltinPivotLook {
         },
         // Dark 22-28: solid accent header, rich dark bands, solid accent total.
         _ => BuiltinPivotLook {
+            whole_table: Some(a(0, Color::Theme(1, 450))),
             header_fill: Some(main),
             header_font: white,
             header_bottom: Some(white),
@@ -632,7 +674,8 @@ pub fn builtin_look(style: &str) -> BuiltinPivotLook {
             inner_v: None,
             filter_fill: Some(mid),
         },
-    }
+    };
+    Some(lk)
 }
 
 fn thin(c: Option<Color>) -> BorderLine {
@@ -641,7 +684,7 @@ fn thin(c: Option<Color>) -> BorderLine {
 
 fn resolve_builtin_style(name: &str, pt: &PivotTable, layout: &PivotStyleLayout, body: RangeRef, c: CellRef) -> Option<Style> {
     let role = classify_cell(pt, layout, body, c)?;
-    let lk = builtin_look(name);
+    let lk = builtin_look(name)?;
     let opts = pt.style_options;
     let mut s = Style::default();
 
@@ -727,8 +770,18 @@ fn apply_builtin_fill_and_font(s: &mut Style, lk: &BuiltinPivotLook, role: &Cell
         }
         return;
     }
-    let stripe1 = (opts.show_row_stripes && role.data_row.is_multiple_of(2)) || (opts.show_col_stripes && role.rel_col.is_multiple_of(2));
-    if let Some(f) = if stripe1 { lk.band1 } else { lk.band2 } {
+    if let Some(f) = lk.whole_table {
+        s.fill = Fill::solid(f);
+    }
+    if opts.show_row_stripes
+        && role.has_data_cols
+        && let Some(f) = if role.data_row.is_multiple_of(2) { lk.band1 } else { lk.band2 }
+    {
+        s.fill = Fill::solid(f);
+    }
+    if opts.show_col_stripes
+        && let Some(f) = if role.rel_col.is_multiple_of(2) { lk.band1 } else { lk.band2 }
+    {
         s.fill = Fill::solid(f);
     }
     if (opts.show_row_headers && (role.is_first_col || role.row_subheading.is_some()))
@@ -789,6 +842,7 @@ mod tests {
             ],
             row_subheading: vec![None; 6],
             col_roles: vec![PivotColRole::Data, PivotColRole::Subtotal(0), PivotColRole::GrandTotal],
+            col_subheading: vec![None; 3],
         }
     }
 
@@ -1011,5 +1065,134 @@ mod tests {
         // must appear in the emitted PDF stream even though the cells themselves have default style.
         assert!(text.contains("1 1 1 rg"), "expected white header text color in PDF stream");
         assert!(text.contains(" re f"), "expected solid fill rectangles for pivot header/stripes in PDF stream");
+    }
+
+    #[test]
+    fn row_stripes_are_omitted_when_pivot_has_no_data_columns() {
+        let hdr = Style { fill: Fill::solid(Color::Theme(2, 0)), ..Style::default() };
+        let stripe1 = Style { fill: Fill::solid(Color::Theme(0, -50)), ..Style::default() };
+        let stripe2 = Style { fill: Fill::solid(Color::Theme(2, 800)), ..Style::default() };
+        let total = Style { fill: Fill::solid(Color::Theme(0, -150)), ..Style::default() };
+        let elems = vec![
+            PivotStyleElement { kind: "headerRow".into(), size: 1, style: hdr },
+            PivotStyleElement { kind: "firstRowStripe".into(), size: 1, style: stripe1 },
+            PivotStyleElement { kind: "secondRowStripe".into(), size: 1, style: stripe2 },
+            PivotStyleElement { kind: "totalRow".into(), size: 1, style: total },
+        ];
+        // 4 columns A..D, all row fields (first_data_col == 4 == body_cols).
+        let row_only_layout = PivotStyleLayout {
+            body_range: Some(RangeRef::new(CellRef::new(2, 0), CellRef::new(6, 3))),
+            first_header_row: 0,
+            first_data_row: 1,
+            first_data_col: 4,
+            page_rows: 0,
+            page_cols: 1,
+            row_roles: vec![PivotRowRole::Data, PivotRowRole::Data, PivotRowRole::Data, PivotRowRole::GrandTotal],
+            row_subheading: vec![None; 4],
+            col_roles: vec![],
+            col_subheading: vec![],
+        };
+        let pt = PivotTable {
+            style: "CustomRowOnly".into(),
+            style_options: PivotStyleOptions {
+                show_row_headers: false,
+                show_col_headers: true,
+                show_row_stripes: true,
+                show_col_stripes: false,
+                show_last_column: true,
+            },
+            custom_style: PivotCustomStyle(Some(Arc::new(elems))),
+            anchor: CellRef::new(2, 0),
+            last_range: Some(RangeRef::new(CellRef::new(2, 0), CellRef::new(6, 3))),
+            style_grid: PivotStyleGrid(Some(Arc::new(row_only_layout))),
+            ..PivotTable::default()
+        };
+        let wb = sample_workbook_with_pivot(pt);
+        let sh = wb.sheet(0).unwrap();
+        let p = &sh.pivots[0];
+        // Header and total row still receive their fills; data rows stay plain white (no stripes).
+        assert_eq!(pivot_cell_style(&wb, sh, p, CellRef::new(2, 0)).fill, Fill::solid(Color::Theme(2, 0)));
+        assert_eq!(pivot_cell_style(&wb, sh, p, CellRef::new(3, 0)).fill.pattern, PatternType::None);
+        assert_eq!(pivot_cell_style(&wb, sh, p, CellRef::new(4, 0)).fill.pattern, PatternType::None);
+        assert_eq!(pivot_cell_style(&wb, sh, p, CellRef::new(6, 0)).fill, Fill::solid(Color::Theme(0, -150)));
+    }
+
+    #[test]
+    fn builtin_stripes_respect_individual_flags_and_unknown_style_returns_none() {
+        assert!(builtin_look("UnrecognizedStyleName").is_none());
+        let pt = PivotTable {
+            style: "PivotStyleMedium22".into(),
+            style_options: PivotStyleOptions {
+                show_row_headers: false,
+                show_col_headers: true,
+                show_row_stripes: false,
+                show_col_stripes: false,
+                show_last_column: false,
+            },
+            anchor: CellRef::new(2, 0),
+            last_range: Some(RangeRef::new(CellRef::new(2, 0), CellRef::new(8, 3))),
+            style_grid: PivotStyleGrid(Some(Arc::new(PivotStyleLayout { page_rows: 0, ..base_layout() }))),
+            ..PivotTable::default()
+        };
+        let wb = sample_workbook_with_pivot(pt);
+        let sh = wb.sheet(0).unwrap();
+        let p = &sh.pivots[0];
+        let lk = builtin_look("PivotStyleMedium22").unwrap();
+        // Both stripe flags off: data rows get whole_table fill uniformly, not band1/band2 alternation.
+        let d0 = pivot_cell_style(&wb, sh, p, CellRef::new(3, 1));
+        let d1 = pivot_cell_style(&wb, sh, p, CellRef::new(4, 1));
+        assert_eq!(d0.fill, Fill::solid(lk.whole_table.unwrap()));
+        assert_eq!(d0.fill, d1.fill);
+
+        // Empty custom style must NOT fall back to Light16.
+        let empty_custom = PivotTable {
+            style: "EmptyCustom".into(),
+            custom_style: PivotCustomStyle(Some(Arc::new(vec![]))),
+            anchor: CellRef::new(2, 0),
+            last_range: Some(RangeRef::new(CellRef::new(2, 0), CellRef::new(8, 3))),
+            style_grid: PivotStyleGrid(Some(Arc::new(PivotStyleLayout { page_rows: 0, ..base_layout() }))),
+            ..PivotTable::default()
+        };
+        let wb2 = sample_workbook_with_pivot(empty_custom);
+        let sh2 = wb2.sheet(0).unwrap();
+        assert_eq!(pivot_cell_style(&wb2, sh2, &sh2.pivots[0], CellRef::new(3, 1)).fill.pattern, PatternType::None);
+    }
+
+    #[test]
+    fn custom_style_dispatches_first_header_cell_col_subheading_and_col_stripes() {
+        let hdr = Style { fill: Fill::solid(Color::Rgb(0x112233)), ..Style::default() };
+        let first_hdr = Style { fill: Fill::solid(Color::Rgb(0x445566)), ..Style::default() };
+        let col_sub = Style { fill: Fill::solid(Color::Rgb(0x778899)), ..Style::default() };
+        let col_stripe = Style { fill: Fill::solid(Color::Rgb(0xAABBCC)), ..Style::default() };
+        let elems = vec![
+            PivotStyleElement { kind: "headerRow".into(), size: 1, style: hdr },
+            PivotStyleElement { kind: "firstHeaderCell".into(), size: 1, style: first_hdr },
+            PivotStyleElement { kind: "firstColumnSubheading".into(), size: 1, style: col_sub },
+            PivotStyleElement { kind: "firstColumnStripe".into(), size: 1, style: col_stripe },
+        ];
+        let layout = PivotStyleLayout { page_rows: 0, col_subheading: vec![Some(0), None, None], ..base_layout() };
+        let pt = PivotTable {
+            style: "CustomFull".into(),
+            style_options: PivotStyleOptions {
+                show_row_headers: false,
+                show_col_headers: true,
+                show_row_stripes: false,
+                show_col_stripes: true,
+                show_last_column: false,
+            },
+            custom_style: PivotCustomStyle(Some(Arc::new(elems))),
+            anchor: CellRef::new(2, 0),
+            last_range: Some(RangeRef::new(CellRef::new(2, 0), CellRef::new(8, 3))),
+            style_grid: PivotStyleGrid(Some(Arc::new(layout))),
+            ..PivotTable::default()
+        };
+        let wb = sample_workbook_with_pivot(pt);
+        let sh = wb.sheet(0).unwrap();
+        let p = &sh.pivots[0];
+        assert_eq!(pivot_cell_style(&wb, sh, p, CellRef::new(2, 0)).fill, Fill::solid(Color::Rgb(0x445566)));
+        assert_eq!(pivot_cell_style(&wb, sh, p, CellRef::new(2, 1)).fill, Fill::solid(Color::Rgb(0x778899)));
+        assert_eq!(pivot_cell_style(&wb, sh, p, CellRef::new(2, 2)).fill, Fill::solid(Color::Rgb(0x112233)));
+        assert_eq!(pivot_cell_style(&wb, sh, p, CellRef::new(3, 0)).fill, Fill::solid(Color::Rgb(0xAABBCC)));
+        assert_eq!(pivot_cell_style(&wb, sh, p, CellRef::new(3, 1)).fill.pattern, PatternType::None);
     }
 }

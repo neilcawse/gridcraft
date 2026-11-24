@@ -101,8 +101,8 @@ const MAX_CHART_PRIMS: usize = 4_000_000;
 #[cfg(test)]
 use layout::bands;
 pub(crate) use layout::split_bands;
+use layout::{GRID_EDGE_INSET_PT, known_paper, seg_size, segments};
 pub use layout::{PrintOptions, SheetLayout, layout_sheet, layouts, paper_size, print_range};
-use layout::{known_paper, seg_size, segments};
 use objects::draw_objects;
 #[cfg(test)]
 use text::{center_across_width, wrap_lines};
@@ -178,21 +178,21 @@ pub fn render_pdf(wb: &Workbook, layouts: &[SheetLayout], file: &str, path: &str
     for lay in layouts {
         let Some(sh) = wb.sheet(lay.sheet) else { continue };
         let mut cf = crate::cf::CfCache::new();
-        let k = lay.k();
         let kx = lay.kx();
+        let ky = lay.ky();
         let (aw, ah) = lay.avail();
         for (pi, (ri, ci)) in lay.pages.iter().enumerate() {
             page_no += 1;
             let (Some(rband), Some(cband)) = (lay.row_bands.get(*ri).copied(), lay.col_bands.get(*ci).copied()) else { continue };
             let rsegs = segments(lay.title_rows, rband);
             let csegs = segments(lay.title_cols, cband);
-            let content_w = (lay.heading_w + csegs.iter().map(|s| seg_size(sh, *s, false)).sum::<f32>()) * kx;
-            let content_h = (lay.heading_h + rsegs.iter().map(|s| seg_size(sh, *s, true)).sum::<f32>()) * k;
-            let ox = lay.margins[0] + if lay.settings.center_h { ((aw - content_w) / 2.0).max(0.0) } else { 0.0 };
-            let oy = lay.margins[2] + if lay.settings.center_v { ((ah - content_h) / 2.0).max(0.0) } else { 0.0 };
+            let content_w = (lay.heading_w + csegs.iter().map(|s| seg_size(lay, sh, *s, false)).sum::<f32>()) * kx;
+            let content_h = (lay.heading_h + rsegs.iter().map(|s| seg_size(lay, sh, *s, true)).sum::<f32>()) * ky;
+            let ox = lay.margins[0] + GRID_EDGE_INSET_PT + if lay.settings.center_h { ((aw - content_w) / 2.0).max(0.0) } else { 0.0 };
+            let oy = lay.margins[2] + GRID_EDGE_INSET_PT + if lay.settings.center_v { ((ah - content_h) / 2.0).max(0.0) } else { 0.0 };
             let page_index = doc.page_count();
             let pg = doc.add_page(lay.page_w, lay.page_h);
-            let mut y = oy + lay.heading_h * k;
+            let mut y = oy + lay.heading_h * ky;
             let mut body: Option<Block> = None;
             for (rsi, rs) in rsegs.iter().enumerate() {
                 let mut x = ox + lay.heading_w * kx;
@@ -203,23 +203,24 @@ pub fn render_pdf(wb: &Workbook, layouts: &[SheetLayout], file: &str, path: &str
                     printed_blocks.push(PrintedBlock {
                         page: page_index,
                         sheet: lay.sheet,
+                        lay,
                         rows: *rs,
                         cols: *cs,
                         x,
                         y,
                         kx,
-                        k,
+                        ky,
                         mirror_axis: sh.right_to_left.then_some(b.mirror_axis),
                     });
                     if lay.settings.headings {
-                        draw_headings(pg, &b, rsi == 0, csi == 0, (ox, oy), (lay.heading_w * kx, lay.heading_h * k));
+                        draw_headings(pg, &b, rsi == 0, csi == 0, (ox, oy), (lay.heading_w * kx, lay.heading_h * ky));
                     }
-                    x += seg_size(sh, *cs, false) * kx;
+                    x += seg_size(lay, sh, *cs, false) * kx;
                     if rsi + 1 == rsegs.len() && csi + 1 == csegs.len() {
                         body = Some(b);
                     }
                 }
-                y += seg_size(sh, *rs, true) * k;
+                y += seg_size(lay, sh, *rs, true) * ky;
             }
             if let Some(b) = &body {
                 draw_objects(pg, wb, lay.sheet, sh, b, &mut pics);
@@ -227,8 +228,8 @@ pub fn render_pdf(wb: &Workbook, layouts: &[SheetLayout], file: &str, path: &str
             if lay.settings.headings {
                 let fill = [0xF2, 0xF2, 0xF2];
                 let ox = if sh.right_to_left { lay.page_w - ox - lay.heading_w * kx } else { ox };
-                pg.fill_rect(ox, oy, lay.heading_w * kx, lay.heading_h * k, fill);
-                pg.rect_stroke(ox, oy, lay.heading_w * kx, lay.heading_h * k, 0.3, [0xA0, 0xA0, 0xA0]);
+                pg.fill_rect(ox, oy, lay.heading_w * kx, lay.heading_h * ky, fill);
+                pg.rect_stroke(ox, oy, lay.heading_w * kx, lay.heading_h * ky, 0.3, [0xA0, 0xA0, 0xA0]);
             }
             let cx = HfContext {
                 page: page_no,
