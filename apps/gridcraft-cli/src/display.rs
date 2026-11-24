@@ -110,8 +110,9 @@ fn dump_sheet(out: &mut impl Write, wb: &Workbook, si: usize, sh: &Sheet, select
     serde_json::to_writer(
         &mut *out,
         &json!({
-            "width_pt": f64::from(sh.default_col_width) * PT, "width_chars": points_to_chars(f64::from(sh.default_col_width)),
-            "height_pt": f64::from(sh.default_row_height) * PT, "digit_width_px": 7, "padding_px": 5,
+            "width_pt": dimension(f64::from(sh.default_col_width), PT), "width_px": dimension(f64::from(sh.default_col_width), 1.0),
+            "height_pt": dimension(f64::from(sh.default_row_height), PT), "height_px": dimension(f64::from(sh.default_row_height), 1.0),
+            "width_chars": points_to_chars(f64::from(sh.default_col_width)), "digit_width_px": 7, "padding_px": 5,
         }),
     )?;
     let merges = sh.merges.iter().filter(|m| m.intersects(&r));
@@ -146,13 +147,16 @@ fn dump_sheet(out: &mut impl Write, wb: &Workbook, si: usize, sh: &Sheet, select
             let col = r.start.col + i as u32;
             let size = sh.cols.get(&col).and_then(|l| l.size);
             let px = f64::from(sh.col_width(col));
+            let configured_px = f64::from(size.unwrap_or(sh.default_col_width));
             Column {
                 column: col_to_letters(col),
-                width_pt: px * PT,
+                width_pt: dimension(px, PT),
+                width_px: dimension(px, 1.0),
                 width_chars: points_to_chars(px),
                 hidden: sh.cols.get(&col).is_some_and(|l| l.hidden),
                 custom: size.is_some(),
-                configured_width_pt: f64::from(size.unwrap_or(sh.default_col_width)) * PT,
+                configured_width_pt: dimension(configured_px, PT),
+                configured_width_px: dimension(configured_px, 1.0),
             }
         }),
     )?;
@@ -164,12 +168,16 @@ fn dump_sheet(out: &mut impl Write, wb: &Workbook, si: usize, sh: &Sheet, select
         out,
         rows.map(|row| {
             let line = sh.rows.get(&row);
+            let px = f64::from(sh.row_height(row));
+            let configured_px = f64::from(line.and_then(|l| l.size).unwrap_or(sh.default_row_height));
             Row {
                 row: row + 1,
-                height_pt: f64::from(sh.row_height(row)) * PT,
+                height_pt: dimension(px, PT),
+                height_px: dimension(px, 1.0),
                 hidden: line.is_some_and(|l| l.hidden),
                 custom: line.is_some_and(|l| l.custom),
-                configured_height_pt: f64::from(line.and_then(|l| l.size).unwrap_or(sh.default_row_height)) * PT,
+                configured_height_pt: dimension(configured_px, PT),
+                configured_height_px: dimension(configured_px, 1.0),
             }
         }),
     )?;
@@ -177,6 +185,11 @@ fn dump_sheet(out: &mut impl Write, wb: &Workbook, si: usize, sh: &Sheet, select
 }
 
 const PT: f64 = 72.0 / 96.0;
+
+// Round only serialized geometry, after unit conversion; layout and hit-testing use model precision.
+fn dimension(model_px: f64, scale: f64) -> f64 {
+    (model_px * scale * 100.0).round() / 100.0 + 0.0
+}
 
 fn comma(out: &mut impl Write, first: &mut bool) -> io::Result<()> {
     if !std::mem::replace(first, false) {
@@ -199,19 +212,23 @@ fn array(out: &mut impl Write, items: impl IntoIterator<Item = impl Serialize>) 
 struct Column {
     column: String,
     width_pt: f64,
+    width_px: f64,
     width_chars: f64,
     hidden: bool,
     custom: bool,
     configured_width_pt: f64,
+    configured_width_px: f64,
 }
 
 #[derive(Serialize)]
 struct Row {
     row: u32,
     height_pt: f64,
+    height_px: f64,
     hidden: bool,
     custom: bool,
     configured_height_pt: f64,
+    configured_height_px: f64,
 }
 
 #[derive(Serialize)]
@@ -371,10 +388,10 @@ fn drawings(out: &mut impl Write, sh: &Sheet, selection: Option<RangeRef>) -> io
         }
         let anchor = AnchorRecord {
             cell: a.cell.a1(),
-            dx_pt: f64::from(a.dx) * PT,
-            dy_pt: f64::from(a.dy) * PT,
-            width_pt: f64::from(a.width) * PT,
-            height_pt: f64::from(a.height) * PT,
+            dx_pt: dimension(f64::from(a.dx), PT),
+            dy_pt: dimension(f64::from(a.dy), PT),
+            width_pt: dimension(f64::from(a.width), PT),
+            height_pt: dimension(f64::from(a.height), PT),
             mode: a.mode,
         };
         comma(out, &mut first)?;
@@ -513,6 +530,7 @@ mod tests {
         sh.default_row_height = 24.0;
         sh.cols.insert(1, LineInfo { size: Some(128.0), hidden: true, ..LineInfo::default() });
         sh.rows.insert(1, LineInfo { size: Some(32.0), custom: true, hidden: true, ..LineInfo::default() });
+        sh.rows.insert(2, LineInfo { size: Some(40.0 / PT as f32), custom: true, ..LineInfo::default() });
         sh.freeze = Some((2, 1));
         sh.zoom = 125;
         sh.show_gridlines = false;
@@ -545,10 +563,18 @@ mod tests {
         assert_eq!(sh["view"]["tab_color"], json!([40, 80, 160]));
         assert_eq!(
             sh["columns"][0],
-            json!({"column":"B", "width_pt":0.0, "width_chars":0.0, "configured_width_pt":96.0, "hidden":true, "custom":true})
+            json!({"column":"B", "width_pt":0.0, "width_px":0.0, "width_chars":0.0, "configured_width_pt":96.0,
+                "configured_width_px":128.0, "hidden":true, "custom":true})
         );
-        assert_eq!(sh["rows"][1], json!({"row":2,"height_pt":0.0,"configured_height_pt":24.0,"hidden":true,"custom":true}));
+        assert_eq!(
+            sh["rows"][1],
+            json!({"row":2,"height_pt":0.0,"height_px":0.0,"configured_height_pt":24.0,"configured_height_px":32.0,"hidden":true,"custom":true})
+        );
+        assert_eq!(sh["rows"][2]["height_pt"], 40.0);
+        assert_eq!(sh["rows"][2]["height_px"], 53.33);
         assert_eq!(sh["standard_dimensions"]["height_pt"], 18.0);
+        assert_eq!(sh["standard_dimensions"]["height_px"], 24.0);
+        assert_eq!(sh["standard_dimensions"]["width_px"], 75.0);
         assert_eq!(sh["standard_dimensions"]["width_chars"], 10.0);
         assert_eq!(sh["drawings"][0]["anchor"]["cell"], "A1");
         assert_eq!(sh["drawings"][0]["anchor"]["width_pt"], 75.0);
