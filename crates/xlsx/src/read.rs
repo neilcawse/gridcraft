@@ -493,7 +493,6 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
         collect_sheet_slicers(&mut cx, wb.sheets.len());
         wb.sheets.push(Arc::new(sheet));
     }
-    cx.sst = Vec::new();
     attach_pending_slicers(&mut cx, &mut wb);
     if wb.sheets.is_empty() {
         cx.warn("the workbook has no worksheets; added an empty sheet");

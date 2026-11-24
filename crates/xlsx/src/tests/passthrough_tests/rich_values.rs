@@ -143,7 +143,7 @@ fn rich_values_and_the_value_metadata_of_cells_come_back() {
     u.assert_valid();
     assert_rich_parts_written(&u, &metadata);
     let sheet = u.text("xl/worksheets/sheet1.xml");
-    assert!(sheet.contains(r#"<c r="A1" vm="1" t="e"><f>SUM(C1:C2)</f><v>#VALUE!</v></c>"#), "{sheet}");
+    assert!(sheet.contains(r#"<c r="A1" t="e" vm="1"><f>SUM(C1:C2)</f><v>#VALUE!</v></c>"#), "{sheet}");
     assert!(sheet.contains(r#"<c r="A2" vm="2"><v>7</v></c>"#), "{sheet}");
     assert!(sheet.contains(r#"<c r="B1"><v>1</v></c>"#), "{sheet}");
 
@@ -166,7 +166,7 @@ fn only_the_cells_that_still_hold_their_value_keep_their_value_metadata() {
     let u = Unpacked::new(&write_xlsx(&wb).unwrap());
     u.assert_valid();
     let sheet = u.text("xl/worksheets/sheet1.xml");
-    assert!(sheet.contains(r#"<c r="A1" vm="1" t="e">"#), "{sheet}");
+    assert!(sheet.contains(r#"<c r="A1" t="e" vm="1">"#), "{sheet}");
     assert!(sheet.contains(r#"<c r="A2"><v>8</v></c>"#), "{sheet}");
     assert!(!sheet.contains(r#"vm="2""#), "{sheet}");
     assert_rich_parts_written(&u, &metadata);
@@ -199,7 +199,7 @@ fn value_metadata_follows_its_cell_when_the_cell_moves() {
     u.assert_valid();
     assert_rich_parts_written(&u, &metadata);
     let xml = u.text("xl/worksheets/sheet1.xml");
-    assert!(xml.contains(r#"<c r="A2" vm="1" t="e"><f>SUM(C2:C3)</f><v>#VALUE!</v></c>"#), "{xml}");
+    assert!(xml.contains(r#"<c r="A2" t="e" vm="1"><f>SUM(C2:C3)</f><v>#VALUE!</v></c>"#), "{xml}");
     assert!(xml.contains(r#"<c r="A3" vm="2"><v>7</v></c>"#), "{xml}");
     assert!(xml.contains(r#"<c r="B2"><v>1</v></c>"#), "{xml}");
 }
@@ -238,7 +238,7 @@ fn dynamic_array_formulas_share_a_kept_metadata_part_that_has_the_flag() {
     assert_rich_parts_written(&u, &metadata);
     let sheet = u.text("xl/worksheets/sheet1.xml");
     assert!(sheet.contains(r#"<c r="D1" cm="1">"#), "{sheet}");
-    assert!(sheet.contains(r#"<c r="A1" vm="1" t="e">"#), "{sheet}");
+    assert!(sheet.contains(r#"<c r="A1" t="e" vm="1">"#), "{sheet}");
     assert!(sheet.contains(r#"<c r="A2" vm="2">"#), "{sheet}");
 }
 
@@ -388,7 +388,7 @@ fn another_error_in_the_cell_loses_the_value_metadata_of_the_one_it_had() {
     };
     // Still #CALC!: the metadata comes back with it.
     let (sheet, back) = with(CellError::Calc);
-    assert!(sheet.contains(r#"<c r="A1" vm="1" t="e">"#), "{sheet}");
+    assert!(sheet.contains(r#"<c r="A1" t="e" vm="1">"#), "{sheet}");
     assert_eq!(back, Value::Error(CellError::Calc));
     // #VALUE! and #SPILL! are written as #VALUE! too, but the #CALC! metadata no longer says what
     // the cell holds.
