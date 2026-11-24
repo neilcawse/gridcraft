@@ -137,7 +137,10 @@ language (none so far) and of localized function names.
    per language, and `cargo xtask ci` runs it first. Language switching and the system-language default already exist (#31).
 2. Locale-aware formulas: localized function-name tables and separators at the formula-bar
    boundary only (files keep en-US invariant names), locale number and date formats, list
-   separators in CSV.
+   separators in CSV. Started: `crates/core/src/locale.rs` holds per-locale date order, decimal,
+   thousands and date separators, currency symbol, month/day names and the Swedish year letter for
+   eleven locales; text→number coercion, `&` and `TEXT`/number formatting read the thread's locale
+   (en-US unless a caller scopes another). Nothing in the app selects a locale yet.
 3. Text shaping and fallback: a shaping engine for grid, editor and PDF text (Arabic, Devanagari,
    Thai), system font fallback for CJK, bidirectional runs, right-to-left sheet tabs and printing;
    embedded subset fonts in PDF.
@@ -150,6 +153,8 @@ language (none so far) and of localized function names.
 | 2026-11-10 | minor | Ukrainian Chart is `Діаграма`, matching [craft-i18n#211](https://github.com/storytold/craft-i18n/pull/211) and distinct from Diagram (`Схема`) |
 | 2026-11-10 | minor | Diagram and Decorative Text labels in all 18 non-English catalogs; Diagram never repeats the catalog's chart word (German `Schema`, Ukrainian `Схема`, Romanian `Schemă`), see [feature-names.md](feature-names.md) |
 | 2026-11-09 | minor | Arabic PDF export no longer fails on a character the Arabic face lacks (it falls back like other text) or when no Arabic font is available (Arabic is set in the CID font, which has no Arabic glyphs, and a message says so) |
+| 2026-11-04 | patch | Dates in text read month names in any letters (`4 März 2026`, `4 février 2026`, case-insensitive) and the locale's own abbreviations (`4-Mrz-2026` in de-DE, `4-mrt-2026` in nl-NL, `4-févr.-2026` in fr-FR with its period), so `DATEVALUE(TEXT(d,"d-mmm-yyyy"))` gives `d` back in those locales |
+| 2026-11-04 | minor | Calculation locale (`gridcraft_core::locale`): coercion reads D/M/Y and Y/M/D dates, `.` date separators, decimal commas, suffix currency and the locale's month names; `TEXT` reads its code in the locale's syntax (`0,0%`, `ÅÅÅÅ`) and writes its separators and names; `&` writes the decimal separator. en-US stays the default everywhere; `gridcraft-cli check` re-evaluates mismatching caches under candidate locales |
 | 2026-10-31 | minor | System and embedded CJK text fallbacks share the Latin baseline in cells, editors and window titles; other scripts, symbols and emoji keep their alignment |
 | 2026-11-08 | minor | Strings built with `format!` in English now translate their template first and fill it in once (`Language::tr_fill`): status bar statistics and the circular-reference note, the column width / row height drag tip, the formula bar text for a picture in a cell, the Move or Copy and Unhide notes, the Format Control title, the equation editor's error prefix and its own check messages (macro definitions, `%` with a link, nesting, length, matrix-cell and size limits; RaTeX parser errors stay English), and the Goal Seek and macro recorder/runner toasts (#3600, #3602, #3603, #3605, #3607–#3611). 24 new keys in every catalog; Average, Count, Sum and the three existing templates added to the 11 catalogs that lacked them, and Ukrainian's English placeholders for those six replaced. Numbers in these strings keep the `.` decimal point |
 | 2026-10-26 | minor | Arabic PDF cells inherit explicit or contextual direction; wrapped lines retain paragraph direction, and RTL pages mirror cell and object geometry |

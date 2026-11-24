@@ -141,6 +141,28 @@ fn merge_suffix(acc: Option<char>, s: Option<char>) -> R<Option<char>> {
     }
 }
 
+/// One part of a complex number as Excel writes it: at most 15 significant digits, decimal unless
+/// that needs more than 21 characters (`0.` plus 19 decimals, so `1.28233995888454E-06` is
+/// scientific but `0.0000000000000001` is not), and scientific from 1E+15. Unlike `&` there is no
+/// 1E-9 floor: `COMPLEX(1E-16,0)` is `0.0000000000000001` (ironcalc COMPLEXs.xlsx D16:D18).
+fn part_text(x: f64) -> String {
+    if x == 0.0 || !x.is_finite() || x.abs() >= 1e-9 {
+        return number_to_text(x);
+    }
+    // Below 1E-9 `number_to_text` is always scientific; keep the decimal when it is short enough.
+    let sci = format!("{:.14e}", x);
+    let Some((mant, exp)) = sci.split_once('e') else { return number_to_text(x) };
+    let mag: i32 = exp.parse().unwrap_or(i32::MIN);
+    let digits = mant.bytes().filter(u8::is_ascii_digit).count();
+    let sig = digits.saturating_sub(mant.bytes().rev().take_while(|&b| b == b'0').count());
+    if !(-40..0).contains(&mag) || i64::from(-mag) - 1 + sig as i64 > 19 {
+        return number_to_text(x);
+    }
+    let decimals = usize::try_from(14 - mag).unwrap_or(0);
+    let s = format!("{:.*}", decimals, x);
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
 fn fmt_complex(z: Cx, suffix: char) -> R<Value> {
     if !z.re.is_finite() || !z.im.is_finite() {
         return Err(CellError::Num);
@@ -149,11 +171,11 @@ fn fmt_complex(z: Cx, suffix: char) -> R<Value> {
     let im = clean(z.im);
     let mut s = String::new();
     if im == 0.0 {
-        s.push_str(&number_to_text(re));
+        s.push_str(&part_text(re));
         return text_val(s);
     }
     if re != 0.0 {
-        s.push_str(&number_to_text(re));
+        s.push_str(&part_text(re));
         if im > 0.0 {
             s.push('+');
         }
@@ -161,7 +183,7 @@ fn fmt_complex(z: Cx, suffix: char) -> R<Value> {
     if im == -1.0 {
         s.push('-');
     } else if im != 1.0 {
-        s.push_str(&number_to_text(im));
+        s.push_str(&part_text(im));
     }
     s.push(suffix);
     text_val(s)

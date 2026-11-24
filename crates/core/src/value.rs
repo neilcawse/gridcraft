@@ -438,11 +438,16 @@ impl Value {
             Value::Array(a) => a.data.first().map(|v| v.to_number_in(sys)).unwrap_or(Ok(0.0)),
         }
     }
-    /// Coercion to text as `&` does it.
+    /// Coercion to text as `&` does it. A number is written with the decimal separator of the
+    /// locale in effect ([`crate::locale::current`]).
     pub fn to_text(&self) -> Result<String, CellError> {
         match self {
             Value::Empty => Ok(String::new()),
-            Value::Number(n) => Ok(number_to_text(*n)),
+            Value::Number(n) => {
+                let s = number_to_text(*n);
+                let decimal = crate::locale::current().decimal;
+                Ok(if decimal != '.' && s.contains('.') { s.replace('.', decimal.encode_utf8(&mut [0; 4])) } else { s })
+            }
             Value::Bool(b) => Ok(if *b { "TRUE".into() } else { "FALSE".into() }),
             Value::Text(t) => Ok(t.to_string()),
             Value::Error(e) => Err(*e),
@@ -524,26 +529,59 @@ pub fn compare_numbers(a: f64, b: f64) -> Ordering {
     round15(a).partial_cmp(&round15(b)).unwrap_or(Ordering::Equal)
 }
 
-/// Case-insensitive text order in three levels, as Excel's collation sorts: first by letters and
-/// digits alone (Arabic marks, tatweel and invisible format characters skipped, Arabic-Indic digits
-/// read as digits); then, letter by letter, by the marks on each letter (none first, then in
+/// Excel's order of the printable ASCII characters, case folded: space, punctuation and symbols,
+/// then digits, then letters. A workbook calculated by Excel 14 shows that a space sorts before a digit:
+/// `VLOOKUP("100_300130…",…,7)` over " West Valley…", " Financial…", "Fiscal Year…", 0, 0,
+/// "100_300130…" bisects to " Financial…". The apostrophe and hyphen come right after the space.
+const ASCII_ORDER: &[u8] = b" '-!\"#$%&()*,./:;?@[\\]^_`{|}~+<=>0123456789abcdefghijklmnopqrstuvwxyz";
+
+/// Collation weight of each ASCII byte (uppercase letters weigh as lowercase); control
+/// characters come first, in code order.
+const ASCII_WEIGHT: [u16; 128] = {
+    let mut w = [0u16; 128];
+    let mut i = 0;
+    while i < 128 {
+        w[i] = i as u16;
+        i += 1;
+    }
+    let mut k = 0;
+    while k < ASCII_ORDER.len() {
+        let c = ASCII_ORDER[k] as usize;
+        w[c] = 128 + k as u16;
+        if c >= b'a' as usize && c <= b'z' as usize {
+            w[c - 32] = 128 + k as u16;
+        }
+        k += 1;
+    }
+    w
+};
+
+/// Weight of one (lowercased) character: ASCII by [`ASCII_WEIGHT`], anything else after it by
+/// code point.
+fn char_weight(c: char) -> u32 {
+    match ASCII_WEIGHT.get(c as usize) {
+        Some(&w) => u32::from(w),
+        None => 256 + c as u32,
+    }
+}
+
+/// Case-insensitive text order the way Excel compares text (`<`, `>`, criteria, sorting,
+/// approximate lookups): punctuation and symbols before digits before letters, so `"Spec 1" >
+/// "{}"` (an Excel-calculated workbook counts nine "Spec n" cells for `COUNTIF(B23:B31,">{}")`).
+/// Text that is not all ASCII compares in three levels, as Excel's collation sorts: first by letters
+/// and digits alone (Arabic marks, tatweel and invisible format characters skipped, Arabic-Indic
+/// digits read as digits); then, letter by letter, by the marks on each letter (none first, then in
 /// Excel's mark order) and the digit script (ASCII, Arabic-Indic, Extended Arabic-Indic); then, to
-/// break a remaining tie, by every character (Unicode lowercase). Only text that is equal at the
-/// last level compares equal.
+/// break a remaining tie, by every character. Characters are weighed by [`char_weight`] at every
+/// level; only text that is equal at the last level compares equal.
 pub fn compare_text(a: &str, b: &str) -> Ordering {
     if std::ptr::eq(a.as_ptr(), b.as_ptr()) && a.len() == b.len() {
         return Ordering::Equal;
     }
     if a.is_ascii() && b.is_ascii() {
-        for (&x, &y) in a.as_bytes().iter().zip(b.as_bytes()) {
-            let o = x.to_ascii_lowercase().cmp(&y.to_ascii_lowercase());
-            if o != Ordering::Equal {
-                return o;
-            }
-        }
-        return a.len().cmp(&b.len());
+        return a.bytes().map(|c| ASCII_WEIGHT[c as usize]).cmp(b.bytes().map(|c| ASCII_WEIGHT[c as usize]));
     }
-    let primary = primary_chars(a).cmp(primary_chars(b));
+    let primary = primary_chars(a).map(char_weight).cmp(primary_chars(b).map(char_weight));
     if primary != Ordering::Equal {
         return primary;
     }
@@ -551,7 +589,7 @@ pub fn compare_text(a: &str, b: &str) -> Ordering {
     if secondary != Ordering::Equal {
         return secondary;
     }
-    lowercase_chars(a).cmp(lowercase_chars(b))
+    lowercase_chars(a).map(char_weight).cmp(lowercase_chars(b).map(char_weight))
 }
 
 fn lowercase_chars(s: &str) -> impl Iterator<Item = char> + '_ {
@@ -654,19 +692,14 @@ pub fn number_to_text(n: f64) -> String {
     }
     // Round to 15 significant digits first, then pick decimal or scientific from the rounded
     // magnitude, so 999999999999999.5 reads `1E+15`, never a 16-digit integer.
-    let a = n.abs();
     let sci = format!("{:.14e}", n);
     let (mant, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
     let mag: i32 = exp.parse().unwrap_or(0);
-    let sig = mant.bytes().filter(u8::is_ascii_digit).count() - mant.bytes().rev().take_while(|&b| b == b'0').count();
+    let digits = mant.bytes().filter(u8::is_ascii_digit).count();
+    let sig = digits.saturating_sub(mant.bytes().rev().take_while(|&b| b == b'0').count());
     // Characters after `0.` for |n| < 1: the leading zeros, then the significant digits.
-    let decimals_below_one = -mag - 1 + sig as i32;
+    let decimals_below_one = i64::from(-mag) - 1 + sig as i64;
     if !(-9..15).contains(&mag) || decimals_below_one > 19 {
-        return sci_text(n, 15);
-    }
-    // A value just below 1e15 can round up to 1e15 at 15 significant digits. Only that narrow
-    // band pays for the exact formatting: it runs for every number literal a formula prints.
-    if a >= 9.999_999_999_999_9e14 && format!("{:.14e}", a).parse::<f64>().is_ok_and(|r| r >= 1e15) {
         return sci_text(n, 15);
     }
     // 15 significant digits, trailing zeros trimmed.
@@ -698,6 +731,23 @@ pub fn sci_text(n: f64, sig: usize) -> String {
 mod tests {
     use super::*;
 
+    /// Excel's text order: space and punctuation/symbols, then digits, then letters, case folded.
+    #[test]
+    fn text_collation_follows_excel_order() {
+        use Ordering::{Equal, Greater, Less};
+        assert_eq!(compare_text("Spec 1", "{}"), Greater);
+        assert_eq!(compare_text("_x", "a"), Less);
+        assert_eq!(compare_text("9", "!"), Greater);
+        assert_eq!(compare_text(" West", "100_300"), Less);
+        assert_eq!(compare_text("~", "+"), Less);
+        assert_eq!(compare_text("ABC", "abc"), Equal);
+        assert_eq!(compare_text("abc", "abd"), Less);
+        assert_eq!(compare_text("ab", "abc"), Less);
+        assert_eq!(compare_text("é", "z"), Greater);
+        assert_eq!(compare_text("Éa", "éB"), Less);
+        assert_ne!(compare_text("a-b", "ab"), Equal);
+    }
+
     #[test]
     fn number_text() {
         assert_eq!(number_to_text(1.0), "1");
@@ -715,6 +765,16 @@ mod tests {
         assert_eq!(number_to_text(9.999999999999999e-10), "0.000000001");
         assert_eq!(number_to_text(-9.999999999999999e-10), "-0.000000001");
         assert_eq!(number_to_text(1.0 / 3.0), "0.333333333333333");
+    }
+
+    #[test]
+    fn number_text_rounds_up_to_scientific_boundary() {
+        assert_eq!(number_to_text(999999999999999.9), "1E+15");
+        assert_eq!(number_to_text(-999999999999999.9), "-1E+15");
+        assert_eq!(number_to_text(999999999999999.0), "999999999999999");
+        assert_eq!(number_to_text(999999999999999.5), "1E+15");
+        assert_eq!(number_to_text(999999999999999.4), "999999999999999");
+        assert_eq!(number_to_text(999999999999989.9), "999999999999990");
     }
 
     /// Excel switches to scientific when the 15-digit decimal would be longer than 21 characters
@@ -739,21 +799,14 @@ mod tests {
         assert_eq!(number_to_text(0.00001), "0.00001");
         assert_eq!(number_to_text(0.000001), "0.000001");
         assert_eq!(number_to_text(1.5e-9), "0.0000000015");
+        // Below 1E-9 `&` is always scientific, however short the decimal (the IM functions format
+        // their parts by the 21-character rule alone, see functions::engineering::complex).
+        assert_eq!(number_to_text(1e-16), "1E-16");
         // Large side: 15 significant digits, scientific from 1E+15.
         assert_eq!(number_to_text(99999999999999.9), "99999999999999.9");
         assert_eq!(number_to_text(999999999999999.4), "999999999999999");
         assert_eq!(number_to_text(9999999999999998.0), "1E+16");
         assert_eq!(number_to_text(9.99999999999999e15), "9.99999999999999E+15");
-    }
-
-    #[test]
-    fn number_text_rounds_up_to_scientific_boundary() {
-        assert_eq!(number_to_text(999999999999999.9), "1E+15");
-        assert_eq!(number_to_text(-999999999999999.9), "-1E+15");
-        assert_eq!(number_to_text(999999999999999.0), "999999999999999");
-        assert_eq!(number_to_text(999999999999999.5), "1E+15");
-        assert_eq!(number_to_text(999999999999999.4), "999999999999999");
-        assert_eq!(number_to_text(999999999999989.9), "999999999999990");
     }
 
     #[test]

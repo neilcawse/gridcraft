@@ -1,10 +1,21 @@
 //! Parsing what people type into a cell (and numeric text in formulas).
 //!
 //! Recognises numbers with thousands separators, percentages, currency, scientific notation,
-//! fractions (`1 1/2`), dates (`3/4/2026`, `2026-03-04`, `4-Mar-2026`, `Mar 4, 2026`), times
-//! (`10:30`, `10:30:15 PM`) and date-times. Locale: en-US.
+//! fractions (`1 1/2`), dates (`3/4/2026`, `2026-03-04`, `4-Mar-2026`, `Mar 4, 2026`, `1JUN2021`),
+//! times (`10:30`, `10:30:15 PM`) and date-times. Separators, the currency symbol, the date order
+//! and the month names are the [`crate::locale::current`] locale's (en-US unless scoped). The date
+//! and time grammar is in the `datetext` module.
+//!
+//! Spaces around the text are ignored for numbers, percentages, currency and fractions, but not
+//! for dates and times: Excel keeps `" 2024-01-10 "` as text when coercing. `DATEVALUE` and
+//! `TIMEVALUE` do trim it ([`parse_date_time_text`]).
 
-use crate::date::{DateSystem, MONTHS, serial_from_ymd, time_fraction};
+mod datetext;
+
+pub use datetext::current_year;
+
+use crate::date::DateSystem;
+use crate::locale::{self, Locale};
 use crate::value::{CellError, Value};
 
 /// A parsed entry: its value and the number format Excel would apply automatically.
@@ -33,20 +44,28 @@ pub fn parse_input(s: &str, sys: DateSystem) -> Parsed {
     if let Some(e) = CellError::parse(t) {
         return Parsed { value: Value::Error(e), format: None };
     }
-    if let Some((n, f)) = parse_numeric(t, sys) {
+    if let Some((n, f)) = parse_numeric(s, sys, locale::current()) {
         return Parsed { value: Value::number(n), format: f };
     }
     Parsed { value: Value::text(s), format: None }
 }
 
-/// Numeric text as arithmetic coerces it ("1,000", "50%", "$3", "1/2/2020", "10:00").
+/// Numeric text as arithmetic coerces it ("1,000", "50%", "$3", "1/2/2020", "10:00"). Spaces
+/// around a number are ignored; a date or time has to fill the whole text.
 pub fn parse_number_text(s: &str) -> Option<f64> {
     parse_number_text_in(s, DateSystem::D1900)
 }
 
 /// Like [`parse_number_text`], with date text read in the given workbook date system.
 pub fn parse_number_text_in(s: &str, sys: DateSystem) -> Option<f64> {
-    parse_numeric(s.trim(), sys).map(|(n, _)| n)
+    parse_numeric(s, sys, locale::current()).map(|(n, _)| n)
+}
+
+/// Date and/or time text as `DATEVALUE` and `TIMEVALUE` read it: unlike coercion, they ignore
+/// spaces around the text. Returns the serial (the date plus the fraction of a day) and the number
+/// format Excel would apply.
+pub fn parse_date_time_text(s: &str, sys: DateSystem) -> Option<(f64, &'static str)> {
+    datetext::parse_datetime(s.trim(), sys, locale::current())
 }
 
 /// Text that Excel's "Number Stored as Text" check flags: it would be a number if typed (signs,
@@ -54,49 +73,53 @@ pub fn parse_number_text_in(s: &str, sys: DateSystem) -> Option<f64> {
 /// fractions kept as text are not flagged, as in Excel.
 pub fn number_stored_as_text(s: &str) -> Option<f64> {
     let t = s.trim();
+    let loc = locale::current();
     // The same parentheses typed entry reads, accounting forms included: `$(5)`, `(5)%`.
-    match parenthesized(t) {
-        Some(inner) if inner.strip_prefix('$').map_or(inner.as_str(), str::trim_start).starts_with(['-', '+', '(']) => None,
-        Some(inner) => parse_plain(&inner).map(|(n, _)| -n),
-        None => parse_plain(t).map(|(n, _)| n),
+    match parenthesized(t, loc) {
+        Some(inner) if inner.strip_prefix(loc.currency).map_or(inner.as_str(), str::trim_start).starts_with(['-', '+', '(']) => None,
+        Some(inner) => parse_plain(&inner, loc).map(|(n, _)| -n),
+        None => parse_plain(t, loc).map(|(n, _)| n),
     }
 }
 
-fn parse_numeric(t: &str, sys: DateSystem) -> Option<(f64, Option<&'static str>)> {
+fn parse_numeric(raw: &str, sys: DateSystem, loc: &Locale) -> Option<(f64, Option<&'static str>)> {
+    let t = raw.trim();
     // Parenthesised negatives: (100) = -100, and the accounting forms `$(100)` and `(5)%`.
-    if let Some(inner) = parenthesized(t) {
+    if let Some(inner) = parenthesized(t, loc) {
         // Excel reads no sign and no nested parentheses inside: `(-5)`, `($-5)`, `((5))`.
-        if inner.strip_prefix('$').map_or(inner.as_str(), str::trim_start).starts_with(['-', '+', '(']) {
+        if inner.strip_prefix(loc.currency).map_or(inner.as_str(), str::trim_start).starts_with(['-', '+', '(']) {
             return None;
         }
-        let r = parse_plain(&inner).or_else(|| parse_fraction(&inner).map(|n| (n, Some("# ?/?"))));
+        let r = parse_plain(&inner, loc).or_else(|| parse_fraction(&inner).map(|n| (n, Some("# ?/?"))));
         return r.map(|(n, f)| (-n, f));
     }
-    parse_unparenthesised(t, sys)
+    parse_unparenthesised(raw, t, sys, loc)
 }
 
-fn parse_unparenthesised(t: &str, sys: DateSystem) -> Option<(f64, Option<&'static str>)> {
+/// `raw` is the text as given and `t` the same without spaces around it.
+fn parse_unparenthesised(raw: &str, t: &str, sys: DateSystem, loc: &Locale) -> Option<(f64, Option<&'static str>)> {
     if t.is_empty() {
         return None;
     }
-    if let Some(r) = parse_plain(t) {
+    if let Some(r) = parse_plain(t, loc) {
         return Some(r);
     }
     if let Some(r) = parse_fraction(t) {
         return Some((r, Some("# ?/?")));
     }
-    if let Some(r) = parse_datetime(t, sys) {
-        return Some(r);
+    // A date or time is read from the whole text: Excel doesn't coerce `" 2024-01-10 "`.
+    if raw.len() == t.len() {
+        return datetext::parse_datetime(t, sys, loc).map(|(n, f)| (n, Some(f)));
     }
     None
 }
 
-/// The number inside accounting parentheses, as plain text: `(5)` gives `5`. A dollar sign may
-/// stand before them (`$(5)` reads as `($5)`) and a percent sign after them (`(5)%` reads as
+/// The number inside accounting parentheses, as plain text: `(5)` gives `5`. The currency symbol
+/// may stand before them (`$(5)` reads as `($5)`) and a percent sign after them (`(5)%` reads as
 /// `(5%)`), with spaces around either. The caller reads only a plain number or a fraction from it.
-fn parenthesized(t: &str) -> Option<String> {
-    let (currency, rest) = match t.strip_prefix('$') {
-        Some(r) => ("$", r.trim_start()),
+fn parenthesized(t: &str, loc: &Locale) -> Option<String> {
+    let (currency, rest) = match t.strip_prefix(loc.currency) {
+        Some(r) => (loc.currency, r.trim_start()),
         None => ("", t),
     };
     let rest = rest.strip_prefix('(')?;
@@ -107,8 +130,9 @@ fn parenthesized(t: &str) -> Option<String> {
     Some(format!("{currency}{}{percent}", body.trim()))
 }
 
-/// Signs, currency, thousands separators, percent, exponent.
-fn parse_plain(t: &str) -> Option<(f64, Option<&'static str>)> {
+/// Signs, currency, thousands separators, percent, exponent, with the locale's separators and
+/// currency symbol (en-US reads the symbol only in front, other locales also after the number).
+fn parse_plain(t: &str, loc: &Locale) -> Option<(f64, Option<&'static str>)> {
     let mut s = t;
     let mut neg = false;
     let mut currency = false;
@@ -119,13 +143,18 @@ fn parse_plain(t: &str) -> Option<(f64, Option<&'static str>)> {
     } else if let Some(r) = s.strip_prefix('+') {
         s = r.trim_start();
     }
-    if let Some(r) = s.strip_prefix('$') {
+    if let Some(r) = s.strip_prefix(loc.currency) {
         currency = true;
         s = r.trim_start();
         if !neg && let Some(r2) = s.strip_prefix('-') {
             neg = true;
             s = r2;
         }
+    } else if !loc.is_default()
+        && let Some(r) = s.strip_suffix(loc.currency)
+    {
+        currency = true;
+        s = r.trim_end();
     }
     if let Some(r) = s.strip_suffix('%') {
         percent = true;
@@ -135,26 +164,30 @@ fn parse_plain(t: &str) -> Option<(f64, Option<&'static str>)> {
     if s.is_empty() || currency && percent {
         return None;
     }
-    let has_sep = s.contains(',');
-    let digits: String = if has_sep {
+    // A no-break-space thousands separator is typed as a space too.
+    let is_group = |c: char| c == loc.group || (loc.group == '\u{a0}' && c == ' ');
+    let has_sep = s.contains(is_group);
+    let (int, frac) = s.split_once(loc.decimal).map_or((s, None), |(a, b)| (a, Some(b)));
+    let mut digits: String = if has_sep {
         // Thousands separators must be in groups of three before the decimal point.
-        let (int, frac) = s.split_once('.').map_or((s, None), |(a, b)| (a, Some(b)));
-        let groups: Vec<&str> = int.split(',').collect();
+        let groups: Vec<&str> = int.split(is_group).collect();
         let first = groups.first()?;
         if first.is_empty() || first.len() > 3 || groups.iter().skip(1).any(|g| g.len() != 3) {
             return None;
         }
-        let mut d = groups.concat();
-        if let Some(f) = frac {
-            d.push('.');
-            d.push_str(f);
-        }
-        d
+        groups.concat()
     } else {
-        s.to_string()
+        int.to_string()
     };
+    if let Some(f) = frac {
+        digits.push('.');
+        digits.push_str(f);
+    }
     let b = digits.as_bytes();
-    if !b.iter().all(|c| c.is_ascii_digit() || matches!(c, b'.' | b'e' | b'E' | b'+' | b'-')) {
+    // Only the locale's decimal separator, now `.`, may stand for the point.
+    if loc.decimal != '.' && loc.group != '.' && int.contains('.')
+        || !b.iter().all(|c| c.is_ascii_digit() || matches!(c, b'.' | b'e' | b'E' | b'+' | b'-'))
+    {
         return None;
     }
     if !b.first().is_some_and(|c| c.is_ascii_digit() || *c == b'.') {
@@ -172,7 +205,12 @@ fn parse_plain(t: &str) -> Option<(f64, Option<&'static str>)> {
         n = -n;
     }
     let fmt = if currency {
-        Some(if digits.contains('.') { "\"$\"#,##0.00" } else { "\"$\"#,##0" })
+        Some(match (loc.is_default(), digits.contains('.')) {
+            (true, true) => "\"$\"#,##0.00",
+            (true, false) => "\"$\"#,##0",
+            (false, true) => "#,##0.00",
+            (false, false) => "#,##0",
+        })
     } else if percent {
         Some(if digits.contains('.') { "0.00%" } else { "0%" })
     } else if sci {
@@ -185,29 +223,33 @@ fn parse_plain(t: &str) -> Option<(f64, Option<&'static str>)> {
     Some((n, fmt))
 }
 
-/// A plain ASCII number: digits, with an optional `.digits` fraction when `frac` is set. Rejects
-/// `nan`, `inf`, signs and exponents that `f64::from_str` would accept, and digits too many for a
-/// finite number (#2163).
-fn plain_number(s: &str, frac: bool) -> Option<f64> {
-    let (int, dec) = match s.split_once('.') {
-        Some((i, d)) if frac => (i, Some(d)),
-        _ => (s, None),
+/// A plain ASCII number: digits, with an optional fraction after the `frac` separator when one is
+/// given. Rejects `nan`, `inf`, signs and exponents that `f64::from_str` would accept, and digits
+/// too many for a finite number (#2163).
+fn plain_number(s: &str, frac: Option<char>) -> Option<f64> {
+    let (int, dec) = match frac.and_then(|sep| s.split_once(sep)) {
+        Some((i, d)) => (i, Some(d)),
+        None => (s, None),
     };
     let digits = |x: &str| !x.is_empty() && x.bytes().all(|c| c.is_ascii_digit());
     if !digits(int) || dec.is_some_and(|d| !digits(d)) {
         return None;
     }
-    s.parse().ok().filter(|x: &f64| x.is_finite())
+    let n: Option<f64> = match dec {
+        Some(d) if frac != Some('.') => format!("{int}.{d}").parse().ok(),
+        _ => s.parse().ok(),
+    };
+    n.filter(|x| x.is_finite())
 }
 
 /// `1/2` (only with a whole part, else it's a date), `1 1/2`, `0 3/4`.
 fn parse_fraction(t: &str) -> Option<f64> {
     let (whole, frac) = t.split_once(' ')?;
     let neg = whole.starts_with('-');
-    let w = plain_number(whole.trim_start_matches('-'), false)?;
+    let w = plain_number(whole.trim_start_matches('-'), None)?;
     let (a, b) = frac.trim().split_once('/')?;
-    let a = plain_number(a, false)?;
-    let b = plain_number(b, false)?;
+    let a = plain_number(a, None)?;
+    let b = plain_number(b, None)?;
     if b == 0.0 || !w.is_finite() {
         return None;
     }
@@ -216,175 +258,6 @@ fn parse_fraction(t: &str) -> Option<f64> {
         return None;
     }
     Some(if neg { -v } else { v })
-}
-
-fn month_from_name(s: &str) -> Option<u32> {
-    let l = s.to_ascii_lowercase();
-    if l.len() < 3 {
-        return None;
-    }
-    MONTHS.iter().position(|m| m.to_ascii_lowercase().starts_with(&l)).map(|i| i as u32 + 1)
-}
-
-/// Time part: `h:mm`, `h:mm:ss`, `h:mm:ss.000`, `h AM`, with optional AM/PM.
-fn parse_time(t: &str) -> Option<(f64, bool, bool)> {
-    let t = t.trim();
-    let lower = t.to_ascii_lowercase();
-    let (body, ampm) = if let Some(b) = lower.strip_suffix("am").or_else(|| lower.strip_suffix('a')) {
-        (b.trim().to_string(), Some(false))
-    } else if let Some(b) = lower.strip_suffix("pm").or_else(|| lower.strip_suffix('p')) {
-        (b.trim().to_string(), Some(true))
-    } else {
-        (lower.clone(), None)
-    };
-    let parts: Vec<&str> = body.split(':').collect();
-    if parts.len() == 1 && ampm.is_none() {
-        return None;
-    }
-    if parts.len() > 3 || parts.iter().any(|p| p.is_empty() || p.starts_with('+')) {
-        return None;
-    }
-    let mut h = plain_number(parts.first()?, false)?;
-    let m = parts.get(1).map_or(Some(0.0), |p| plain_number(p, false))?;
-    let s = parts.get(2).map_or(Some(0.0), |p| plain_number(p, true))?;
-    if m >= 60.0 || s >= 60.0 || h < 0.0 || m < 0.0 || s < 0.0 {
-        return None;
-    }
-    if let Some(pm) = ampm {
-        if !(0.0..=12.0).contains(&h) {
-            return None;
-        }
-        if h == 12.0 {
-            h = 0.0;
-        }
-        if pm {
-            h += 12.0;
-        }
-    } else if h >= 10000.0 {
-        return None;
-    }
-    Some((time_fraction(h, m, s), parts.len() == 3, ampm.is_some()))
-}
-
-fn parse_date(t: &str, sys: DateSystem) -> Option<(f64, &'static str)> {
-    let t = t.trim().trim_end_matches(',');
-    let num = |s: &str| {
-        let s = s.trim();
-        if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        s.parse::<i64>().ok()
-    };
-    // ISO yyyy-mm-dd or yyyy/mm/dd
-    let seps: &[char] = &['/', '-', '.'];
-    let parts: Vec<&str> = t.split(seps).collect();
-    if parts.len() == 3 {
-        let (a, b, c) = (parts[0].trim(), parts[1].trim(), parts[2].trim());
-        if a.len() == 4
-            && let (Some(y), Some(m), Some(d)) = (num(a), num(b), num(c))
-        {
-            return valid_ymd(sys, y, m, d).map(|s| (s, "yyyy-mm-dd"));
-        }
-        if let (Some(m), Some(d), Some(y)) = (num(a), num(b), num(c)) {
-            let y = if c.len() <= 2 { if y < 30 { 2000 + y } else { 1900 + y } } else { y };
-            return valid_ymd(sys, y, m, d).map(|s| (s, "m/d/yyyy"));
-        }
-        // 4-Mar-2026
-        if let (Some(d), Some(m), Some(y)) = (num(a), month_from_name(b), num(c)) {
-            let y = if c.len() <= 2 { if y < 30 { 2000 + y } else { 1900 + y } } else { y };
-            return valid_ymd(sys, y, m as i64, d).map(|s| (s, "d-mmm-yy"));
-        }
-    }
-    if parts.len() == 2 {
-        let (a, b) = (parts[0].trim(), parts[1].trim());
-        // m/d in the current year is ambiguous without a clock; use month/day of 2026? Excel uses
-        // the current year. We accept d-mmm / mmm-d only with month names, and m/d → current year.
-        if let (Some(m), Some(d)) = (num(a), num(b)) {
-            let y = current_year();
-            if (1..=12).contains(&m) && (1..=31).contains(&d) {
-                return valid_ymd(sys, y, m, d).map(|s| (s, "d-mmm"));
-            }
-            // m/yyyy
-            if (1..=12).contains(&m) && b.len() == 4 {
-                return valid_ymd(sys, d, m, 1).map(|s| (s, "mmm-yy"));
-            }
-        }
-        if let (Some(d), Some(m)) = (num(a), month_from_name(b)) {
-            return valid_ymd(sys, current_year(), m as i64, d).map(|s| (s, "d-mmm"));
-        }
-        if let (Some(m), Some(y)) = (month_from_name(a), num(b)) {
-            let y = if b.len() <= 2 { if y < 30 { 2000 + y } else { 1900 + y } } else { y };
-            return valid_ymd(sys, y, m as i64, 1).map(|s| (s, "mmm-yy"));
-        }
-    }
-    // "Mar 4, 2026" / "March 4 2026" / "4 March 2026"
-    let words: Vec<&str> = t.split([' ', ',']).filter(|w| !w.is_empty()).collect();
-    if words.len() == 3 {
-        // Two-digit years follow the same 2029 rule as the dashed forms above.
-        let expand = |w: &str, y: i64| if w.len() <= 2 { if y < 30 { 2000 + y } else { 1900 + y } } else { y };
-        if let (Some(m), Some(d), Some(y)) = (month_from_name(words[0]), num(words[1]), num(words[2])) {
-            let y = expand(words[2], y);
-            return valid_ymd(sys, y, m as i64, d).map(|s| (s, "d-mmm-yy"));
-        }
-        if let (Some(d), Some(m), Some(y)) = (num(words[0]), month_from_name(words[1]), num(words[2])) {
-            let y = expand(words[2], y);
-            return valid_ymd(sys, y, m as i64, d).map(|s| (s, "d-mmm-yy"));
-        }
-    }
-    None
-}
-
-fn valid_ymd(sys: DateSystem, y: i64, m: i64, d: i64) -> Option<f64> {
-    // Dates before 1900 stay text (`DATE()` would add 1900 to such a year).
-    if !(1..=12).contains(&m) || d < 1 || y < 1900 {
-        return None;
-    }
-    let max = crate::date::days_in_month_in(sys, y as i32, m as u32) as i64;
-    if d > max {
-        return None;
-    }
-    serial_from_ymd(sys, y, m, d)
-}
-
-/// The year used for dates typed without one, from the system clock (browser clock on wasm).
-/// Falls back to 2026 only when no clock is available.
-pub fn current_year() -> i64 {
-    if let Some(ms) = crate::date::unix_now_ms() {
-        let days = (ms / 86_400_000.0).floor() as i64;
-        return crate::date::civil_from_days(days).0 as i64;
-    }
-    2026
-}
-
-fn parse_datetime(t: &str, sys: DateSystem) -> Option<(f64, Option<&'static str>)> {
-    if let Some((tf, secs, ampm)) = parse_time(t) {
-        let f = match (secs, ampm) {
-            // 24 hours or more: elapsed hours, so 25:00 shows as 25:00:00, not 1:00.
-            _ if tf >= 1.0 => "[h]:mm:ss",
-            (false, false) => "h:mm",
-            (true, false) => "h:mm:ss",
-            (false, true) => "h:mm AM/PM",
-            (true, true) => "h:mm:ss AM/PM",
-        };
-        return Some((tf, Some(f)));
-    }
-    if let Some((d, f)) = parse_date(t, sys) {
-        return Some((d, Some(f)));
-    }
-    // date + time: split at the last space(s) before a time-looking tail. Only splits where the
-    // tail could be a time are tried: a long tail can't parse, so this stays linear in the text
-    // instead of reparsing every prefix for every space (one long text field quadratic).
-    for (i, _) in t.match_indices(' ') {
-        let Some(b) = t.get(i + 1..) else { continue };
-        let bytes = b.as_bytes();
-        if b.len() > 36 || !bytes.first().is_some_and(u8::is_ascii_digit) || !b.contains(':') {
-            continue;
-        }
-        if let (Some((d, _)), Some((tf, _, _))) = (t.get(..i).and_then(|a| parse_date(a, sys)), parse_time(b)) {
-            return Some((d + tf, Some("m/d/yyyy h:mm")));
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -598,6 +471,54 @@ mod tests {
         assert_eq!(p("23:59").format, Some("h:mm"));
     }
 
+    /// Excel-authored ironcalc fixtures (SIN/FLOOR/EXP over `=" 2024-01-10 "`, labelled "Non
+    /// coerced text date") and an Excel-calculated workbook (`TEXT(" 4/7/13","mm/dd/yy")` stays text): spaces
+    /// around a number are ignored, around a date or a time they make the text uncoercible.
+    /// `DATEVALUE`/`TIMEVALUE` trim it themselves (DATEVALUE.xlsx B16/B53/B54, TIMEVALUE.xlsx B50).
+    #[test]
+    fn spaces_around_dates_and_times_block_coercion_but_not_date_time_text() {
+        assert_eq!(parse_number_text("2024-01-10"), Some(45301.0));
+        assert_eq!(parse_number_text(" 10 "), Some(10.0));
+        assert_eq!(parse_number_text(" 1 1/2 "), Some(1.5));
+        assert_eq!(parse_number_text(" 50% "), Some(0.5));
+        assert_eq!(parse_number_text("4:35 PM"), parse_number_text("16:35"));
+        for s in [" 2024-01-10 ", "2024-01-10 ", " 2024-01-10", " 4/7/13", "4/7/13 ", " Mar 4, 2026", " 4:35 PM ", "10:30 ", " 3/4/2026 10:30"] {
+            assert_eq!(parse_number_text(s), None, "{s:?}");
+            assert_eq!(p(s).value, Value::text(s), "{s:?}");
+        }
+        let sys = DateSystem::D1900;
+        assert_eq!(parse_date_time_text(" 2024-01-10 ", sys), Some((45301.0, "yyyy-mm-dd")));
+        assert_eq!(parse_date_time_text("2026-01-01 ", sys), Some((46023.0, "yyyy-mm-dd")));
+        assert_eq!(parse_date_time_text(" 4:35 PM ", sys).map(|(n, _)| n), parse_number_text("4:35 PM"));
+        assert_eq!(parse_date_time_text("7/7/2026 4:35 PM", sys).map(|(n, _)| n - n.floor()), Some(0.6909722222189885));
+        // Plain numbers and words are neither dates nor times.
+        for s in [" 10 ", "8", "10.0", "008", "abc", "", " "] {
+            assert_eq!(parse_date_time_text(s, sys), None, "{s:?}");
+        }
+    }
+
+    /// Excel's en-US recognizer has no `.` date separator (ironcalc DATEVALUE.xlsx B52).
+    #[test]
+    fn dots_do_not_separate_date_parts() {
+        for s in ["2026.01.01", "1.5.2026", "3.4.26", "1.2.3.4"] {
+            assert_eq!(p(s).value, Value::text(s), "{s}");
+            assert_eq!(parse_number_text(s), None, "{s}");
+        }
+        assert_eq!(p("1.5").value, Value::Number(1.5));
+    }
+
+    /// Month names touching numbers (Excel-saved workbooks: `"1"&B1&B2`, `1&H$2`, `MONTH(D2&1)`).
+    #[test]
+    fn concatenated_month_names_coerce() {
+        assert_eq!(parse_number_text("1JUN2021"), Some(44348.0));
+        assert_eq!(parse_number_text("1-JAN2024"), Some(45292.0));
+        assert_eq!(parse_number_text("May 2022"), parse_number_text("5/1/2022"));
+        assert_eq!(parse_number_text("July1"), parse_number_text(&format!("7/1/{}", current_year())));
+        assert_eq!(p("1Oct 21").format, Some("d-mmm-yy"));
+        assert_eq!(p("May 2022").format, Some("mmm-yy"));
+        assert_eq!(p("Oct 21").format, Some("d-mmm"));
+    }
+
     #[test]
     fn fictitious_1900_02_29() {
         // Excel accepts 29 February 1900 (serial 60) and keeps 1 March 1900 at 61.
@@ -632,5 +553,45 @@ mod tests {
         for text in ["3/4/2026", "10:30", "1 1/2", "abc", "12abc", "", "  ", "TRUE", "#N/A", "((1))", "(-5)", "$(5)%", "(1/2)"] {
             assert_eq!(number_stored_as_text(text), None, "{text}");
         }
+    }
+
+    /// Coercion reads the separators, currency and date order of the locale in effect.
+    #[test]
+    fn numbers_and_dates_in_another_locale() {
+        use crate::locale::{DE_DE, EN_GB, ES_ES, FR_FR, scoped};
+        let n = parse_number_text;
+        scoped(&DE_DE, || {
+            assert_eq!(n("1,5"), Some(1.5));
+            assert_eq!(n("1.234,5"), Some(1234.5));
+            assert_eq!(n("-1.234"), Some(-1234.0));
+            assert_eq!(n("7,5%"), Some(0.075));
+            assert_eq!(n("23€"), Some(23.0));
+            assert_eq!(n("23 €"), Some(23.0));
+            assert_eq!(n("€100"), Some(100.0));
+            assert_eq!(n("$5"), None);
+            assert_eq!(n("1,2.3"), None);
+            assert_eq!(n("16.02.24"), Some(45338.0));
+            assert_eq!(n("1.5"), parse_number_text_in("1/5", DateSystem::D1900));
+        });
+        scoped(&FR_FR, || {
+            assert_eq!(n("1 234,5"), Some(1234.5));
+            assert_eq!(n("1\u{a0}234"), Some(1234.0));
+            assert_eq!(n("1.5"), None);
+        });
+        scoped(&ES_ES, || assert_eq!(n("10-12-1999"), Some(36504.0)));
+        // en-IE: en-GB's dates and point, the euro before or after (ironcalc's fixtures' Excel).
+        scoped(&crate::locale::EN_IE, || {
+            assert_eq!((n("23€"), n(" €100 "), n("7.0e0"), n("123,456.67"), n("12,34")), (Some(23.0), Some(100.0), Some(7.0), Some(123456.67), None));
+        });
+        scoped(&EN_GB, || {
+            assert_eq!(n("01/09/2020 15:02:40").map(f64::floor), Some(44075.0));
+            assert_eq!(n("1,234.5"), Some(1234.5));
+        });
+        // en-US is unchanged.
+        assert_eq!(n("1,5"), None);
+        assert_eq!(n("23€"), None);
+        assert_eq!(n("01/09/2020"), Some(43839.0));
+        assert_eq!(Value::Number(1.5).to_text(), Ok("1.5".into()));
+        assert_eq!(scoped(&DE_DE, || Value::Number(1.5).to_text()), Ok("1,5".into()));
     }
 }

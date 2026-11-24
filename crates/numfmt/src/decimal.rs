@@ -217,56 +217,54 @@ pub(crate) fn fixed(a: f64, decimals: usize) -> (String, String) {
     fixed_from_digits(&d, e, decimals)
 }
 
-/// General format squeezed into `max_chars` characters. Excel shows fewer decimals, then
-/// scientific notation, then "####" when a column is narrow; `None` means the caller paints "####".
-pub fn format_general_fit(n: f64, max_chars: usize) -> Option<String> {
+/// Fixed notation of `digits × 10^x` in at most `max_chars` characters, sign included, with as
+/// many decimals as fit. `None` when the integer part alone is too wide or the number rounds to
+/// zero. Each width only re-rounds the digits, into strings that are reused.
+fn general_fixed(sign: &str, digits: &[u8; 15], x: i32, max_chars: usize) -> Option<String> {
     // The widest fixed rendering of a double is about 330 characters; a larger request only
     // pads zero decimals the trim below throws away.
     let max_chars = max_chars.min(1024);
-    if !n.is_finite() {
+    let int_len = sign.len() + (x.max(0) as usize) + 1;
+    if int_len > max_chars {
         return None;
     }
-    if n == 0.0 {
-        return (max_chars >= 1).then(|| "0".to_string());
-    }
-    let sign = if n < 0.0 { "-" } else { "" };
-    let (digits, x) = decimal_digits(n.abs());
-    let int_len = sign.len() + (x.max(0) as usize) + 1;
-    // Fixed notation for magnitudes from 1E-4 up to what fits. The 15 digits are computed once;
-    // each width only re-rounds them, into strings that are reused.
+    let avail = max_chars - int_len;
+    // Zeros past the 400th decimal are trimmed below anyway, so a huge width needs no more.
+    let mut decimals = (if avail >= 2 { avail - 1 } else { 0 }).min(MAX_DECIMALS);
     let (mut i, mut f, mut s) = (String::new(), String::new(), String::new());
-    if x >= -4 && int_len <= max_chars {
-        let avail = max_chars - int_len;
-        // Zeros past the 400th decimal are trimmed below anyway, so a huge width needs no more.
-        let mut decimals = (if avail >= 2 { avail - 1 } else { 0 }).min(MAX_DECIMALS);
-        loop {
-            fixed_into(&digits, x, decimals, &mut i, &mut f);
-            let ft = f.trim_end_matches('0');
-            if i.is_empty() && ft.is_empty() {
-                break; // rounded away to zero: use scientific
-            }
-            s.clear();
-            s.push_str(sign);
-            s.push_str(if i.is_empty() { "0" } else { &i });
-            if !ft.is_empty() {
-                s.push('.');
-                s.push_str(ft);
-            }
-            if s.chars().count() <= max_chars {
-                return Some(s);
-            }
-            if decimals == 0 {
-                break;
-            }
-            decimals -= 1;
+    loop {
+        fixed_into(digits, x, decimals, &mut i, &mut f);
+        let ft = f.trim_end_matches('0');
+        if i.is_empty() && ft.is_empty() {
+            return None;
         }
+        s.clear();
+        s.push_str(sign);
+        s.push_str(if i.is_empty() { "0" } else { &i });
+        if !ft.is_empty() {
+            s.push('.');
+            s.push_str(ft);
+        }
+        if s.chars().count() <= max_chars {
+            return Some(s);
+        }
+        if decimals == 0 {
+            return None;
+        }
+        decimals -= 1;
     }
+}
+
+/// Scientific notation (`1.2345E+11`) of `digits × 10^x` in at most `max_chars` characters, sign
+/// included, with as many mantissa digits as fit.
+fn general_scientific(sign: &str, digits: &[u8; 15], x: i32, max_chars: usize) -> Option<String> {
+    let (mut i, mut f, mut s) = (String::new(), String::new(), String::new());
     for md in (0..=max_chars.min(14)).rev() {
         let mut e = x;
-        fixed_into(&digits, 0, md, &mut i, &mut f);
+        fixed_into(digits, 0, md, &mut i, &mut f);
         if i.len() > 1 {
             e += 1;
-            fixed_into(&digits, -1, md, &mut i, &mut f);
+            fixed_into(digits, -1, md, &mut i, &mut f);
         }
         let ft = f.trim_end_matches('0');
         s.clear();
@@ -282,6 +280,58 @@ pub fn format_general_fit(n: f64, max_chars: usize) -> Option<String> {
         }
     }
     None
+}
+
+/// General format squeezed into `max_chars` characters. Excel shows fewer decimals, then
+/// scientific notation, then "####" when a column is narrow; `None` means the caller paints "####".
+pub fn format_general_fit(n: f64, max_chars: usize) -> Option<String> {
+    if !n.is_finite() {
+        return None;
+    }
+    if n == 0.0 {
+        return (max_chars >= 1).then(|| "0".to_string());
+    }
+    let sign = if n < 0.0 { "-" } else { "" };
+    let (digits, x) = decimal_digits(n.abs());
+    // Fixed notation for magnitudes from 1E-4 up to what fits.
+    if x >= -4
+        && let Some(s) = general_fixed(sign, &digits, x, max_chars)
+    {
+        return Some(s);
+    }
+    general_scientific(sign, &digits, x, max_chars)
+}
+
+/// How many significant digits a General rendering shows: the digits of its mantissa from the
+/// first to the last that isn't zero.
+fn significant_digits_shown(s: &str) -> usize {
+    let mantissa = s.split_once('E').map_or(s, |(m, _)| m);
+    let digits: Vec<u8> = mantissa.bytes().filter(u8::is_ascii_digit).collect();
+    let leading = digits.iter().take_while(|&&d| d == b'0').count();
+    let trailing = digits.iter().rev().take_while(|&&d| d == b'0').count();
+    digits.len().saturating_sub(leading + trailing)
+}
+
+/// What `TEXT(n, "General")` writes: `|n|` in `width` characters and then the minus sign, which
+/// doesn't count towards the width (`-10000000000` and `-1.234567891` keep all their digits). The
+/// notation is the one that shows more significant digits, fixed when they tie, so `1E-9` is
+/// `0.000000001` but `1.5E-9` is `1.5E-09`. A cell has no such tie-break: it keeps the
+/// fixed-above-1E-4 rule of [`format_general_fit`] and counts the sign.
+pub(crate) fn format_general_text(n: f64, width: usize) -> Option<String> {
+    if !n.is_finite() {
+        return None;
+    }
+    if n == 0.0 {
+        return Some("0".to_string());
+    }
+    let (digits, x) = decimal_digits(n.abs());
+    let body = match (general_fixed("", &digits, x, width), general_scientific("", &digits, x, width)) {
+        (Some(f), Some(s)) if significant_digits_shown(&f) >= significant_digits_shown(&s) => f,
+        (Some(_), Some(s)) => s,
+        (Some(s), None) | (None, Some(s)) => s,
+        (None, None) => return None,
+    };
+    Some(if n < 0.0 { format!("-{body}") } else { body })
 }
 
 #[cfg(test)]
@@ -328,5 +378,63 @@ mod tests {
         assert_eq!(format_general_fit(9.99999999999, 5).as_deref(), Some("10"));
         assert_eq!(format_general_fit(f64::NAN, 11), None);
         assert_eq!(format_general_fit(1.7976931348623157e308, 11).as_deref(), Some("1.7977E+308"));
+    }
+
+    /// Excel-authored poi GeneralFormatTests.xlsx (`TEXT(value,"General")`, every row of the
+    /// number block) and ironcalc TEXT.xlsx NUMBERS!H7/H20: 11 characters for the digits, the
+    /// minus sign on top.
+    #[test]
+    fn general_text_excludes_the_sign_from_the_width() {
+        let rows: [(f64, &str); 28] = [
+            (12345.0, "12345"),
+            (1.23456789, "1.23456789"),
+            (1.234567891, "1.234567891"),
+            (1.2345678912, "1.234567891"),
+            (1.2345678919, "1.234567892"),
+            (10000000000.0, "10000000000"),
+            (100000000000.0, "1E+11"),
+            (110000000000.0, "1.1E+11"),
+            (112345000000.0, "1.12345E+11"),
+            (112345100000.0, "1.12345E+11"),
+            (112345900000.0, "1.12346E+11"),
+            (0.01, "0.01"),
+            (1e-9, "0.000000001"),
+            (1e-10, "1E-10"),
+            (1.1e-10, "1.1E-10"),
+            (1.12345e-10, "1.12345E-10"),
+            (1.123451e-10, "1.12345E-10"),
+            (1.123459e-10, "1.12346E-10"),
+            (-1.2345678912, "-1.234567891"),
+            (-1.2345678919, "-1.234567892"),
+            (-10000000000.0, "-10000000000"),
+            (-100000000000.0, "-1E+11"),
+            (-112345000000.0, "-1.12345E+11"),
+            (-1e-9, "-0.000000001"),
+            (-1.12345e-10, "-1.12345E-10"),
+            (-1.123459e-10, "-1.12346E-10"),
+            (-1.0 / 3.0, "-0.333333333"),
+            (-1e-8, "-0.00000001"),
+        ];
+        for (n, want) in rows {
+            assert_eq!(format_general_text(n, 11).as_deref(), Some(want), "{n:e}");
+        }
+        assert_eq!(format_general_text(0.0, 11).as_deref(), Some("0"));
+        assert_eq!(format_general_text(f64::NAN, 11), None);
+    }
+
+    /// The notation that keeps more significant digits wins, fixed on a tie.
+    #[test]
+    fn general_text_picks_the_notation_with_more_digits() {
+        // Fixed notation rounds 1.5E-9 to 0.000000002.
+        assert_eq!(format_general_text(1.5e-9, 11).as_deref(), Some("1.5E-09"));
+        assert_eq!(format_general_text(1.5e-8, 11).as_deref(), Some("0.000000015"));
+        assert_eq!(format_general_text(0.0000123456789, 11).as_deref(), Some("1.23457E-05"));
+        assert_eq!(format_general_text(0.00001234, 11).as_deref(), Some("0.00001234"));
+        assert_eq!(format_general_text(123456.789012, 11).as_deref(), Some("123456.789"));
+        assert_eq!(format_general_text(123456789012.0, 11).as_deref(), Some("1.23457E+11"));
+        assert_eq!(format_general_text(1.7976931348623157e308, 11).as_deref(), Some("1.7977E+308"));
+        // A cell keeps its own rule.
+        assert_eq!(format_general_fit(-1.0 / 3.0, 11).as_deref(), Some("-0.33333333"));
+        assert_eq!(format_general_fit(-1e-8, 11).as_deref(), Some("-1E-08"));
     }
 }

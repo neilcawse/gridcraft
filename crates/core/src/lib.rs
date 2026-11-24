@@ -6,12 +6,13 @@
 pub mod addr;
 pub mod color;
 pub mod date;
+pub mod locale;
 pub mod parse;
 pub mod region;
 pub mod value;
 
 pub use addr::{
-    CategoryLevels, CellRef, MAX_COLS, MAX_ROWS, RangeRef, category_levels, col_to_letters, is_r1c1_name, letters_to_col, quote_sheet,
+    CategoryLevels, CellRef, MAX_COLS, MAX_ROWS, RangeRef, category_levels, col_to_letters, is_r1c1_name, is_r1c1_token, letters_to_col, quote_sheet,
     sheet_needs_quotes, split_areas, split_sheet, unquote_sheet, valid_defined_name, valid_table_name,
 };
 pub use date::DateSystem;
