@@ -18,8 +18,8 @@ use gridcraft_model::{
 
 use crate::drawing::{Obj, image_content_type, image_ext};
 use crate::fmla::text_to_file;
-use crate::styles::{color_attrs, dxf_id, dxf_xml};
 use crate::passthrough::TableBinding;
+use crate::styles::{color_attrs, dxf_id, dxf_xml};
 use crate::tables::{paper_id, px_to_col_width, px_to_pt};
 use crate::write::{
     CT_CHART, CT_COMMENTS, CT_DRAWING, CT_TABLE, CT_THREADED_COMMENTS, NS_MAIN, NS_REL, NS_THREADED, Out, REL_THREADED_COMMENT, Rels, XML_DECL,

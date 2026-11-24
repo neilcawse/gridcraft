@@ -42,7 +42,6 @@ mod source;
 mod taint;
 mod xls_meta;
 
-
 #[cfg(test)]
 use calc::{bool_cached_as_number, values_match};
 use calc::{oracle, pin_volatile, snapshot_formula_values, unpin_volatile};
@@ -568,7 +567,6 @@ fn walk(dir: &Path, depth: usize, mut rescan: bool, out: &mut Discovery, seen: &
             if !out.add_file(p) {
                 return false;
             }
-
         }
     }
     true

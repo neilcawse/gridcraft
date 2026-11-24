@@ -53,7 +53,7 @@ const MAX_NAME_CHARS: usize = 255;
 /// The name for the defined name `original` when Excel can't hold it: each character Excel
 /// forbids (a space, `-`, `/`…) becomes `_`, and a `_` goes in front of a name that doesn't start
 /// with a letter, `_` or `\` (`1st`) or that reads as a reference ([`reads_as_reference`]: `MU1`
-/// becomes `_MU1`, as the `.xls` and XLSB readers do for what Excel itself renames), and a name
+/// becomes `_MU1`), and a name
 /// that is too long is cut. The result passes [`valid_defined_name`]; making it unique is the
 /// caller's, by putting more underscores in front.
 pub(crate) fn excel_name(original: &str) -> String {
@@ -74,9 +74,8 @@ pub(crate) fn excel_name(original: &str) -> String {
 /// `needs_rename` passes) and from every other new one by more underscores in front. One map
 /// serves a name's definition and every formula that uses it, so a sheet's name that hides the
 /// workbook's of its spelling still does. An empty name is left out. The ODS reader renames
-/// whatever [`valid_defined_name`] refuses, the XLSB reader what [`reads_as_reference`] (the names
-/// Excel itself renames when it opens a file); both make the result unique here, so no reader
-/// leaves two names of one spelling.
+/// whatever [`valid_defined_name`] refuses and reserves existing valid names before assigning
+/// the replacements.
 pub(crate) fn excel_names<'a>(written: impl Iterator<Item = &'a str> + Clone, needs_rename: impl Fn(&str) -> bool) -> HashMap<String, String> {
     let mut taken: HashSet<String> = written.clone().filter(|n| !n.is_empty() && !needs_rename(n)).map(str::to_lowercase).collect();
     // How many underscores each base has tried, so a crowd of names meeting at one base stays linear.

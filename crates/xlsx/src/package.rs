@@ -184,12 +184,16 @@ impl<'a> ZipParts<'a> {
     pub fn rels(&mut self, part: &str) -> Result<Vec<Rel>, IoError> {
         let Some(bytes) = self.read(&craft_opc::rels_path(part))? else { return Ok(Vec::new()) };
         let rels = craft_opc::Rels::parse_in(&bytes, part, |n| self.has(n).then(|| n.to_string()));
-        Ok(rels.list.into_iter().map(|r| {
+        Ok(rels
+            .list
+            .into_iter()
+            .map(|r| {
                 let kind = match r.kind() {
                     "extendedProperties" => "extended-properties",
                     "customProperties" => "custom-properties",
                     other => other,
-                }.to_string();
+                }
+                .to_string();
                 Rel { id: r.id, kind, target: r.target, external: r.external }
             })
             .collect())

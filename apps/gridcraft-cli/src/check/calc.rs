@@ -23,7 +23,6 @@ fn functions_of(e: &Expr) -> Vec<String> {
     set.into_iter().collect()
 }
 
-
 /// The formula as the formula bar shows it.
 pub(super) fn formula_text(cell: &Cell) -> String {
     cell.bar_text()

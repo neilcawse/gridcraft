@@ -40,8 +40,7 @@ still recalculate with it). Saved results may be out of date if
 the source application did not recalculate before saving, and they are that application's
 results, which need not be Excel's.
 
-Names Excel can't hold are renamed, with one warning, as the `.xls` and XLSB readers rename the
-names Excel renames when it opens a file: a name that reads as a cell in today's grid (`TAX2020`,
+Names Excel can't hold are renamed, with one warning: a name that reads as a cell in today's grid (`TAX2020`,
 `MIN1`, `Q1`) or as an R1C1 reference (`R`, `C`, `RC`, `R1C1`), and a name with a space, hyphen,
 slash or other character Excel forbids, or a leading digit, or over 255 characters. Each forbidden
 character becomes `_` and a `_` goes in front of what still doesn't start or read as a name; a name

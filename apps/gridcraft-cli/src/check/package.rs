@@ -384,4 +384,3 @@ fn has_content(mut input: impl std::io::BufRead, marker: &str) -> bool {
         buf.clear();
     }
 }
-
