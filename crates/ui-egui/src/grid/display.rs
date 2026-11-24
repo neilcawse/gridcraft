@@ -97,6 +97,6 @@ pub struct TextFrame<'a> {
 
 impl Drop for TextFrame<'_> {
     fn drop(&mut self) {
-        let _ = self.context.0.end_pass();
+        self.context.0.end_pass().textures_delta.clear();
     }
 }
