@@ -179,13 +179,14 @@ pub fn render_pdf(wb: &Workbook, layouts: &[SheetLayout], file: &str, path: &str
         let Some(sh) = wb.sheet(lay.sheet) else { continue };
         let mut cf = crate::cf::CfCache::new();
         let k = lay.k();
+        let kx = lay.kx();
         let (aw, ah) = lay.avail();
         for (pi, (ri, ci)) in lay.pages.iter().enumerate() {
             page_no += 1;
             let (Some(rband), Some(cband)) = (lay.row_bands.get(*ri).copied(), lay.col_bands.get(*ci).copied()) else { continue };
             let rsegs = segments(lay.title_rows, rband);
             let csegs = segments(lay.title_cols, cband);
-            let content_w = (lay.heading_w + csegs.iter().map(|s| seg_size(sh, *s, false)).sum::<f32>()) * k;
+            let content_w = (lay.heading_w + csegs.iter().map(|s| seg_size(sh, *s, false)).sum::<f32>()) * kx;
             let content_h = (lay.heading_h + rsegs.iter().map(|s| seg_size(sh, *s, true)).sum::<f32>()) * k;
             let ox = lay.margins[0] + if lay.settings.center_h { ((aw - content_w) / 2.0).max(0.0) } else { 0.0 };
             let oy = lay.margins[2] + if lay.settings.center_v { ((ah - content_h) / 2.0).max(0.0) } else { 0.0 };
@@ -194,7 +195,7 @@ pub fn render_pdf(wb: &Workbook, layouts: &[SheetLayout], file: &str, path: &str
             let mut y = oy + lay.heading_h * k;
             let mut body: Option<Block> = None;
             for (rsi, rs) in rsegs.iter().enumerate() {
-                let mut x = ox + lay.heading_w * k;
+                let mut x = ox + lay.heading_w * kx;
                 for (csi, cs) in csegs.iter().enumerate() {
                     let b = make_block(wb, lay.sheet, sh, *rs, *cs, (x, y), lay);
                     draw_block(pg, &b, lay.settings.gridlines, &mut cf);
@@ -206,13 +207,14 @@ pub fn render_pdf(wb: &Workbook, layouts: &[SheetLayout], file: &str, path: &str
                         cols: *cs,
                         x,
                         y,
+                        kx,
                         k,
                         mirror_axis: sh.right_to_left.then_some(b.mirror_axis),
                     });
                     if lay.settings.headings {
-                        draw_headings(pg, &b, rsi == 0, csi == 0, (ox, oy), (lay.heading_w * k, lay.heading_h * k));
+                        draw_headings(pg, &b, rsi == 0, csi == 0, (ox, oy), (lay.heading_w * kx, lay.heading_h * k));
                     }
-                    x += seg_size(sh, *cs, false) * k;
+                    x += seg_size(sh, *cs, false) * kx;
                     if rsi + 1 == rsegs.len() && csi + 1 == csegs.len() {
                         body = Some(b);
                     }
@@ -224,9 +226,9 @@ pub fn render_pdf(wb: &Workbook, layouts: &[SheetLayout], file: &str, path: &str
             }
             if lay.settings.headings {
                 let fill = [0xF2, 0xF2, 0xF2];
-                let ox = if sh.right_to_left { lay.page_w - ox - lay.heading_w * k } else { ox };
-                pg.fill_rect(ox, oy, lay.heading_w * k, lay.heading_h * k, fill);
-                pg.rect_stroke(ox, oy, lay.heading_w * k, lay.heading_h * k, 0.3, [0xA0, 0xA0, 0xA0]);
+                let ox = if sh.right_to_left { lay.page_w - ox - lay.heading_w * kx } else { ox };
+                pg.fill_rect(ox, oy, lay.heading_w * kx, lay.heading_h * k, fill);
+                pg.rect_stroke(ox, oy, lay.heading_w * kx, lay.heading_h * k, 0.3, [0xA0, 0xA0, 0xA0]);
             }
             let cx = HfContext {
                 page: page_no,
