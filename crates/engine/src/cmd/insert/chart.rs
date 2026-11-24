@@ -109,6 +109,7 @@ pub fn series_from_range(sh: &Sheet, r: RangeRef, by_rows: bool) -> Vec<Series> 
                 number_format: None,
                 innermost_categories: false,
                 label_number_format: None,
+                ..Default::default()
             });
         }
     } else {
@@ -128,6 +129,7 @@ pub fn series_from_range(sh: &Sheet, r: RangeRef, by_rows: bool) -> Vec<Series> 
                 number_format: None,
                 innermost_categories: false,
                 label_number_format: None,
+                ..Default::default()
             });
         }
     }
@@ -299,6 +301,8 @@ pub fn build_chart(s: &Session, p: &Json) -> Result<(usize, Chart)> {
         pivot: None,
         axis_number_formats: Default::default(),
         pivot_label_formats: Vec::new(),
+        area_style: Default::default(),
+        user_shapes: Vec::new(),
     };
     Ok((sheet, chart))
 }

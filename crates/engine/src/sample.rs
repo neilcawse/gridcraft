@@ -114,6 +114,7 @@ fn sales(s: &mut Session) -> bool {
                 number_format: None,
                 innermost_categories: false,
                 label_number_format: None,
+                ..Default::default()
             }];
         }
     }

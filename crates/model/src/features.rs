@@ -476,6 +476,139 @@ pub enum QuartileMethod {
     Inclusive,
 }
 
+/// Per-point visual override (`<c:dPt><c:spPr>`), keyed by 0-based point index.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DataPointStyle {
+    /// 0-based point index (`<c:idx val="…"/>`).
+    pub idx: usize,
+    /// Explicit solid fill colour (`<a:solidFill>`). `None` keeps automatic/series fill.
+    pub fill: Option<Color>,
+    /// Explicit transparent fill (`<a:noFill/>`).
+    pub no_fill: bool,
+    /// Explicit outline colour (`<a:ln><a:solidFill>`).
+    pub line_color: Option<Color>,
+    /// Explicit outline width in points (`<a:ln w="…"/>` / 12700).
+    pub line_width: Option<f32>,
+    /// Explicit no outline (`<a:ln><a:noFill/></a:ln>`).
+    pub no_line: bool,
+}
+
+/// Placement of a series' data labels (`<c:dLblPos>`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DataLabelPos {
+    #[default]
+    Auto,
+    Center,
+    InsideEnd,
+    InsideBase,
+    OutsideEnd,
+    BestFit,
+}
+
+/// Per-point data label override (`<c:dLbl>`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DataLabelOverride {
+    pub idx: usize,
+    pub delete: bool,
+    pub show_val: Option<bool>,
+    pub show_percent: Option<bool>,
+    pub show_cat_name: Option<bool>,
+    pub show_ser_name: Option<bool>,
+    pub num_fmt: Option<String>,
+    pub text: Option<String>,
+}
+
+/// Full `<c:dLbls>` configuration for a series (or inherited from its chart group).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DataLabels {
+    pub delete: bool,
+    pub show_val: bool,
+    pub show_percent: bool,
+    pub show_cat_name: bool,
+    pub show_ser_name: bool,
+    pub show_leader_lines: bool,
+    pub pos: DataLabelPos,
+    pub separator: Option<String>,
+    /// Typed number format (`<c:numFmt sourceLinked="0"/>`), including percentage formats.
+    pub num_fmt: Option<String>,
+    pub points: Vec<DataLabelOverride>,
+}
+
+impl DataLabels {
+    /// Whether any visible label component is enabled on the series or on a point override.
+    pub fn shows_any(&self) -> bool {
+        if self.delete {
+            return false;
+        }
+        self.show_val
+            || self.show_percent
+            || self.show_cat_name
+            || self.show_ser_name
+            || self.points.iter().any(|p| {
+                !p.delete
+                    && (p.text.is_some()
+                        || p.show_val == Some(true)
+                        || p.show_percent == Some(true)
+                        || p.show_cat_name == Some(true)
+                        || p.show_ser_name == Some(true))
+            })
+    }
+}
+
+/// Chart area (`<c:chartSpace><c:spPr>`) fill and outer border styling.
+/// Default (`no_fill: false, no_line: false, fill: None, line_color: None`) draws the standard
+/// white background and light-grey outer frame.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChartAreaStyle {
+    pub fill: Option<Color>,
+    pub no_fill: bool,
+    pub line_color: Option<Color>,
+    pub line_width: Option<f32>,
+    pub no_line: bool,
+}
+
+impl ChartAreaStyle {
+    pub fn is_default(&self) -> bool {
+        self.fill.is_none() && !self.no_fill && self.line_color.is_none() && self.line_width.is_none() && !self.no_line
+    }
+}
+
+/// Embedded chart-relative shape / text callout (`<c:userShapes>`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChartUserShape {
+    /// Left edge as a fraction of chart width (`0.0..=1.0`).
+    pub x: f32,
+    /// Top edge as a fraction of chart height (`0.0..=1.0`).
+    pub y: f32,
+    /// Width as a fraction of chart width (`0.0..=1.0`), used when `abs_width` is `None`.
+    pub w: f32,
+    /// Height as a fraction of chart height (`0.0..=1.0`), used when `abs_height` is `None`.
+    pub h: f32,
+    /// Fixed width in points/pixels (`<cdr:absSizeAnchor>`).
+    pub abs_width: Option<f32>,
+    /// Fixed height in points/pixels (`<cdr:absSizeAnchor>`).
+    pub abs_height: Option<f32>,
+    /// Cached or literal text (`<a:t>` from `<a:r>` or `<a:fld>`).
+    pub text: String,
+    /// Optional worksheet cell reference (`textlink="..."` / `f="..."`) evaluated live.
+    pub text_link: Option<String>,
+    pub fill: Option<Color>,
+    pub no_fill: bool,
+    pub line_color: Option<Color>,
+    pub line_width: Option<f32>,
+    pub no_line: bool,
+    pub text_color: Option<Color>,
+    pub font_size: Option<f32>,
+    pub bold: bool,
+    pub align: Option<ShapeTextAlign>,
+    pub anchor: Option<ShapeTextAnchor>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Series {
     /// Formula text for the series name (`Sheet1!$B$1`) or a literal.
@@ -511,6 +644,21 @@ pub struct Series {
     /// `None` shows the values in their source cells' format.
     #[serde(default)]
     pub label_number_format: Option<String>,
+    /// Series-level outline colour (`<c:spPr><a:ln><a:solidFill>`), used on bar/column/pie/doughnut.
+    #[serde(default)]
+    pub line_color: Option<Color>,
+    /// Series-level outline width in points (`<c:spPr><a:ln w="…"/>`).
+    #[serde(default)]
+    pub line_width: Option<f32>,
+    /// Explicit no outline (`<c:spPr><a:ln><a:noFill/></a:ln>`).
+    #[serde(default)]
+    pub no_line: bool,
+    /// Per-point colour/outline overrides (`<c:dPt>`).
+    #[serde(default)]
+    pub points: Vec<DataPointStyle>,
+    /// Structured data label settings (`<c:dLbls>` and per-point `<c:dLbl>`).
+    #[serde(default)]
+    pub data_labels: Option<DataLabels>,
 }
 
 /// Regression a trendline fits (`c:trendlineType`).
@@ -652,6 +800,12 @@ pub struct Chart {
     /// saved.
     #[serde(default)]
     pub pivot_label_formats: Vec<(Vec<String>, String)>,
+    /// Chart area fill and outer border (`<c:chartSpace><c:spPr>`).
+    #[serde(default)]
+    pub area_style: ChartAreaStyle,
+    /// Chart-relative shapes / text callouts (`<c:userShapes>`).
+    #[serde(default)]
+    pub user_shapes: Vec<ChartUserShape>,
 }
 
 impl Chart {
@@ -1273,6 +1427,8 @@ mod tests {
             pivot: None,
             axis_number_formats: Default::default(),
             pivot_label_formats: Default::default(),
+            area_style: Default::default(),
+            user_shapes: Default::default(),
         };
         let mut json = serde_json::to_value(&chart).expect("serialize chart");
         json.as_object_mut().expect("chart object").remove("hole_size");

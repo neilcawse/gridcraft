@@ -2,11 +2,10 @@
 
 use gridcraft_calc::evaluate;
 use gridcraft_core::{CellRef, MAX_COLS, MAX_ROWS, RangeRef, Value, category_levels, number_to_text};
-use gridcraft_model::{Chart, ChartKind, Theme, Workbook, style::apply_tint};
+use gridcraft_model::{Chart, ChartKind, ChartUserShape, Color, ShapeTextAlign, ShapeTextAnchor, Theme, Workbook, style::apply_tint};
 use gridcraft_numfmt::{NumberFormat, format_value};
 
-use crate::{ChartData, Rgba, SeriesData, TrendlineData};
-
+use crate::{ChartData, HAlign, PointStyleData, Rgba, SeriesData, TrendlineData, UserShapeData, VAlign};
 /// Cap on points per series (keeps whole-column references from exploding).
 pub(crate) const MAX_POINTS: usize = 100_000;
 /// Cap on series per chart.
@@ -169,7 +168,7 @@ pub fn has_volatile_series(wb: &Workbook, sheet: usize, ch: &Chart) -> bool {
             .into_iter()
             .flatten()
             .any(|f| formula_volatile(wb, sheet, f, 0, &mut seen))
-    })
+    }) || ch.user_shapes.iter().filter_map(|u| u.text_link.as_deref()).any(|f| formula_volatile(wb, sheet, f, 0, &mut seen))
 }
 
 /// Names followed inside names before a formula counts as volatile.
@@ -483,6 +482,76 @@ pub fn series_plot_kind(chart: &Chart, i: usize) -> ChartKind {
     plot_kind(chart.kind, chart.series.get(i).and_then(|s| s.kind), i)
 }
 
+fn resolve_rgba(c: Option<&Color>, theme: &Theme) -> Option<Rgba> {
+    c.and_then(|c| c.resolve(theme)).map(|[r, g, b]| [r, g, b, 0xFF])
+}
+
+fn resolve_stroke(c: Option<&Color>, width: Option<f32>, no_line: bool, theme: &Theme) -> Option<(Rgba, f32)> {
+    if no_line {
+        return None;
+    }
+    let rgba = resolve_rgba(c, theme)?;
+    let w = width.filter(|w| w.is_finite() && *w > 0.0).unwrap_or(0.75);
+    Some((rgba, w))
+}
+
+/// Evaluates a formula-linked text box (`textlink` / `f`) against the workbook, formatting
+/// numbers with the referenced cell's number format when it points at a cell.
+fn resolve_linked_text(wb: &Workbook, sheet: usize, f: &str) -> Option<String> {
+    let f = f.trim();
+    if f.is_empty() {
+        return None;
+    }
+    let val = evaluate(wb, sheet, CellRef::default(), f);
+    if matches!(val, Value::Empty | Value::Error(_)) {
+        return None;
+    }
+    if let Value::Number(_) = val
+        && let Some((sh, r)) = parse_ref(wb, sheet, f)
+        && let Some(s) = wb.sheet(sh)
+    {
+        let code = &wb.styles.get(s.style_id(r.start)).num_fmt.0;
+        if !code.eq_ignore_ascii_case("general") {
+            return Some(format_value(&val, &NumberFormat::parse_cached(code), wb.date_system).text);
+        }
+    }
+    let text = value_text(&val);
+    (!text.is_empty()).then_some(text)
+}
+
+pub(crate) fn resolve_user_shape(wb: Option<(&Workbook, usize)>, theme: &Theme, u: &ChartUserShape) -> UserShapeData {
+    let text = u.text_link.as_deref().and_then(|f| wb.and_then(|(w, s)| resolve_linked_text(w, s, f))).unwrap_or_else(|| u.text.clone());
+    let fill = if u.no_fill { None } else { resolve_rgba(u.fill.as_ref(), theme) };
+    let stroke = resolve_stroke(u.line_color.as_ref(), u.line_width, u.no_line, theme);
+    let text_color = resolve_rgba(u.text_color.as_ref(), theme).unwrap_or([0x26, 0x26, 0x26, 0xFF]);
+    let font_size = u.font_size.filter(|s| s.is_finite() && *s > 0.0).unwrap_or(11.0);
+    let align = match u.align.unwrap_or(ShapeTextAlign::Center) {
+        ShapeTextAlign::Left => HAlign::Left,
+        ShapeTextAlign::Center => HAlign::Center,
+        ShapeTextAlign::Right => HAlign::Right,
+    };
+    let valign = match u.anchor.unwrap_or(ShapeTextAnchor::Middle) {
+        ShapeTextAnchor::Top => VAlign::Top,
+        ShapeTextAnchor::Middle => VAlign::Middle,
+        ShapeTextAnchor::Bottom => VAlign::Bottom,
+    };
+    UserShapeData {
+        x: u.x,
+        y: u.y,
+        w: u.w,
+        h: u.h,
+        abs_width: u.abs_width,
+        abs_height: u.abs_height,
+        text,
+        fill,
+        stroke,
+        text_color,
+        font_size,
+        bold: u.bold,
+        align,
+        valign,
+    }
+}
 /// Evaluates a chart's series formulas: names, values, categories (default "1", "2", …), X
 /// values (scatter/bubble), bubble sizes, number formats and colours (explicit, else the
 /// default palette derived from the workbook theme accents).
@@ -527,6 +596,19 @@ pub fn resolve(wb: &Workbook, sheet: usize, chart: &Chart) -> ChartData {
             })
             .collect::<Vec<_>>();
         trend_left = trend_left.saturating_sub(trendlines.len());
+        let line = resolve_stroke(s.line_color.as_ref(), s.line_width, s.no_line, &wb.theme);
+        let points = s
+            .points
+            .iter()
+            .take(4096)
+            .map(|p| PointStyleData {
+                idx: p.idx,
+                fill: if p.no_fill { None } else { resolve_rgba(p.fill.as_ref(), &wb.theme) },
+                no_fill: p.no_fill,
+                stroke: resolve_stroke(p.line_color.as_ref(), p.line_width, p.no_line, &wb.theme),
+                no_line: p.no_line,
+            })
+            .collect();
         series.push(SeriesData {
             name,
             values,
@@ -542,12 +624,19 @@ pub fn resolve(wb: &Workbook, sheet: usize, chart: &Chart) -> ChartData {
                 _ => ref_format(wb, sheet, &s.values),
             },
             label_number_format: s.label_number_format.clone(),
+            line,
+            no_line: s.no_line,
+            points,
+            data_labels: s.data_labels.clone(),
         });
     }
     let n = series.iter().map(|s| s.values.len()).max().unwrap_or(0);
     let categories = categories.unwrap_or_else(|| (1..=n).map(|i| i.to_string()).collect());
     let palette = default_palette(&wb.theme, n.min(PALETTE_CYCLE));
-    ChartData { categories, category_levels, series, palette }
+    let area_fill = if chart.area_style.no_fill { None } else { resolve_rgba(chart.area_style.fill.as_ref(), &wb.theme) };
+    let area_stroke = resolve_stroke(chart.area_style.line_color.as_ref(), chart.area_style.line_width, chart.area_style.no_line, &wb.theme);
+    let user_shapes = chart.user_shapes.iter().take(256).map(|u| resolve_user_shape(Some((wb, sheet)), &wb.theme, u)).collect();
+    ChartData { categories, category_levels, series, palette, area_fill, area_stroke, user_shapes }
 }
 
 #[cfg(test)]

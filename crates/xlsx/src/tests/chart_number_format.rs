@@ -177,6 +177,8 @@ fn chart(id: u32, kind: ChartKind, series: Vec<Series>, axes: AxisNumberFormats)
         pivot: None,
         axis_number_formats: axes,
         pivot_label_formats: Vec::new(),
+        area_style: Default::default(),
+        user_shapes: Vec::new(),
     }
 }
 

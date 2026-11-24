@@ -9,7 +9,8 @@ use craft_drawingml::style::{ColorBase, ColorRef as DmlColor, Fill as DmlFill};
 use gridcraft_core::{CellRef, RangeRef, Value, category_levels};
 use gridcraft_formula::{BinOp, Expr, Reference, SheetSel};
 use gridcraft_model::{
-    AxisNumberFormats, Chart, ChartDataTable, ChartKind, Color, DefinedName, LegendPos, LineDash, Series, Trendline, TrendlineKind, Workbook,
+    AxisNumberFormats, Chart, ChartAreaStyle, ChartDataTable, ChartKind, ChartUserShape, Color, DataLabelOverride, DataLabelPos, DataLabels,
+    DataPointStyle, DefinedName, LegendPos, LineDash, Series, ShapeTextAlign, ShapeTextAnchor, Trendline, TrendlineKind, Workbook, style::apply_tint,
 };
 
 use crate::drawing::{dml_color, srgb};
@@ -53,6 +54,291 @@ pub(crate) fn map_dml_color(c: &DmlColor) -> Option<Color> {
         ColorBase::System { last, .. } => Some(Color::Rgb((u32::from(last.r) << 16) | (u32::from(last.g) << 8) | u32::from(last.b))),
         ColorBase::Preset { .. } => None,
     }
+}
+
+/// Maps a DrawingML `schemeClr/@val` to a model theme slot index (`0..=11`).
+fn scheme_slot(name: &str) -> Option<u8> {
+    match name {
+        "bg1" | "lt1" => Some(0),
+        "tx1" | "dk1" => Some(1),
+        "bg2" | "lt2" => Some(2),
+        "tx2" | "dk2" => Some(3),
+        "accent1" => Some(4),
+        "accent2" => Some(5),
+        "accent3" => Some(6),
+        "accent4" => Some(7),
+        "accent5" => Some(8),
+        "accent6" => Some(9),
+        "hlink" => Some(10),
+        "folHlink" => Some(11),
+        _ => None,
+    }
+}
+
+/// Extracts an ECMA-376 tint in thousandths (`-1000..=1000`) from DrawingML colour modifier
+/// children (`lumMod`, `lumOff`, `tint`, `shade`).
+fn color_mod_tint(clr: &El) -> i16 {
+    let pct = |name: &str| clr.child(name).and_then(|c| c.attr_f64("val")).filter(|v| v.is_finite()).map(|v| v / 100_000.0);
+    let lum_mod = pct("lumMod");
+    let lum_off = pct("lumOff");
+    let raw = if lum_mod.is_some() || lum_off.is_some() {
+        let m = lum_mod.unwrap_or(1.0);
+        let o = lum_off.unwrap_or(0.0);
+        if o > 0.0 {
+            o.clamp(0.0, 1.0)
+        } else if m < 1.0 {
+            (m - 1.0).clamp(-1.0, 0.0)
+        } else if o < 0.0 {
+            o.clamp(-1.0, 0.0)
+        } else {
+            0.0
+        }
+    } else if let Some(t) = pct("tint") {
+        (1.0 - t).clamp(0.0, 1.0)
+    } else if let Some(s) = pct("shade") {
+        (s - 1.0).clamp(-1.0, 0.0)
+    } else {
+        0.0
+    };
+    (raw * 1000.0).round().clamp(-1000.0, 1000.0) as i16
+}
+
+/// Colour of a DrawingML fill element (`<a:solidFill>`), honouring `srgbClr`, `sysClr`,
+/// `schemeClr`, and colour modifiers (`lumMod`, `lumOff`, `tint`, `shade`).
+pub(crate) fn chart_color(e: &El) -> Option<Color> {
+    if let Some(clr) = e.child("srgbClr")
+        && let Some(hex) = clr.attr("val")
+        && let Some(Color::Rgb(v)) = Color::from_hex(hex)
+    {
+        let tint = color_mod_tint(clr);
+        if tint != 0 {
+            let [r, g, b] = apply_tint([(v >> 16) as u8, (v >> 8) as u8, v as u8], f64::from(tint) / 1000.0);
+            return Some(Color::rgb(r, g, b));
+        }
+        return Some(Color::Rgb(v));
+    }
+    if let Some(clr) = e.child("sysClr")
+        && let Some(hex) = clr.attr("lastClr")
+        && let Some(Color::Rgb(v)) = Color::from_hex(hex)
+    {
+        let tint = color_mod_tint(clr);
+        if tint != 0 {
+            let [r, g, b] = apply_tint([(v >> 16) as u8, (v >> 8) as u8, v as u8], f64::from(tint) / 1000.0);
+            return Some(Color::rgb(r, g, b));
+        }
+        return Some(Color::Rgb(v));
+    }
+    if let Some(clr) = e.child("schemeClr")
+        && let Some(val) = clr.attr("val")
+        && let Some(slot) = scheme_slot(val)
+    {
+        return Some(Color::Theme(slot, color_mod_tint(clr)));
+    }
+    None
+}
+
+/// Parsed `<c:spPr>` fill and outline properties.
+#[derive(Default)]
+struct SpPr {
+    fill: Option<Color>,
+    no_fill: bool,
+    line_color: Option<Color>,
+    line_width: Option<f32>,
+    no_line: bool,
+}
+
+fn parse_sp_pr(sp: Option<&El>) -> SpPr {
+    let Some(sp) = sp else { return SpPr::default() };
+    let ln = sp.child("ln");
+    SpPr {
+        fill: sp.child("solidFill").and_then(chart_color),
+        no_fill: sp.child("noFill").is_some(),
+        line_color: ln.and_then(|l| l.child("solidFill")).and_then(chart_color),
+        line_width: ln.and_then(|l| l.attr_f64("w")).map(|w| (w / EMU_PER_PT) as f32).filter(|w| w.is_finite() && *w >= 0.0),
+        no_line: ln.is_some_and(|l| l.child("noFill").is_some()),
+    }
+}
+
+pub(crate) fn parse_area_style(root: Option<&El>) -> ChartAreaStyle {
+    let sp = parse_sp_pr(root.and_then(|r| r.child("spPr")));
+    ChartAreaStyle { fill: sp.fill, no_fill: sp.no_fill, line_color: sp.line_color, line_width: sp.line_width, no_line: sp.no_line }
+}
+
+const MAX_DATA_POINTS: usize = 4_096;
+
+fn parse_data_points(ser: Option<&El>) -> Vec<DataPointStyle> {
+    let Some(ser) = ser else { return Vec::new() };
+    let mut out: Vec<DataPointStyle> = Vec::new();
+    for dpt in ser.kids("dPt").take(MAX_DATA_POINTS) {
+        let Some(idx) = dpt.child_val("idx").and_then(|v| v.trim().parse::<usize>().ok()) else { continue };
+        let sp = parse_sp_pr(dpt.child("spPr"));
+        if sp.fill.is_none() && !sp.no_fill && sp.line_color.is_none() && sp.line_width.is_none() && !sp.no_line {
+            continue;
+        }
+        let style =
+            DataPointStyle { idx, fill: sp.fill, no_fill: sp.no_fill, line_color: sp.line_color, line_width: sp.line_width, no_line: sp.no_line };
+        if let Some(slot) = out.iter_mut().find(|p| p.idx == idx) {
+            *slot = style;
+        } else {
+            out.push(style);
+        }
+    }
+    out
+}
+
+fn parse_dlbl_pos(val: &str) -> DataLabelPos {
+    match val {
+        "ctr" => DataLabelPos::Center,
+        "inEnd" => DataLabelPos::InsideEnd,
+        "inBase" => DataLabelPos::InsideBase,
+        "outEnd" => DataLabelPos::OutsideEnd,
+        "bestFit" => DataLabelPos::BestFit,
+        _ => DataLabelPos::Auto,
+    }
+}
+
+fn dlbl_pos_xml(pos: DataLabelPos) -> Option<&'static str> {
+    match pos {
+        DataLabelPos::Auto => None,
+        DataLabelPos::Center => Some("ctr"),
+        DataLabelPos::InsideEnd => Some("inEnd"),
+        DataLabelPos::InsideBase => Some("inBase"),
+        DataLabelPos::OutsideEnd => Some("outEnd"),
+        DataLabelPos::BestFit => Some("bestFit"),
+    }
+}
+
+fn opt_bool_val(e: &El, k: &str) -> Option<bool> {
+    e.child(k).map(|c| c.flag("val", true))
+}
+
+fn para_text(p: &El) -> String {
+    let mut s = String::new();
+    for child in &p.children {
+        if matches!(child.name.as_str(), "r" | "fld")
+            && let Some(t) = child.child("t")
+        {
+            s.push_str(&t.text);
+        }
+    }
+    s
+}
+
+fn body_rich_text(body: &El) -> String {
+    body.kids("p").map(para_text).collect::<Vec<_>>().join("\n")
+}
+
+fn parse_dlbls(d: &El) -> DataLabels {
+    if bool_val(d, "delete") {
+        return DataLabels { delete: true, ..Default::default() };
+    }
+    let mut points: Vec<DataLabelOverride> = Vec::new();
+    for dl in d.kids("dLbl").take(MAX_DATA_POINTS) {
+        let Some(idx) = dl.child_val("idx").and_then(|v| v.trim().parse::<usize>().ok()) else { continue };
+        let ov = DataLabelOverride {
+            idx,
+            delete: bool_val(dl, "delete"),
+            show_val: opt_bool_val(dl, "showVal"),
+            show_percent: opt_bool_val(dl, "showPercent"),
+            show_cat_name: opt_bool_val(dl, "showCatName"),
+            show_ser_name: opt_bool_val(dl, "showSerName"),
+            num_fmt: typed_num_fmt(dl.child("numFmt")),
+            text: dl.child("tx").and_then(|tx| tx.child("rich")).map(body_rich_text).filter(|t| !t.is_empty()),
+        };
+        if let Some(slot) = points.iter_mut().find(|p| p.idx == idx) {
+            *slot = ov;
+        } else {
+            points.push(ov);
+        }
+    }
+    DataLabels {
+        delete: false,
+        show_val: bool_val(d, "showVal"),
+        show_percent: bool_val(d, "showPercent"),
+        show_cat_name: bool_val(d, "showCatName"),
+        show_ser_name: bool_val(d, "showSerName"),
+        show_leader_lines: bool_val(d, "showLeaderLines"),
+        pos: d.child_val("dLblPos").map(parse_dlbl_pos).unwrap_or_default(),
+        separator: d.child("separator").map(|s| s.text.clone()).filter(|s| !s.is_empty()),
+        num_fmt: typed_num_fmt(d.child("numFmt")),
+        points,
+    }
+}
+
+/// Parses `<cdr:userShapes>` (`xl/drawings/drawingN.xml` linked from `<c:userShapes r:id="…"/>`)
+/// into chart-relative [`ChartUserShape`] callouts/text boxes (including `<a:fld>` and `textlink`).
+#[allow(dead_code)]
+pub(crate) fn parse_user_shapes(us_xml: &El) -> Vec<ChartUserShape> {
+    let mut out = Vec::new();
+    for a in us_xml.children.iter().take(256) {
+        let frac = |parent: &str, child: &str, def: f32| {
+            a.path(&[parent, child]).and_then(|e| e.text.trim().parse::<f32>().ok()).filter(|v| v.is_finite()).unwrap_or(def).clamp(0.0, 1.0)
+        };
+        let (x, y) = (frac("from", "x", 0.0), frac("from", "y", 0.0));
+        let (w, h, abs_width, abs_height) = match a.name.as_str() {
+            "relSizeAnchor" => {
+                let x2 = frac("to", "x", 1.0).max(x);
+                let y2 = frac("to", "y", 1.0).max(y);
+                (x2 - x, y2 - y, None, None)
+            }
+            "absSizeAnchor" => {
+                let ext = a.child("ext");
+                let emu =
+                    |k: &str| ext.and_then(|e| e.attr_f64(k)).filter(|v| v.is_finite()).map(|v| (v / crate::tables::EMU_PER_PX).max(0.0) as f32);
+                (0.0, 0.0, emu("cx"), emu("cy"))
+            }
+            _ => continue,
+        };
+        for obj in &a.children {
+            if obj.name != "sp" {
+                continue;
+            }
+            let sp = parse_sp_pr(obj.child("spPr"));
+            let tb = obj.child("txBody");
+            let text = tb.map(body_rich_text).unwrap_or_default();
+            let text_link = obj.attr("textlink").or_else(|| obj.attr("f")).map(str::trim).filter(|s| !s.is_empty()).map(chart_ref_from_file);
+            let anchor = tb.and_then(|b| b.child("bodyPr")).and_then(|b| b.attr("anchor")).map(|a| match a {
+                "ctr" => ShapeTextAnchor::Middle,
+                "b" => ShapeTextAnchor::Bottom,
+                _ => ShapeTextAnchor::Top,
+            });
+            let align = tb.and_then(|b| b.kids("p").next()).and_then(|p| p.child("pPr")).and_then(|p| p.attr("algn")).map(|a| match a {
+                "ctr" => ShapeTextAlign::Center,
+                "r" => ShapeTextAlign::Right,
+                _ => ShapeTextAlign::Left,
+            });
+            let rpr = tb.and_then(|b| {
+                b.kids("p")
+                    .flat_map(|p| p.children.iter().filter(|c| matches!(c.name.as_str(), "r" | "fld")))
+                    .find_map(|r| r.child("rPr"))
+                    .or_else(|| b.kids("p").find_map(|p| p.path(&["pPr", "defRPr"])))
+            });
+            let font_size = rpr.and_then(|r| r.attr_f64("sz")).filter(|v| v.is_finite()).map(|v| (v / 100.0).clamp(1.0, 4000.0) as f32);
+            let bold = rpr.is_some_and(|r| r.flag("b", false));
+            let text_color = rpr.and_then(|r| r.child("solidFill")).and_then(chart_color);
+            out.push(ChartUserShape {
+                x,
+                y,
+                w,
+                h,
+                abs_width,
+                abs_height,
+                text,
+                text_link,
+                fill: sp.fill,
+                no_fill: sp.no_fill,
+                line_color: sp.line_color,
+                line_width: sp.line_width,
+                no_line: sp.no_line,
+                text_color,
+                font_size,
+                bold,
+                align,
+                anchor,
+            });
+        }
+    }
+    out
 }
 
 fn map_chart_type(k: ChartType, plot: Option<&El>) -> ChartKind {
@@ -487,7 +773,7 @@ pub(crate) fn from_dml_chart(dc: DmlChart, root: Option<&El>, budget: &mut Chart
     let series_labels = dc.series.iter().any(|s| s.data_labels == Some(true));
     let pivot = dc.pivot_source.as_deref().map(strip_book).filter(|n| !n.is_empty()).map(str::to_string);
     let mut caches = Vec::new();
-    let series = dc
+    let series: Vec<Series> = dc
         .series
         .into_iter()
         .enumerate()
@@ -498,20 +784,33 @@ pub(crate) fn from_dml_chart(dc: DmlChart, root: Option<&El>, budget: &mut Chart
             };
             let series_kind = s.kind.map(|k| map_chart_type(k, plot)).unwrap_or(base_kind);
             let xy = matches!(series_kind, ChartKind::Scatter | ChartKind::ScatterLines | ChartKind::Bubble);
-            let color = s
+            let sp = parse_sp_pr(sel.and_then(|e| e.child("spPr")));
+            let color = sp
                 .fill
-                .as_ref()
-                .and_then(|f| match f {
-                    DmlFill::Solid { color } => map_dml_color(color),
-                    _ => None,
-                })
                 .or_else(|| {
-                    s.line.as_ref().and_then(|l| l.fill.as_ref()).and_then(|f| match f {
+                    s.fill.as_ref().and_then(|f| match f {
                         DmlFill::Solid { color } => map_dml_color(color),
                         _ => None,
                     })
                 })
-                .or_else(|| sel.and_then(|e| e.path(&["marker", "spPr", "solidFill"])).and_then(dml_color));
+                .or_else(|| {
+                    if matches!(
+                        series_kind,
+                        ChartKind::Line | ChartKind::LineMarkers | ChartKind::LineStacked | ChartKind::Radar | ChartKind::ScatterLines
+                    ) {
+                        sp.line_color.or_else(|| {
+                            s.line.as_ref().and_then(|l| l.fill.as_ref()).and_then(|f| match f {
+                                DmlFill::Solid { color } => map_dml_color(color),
+                                _ => None,
+                            })
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .or_else(|| sel.and_then(|e| e.path(&["marker", "spPr", "solidFill"])).and_then(chart_color));
+            let points = parse_data_points(sel);
+            let data_labels = sel.and_then(|e| e.child("dLbls")).or_else(|| group_el.and_then(|g| g.child("dLbls"))).map(parse_dlbls);
             let mut trendline_els = sel
                 .into_iter()
                 .flat_map(|e| e.kids("trendline").take(16))
@@ -554,6 +853,11 @@ pub(crate) fn from_dml_chart(dc: DmlChart, root: Option<&El>, budget: &mut Chart
                 label_number_format: sel
                     .and_then(|e| e.child("dLbls"))
                     .map_or_else(|| label_num_fmt(group_el.and_then(|g| g.child("dLbls")), xy), |d| label_num_fmt(Some(d), xy)),
+                line_color: sp.line_color,
+                line_width: sp.line_width,
+                no_line: sp.no_line,
+                points,
+                data_labels,
             };
             if pivot.is_some() {
                 caches.push(sel.map(|e| pivot_series_cache(e, budget)).unwrap_or_default());
@@ -612,6 +916,10 @@ pub(crate) fn from_dml_chart(dc: DmlChart, root: Option<&El>, budget: &mut Chart
         },
         None => dc.title,
     };
+    let any_dlbls = series.iter().any(|s| s.data_labels.as_ref().is_some_and(DataLabels::shows_any));
+    let all_dlbls_explicit = !series.is_empty() && series.iter().all(|s| s.data_labels.is_some());
+    let data_labels = if all_dlbls_explicit { any_dlbls } else { any_dlbls || dc.data_labels || series_labels };
+    let area_style = parse_area_style(root);
     let ch = Chart {
         id: 0,
         kind,
@@ -619,7 +927,7 @@ pub(crate) fn from_dml_chart(dc: DmlChart, root: Option<&El>, budget: &mut Chart
         title,
         series,
         legend,
-        data_labels: dc.data_labels || series_labels,
+        data_labels,
         data_table: dc.data_table.map(|t| ChartDataTable {
             show_keys: t.show_keys,
             horizontal_border: t.horizontal_border,
@@ -637,6 +945,8 @@ pub(crate) fn from_dml_chart(dc: DmlChart, root: Option<&El>, budget: &mut Chart
         pivot,
         axis_number_formats,
         pivot_label_formats: Vec::new(),
+        area_style,
+        user_shapes: Vec::new(),
     };
     (ch, caches)
 }
@@ -937,6 +1247,18 @@ fn series_xml(s: &Series, idx: usize, g: G, labels: bool, wb: &Workbook, si: usi
         }
     }
     let color = s.color.as_ref().and_then(|c: &Color| srgb(c, &wb.theme));
+    let line_c = s.line_color.as_ref().and_then(|c: &Color| srgb(c, &wb.theme));
+    let ln_xml = |lc: Option<&str>, lw: Option<f32>, no_line: bool| -> String {
+        if no_line {
+            return "<a:ln><a:noFill/></a:ln>".into();
+        }
+        let Some(c) = lc else { return String::new() };
+        let w_attr = lw
+            .filter(|w| w.is_finite())
+            .map(|w| format!(" w=\"{}\"", (f64::from(w) * EMU_PER_PT).round().clamp(0.0, 20_116_800.0) as i64))
+            .unwrap_or_default();
+        format!("<a:ln{w_attr}><a:solidFill>{c}</a:solidFill></a:ln>")
+    };
     let line_like = matches!(g, G::Line { .. } | G::Radar | G::Scatter { lines: true });
     match (&color, line_like) {
         (Some(c), true) => {
@@ -949,9 +1271,14 @@ fn series_xml(s: &Series, idx: usize, g: G, labels: bool, wb: &Workbook, si: usi
             );
         }
         (Some(c), false) => {
-            let _ = write!(x, "<c:spPr><a:solidFill>{c}</a:solidFill></c:spPr>");
+            let ln = ln_xml(line_c.as_deref(), s.line_width, s.no_line);
+            let _ = write!(x, "<c:spPr><a:solidFill>{c}</a:solidFill>{ln}</c:spPr>");
         }
         (None, _) if g == (G::Scatter { lines: false }) || g == G::Stock => x.push_str("<c:spPr><a:ln w=\"19050\"><a:noFill/></a:ln></c:spPr>"),
+        (None, false) if line_c.is_some() || s.no_line => {
+            let ln = ln_xml(line_c.as_deref(), s.line_width, s.no_line);
+            let _ = write!(x, "<c:spPr>{ln}</c:spPr>");
+        }
         _ => {}
     }
     match g {
@@ -960,9 +1287,35 @@ fn series_xml(s: &Series, idx: usize, g: G, labels: bool, wb: &Workbook, si: usi
         G::Bubble => x.push_str("<c:invertIfNegative val=\"0\"/>"),
         _ => {}
     }
-    // A typed label format needs the series' own dLbls (after dPt, before trendline in every
-    // series type written here).
-    if let Some(f) = s.label_number_format.as_deref() {
+    for pt in &s.points {
+        let mut sp = String::new();
+        if pt.no_fill {
+            sp.push_str("<a:noFill/>");
+        } else if let Some(c) = pt.fill.as_ref().and_then(|c| srgb(c, &wb.theme)) {
+            let _ = write!(sp, "<a:solidFill>{c}</a:solidFill>");
+        }
+        let plc = pt.line_color.as_ref().and_then(|c| srgb(c, &wb.theme));
+        sp.push_str(&ln_xml(plc.as_deref(), pt.line_width, pt.no_line));
+        if !sp.is_empty() {
+            let _ = write!(x, "<c:dPt><c:idx val=\"{}\"/><c:spPr>{sp}</c:spPr></c:dPt>", pt.idx);
+        }
+    }
+    // Emit series-level <c:dLbls> only when it carries settings beyond the group's plain showVal.
+    let needs_series_dl = |dl: &DataLabels| {
+        dl.delete
+            || dl.show_val != labels
+            || dl.show_percent
+            || dl.show_cat_name
+            || dl.show_ser_name
+            || dl.show_leader_lines
+            || dl.pos != DataLabelPos::Auto
+            || dl.separator.is_some()
+            || dl.num_fmt.is_some()
+            || !dl.points.is_empty()
+    };
+    if let Some(dl) = s.data_labels.as_ref().filter(|dl| needs_series_dl(dl)) {
+        x.push_str(&dlbls_full(dl, s.label_number_format.as_deref()));
+    } else if let Some(f) = s.label_number_format.as_deref() {
         x.push_str(&dlbls(labels, Some(f)));
     }
     // Trendlines sit between dLbls and the data in CT_LineSer, CT_BarSer, CT_AreaSer,
@@ -1071,6 +1424,84 @@ fn dlbls(show: bool, fmt: Option<&str>) -> String {
         fmt.map(|f| num_fmt_xml(Some(f))).unwrap_or_default(),
         show as u8
     )
+}
+
+fn dlbls_full(dl: &DataLabels, fallback_fmt: Option<&str>) -> String {
+    if dl.delete {
+        return "<c:dLbls><c:delete val=\"1\"/></c:dLbls>".into();
+    }
+    let mut out = String::from("<c:dLbls>");
+    for p in &dl.points {
+        let _ = write!(out, "<c:dLbl><c:idx val=\"{}\"/>", p.idx);
+        if p.delete {
+            out.push_str("<c:delete val=\"1\"/></c:dLbl>");
+            continue;
+        }
+        if let Some(t) = &p.text {
+            let _ = write!(out, "<c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>{}</a:t></a:r></a:p></c:rich></c:tx>", esc(t));
+        }
+        if let Some(f) = p.num_fmt.as_deref() {
+            out.push_str(&num_fmt_xml(Some(f)));
+        }
+        if let Some(v) = p.show_val {
+            let _ = write!(out, "<c:showVal val=\"{}\"/>", u8::from(v));
+        }
+        if let Some(v) = p.show_cat_name {
+            let _ = write!(out, "<c:showCatName val=\"{}\"/>", u8::from(v));
+        }
+        if let Some(v) = p.show_ser_name {
+            let _ = write!(out, "<c:showSerName val=\"{}\"/>", u8::from(v));
+        }
+        if let Some(v) = p.show_percent {
+            let _ = write!(out, "<c:showPercent val=\"{}\"/>", u8::from(v));
+        }
+        out.push_str("</c:dLbl>");
+    }
+    if let Some(f) = dl.num_fmt.as_deref().or(fallback_fmt) {
+        out.push_str(&num_fmt_xml(Some(f)));
+    }
+    if let Some(pos) = dlbl_pos_xml(dl.pos) {
+        let _ = write!(out, "<c:dLblPos val=\"{pos}\"/>");
+    }
+    let _ = write!(
+        out,
+        "<c:showLegendKey val=\"0\"/><c:showVal val=\"{}\"/><c:showCatName val=\"{}\"/><c:showSerName val=\"{}\"/><c:showPercent val=\"{}\"/><c:showBubbleSize val=\"0\"/>",
+        u8::from(dl.show_val),
+        u8::from(dl.show_cat_name),
+        u8::from(dl.show_ser_name),
+        u8::from(dl.show_percent)
+    );
+    if let Some(sep) = &dl.separator {
+        let _ = write!(out, "<c:separator>{}</c:separator>", esc(sep));
+    }
+    if dl.show_leader_lines {
+        out.push_str("<c:showLeaderLines val=\"1\"/>");
+    }
+    out.push_str("</c:dLbls>");
+    out
+}
+
+fn area_style_xml(st: &ChartAreaStyle, wb: &Workbook) -> String {
+    if st.is_default() {
+        return String::new();
+    }
+    let mut inner = String::new();
+    if st.no_fill {
+        inner.push_str("<a:noFill/>");
+    } else if let Some(c) = st.fill.as_ref().and_then(|c| srgb(c, &wb.theme)) {
+        let _ = write!(inner, "<a:solidFill>{c}</a:solidFill>");
+    }
+    if st.no_line {
+        inner.push_str("<a:ln><a:noFill/></a:ln>");
+    } else if let Some(c) = st.line_color.as_ref().and_then(|c| srgb(c, &wb.theme)) {
+        let w_attr = st
+            .line_width
+            .filter(|w| w.is_finite())
+            .map(|w| format!(" w=\"{}\"", (f64::from(w) * EMU_PER_PT).round().clamp(0.0, 20_116_800.0) as i64))
+            .unwrap_or_default();
+        let _ = write!(inner, "<a:ln{w_attr}><a:solidFill>{c}</a:solidFill></a:ln>");
+    }
+    if inner.is_empty() { String::new() } else { format!("<c:spPr>{inner}</c:spPr>") }
 }
 
 fn group_xml(g: G, series: &[(usize, &Series)], ch: &Chart, axes: (u32, u32), wb: &Workbook, si: usize) -> String {
@@ -1361,6 +1792,7 @@ pub fn write_chart(wb: &Workbook, si: usize, ch: &Chart, book_name: &str) -> Str
     if let Some(p) = pos {
         let _ = write!(s, "<c:legend><c:legendPos val=\"{p}\"/><c:overlay val=\"0\"/></c:legend>");
     }
-    s.push_str("<c:plotVisOnly val=\"1\"/><c:dispBlanksAs val=\"gap\"/></c:chart></c:chartSpace>");
+    let sp = area_style_xml(&ch.area_style, wb);
+    let _ = write!(s, "<c:plotVisOnly val=\"1\"/><c:dispBlanksAs val=\"gap\"/></c:chart>{sp}</c:chartSpace>");
     s
 }
