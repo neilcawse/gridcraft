@@ -62,6 +62,8 @@ pub struct Output {
     pub chart_value_item: bool,
     /// Grid column holding the innermost row labels (`None` without row fields).
     pub label_col: Option<u32>,
+    /// Number of leading row-label columns before the first data column (`firstDataCol`).
+    pub row_label_cols: u32,
     /// Every value cell with the items that locate it (for GETPIVOTDATA).
     pub data: Vec<PivotDataCell>,
 }

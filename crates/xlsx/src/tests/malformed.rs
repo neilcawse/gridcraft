@@ -484,6 +484,25 @@ fn conditional_format_cap_admits_a_large_block_after_small_ones() {
     assert!(!rep.warnings.iter().any(|w| w.contains("kept range cells")), "{:?}", rep.warnings);
 }
 
+#[test]
+fn conditional_format_clips_full_column_to_used_bounds_and_drops_repeated_blocks() {
+    // 500 populated rows in A1:J500 with legitimate F13:J1048576 CF => ~2,440 clipped cells (kept).
+    let rows: String = (1..=500).map(|r| format!(r#"<row r="{r}"><c r="A{r}"><v>{r}</v></c><c r="J{r}"><v>{r}</v></c></row>"#)).collect();
+    let full_col = r#"<conditionalFormatting sqref="F13:J1048576"><cfRule type="cellIs" operator="greaterThan" priority="1"><formula>10</formula></cfRule></conditionalFormatting>"#;
+    let (wb_ok, rep_ok) = read_xlsx(&minimal(&format!("<sheetData>{rows}</sheetData>{full_col}"), &[], "", "")).unwrap();
+    assert_eq!(wb_ok.sheets[0].cond_formats.len(), 1, "legitimate F13:J1048576 on a 500-row sheet must be kept");
+    assert!(!rep_ok.warnings.iter().any(|w| w.contains("kept range cells")), "{:?}", rep_ok.warnings);
+
+    // Hostile: 2,000 repeated A1:Y2000 ranges (50,000 cells each = 100M cells) must be dropped cleanly.
+    let repeated_sq = vec!["A1:Y2000"; 2_000].join(" ");
+    let hostile = format!(
+        r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData><conditionalFormatting sqref="{repeated_sq}"><cfRule type="cellIs" operator="equal" priority="1"><formula>999</formula></cfRule></conditionalFormatting>"#
+    );
+    let (wb_bad, rep_bad) = read_xlsx(&minimal(&hostile, &[], "", "")).unwrap();
+    assert_eq!(wb_bad.sheets[0].cond_formats.len(), 0, "100M-cell repeated sqref block must be dropped");
+    assert!(rep_bad.warnings.iter().any(|w| w.contains("kept range cells")), "{:?}", rep_bad.warnings);
+}
+
 /// #2173: cell formats share one copy of each custom number format (even an over-long one, which
 /// is kept as stored) and font names are cut to 255 characters.
 #[test]

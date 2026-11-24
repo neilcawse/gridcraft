@@ -213,3 +213,22 @@ fn typed_formats_round_trip() {
         assert_eq!(fmts(a), fmts(b), "chart {}", b.id);
     }
 }
+
+#[test]
+fn series_dlbls_without_num_fmt_inherits_group_dlbls_num_fmt() {
+    let ch = read(
+        "<c:barChart><c:barDir val=\"col\"/><c:grouping val=\"clustered\"/>\
+         <c:ser><c:idx val=\"0\"/><c:order val=\"0\"/>\
+         <c:dLbls><c:dLblPos val=\"outEnd\"/></c:dLbls>\
+         <c:val><c:numRef><c:f>Data!$B$2:$B$5</c:f></c:numRef></c:val></c:ser>\
+         <c:ser><c:idx val=\"1\"/><c:order val=\"1\"/>\
+         <c:dLbls><c:numFmt formatCode=\"0.00\" sourceLinked=\"1\"/></c:dLbls>\
+         <c:val><c:numRef><c:f>Data!$C$2:$C$5</c:f></c:numRef></c:val></c:ser>\
+         <c:dLbls><c:numFmt formatCode=\"$#,##0\" sourceLinked=\"0\"/><c:showVal val=\"1\"/></c:dLbls>\
+         <c:axId val=\"1\"/><c:axId val=\"2\"/></c:barChart>",
+    );
+    assert_eq!(ch.series[0].label_number_format.as_deref(), Some("$#,##0"));
+    assert_eq!(ch.series[0].data_labels.as_ref().and_then(|d| d.num_fmt.as_deref()), Some("$#,##0"));
+    assert_eq!(ch.series[1].label_number_format, None);
+    assert_eq!(ch.series[1].data_labels.as_ref().and_then(|d| d.num_fmt.as_deref()), None);
+}

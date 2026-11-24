@@ -130,6 +130,7 @@ fn cell_get(s: &mut Session, p: &Json) -> Result<Json> {
         "value": value_json(&sh.value(c)),
         "type": if sh.cell_pictures.contains_key(&c) { "picture" } else { match sh.value(c) { Value::Empty => "empty", Value::Number(_) => "number", Value::Text(_) => "text", Value::Bool(_) => "boolean", Value::Error(_) => "error", Value::Array(_) => "array" } },
         "formula": cell.and_then(|x| x.formula.as_ref()).map(|f| format!("={}", f.text)),
+        "input": sh.input_text(c),
         "text": crate::display::cell_text_with_cf(&d.wb, sheet, sh, c, &mut cf),
         "picture": sh.cell_pictures.get(&c).map(|picture| json!({"mime": picture.mime, "alt": picture.alt, "bytes": picture.data.len()})),
         "spilledFrom": sh.spill_anchor(c).map(|a| a.a1()),

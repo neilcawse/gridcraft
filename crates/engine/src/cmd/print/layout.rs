@@ -7,6 +7,9 @@ use super::{
 /// Cells in a page block above which only stored cells are visited (not every grid position).
 pub(super) const DENSE_BLOCK: u64 = 60_000;
 
+/// Total conditional-format `look()` calls allowed across one sheet's print layout.
+const MAX_CF_PRINT_LOOKS: usize = 60_000;
+
 /// Windows Excel reserves 4 printer dots (0.48 pt at 600 dpi) on each edge of the cell grid,
 /// reducing the usable width and height between margins by 0.96 pt.
 pub(super) const GRID_EDGE_INSET_PT: f32 = 0.48;
@@ -330,17 +333,24 @@ pub fn print_range(sh: &Sheet) -> Option<RangeRef> {
 /// alignment, or number-format styling do not expand the print range.
 pub(crate) fn sheet_print_range(wb: &Workbook, si: usize, sh: &Sheet) -> Option<RangeRef> {
     let mut cf = crate::cf::CfCache::new();
-    sheet_print_range_with_cf(wb, si, sh, &mut cf).0
+    let mut cf_budget = MAX_CF_PRINT_LOOKS;
+    sheet_print_range_with_cf(wb, si, sh, &mut cf, &mut cf_budget).0
 }
 
 type OverflowSpan = (u32, u32, u32);
 
-fn sheet_print_range_with_cf(wb: &Workbook, si: usize, sh: &Sheet, cf: &mut crate::cf::CfCache) -> (Option<RangeRef>, Vec<OverflowSpan>) {
+fn sheet_print_range_with_cf(
+    wb: &Workbook,
+    si: usize,
+    sh: &Sheet,
+    cf: &mut crate::cf::CfCache,
+    cf_budget: &mut usize,
+) -> (Option<RangeRef>, Vec<OverflowSpan>) {
     if let Some(a) = sh.print.print_area {
-        let (used, overflows) = printable_cells_range(wb, si, sh, cf);
+        let (used, overflows) = printable_cells_range(wb, si, sh, cf, cf_budget);
         return (Some(trim_full_used(used, a)), overflows);
     }
-    let (mut r, overflows) = printable_cells_range(wb, si, sh, cf);
+    let (mut r, overflows) = printable_cells_range(wb, si, sh, cf, cf_budget);
     for c in &sh.charts {
         union_anchor(sh, &mut r, &c.anchor);
     }
@@ -353,7 +363,13 @@ fn sheet_print_range_with_cf(wb: &Workbook, si: usize, sh: &Sheet, cf: &mut crat
     (r, overflows)
 }
 
-fn printable_cells_range(wb: &Workbook, si: usize, sh: &Sheet, cf: &mut crate::cf::CfCache) -> (Option<RangeRef>, Vec<OverflowSpan>) {
+fn printable_cells_range(
+    wb: &Workbook,
+    si: usize,
+    sh: &Sheet,
+    cf: &mut crate::cf::CfCache,
+    cf_budget: &mut usize,
+) -> (Option<RangeRef>, Vec<OverflowSpan>) {
     let mut out: Option<RangeRef> = None;
     let mut extend = |rng: RangeRef| {
         out = Some(out.map_or(rng, |u| u.union(&rng)));
@@ -370,7 +386,7 @@ fn printable_cells_range(wb: &Workbook, si: usize, sh: &Sheet, cf: &mut crate::c
     // (matching Excel for full-width header banners set via `<row s="...">`).
     if let Some(used) = sh.used_range() {
         for (&row, info) in &sh.rows {
-            if info.style.is_some_and(|sid| style_is_printable(wb, sid)) {
+            if !info.hidden && info.style.is_some_and(|sid| style_is_printable(wb, sid)) {
                 extend(RangeRef::new(CellRef::new(row, used.start.col), CellRef::new(row, used.end.col)));
             }
         }
@@ -398,9 +414,9 @@ fn printable_cells_range(wb: &Workbook, si: usize, sh: &Sheet, cf: &mut crate::c
             extend(*m);
         }
     }
-    extend_printable_cf_cells(wb, si, sh, cf, &mut extend);
+    extend_printable_cf_cells(wb, si, sh, cf, cf_budget, &mut extend);
     let overflows = if let Some(cur_out) = out {
-        let (ovs, max_col) = collect_text_overflows(wb, sh, cur_out.end.col);
+        let (ovs, max_col) = collect_text_overflows(wb, si, sh, cur_out.end.col, cf);
         if max_col > cur_out.end.col {
             out = Some(cur_out.union(&RangeRef::cell(CellRef::new(cur_out.start.row, max_col))));
         }
@@ -412,25 +428,46 @@ fn printable_cells_range(wb: &Workbook, si: usize, sh: &Sheet, cf: &mut crate::c
 }
 
 /// Includes cells whose conditional format produces a visible fill, border, colour scale, or data bar.
-fn extend_printable_cf_cells(wb: &Workbook, si: usize, sh: &Sheet, cf: &mut crate::cf::CfCache, extend: &mut impl FnMut(RangeRef)) {
-    if sh.cond_formats.is_empty() {
+fn extend_printable_cf_cells(
+    wb: &Workbook,
+    si: usize,
+    sh: &Sheet,
+    cf: &mut crate::cf::CfCache,
+    look_budget: &mut usize,
+    extend: &mut impl FnMut(RangeRef),
+) {
+    if sh.cond_formats.is_empty() || *look_budget == 0 {
         return;
     }
+    let mut seen: std::collections::HashSet<RangeRef> = std::collections::HashSet::new();
     for cond in &sh.cond_formats {
         if !cf_rule_can_paint(wb, &cond.rule) {
             continue;
         }
         for &rng in &cond.ranges {
+            if !seen.insert(rng) {
+                continue;
+            }
             if rng.count() <= DENSE_BLOCK {
                 for pos in rng.iter() {
+                    if *look_budget == 0 {
+                        return;
+                    }
+                    *look_budget -= 1;
                     if cf.look(wb, si, pos).is_some_and(|l| cf_look_is_printable(wb, &l)) {
                         extend(RangeRef::cell(pos));
                     }
                 }
             } else {
                 for (pos, cell) in sh.cells.iter_range(rng) {
-                    if !cell.has_content() && cf.look(wb, si, pos).is_some_and(|l| cf_look_is_printable(wb, &l)) {
-                        extend(RangeRef::cell(pos));
+                    if !cell.has_content() {
+                        if *look_budget == 0 {
+                            return;
+                        }
+                        *look_budget -= 1;
+                        if cf.look(wb, si, pos).is_some_and(|l| cf_look_is_printable(wb, &l)) {
+                            extend(RangeRef::cell(pos));
+                        }
                     }
                 }
             }
@@ -440,7 +477,7 @@ fn extend_printable_cf_cells(wb: &Workbook, si: usize, sh: &Sheet, cf: &mut crat
 
 /// Collects rightward overflow spans of unwrapped text cells into empty neighbours and returns
 /// the furthest column reached beyond `initial_max_col`.
-fn collect_text_overflows(wb: &Workbook, sh: &Sheet, initial_max_col: u32) -> (Vec<OverflowSpan>, u32) {
+fn collect_text_overflows(wb: &Workbook, si: usize, sh: &Sheet, initial_max_col: u32, cf: &mut crate::cf::CfCache) -> (Vec<OverflowSpan>, u32) {
     let col_kx = excel_col_px_to_pt(wb);
     let pad = 2.0 * PX_TO_PT;
     let mut overflows = Vec::new();
@@ -462,7 +499,7 @@ fn collect_text_overflows(wb: &Workbook, sh: &Sheet, initial_max_col: u32) -> (V
         }
         let cell_w = sh.col_width(pos.col) * col_kx;
         let text = if sh.show_formulas {
-            crate::display::cell_text(wb, sh, pos)
+            crate::display::cell_text_with_cf(wb, si, sh, pos, cf)
         } else {
             crate::display::value_text_as(wb, &cell.value, st.num_fmt.as_str())
         };
@@ -504,6 +541,7 @@ fn collect_text_overflows(wb: &Workbook, sh: &Sheet, initial_max_col: u32) -> (V
 /// True when page `(rband, cband)` contains at least one printable cell, visible style, merge,
 /// table, conditional format, overflowing text span, or floating object. Used to trim completely
 /// blank trailing pages.
+#[allow(clippy::too_many_arguments)]
 fn page_has_content(
     wb: &Workbook,
     si: usize,
@@ -512,6 +550,7 @@ fn page_has_content(
     cband: (u32, u32),
     overflows: &[OverflowSpan],
     cf: &mut crate::cf::CfCache,
+    look_budget: &mut usize,
 ) -> bool {
     if overflows.iter().any(|&(r, c0, c1)| r >= rband.0 && r <= rband.1 && c1 >= cband.0 && c0 <= cband.1) {
         return true;
@@ -526,7 +565,7 @@ fn page_has_content(
         }
     }
     for (_, info) in sh.rows.range(rband.0..=rband.1) {
-        if info.style.is_some_and(|sid| style_is_printable(wb, sid)) {
+        if !info.hidden && info.style.is_some_and(|sid| style_is_printable(wb, sid)) {
             return true;
         }
     }
@@ -550,19 +589,37 @@ fn page_has_content(
     }) {
         return true;
     }
-    if !sh.cond_formats.is_empty() {
-        for cond in &sh.cond_formats {
+    if !sh.cond_formats.is_empty() && *look_budget > 0 {
+        let mut seen: std::collections::HashSet<RangeRef> = std::collections::HashSet::new();
+        'cf: for cond in &sh.cond_formats {
             if !cf_rule_can_paint(wb, &cond.rule) {
                 continue;
             }
             for &rng in &cond.ranges {
                 let Some(sub) = rng.intersection(&block) else { continue };
+                if !seen.insert(sub) {
+                    continue;
+                }
                 if sub.count() <= DENSE_BLOCK {
-                    if sub.iter().any(|pos| cf.look(wb, si, pos).is_some_and(|l| cf_look_is_printable(wb, &l))) {
-                        return true;
+                    for pos in sub.iter() {
+                        if *look_budget == 0 {
+                            break 'cf;
+                        }
+                        *look_budget -= 1;
+                        if cf.look(wb, si, pos).is_some_and(|l| cf_look_is_printable(wb, &l)) {
+                            return true;
+                        }
                     }
-                } else if sh.cells.iter_range(sub).any(|(pos, _)| cf.look(wb, si, pos).is_some_and(|l| cf_look_is_printable(wb, &l))) {
-                    return true;
+                } else {
+                    for (pos, _) in sh.cells.iter_range(sub) {
+                        if *look_budget == 0 {
+                            break 'cf;
+                        }
+                        *look_budget -= 1;
+                        if cf.look(wb, si, pos).is_some_and(|l| cf_look_is_printable(wb, &l)) {
+                            return true;
+                        }
+                    }
                 }
             }
         }
@@ -650,13 +707,14 @@ pub fn layout_sheet(wb: &Workbook, si: usize, opts: &PrintOptions, range_overrid
         }
     }
     let mut cf = crate::cf::CfCache::new();
+    let mut cf_budget = MAX_CF_PRINT_LOOKS;
     let (area, overflows) = match range_override {
         Some(r) => {
-            let (used, ov) = printable_cells_range(wb, si, sh, &mut cf);
+            let (used, ov) = printable_cells_range(wb, si, sh, &mut cf, &mut cf_budget);
             (trim_full_used(used, r), ov)
         }
         None => {
-            let (used, ov) = sheet_print_range_with_cf(wb, si, sh, &mut cf);
+            let (used, ov) = sheet_print_range_with_cf(wb, si, sh, &mut cf, &mut cf_budget);
             (used.unwrap_or(RangeRef::cell(CellRef::new(0, 0))), ov)
         }
     };
@@ -715,7 +773,7 @@ pub fn layout_sheet(wb: &Workbook, si: usize, opts: &PrintOptions, range_overrid
             while lay.pages.len() > 1 {
                 let Some(&(ri, ci)) = lay.pages.last() else { break };
                 let (Some(&rb), Some(&cb)) = (lay.row_bands.get(ri), lay.col_bands.get(ci)) else { break };
-                if page_has_content(wb, si, sh, rb, cb, &overflows, &mut cf) {
+                if page_has_content(wb, si, sh, rb, cb, &overflows, &mut cf, &mut cf_budget) {
                     break;
                 }
                 lay.pages.pop();
@@ -867,5 +925,50 @@ mod tests {
         let lay = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
         assert_eq!((lay.area.end.row, lay.area.end.col), (MAX_ROWS - 1, MAX_COLS - 1));
         assert!(lay.pages.len() <= MAX_PAGES);
+    }
+
+    #[test]
+    fn repeated_cf_ranges_finish_print_layout_within_budget() {
+        let mut wb = Workbook::new();
+        let fill = gridcraft_model::Style {
+            fill: gridcraft_model::Fill { pattern: PatternType::Solid, fg: gridcraft_model::Color::Rgb(0xFFCC00), bg: gridcraft_model::Color::Auto },
+            ..Default::default()
+        };
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.set_value(CellRef::new(0, 0), gridcraft_core::Value::Number(1.0));
+        let block = RangeRef::new(CellRef::new(0, 0), CellRef::new(1999, 24)); // A1:Y2000 (50,000 cells)
+        sh.cond_formats.push(gridcraft_model::CondFormat {
+            ranges: vec![block; 2_000],
+            rule: gridcraft_model::CfRule::CellIs { op: gridcraft_model::CfOperator::Equal, a: "999".into(), b: None, style: Box::new(fill) },
+            priority: 1,
+            stop_if_true: false,
+        });
+        let mut cf = crate::cf::CfCache::new();
+        let mut budget = MAX_CF_PRINT_LOOKS;
+        let sh_ref = wb.sheet(0).unwrap();
+        extend_printable_cf_cells(&wb, 0, sh_ref, &mut cf, &mut budget, &mut |_| {});
+        assert_eq!(budget, MAX_CF_PRINT_LOOKS - 50_000, "2,000 repeated A1:Y2000 ranges must be deduplicated to one pass");
+
+        let lay = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
+        let pdf = super::super::render_pdf(&wb, &[lay], "test.xlsx", "").unwrap();
+        assert!(pdf.bytes.starts_with(b"%PDF-"));
+    }
+
+    #[test]
+    fn hidden_styled_rows_do_not_expand_print_range_or_keep_blank_pages() {
+        let mut wb = Workbook::new();
+        let fill = wb.styles.intern(gridcraft_model::Style {
+            fill: gridcraft_model::Fill { pattern: PatternType::Solid, fg: gridcraft_model::Color::Rgb(0xEEEEEE), bg: gridcraft_model::Color::Auto },
+            ..Default::default()
+        });
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.set_value(CellRef::new(0, 0), gridcraft_core::Value::text("Visible"));
+        sh.rows.insert(150, gridcraft_model::LineInfo { size: None, hidden: true, style: Some(fill), ..Default::default() });
+        let sh = wb.sheet(0).unwrap();
+        let range = sheet_print_range(&wb, 0, sh).unwrap();
+        assert_eq!(range.end.row, 0, "hidden row with row-level fill must not expand print range");
+        let mut cf = crate::cf::CfCache::new();
+        let mut budget = MAX_CF_PRINT_LOOKS;
+        assert!(!page_has_content(&wb, 0, sh, (100, 160), (0, 5), &[], &mut cf, &mut budget));
     }
 }

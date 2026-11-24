@@ -2525,3 +2525,32 @@ fn legacy_count_numbers_caption_follows_the_function() {
         assert_eq!(text(&s, "E3"), after, "{legacy}");
     }
 }
+
+#[test]
+fn changing_pivot_style_clears_imported_custom_style() {
+    use gridcraft_model::{PivotCustomStyle, PivotStyleElement};
+
+    let mut s = Session::new();
+    s.new_workbook();
+    let rows = json!([["Region", "Sales"], ["North", 10], ["South", 20]]);
+    s.execute("range.setValues", json!({"range": "A1", "values": rows})).unwrap();
+    s.execute("insert.pivotTable", json!({"source": "Sheet1!$A$1:$B$3", "destination": "Sheet1!D3", "rows": ["Region"], "values": ["Sales"]}))
+        .unwrap();
+
+    {
+        let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+        let pt = &mut sh.pivots[0];
+        pt.style = "ImportedCustom1".into();
+        pt.custom_style = PivotCustomStyle(Some(std::sync::Arc::new(vec![PivotStyleElement {
+            kind: "headerRow".into(),
+            size: 1,
+            style: gridcraft_model::Style::default(),
+        }])));
+    }
+    assert!(!s.doc().unwrap().wb.sheet(0).unwrap().pivots[0].custom_style.is_none());
+
+    s.execute("pivot.style", json!({"style": "PivotStyleMedium9"})).unwrap();
+    let pt = &s.doc().unwrap().wb.sheet(0).unwrap().pivots[0];
+    assert_eq!(pt.style, "PivotStyleMedium9");
+    assert!(pt.custom_style.is_none(), "switching pivot style must clear imported custom_style");
+}

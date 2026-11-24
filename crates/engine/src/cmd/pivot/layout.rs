@@ -186,6 +186,7 @@ pub(super) fn layout(s: &mut Session, p: &Json) -> Result<Json> {
         }
         if let Some(st) = &style {
             pt.style = st.clone();
+            pt.custom_style = gridcraft_model::PivotCustomStyle(None);
         }
         if let Some(v) = gr {
             pt.grand_totals_rows = v;

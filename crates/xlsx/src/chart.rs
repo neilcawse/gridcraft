@@ -371,8 +371,8 @@ fn apply_dlbls_overlay(base: &mut DataLabels, d: &El) {
     if let Some(sep) = d.child("separator").map(|s| s.text.clone()).filter(|s| !s.is_empty()) {
         base.separator = Some(sep);
     }
-    if let Some(nf) = typed_num_fmt(d.child("numFmt")) {
-        base.num_fmt = Some(nf);
+    if let Some(nf_el) = d.child("numFmt") {
+        base.num_fmt = typed_num_fmt(Some(nf_el));
     }
     for dl in d.kids("dLbl").take(MAX_DATA_POINTS) {
         let Some(ov) = parse_dlbl_override(dl) else { continue };
@@ -775,14 +775,21 @@ fn typed_num_fmt(e: Option<&El>) -> Option<String> {
     e.attr("formatCode").map(str::trim).filter(|c| !c.is_empty()).map(str::to_string)
 }
 
-/// The typed number format of a `<c:dLbls>` that shows values. Labels that show other numbers
-/// but not the values keep none: percentages, bubble sizes, and on scatter and bubble charts
-/// (`xy`) the X values. The format was typed for those, and on the values `0.0%` reads 3 as
-/// "300.0%".
-fn label_num_fmt(d: Option<&El>, xy: bool) -> Option<String> {
-    let other = |d: &El| bool_val(d, "showPercent") || bool_val(d, "showBubbleSize") || (xy && bool_val(d, "showCatName"));
-    let d = d.filter(|d| bool_val(d, "showVal") || !other(d))?;
-    typed_num_fmt(d.child("numFmt"))
+/// The typed number format of merged group + series `<c:dLbls>` when values are shown.
+/// When a series `<c:dLbls>` omits `<c:numFmt>`, it inherits the group `<c:dLbls>`'s `<c:numFmt>`.
+/// Labels that show other numbers (percentages, bubble sizes, or scatter/bubble X values)
+/// without values keep none so formats like `0.0%` are not applied to raw values.
+fn merged_label_num_fmt(group: Option<&El>, ser: Option<&El>, xy: bool) -> Option<String> {
+    if ser.is_some_and(|s| bool_val(s, "delete")) {
+        return None;
+    }
+    let flag = |k: &str| ser.and_then(|s| opt_bool_val(s, k)).or_else(|| group.and_then(|g| opt_bool_val(g, k))).unwrap_or(false);
+    let other = flag("showPercent") || flag("showBubbleSize") || (xy && flag("showCatName"));
+    if !(flag("showVal") || !other) {
+        return None;
+    }
+    let nf_el = ser.and_then(|s| s.child("numFmt")).or_else(|| group.and_then(|g| g.child("numFmt")));
+    typed_num_fmt(nf_el)
 }
 
 /// The typed number format of an axis that is drawn: a deleted (hidden) axis keeps none, since
@@ -922,9 +929,7 @@ pub(crate) fn from_dml_chart(dc: DmlChart, root: Option<&El>, budget: &mut Chart
                     .filter(|c| !c.is_empty() && !c.eq_ignore_ascii_case("General"))
                     .map(str::to_string),
                 innermost_categories: false,
-                label_number_format: sel
-                    .and_then(|e| e.child("dLbls"))
-                    .map_or_else(|| label_num_fmt(group_el.and_then(|g| g.child("dLbls")), xy), |d| label_num_fmt(Some(d), xy)),
+                label_number_format: merged_label_num_fmt(group_el.and_then(|g| g.child("dLbls")), sel.and_then(|e| e.child("dLbls")), xy),
                 line_color: sp.line_color,
                 line_width: sp.line_width,
                 no_line: sp.no_line,

@@ -74,8 +74,16 @@ impl PageGrid {
         lay.area = RangeRef::new(CellRef::new(0, 0), CellRef::new(end_row, end_col));
         let (row_bands, col_bands) = print::split_bands(sh, &lay, MAX_ROWS as usize);
         let s = f64::from(lay.scale.clamp(0.1, 4.0));
-        let to_layout = |pt: f32| f64::from(pt) / f64::from(PX_TO_PT) / s;
-        let margins = lay.margins.map(to_layout);
+        let to_layout_x = |pt: f32| f64::from(pt) / f64::from(PX_TO_PT) / s;
+        let to_layout_y = |pt: f32| f64::from(pt) / f64::from(lay.row_px_to_pt) / s;
+        let margins = [
+            to_layout_x(lay.margins[0]),
+            to_layout_x(lay.margins[1]),
+            to_layout_y(lay.margins[2]),
+            to_layout_y(lay.margins[3]),
+            to_layout_y(lay.margins[4]),
+            to_layout_y(lay.margins[5]),
+        ];
         let (hf_left, hf_right) = lay.hf_sides();
         let hf_text_k = lay.hf_text_scale() / s as f32;
         let band_range = |bands: &[(u32, u32)], lo: u32, hi: u32| {
@@ -97,13 +105,22 @@ impl PageGrid {
                 Some((gi, gj))
             })
             .collect();
+        let ri = if lay.row_deltas.is_empty() {
+            LineIndex::new(&sh.rows, sh.default_row_height, MAX_ROWS)
+        } else {
+            let mut rows = sh.rows.clone();
+            for &(row, effective_px, _) in &lay.row_deltas {
+                rows.entry(row).or_default().size = Some(effective_px);
+            }
+            LineIndex::new(&rows, sh.default_row_height, MAX_ROWS)
+        };
         Some(PageGrid {
-            page_w: to_layout(lay.page_w),
-            page_h: to_layout(lay.page_h),
+            page_w: to_layout_x(lay.page_w),
+            page_h: to_layout_y(lay.page_h),
             margins,
             gap: f64::from(PAGE_GAP) / s,
             scale: lay.scale,
-            hf_sides: [to_layout(hf_left), to_layout(hf_right)],
+            hf_sides: [to_layout_x(hf_left), to_layout_x(hf_right)],
             hf_text_k,
             paper_pt: (lay.page_w, lay.page_h),
             rows_complete: row_bands.last().is_some_and(|b| b.1 >= MAX_ROWS - 1),
@@ -114,7 +131,7 @@ impl PageGrid {
             data_cols,
             page_order: printed.settings.page_order,
             printed_pages,
-            ri: LineIndex::new(&sh.rows, sh.default_row_height, MAX_ROWS),
+            ri,
             ci: LineIndex::new(&sh.cols, sh.default_col_width, MAX_COLS),
         })
     }
@@ -401,5 +418,33 @@ mod tests {
         assert_eq!(g.page_number(0, 1), Some((3, 3)));
         assert_eq!(g.page_number(1, 1), None);
         assert!(!g.is_data_page(1, 1));
+    }
+
+    #[test]
+    fn vertical_page_geometry_uses_row_px_to_pt_and_autofit_row_deltas() {
+        let mut wb = wb_with(70, 2);
+        let big_font =
+            wb.styles.intern(gridcraft_model::Style { font: gridcraft_model::Font { size: 24.0, ..Default::default() }, ..Default::default() });
+        wb.sheet_mut(0).unwrap().set_style(CellRef::new(5, 0), big_font);
+        let printed = print::layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
+        assert!(!printed.row_deltas.is_empty(), "expected non-custom 24pt row to record an auto-fit delta");
+        let expected_h5 = f64::from(printed.row_deltas.iter().find(|e| e.0 == 5).unwrap().1);
+
+        let g = PageGrid::build(&wb, 0, 100, 10).unwrap();
+        // Auto-fitted row height is reflected in PageGrid's row index.
+        assert!(((g.row_y(6) - g.row_y(5)) - expected_h5).abs() < 1e-6);
+        // Page height matches SheetLayout's vertical row_px_to_pt conversion.
+        let expected_page_h = f64::from(printed.page_h) / f64::from(printed.row_px_to_pt) / f64::from(printed.scale);
+        assert!((g.page_h - expected_page_h).abs() < 1e-6);
+        // Every row in the first printed row band fits strictly within page 0's content rect.
+        let (r0, r1) = g.row_bands[0];
+        assert_eq!(g.row_bands[0], printed.row_bands[0]);
+        let (cx, cy, _, ch) = g.content_rect(0, 0);
+        let last_row_top = g.row_y(r1);
+        let last_row_bottom = last_row_top + (g.ri.start(r1 + 1) - g.ri.start(r1));
+        assert!(last_row_bottom <= cy + ch + 1e-6, "last row {r1} ({last_row_bottom}) overflowed content rect ({})", cy + ch);
+        assert_eq!(g.row_at(last_row_top + 1.0), r1);
+        assert!(g.on_cells(cx + 1.0, last_row_top + 1.0));
+        assert_eq!(r0, 0);
     }
 }

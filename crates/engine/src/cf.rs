@@ -76,6 +76,16 @@ thread_local! {
     static SCANNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+#[cfg(test)]
+pub(crate) fn reset_scanned() {
+    SCANNED.with(|n| n.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn scanned_count() -> usize {
+    SCANNED.with(std::cell::Cell::get)
+}
+
 /// Most cells one rule's statistics visit, across all of its ranges together: a rule repeating
 /// the same range many times must not multiply the scan.
 const STATS_SCAN_LIMIT: usize = 2_000_000;

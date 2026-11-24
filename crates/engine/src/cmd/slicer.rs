@@ -47,13 +47,13 @@ pub fn specs() -> Vec<CommandSpec> {
 /// Distinct, non-blank display values of a table column, in first-seen order. Used to populate a
 /// slicer's tiles and to detect "everything selected".
 pub fn column_values(wb: &Workbook, sheet: usize, table: &str, column: &str) -> Vec<String> {
-    let (sh, t) = match wb.sheet(sheet).and_then(|sh| sh.tables.iter().find(|t| t.name.eq_ignore_ascii_case(table)).map(|t| (sh, t))) {
-        Some(pair) => pair,
+    let (si, sh, t) = match wb.sheet(sheet).and_then(|sh| sh.tables.iter().find(|t| t.name.eq_ignore_ascii_case(table)).map(|t| (sheet, sh, t))) {
+        Some(triple) => triple,
         None => match wb.table(table).and_then(|(si, ti)| {
             let sh = wb.sheet(si)?;
-            Some((sh, sh.tables.get(ti)?))
+            Some((si, sh, sh.tables.get(ti)?))
         }) {
-            Some(pair) => pair,
+            Some(triple) => triple,
             None => return vec![],
         },
     };
@@ -62,8 +62,9 @@ pub fn column_values(wb: &Workbook, sheet: usize, table: &str, column: &str) -> 
     let col = dr.start.col + ci as u32;
     let mut seen = std::collections::BTreeSet::new();
     let mut out = Vec::new();
+    let mut cf = crate::cf::CfCache::new();
     for row in dr.start.row..=dr.end.row {
-        let text = crate::display::cell_text(wb, sh, CellRef::new(row, col));
+        let text = crate::display::cell_text_with_cf(wb, si, sh, CellRef::new(row, col), &mut cf);
         if text.is_empty() {
             continue;
         }

@@ -927,6 +927,7 @@ pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut
     // the sheet's merges sorted once, not from a scan of all of them. Out of budget: the row keeps
     // the height it has.
     let Some(row_merges) = sweep.at(sh, row) else { return };
+    let mut cf = crate::cf::CfCache::new();
     for (c, cell) in sh.cells.row(row, 0, gridcraft_core::MAX_COLS - 1) {
         if !sweep.charge(row_merges.len()) {
             return;
@@ -945,7 +946,7 @@ pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut
             // Only a wrapping cell is laid out over several lines: each explicit line break
             // starts one, and each line folds at the column width.
             if st.align.wrap {
-                let text = crate::display::cell_text(wb, sh, CellRef::new(row, c));
+                let text = crate::display::cell_text_with_cf(wb, si, sh, CellRef::new(row, c), &mut cf);
                 let w = sh.col_width(c).max(1.0) - 6.0;
                 lines = text.lines().map(|l| wrapped_line_count(l, w.max(1.0), size, st.font.bold)).sum::<f32>().max(1.0);
             }

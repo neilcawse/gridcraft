@@ -180,8 +180,9 @@ pub fn read_source(wb: &Workbook, text: &str, default_sheet: usize) -> Result<So
     let mut taken: HashSet<String> = HashSet::new();
     let mut next_suffix: HashMap<String, usize> = HashMap::new();
     let mut formats = Vec::new();
+    let mut cf = crate::cf::CfCache::new();
     for c in r.start.col..=r.end.col {
-        let h = crate::display::cell_text(wb, sh, CellRef::new(r.start.row, c)).trim().to_string();
+        let h = crate::display::cell_text_with_cf(wb, si, sh, CellRef::new(r.start.row, c), &mut cf).trim().to_string();
         if h.is_empty() {
             return Err(FIELD_NAME_ERR.into());
         }
@@ -408,7 +409,7 @@ fn style_layout_from_output(origin: CellRef, area: RangeRef, body_offset: u32, o
         body_range: Some(body_range),
         first_header_row: 0,
         first_data_row,
-        first_data_col: 1,
+        first_data_col: out.row_label_cols,
         page_rows,
         page_cols: 1,
         row_roles,
@@ -501,5 +502,49 @@ mod fit_tests {
         let set = rebuilt_item_set(items);
         assert!(set.contains(first.as_slice()));
         assert!(!set.contains([String::from("C")].as_slice()));
+    }
+    #[test]
+    fn style_layout_carries_tabular_and_outline_row_label_cols_with_zero_data_fields() {
+        use super::*;
+
+        for layout_mode in [PivotLayout::Tabular, PivotLayout::Outline] {
+            let mut wb = Workbook::new();
+            let sh = wb.sheet_mut(0).unwrap();
+            for (r, row) in [
+                [Value::text("Region"), Value::text("Item")],
+                [Value::text("North"), Value::text("Widget")],
+                [Value::text("South"), Value::text("Gadget")],
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                for (c, v) in row.into_iter().enumerate() {
+                    sh.set_value(CellRef::new(r as u32, c as u32), v);
+                }
+            }
+            let pt = PivotTable {
+                id: 1,
+                name: "Pivot1".into(),
+                source: "Sheet1!$A$1:$B$3".into(),
+                anchor: CellRef::new(0, 3),
+                layout: layout_mode,
+                rows: vec![
+                    PivotField { source_col: "Region".into(), ..Default::default() },
+                    PivotField { source_col: "Item".into(), ..Default::default() },
+                ],
+                ..Default::default()
+            };
+            sh.pivots.push(pt);
+
+            let area = refresh(&mut wb, 0, 0, true).unwrap();
+            let sh = wb.sheet(0).unwrap();
+            let pt = &sh.pivots[0];
+            let sl = pt.style_grid.0.as_ref().expect("refresh populates style_grid");
+            let body = sl.body_range.unwrap();
+            let body_cols = body.end.col - body.start.col + 1;
+            assert_eq!(body_cols, 2, "{layout_mode:?}: 2 row fields and 0 data fields => 2 body cols (area={area})");
+            assert_eq!(sl.first_data_col, 2, "{layout_mode:?}: first_data_col must equal row-label column count (2)");
+            assert!(!(sl.first_data_col < body_cols), "{layout_mode:?}: has_data_cols must be false");
+        }
     }
 }

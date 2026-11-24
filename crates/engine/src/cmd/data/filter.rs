@@ -207,12 +207,13 @@ pub(crate) fn apply_filter(wb: &mut Workbook, sheet: usize) {
             col_stats.insert(i, (thr, avg));
         }
     }
+    let mut cf = crate::cf::CfCache::new();
     for row in r.start.row + 1..=r.end.row {
         let mut visible = true;
         for (i, (off, crit)) in af.criteria.iter().enumerate() {
             let c = CellRef::new(row, r.start.col + off);
             let v = sh.value(c);
-            let text = crate::display::cell_text(wb, sh, c);
+            let text = crate::display::cell_text_with_cf(wb, sheet, sh, c, &mut cf);
             let ok = match crit {
                 FilterCriterion::Values { values, blanks } => {
                     if filter_blank(&v) {
@@ -301,11 +302,12 @@ pub fn filter_values(wb: &Workbook, sheet: usize, col: u32) -> Vec<(String, bool
     let off = col.saturating_sub(af.range.start.col);
     let selected: Option<&FilterCriterion> = af.criteria.iter().find(|(o, _)| *o == off).map(|(_, c)| c);
     let mut seen = std::collections::BTreeMap::new();
+    let mut cf = crate::cf::CfCache::new();
     for row in af.range.start.row + 1..=af.range.end.row.min(af.range.start.row + 1_000_000) {
         let c = CellRef::new(row, col);
         let v = sh.value(c);
         let blank = filter_blank(&v);
-        let t = if blank { "(Blanks)".to_string() } else { crate::display::cell_text(wb, sh, c) };
+        let t = if blank { "(Blanks)".to_string() } else { crate::display::cell_text_with_cf(wb, sheet, sh, c, &mut cf) };
         let on = match selected {
             Some(FilterCriterion::Values { values, blanks }) => {
                 if blank {

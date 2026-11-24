@@ -21,6 +21,14 @@ pub(super) fn plot_kind(chart: &Chart, s: &SeriesData, i: usize) -> ChartKind {
     crate::resolve::plot_kind(chart.kind, Some(s.kind), i)
 }
 
+/// Category palette colour of point `j` (ignoring any series' `<c:dPt>` overrides).
+pub(super) fn category_color(data: &ChartData, j: usize) -> Rgba {
+    match (j, data.series.first()) {
+        (0, Some(s)) => s.color,
+        _ => j.checked_rem(data.palette.len()).and_then(|k| data.palette.get(k)).copied().unwrap_or_else(|| series_color(&Theme::default(), j)),
+    }
+}
+
 /// Colour of point `j` for charts that colour by point (pie, doughnut, treemap, sunburst).
 /// Returns transparent `[0, 0, 0, 0]` when the point explicitly has `no_fill`.
 pub(super) fn point_color(data: &ChartData, j: usize) -> Rgba {
@@ -32,10 +40,7 @@ pub(super) fn point_color(data: &ChartData, j: usize) -> Rgba {
             return fill;
         }
     }
-    match (j, data.series.first()) {
-        (0, Some(s)) => s.color,
-        _ => j.checked_rem(data.palette.len()).and_then(|k| data.palette.get(k)).copied().unwrap_or_else(|| series_color(&Theme::default(), j)),
-    }
+    category_color(data, j)
 }
 
 /// Outline colour of point `j` for pie/doughnut legend swatches, when explicitly styled.

@@ -165,6 +165,13 @@ pub fn value_text(wb: &Workbook, sheet: &Sheet, c: CellRef) -> String {
     with_fill_space(format_value_full(&sheet.value(c), &parsed(&code), wb.date_system))
 }
 
+/// Like [`value_text`], reusing a caller-owned [`crate::cf::CfCache`] across a range so conditional
+/// formatting `<dxf><numFmt>` overrides are evaluated efficiently.
+pub fn value_text_with_cf(wb: &Workbook, sheet: usize, sh: &Sheet, c: CellRef, cf: &mut crate::cf::CfCache) -> String {
+    let code = cf.effective_num_fmt(wb, sheet, sh, c);
+    with_fill_space(format_value_full(&sh.value(c), &parsed(&code), wb.date_system))
+}
+
 /// A cell's value through its number format, General at the 11-character cell width.
 fn shown_text(wb: &Workbook, sheet: &Sheet, c: CellRef) -> String {
     let code = effective_code(wb, sheet, c);
@@ -372,5 +379,48 @@ mod tests {
         assert_eq!(cell_text(&wb, sh, CellRef::new(3, 0)), "5");
         assert_eq!(value_text(&wb, sh, CellRef::new(2, 0)), "2h, 10m");
         assert_eq!(range_text(&wb, 0, RangeRef::new(CellRef::new(0, 0), CellRef::new(3, 0))), "30s\n15m\n2h, 10m\n5\n");
+    }
+
+    #[test]
+    fn shared_cf_cache_scans_rule_stats_once_across_loops() {
+        use gridcraft_model::{CfRule, CondFormat, NumFmt, Style};
+        let mut wb = Workbook::new();
+        let sh = wb.sheet_mut(0).unwrap();
+        for row in 0..40 {
+            sh.set_value(CellRef::new(row, 0), Value::Number((row + 1) as f64));
+        }
+        sh.cond_formats.push(CondFormat {
+            ranges: vec![RangeRef::new(CellRef::new(0, 0), CellRef::new(39, 0))],
+            priority: 1,
+            stop_if_true: false,
+            rule: CfRule::Top10 {
+                bottom: false,
+                percent: false,
+                rank: 5,
+                style: Box::new(Style { num_fmt: NumFmt::new("0.00"), ..Style::default() }),
+            },
+        });
+        sh.autofilter = Some(gridcraft_model::AutoFilter { range: RangeRef::new(CellRef::new(0, 0), CellRef::new(39, 0)), criteria: vec![] });
+
+        let sh_ref = wb.sheet(0).unwrap();
+        crate::cf::reset_scanned();
+        let mut cf = crate::cf::CfCache::new();
+        for row in 0..40 {
+            let c = CellRef::new(row, 0);
+            let t = cell_text_with_cf(&wb, 0, sh_ref, c, &mut cf);
+            let v = value_text_with_cf(&wb, 0, sh_ref, c, &mut cf);
+            if row >= 35 {
+                assert_eq!(t, format!("{}.00", row + 1));
+                assert_eq!(v, format!("{}.00", row + 1));
+            } else {
+                assert_eq!(t, format!("{}", row + 1));
+            }
+        }
+        assert_eq!(crate::cf::scanned_count(), 40, "shared CfCache must build Top10 stats once");
+
+        crate::cf::reset_scanned();
+        let vals = crate::cmd::data::filter_values(&wb, 0, 0);
+        assert_eq!(vals.len(), 39);
+        assert_eq!(crate::cf::scanned_count(), 40, "filter_values must reuse one CfCache across all rows");
     }
 }

@@ -1,7 +1,7 @@
 use gridcraft_model::DataLabelPos;
 
 use super::frame::{Bx, CatAxis, ValAxis, frame, on, value_range};
-use super::legend::{cat_label, point_color};
+use super::legend::{cat_label, category_color, point_color};
 use super::{
     AXIS, Chart, ChartData, Ctx, DARK_TEXT, DOWN, Fmt, GRID, HAlign, LABEL_SIZE, MAX_CATS, MAX_LABELS, MAX_MARKERS, MAX_SERIES, MAX_WEDGES, Prim,
     QuartileMethod, Rgba, STOCK, SeriesData, TAU, TEXT, UP, VAlign, WHITE, axis_fmt, clean, label_fmt, nice_scale,
@@ -224,7 +224,8 @@ pub(super) fn format_point_label(chart: &Chart, data: &ChartData, s: &SeriesData
         }
     }
     if show_val {
-        let code = ov.and_then(|p| p.num_fmt.as_deref()).or(s.label_number_format.as_deref()).unwrap_or(&s.number_format);
+        let dl_val_fmt = (!show_pct).then_some(dl.num_fmt.as_deref()).flatten();
+        let code = ov.and_then(|p| p.num_fmt.as_deref()).or(s.label_number_format.as_deref()).or(dl_val_fmt).unwrap_or(&s.number_format);
         let t = Fmt::new(code).format(raw_val, None);
         if !t.is_empty() {
             parts.push(t);
@@ -247,7 +248,7 @@ fn slice_style(data: &ChartData, s: &SeriesData, j: usize, default_stroke: Optio
     let fill = match pt {
         Some(p) if p.no_fill => [0, 0, 0, 0],
         Some(p) if p.fill.is_some() => p.fill.unwrap_or([0, 0, 0, 0]),
-        _ => point_color(data, j),
+        _ => category_color(data, j),
     };
     let stroke = match pt {
         Some(p) if p.no_line => None,

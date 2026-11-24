@@ -2401,3 +2401,76 @@ fn sanitize_normalizes_unsorted_points_and_caps_user_shapes_and_label_overrides(
     assert!(dl.points.len() <= 4096);
     assert!(dl.points.windows(2).all(|w| w[0].idx < w[1].idx));
 }
+
+#[test]
+fn multi_ring_doughnut_does_not_leak_inner_ring_dpt_overrides_to_outer_rings() {
+    let mut c = chart(ChartKind::Doughnut);
+    c.title = Some(String::new());
+    c.legend = LegendPos::Right;
+    let custom_red = [0xEE, 0x11, 0x22, 0xFF];
+    let pal0 = [0x10, 0x20, 0x30, 0xFF];
+    let pal1 = [0x40, 0x50, 0x60, 0xFF];
+    let data = ChartData {
+        categories: vec!["CatA".into(), "CatB".into()],
+        palette: vec![pal0, pal1],
+        series: vec![
+            SeriesData {
+                name: "Inner".into(),
+                values: vec![Some(50.0), Some(50.0)],
+                color: pal0,
+                points: vec![
+                    PointStyleData { idx: 0, fill: Some(custom_red), ..Default::default() },
+                    PointStyleData { idx: 1, no_fill: true, ..Default::default() },
+                ],
+                ..SeriesData::default()
+            },
+            SeriesData { name: "Outer".into(), values: vec![Some(50.0), Some(50.0)], color: pal1, points: vec![], ..SeriesData::default() },
+        ],
+        ..ChartData::default()
+    };
+    let prims = render(&c, &data, 360.0, 260.0, &ApproxMeasure);
+    // Collect wedges grouped by (r_inner, r_outer). Ring 0 has smaller r_outer than ring 1.
+    let mut wedges: Vec<(f32, Rgba)> = prims
+        .iter()
+        .filter_map(|p| match *p {
+            Prim::Wedge { r_outer, fill, .. } => Some((r_outer, fill)),
+            _ => None,
+        })
+        .collect();
+    wedges.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // Inner ring has 1 filled wedge (custom_red; slice 1 is no_fill).
+    // Outer ring has 2 filled wedges (pal0 and pal1 — NOT custom_red and NOT skipped as no_fill).
+    assert_eq!(wedges.len(), 3, "expected 1 inner wedge + 2 outer wedges, got {wedges:?}");
+    assert_eq!(wedges[0].1, custom_red);
+    let outer_fills: Vec<Rgba> = wedges[1..].iter().map(|w| w.1).collect();
+    assert!(outer_fills.contains(&pal0), "outer ring slice 0 must use palette[0], got {outer_fills:?}");
+    assert!(outer_fills.contains(&pal1), "outer ring slice 1 must use palette[1], got {outer_fills:?}");
+    assert!(!outer_fills.contains(&custom_red), "inner ring dPt fill must not leak to outer ring");
+    // Legend swatch for CatA still reflects point_color (custom_red).
+    let has_legend_red = prims.iter().any(|p| matches!(*p, Prim::Rect { fill, .. } if fill == Some(custom_red)));
+    assert!(has_legend_red, "legend swatch must keep point_color override");
+}
+
+#[test]
+fn data_labels_use_merged_dlbls_num_fmt_for_values() {
+    use gridcraft_model::DataLabels;
+
+    let mut c = chart(ChartKind::ColumnClustered);
+    c.title = Some(String::new());
+    c.legend = LegendPos::None;
+    let data = ChartData {
+        categories: vec!["Q1".into()],
+        series: vec![SeriesData {
+            name: "Revenue".into(),
+            values: vec![Some(1250.0)],
+            number_format: "General".into(),
+            label_number_format: None,
+            data_labels: Some(DataLabels { show_val: true, num_fmt: Some("$#,##0".into()), ..Default::default() }),
+            ..SeriesData::default()
+        }],
+        ..ChartData::default()
+    };
+    let prims = render(&c, &data, 320.0, 220.0, &ApproxMeasure);
+    let t = texts(&prims);
+    assert!(t.contains(&"$1,250"), "expected dl.num_fmt formatted label $1,250 in {t:?}");
+}
