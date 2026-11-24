@@ -434,8 +434,10 @@ pub(crate) fn fingerprint_shape(shape: &gridcraft_model::Shape) -> u128 {
     hash_color(&mut h, *line);
     hash_bytes(&mut h, text.as_bytes());
     hash_f32(&mut h, *rotation);
-    let ShapeFormat { no_line, font_size, bold, italic, font, text_color, text_outline, text_shadow, align, anchor: v_anchor, rtl } = format;
+    let ShapeFormat { no_line, font_size, bold, italic, font, text_color, text_outline, text_shadow, align, anchor: v_anchor, rtl, left_indent } =
+        format;
     h.update([u8::from(*no_line), u8::from(*bold), u8::from(*italic), u8::from(*rtl)]);
+    hash_f32(&mut h, *left_indent);
     match font_size {
         Some(sz) => {
             h.update([1u8]);
