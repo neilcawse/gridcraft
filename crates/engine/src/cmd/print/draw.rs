@@ -24,8 +24,12 @@ pub(super) struct Look {
     fill: Option<Rgb>,
     pub(super) cf: Option<crate::cf::CfLook>,
 }
+/// Most conditional-format rules evaluated for any single drawn cell during PDF export: bounds
+/// hostile sheets stacking hundreds of overlapping rules on one cell while ensuring every cell
+/// on every page of a large multi-page PDF keeps all its normal conditional formats.
+const MAX_CF_RULES_PER_CELL: usize = 64;
 
-fn cell_look(wb: &Workbook, si: usize, sh: &Sheet, c: CellRef, cf: &mut crate::cf::CfCache, cf_budget: &mut usize) -> Look {
+fn cell_look(wb: &Workbook, si: usize, sh: &Sheet, c: CellRef, cf: &mut crate::cf::CfCache) -> Look {
     let mut style = match sh.table_at(c) {
         Some(t) => crate::tables::table_cell_shown_style(wb, si, t, cf.table_edges(sh, t), c),
         None => match sh.pivot_at(c) {
@@ -33,7 +37,8 @@ fn cell_look(wb: &Workbook, si: usize, sh: &Sheet, c: CellRef, cf: &mut crate::c
             None => wb.styles.get(sh.style_id(c)).clone(),
         },
     };
-    let cfl = if *cf_budget > 0 && cf.may_apply(wb, si, c) { cf.look_budgeted(wb, si, c, cf_budget) } else { None };
+    let mut cell_budget = MAX_CF_RULES_PER_CELL;
+    let cfl = cf.look_budgeted(wb, si, c, &mut cell_budget);
     if let Some(st) = cfl.as_ref().and_then(|l| l.style.as_ref()) {
         if st.align.reading_order.is_some() {
             style.align.reading_order = st.align.reading_order;
@@ -325,7 +330,7 @@ impl<'a> Covered<'a> {
 }
 
 /// Draws the cells of a block: fills, gridlines, data bars, borders and text.
-pub(super) fn draw_block(pg: &mut Page, b: &Block, gridlines: bool, cf: &mut crate::cf::CfCache, cf_budget: &mut usize) {
+pub(super) fn draw_block(pg: &mut Page, b: &Block, gridlines: bool, cf: &mut crate::cf::CfCache) {
     let (bx, by) = (b.xs.first().copied().unwrap_or(0.0), b.ys.first().copied().unwrap_or(0.0));
     let (bw, bh) = (b.xs.last().copied().unwrap_or(bx) - bx, b.ys.last().copied().unwrap_or(by) - by);
     if bw <= 0.0 || bh <= 0.0 {
@@ -363,7 +368,7 @@ pub(super) fn draw_block(pg: &mut Page, b: &Block, gridlines: bool, cf: &mut cra
     let mut looks: Vec<(CellRef, Look)> = Vec::new();
     for &c in cells.iter().chain(merges.iter().map(|m| &m.start)) {
         let skip = !by_start.contains_key(&c)
-            && (*cf_budget == 0 || !cf.may_apply(b.wb, b.si, c))
+            && !cf.may_apply(b.wb, b.si, c)
             && sh.value_ref(c).is_none_or(|v| v.is_empty())
             && sh.style_id(c) == StyleId::DEFAULT
             && (sh.tables.is_empty() || sh.table_at(c).is_none())
@@ -371,7 +376,7 @@ pub(super) fn draw_block(pg: &mut Page, b: &Block, gridlines: bool, cf: &mut cra
         if skip {
             continue;
         }
-        let l = cell_look(b.wb, b.si, sh, c, cf, cf_budget);
+        let l = cell_look(b.wb, b.si, sh, c, cf);
         if l.fill.is_some()
             || l.cf.is_some()
             || by_start.contains_key(&c)

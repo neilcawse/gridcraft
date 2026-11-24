@@ -8,8 +8,8 @@ use super::{
 pub(super) const DENSE_BLOCK: u64 = 60_000;
 
 /// Total conditional-format rule-evaluation work units allowed across one sheet's print layout
-/// (and independently across one sheet's PDF render pass).
-pub(super) const MAX_CF_PRINT_WORK: usize = 250_000;
+/// blank-cell discovery passes.
+const MAX_CF_PRINT_WORK: usize = 250_000;
 
 /// Windows Excel reserves 4 printer dots (0.48 pt at 600 dpi) on each edge of the cell grid,
 /// reducing the usable width and height between margins by 0.96 pt.
@@ -415,7 +415,7 @@ fn printable_cells_range(
             extend(*m);
         }
     }
-    extend_printable_cf_cells(wb, si, sh, cf, cf_budget, &mut extend);
+    extend_printable_cf_cells(wb, si, sh, cf, cf_budget, &mut out);
     let overflows = if let Some(cur_out) = out {
         let (ovs, max_col) = collect_text_overflows(wb, si, sh, cur_out.end.col, cf);
         if max_col > cur_out.end.col {
@@ -429,51 +429,58 @@ fn printable_cells_range(
 }
 
 /// Includes cells whose conditional format produces a visible fill, border, colour scale, or data bar.
-fn extend_printable_cf_cells(
-    wb: &Workbook,
-    si: usize,
-    sh: &Sheet,
-    cf: &mut crate::cf::CfCache,
-    cf_budget: &mut usize,
-    extend: &mut impl FnMut(RangeRef),
-) {
+fn extend_printable_cf_cells(wb: &Workbook, si: usize, sh: &Sheet, cf: &mut crate::cf::CfCache, cf_budget: &mut usize, out: &mut Option<RangeRef>) {
     if sh.cond_formats.is_empty() || *cf_budget == 0 {
         return;
     }
+    let used = sh.used_range();
     let (single_cells, multi_ranges) = cf.indexed_ranges(sh, si, None, |r| cf_rule_can_paint(wb, r));
     for pos in single_cells {
-        if sh.cells.get(pos).is_some_and(|cell| cell.has_content()) {
+        if out.is_some_and(|u| u.contains(pos)) || sh.cells.get(pos).is_some_and(|cell| cell.has_content()) {
             continue;
         }
         if *cf_budget == 0 {
             return;
         }
         if cf.look_budgeted(wb, si, pos, cf_budget).is_some_and(|l| cf_look_is_printable(wb, &l)) {
-            extend(RangeRef::cell(pos));
+            let r = RangeRef::cell(pos);
+            *out = Some(out.map_or(r, |u| u.union(&r)));
         }
     }
     for rng in multi_ranges {
+        if out.is_some_and(|u| u.contains(rng.start) && u.contains(rng.end)) {
+            continue;
+        }
         if rng.count() <= DENSE_BLOCK {
             for pos in rng.iter() {
-                if sh.cells.get(pos).is_some_and(|cell| cell.has_content()) {
+                if out.is_some_and(|u| u.contains(pos)) || sh.cells.get(pos).is_some_and(|cell| cell.has_content()) {
                     continue;
                 }
                 if *cf_budget == 0 {
                     return;
                 }
                 if cf.look_budgeted(wb, si, pos, cf_budget).is_some_and(|l| cf_look_is_printable(wb, &l)) {
-                    extend(RangeRef::cell(pos));
+                    let r = RangeRef::cell(pos);
+                    *out = Some(out.map_or(r, |u| u.union(&r)));
                 }
             }
         } else {
-            for (pos, cell) in sh.cells.iter_range(rng) {
-                if !cell.has_content() {
-                    if *cf_budget == 0 {
-                        return;
-                    }
-                    if cf.look_budgeted(wb, si, pos, cf_budget).is_some_and(|l| cf_look_is_printable(wb, &l)) {
-                        extend(RangeRef::cell(pos));
-                    }
+            // Sparse branch only inspects stored cells in `rng`; if every stored cell in `rng`
+            // already lies inside `out`, none can expand `out`.
+            let Some(sub) = used.and_then(|u| rng.intersection(&u)) else { continue };
+            if out.is_some_and(|u| u.contains(sub.start) && u.contains(sub.end)) {
+                continue;
+            }
+            for (pos, cell) in sh.cells.iter_range(sub) {
+                if out.is_some_and(|u| u.contains(pos)) || cell.has_content() {
+                    continue;
+                }
+                if *cf_budget == 0 {
+                    return;
+                }
+                if cf.look_budgeted(wb, si, pos, cf_budget).is_some_and(|l| cf_look_is_printable(wb, &l)) {
+                    let r = RangeRef::cell(pos);
+                    *out = Some(out.map_or(r, |u| u.union(&r)));
                 }
             }
         }
@@ -948,7 +955,8 @@ mod tests {
         let mut cf = crate::cf::CfCache::new();
         let mut budget = MAX_CF_PRINT_WORK;
         let sh_ref = wb.sheet(0).unwrap();
-        extend_printable_cf_cells(&wb, 0, sh_ref, &mut cf, &mut budget, &mut |_| {});
+        let mut out = None;
+        extend_printable_cf_cells(&wb, 0, sh_ref, &mut cf, &mut budget, &mut out);
         assert_eq!(
             budget,
             MAX_CF_PRINT_WORK - 49_999,

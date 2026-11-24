@@ -178,7 +178,6 @@ pub fn render_pdf(wb: &Workbook, layouts: &[SheetLayout], file: &str, path: &str
     for lay in layouts {
         let Some(sh) = wb.sheet(lay.sheet) else { continue };
         let mut cf = crate::cf::CfCache::new();
-        let mut cf_budget = layout::MAX_CF_PRINT_WORK;
         let kx = lay.kx();
         let ky = lay.ky();
         let (aw, ah) = lay.avail();
@@ -199,7 +198,7 @@ pub fn render_pdf(wb: &Workbook, layouts: &[SheetLayout], file: &str, path: &str
                 let mut x = ox + lay.heading_w * kx;
                 for (csi, cs) in csegs.iter().enumerate() {
                     let b = make_block(wb, lay.sheet, sh, *rs, *cs, (x, y), lay);
-                    draw_block(pg, &b, lay.settings.gridlines, &mut cf, &mut cf_budget);
+                    draw_block(pg, &b, lay.settings.gridlines, &mut cf);
                     draw_block_links(pg, &b, page_index, &mut pending_links);
                     printed_blocks.push(PrintedBlock {
                         page: page_index,

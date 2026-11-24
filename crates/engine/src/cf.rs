@@ -26,17 +26,18 @@ pub struct CfLook {
 /// The grid and print keep one per paint.
 #[derive(Default)]
 pub struct CfCache {
-    stats: HashMap<usize, RuleStats>,
+    stats: HashMap<(u32, StatsNeed), RuleStats>,
+    stats_cells_scanned: usize,
     table_edges: HashMap<RangeRef, crate::tables::ShownEdges>,
     index: Option<SheetCfIndex>,
 }
 
 struct RuleMeta {
     orig_idx: usize,
+    group_id: u32,
     first: Option<CellRef>,
     sets_num_fmt: bool,
 }
-
 struct RangeGroup {
     /// Rule ranks into `SheetCfIndex::rules` (already sorted by `(priority, orig_idx)`).
     rule_ranks: Vec<u32>,
@@ -81,13 +82,13 @@ impl SheetCfIndex {
         for &(orig_idx, _) in &order {
             let sets_num_fmt = rule_style(&sh.cond_formats[orig_idx].rule).is_some_and(style_sets_num_fmt);
             any_num_fmt |= sets_num_fmt;
-            rules.push(RuleMeta { orig_idx, first: None, sets_num_fmt });
+            rules.push(RuleMeta { orig_idx, group_id: u32::MAX, first: None, sets_num_fmt });
         }
 
         let mut groups: Vec<RangeGroup> = Vec::new();
         let mut group_reps: Vec<usize> = Vec::new();
         let mut buckets: HashMap<u64, Vec<(u32, usize)>> = HashMap::new();
-        for (rank, meta) in rules.iter().enumerate() {
+        for (rank, meta) in rules.iter_mut().enumerate() {
             let ranges = &sh.cond_formats[meta.orig_idx].ranges;
             if ranges.is_empty() {
                 continue;
@@ -97,11 +98,13 @@ impl SheetCfIndex {
             let h = hasher.finish();
             let bucket = buckets.entry(h).or_default();
             if let Some(&(gid, _)) = bucket.iter().find(|&&(_, rep)| sh.cond_formats[rep].ranges == *ranges) {
+                meta.group_id = gid;
                 let g = &mut groups[gid as usize];
                 g.rule_ranks.push(rank as u32);
                 g.has_num_fmt |= meta.sets_num_fmt;
             } else {
                 let gid = groups.len() as u32;
+                meta.group_id = gid;
                 groups.push(RangeGroup { rule_ranks: vec![rank as u32], has_num_fmt: meta.sets_num_fmt });
                 group_reps.push(meta.orig_idx);
                 bucket.push((gid, meta.orig_idx));
@@ -328,7 +331,7 @@ struct RuleStats {
 
 /// Which statistics a rule reads. Scanning the rule's whole range for them costs O(range), so
 /// rules that read none (cell value, formula, text, blanks, errors, dates) never scan.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum StatsNeed {
     /// Sorted numbers, their mean and deviation (top/bottom N, above average, scales, bars, icons).
     Numbers,
@@ -349,12 +352,20 @@ fn stats_need(rule: &CfRule) -> Option<StatsNeed> {
 }
 
 impl RuleStats {
+    #[cfg(test)]
     fn build(sh: &Sheet, ranges: &[RangeRef], need: StatsNeed) -> RuleStats {
-        let (sorted, counts) = numbers_in(sh, ranges, need);
+        Self::build_capped(sh, ranges, need, STATS_SCAN_LIMIT).0
+    }
+
+    fn build_capped(sh: &Sheet, ranges: &[RangeRef], need: StatsNeed, max_cells: usize) -> (RuleStats, usize) {
+        if max_cells == 0 {
+            return (RuleStats::default(), 0);
+        }
+        let (sorted, counts, visited) = numbers_in(sh, ranges, need, max_cells);
         let n = sorted.len().max(1) as f64;
         let avg = sorted.iter().sum::<f64>() / n;
         let std = (sorted.iter().map(|x| (x - avg).powi(2)).sum::<f64>() / n).sqrt();
-        RuleStats { sorted, avg, std, counts }
+        (RuleStats { sorted, avg, std, counts }, visited)
     }
 }
 
@@ -378,6 +389,10 @@ pub(crate) fn scanned_count() -> usize {
 /// the same range many times must not multiply the scan.
 const STATS_SCAN_LIMIT: usize = 2_000_000;
 
+/// Most cells all distinct `(group_id, StatsNeed)` statistics builds together may visit in one
+/// [`CfCache`]: overlapping distinct-range statistics rules (`A:A`, `A1:A1048575`, …) stay
+/// bounded instead of multiplying full-column scans across hundreds of rules.
+const MAX_TOTAL_STATS_SCAN: usize = 2_000_000;
 /// Steps through the spilled cells inside `r`, row-major: `Some(cell)` for each, and `None` for a
 /// jump past the spills left or right of the columns on a row (one step per row, however many
 /// there are), so unrelated spills between a narrow range's corners cost little.
@@ -399,12 +414,71 @@ fn spill_steps(sh: &Sheet, r: RangeRef) -> impl Iterator<Item = Option<CellRef>>
     })
 }
 
-fn numbers_in(sh: &Sheet, ranges: &[RangeRef], need: StatsNeed) -> (Vec<f64>, HashMap<String, usize>) {
+fn write_lowercase_display(v: &Value, buf: &mut String) {
+    buf.clear();
+    match v {
+        Value::Text(s) => {
+            if s.is_ascii() {
+                buf.push_str(s);
+                buf.make_ascii_lowercase();
+            } else {
+                for ch in s.chars() {
+                    buf.extend(ch.to_lowercase());
+                }
+            }
+        }
+        Value::Error(e) => {
+            buf.push_str(e.as_str());
+            buf.make_ascii_lowercase();
+        }
+        Value::Bool(b) => buf.push_str(if *b { "true" } else { "false" }),
+        _ => {
+            let d = v.display();
+            if d.is_ascii() {
+                buf.push_str(&d);
+                buf.make_ascii_lowercase();
+            } else {
+                for ch in d.chars() {
+                    buf.extend(ch.to_lowercase());
+                }
+            }
+        }
+    }
+}
+
+fn count_value(v: &Value, counts: &mut HashMap<String, usize>, key: &mut String) {
+    if v.is_empty() {
+        return;
+    }
+    if let Value::Text(s) = v
+        && s.bytes().all(|b| b.is_ascii() && !b.is_ascii_uppercase())
+    {
+        if let Some(cnt) = counts.get_mut(s.as_ref()) {
+            *cnt += 1;
+        } else {
+            counts.insert(s.to_string(), 1);
+        }
+        return;
+    }
+    write_lowercase_display(v, key);
+    if let Some(cnt) = counts.get_mut(key.as_str()) {
+        *cnt += 1;
+    } else {
+        counts.insert(key.clone(), 1);
+    }
+}
+
+fn numbers_in(sh: &Sheet, ranges: &[RangeRef], need: StatsNeed, max_cells: usize) -> (Vec<f64>, HashMap<String, usize>, usize) {
+    if max_cells == 0 {
+        return (Vec::new(), HashMap::new(), 0);
+    }
     let mut nums = Vec::new();
     let mut counts = HashMap::new();
-    let mut budget = STATS_SCAN_LIMIT;
+    let mut key = String::new();
+    let mut budget = max_cells;
     let mut seen: HashSet<RangeRef> = HashSet::new();
     let used = sh.used_range();
+    let has_spills = !sh.spill.is_empty();
     for r in ranges {
         if budget == 0 {
             break;
@@ -419,32 +493,54 @@ fn numbers_in(sh: &Sheet, ranges: &[RangeRef], need: StatsNeed) -> (Vec<f64>, Ha
         }
         // Only stored and spilled cells hold values: blank cells of a sparse range cost nothing,
         // so a value far down a huge range is still counted. Every cell looked at is charged.
-        let stored = sh.cells.iter_range(r).map(|(c, _)| (Some(c), true));
-        let spilled = spill_steps(sh, r).map(|c| (c, false));
-        for (c, is_stored) in stored.chain(spilled).take(budget) {
+        #[cfg(test)]
+        let mut scanned_here = 0usize;
+        for (c, cell) in sh.cells.iter_range(r).take(budget) {
             budget -= 1;
-            // a skip over spills outside the columns (charged, not read), or a spilled value
-            // under a stored cell, which was read with it
-            let Some(c) = c.filter(|c| is_stored || sh.cells.get(*c).is_none()) else { continue };
             #[cfg(test)]
-            SCANNED.with(|n| n.set(n.get() + 1));
-            let v = sh.value(c);
+            {
+                scanned_here += 1;
+            }
+            let v: &Value = if !cell.value.is_empty() || cell.formula.is_some() {
+                &cell.value
+            } else if has_spills {
+                sh.spill.get(&c).unwrap_or(&Value::Empty)
+            } else {
+                &Value::Empty
+            };
             match need {
                 StatsNeed::Numbers => {
                     if let Value::Number(n) = v {
-                        nums.push(n);
+                        nums.push(*n);
                     }
                 }
-                StatsNeed::Counts => {
-                    if !v.is_empty() {
-                        *counts.entry(v.display().to_lowercase()).or_insert(0) += 1;
+                StatsNeed::Counts => count_value(v, &mut counts, &mut key),
+            }
+        }
+        if has_spills && budget > 0 {
+            for c in spill_steps(sh, r).take(budget) {
+                budget -= 1;
+                let Some(c) = c.filter(|c| sh.cells.get(*c).is_none()) else { continue };
+                #[cfg(test)]
+                {
+                    scanned_here += 1;
+                }
+                let v = sh.spill.get(&c).unwrap_or(&Value::Empty);
+                match need {
+                    StatsNeed::Numbers => {
+                        if let Value::Number(n) = v {
+                            nums.push(*n);
+                        }
                     }
+                    StatsNeed::Counts => count_value(v, &mut counts, &mut key),
                 }
             }
         }
+        #[cfg(test)]
+        SCANNED.with(|n| n.set(n.get() + scanned_here));
     }
     nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    (nums, counts)
+    (nums, counts, max_cells - budget)
 }
 
 fn percentile(sorted: &[f64], p: f64) -> f64 {
@@ -489,12 +585,23 @@ struct RuleEval<'a> {
     cell: CellRef,
     first: CellRef,
     value: &'a Value,
-    text: &'a str,
+    text: &'a std::cell::OnceCell<String>,
+    text_lower: &'a std::cell::OnceCell<String>,
     stats: &'a RuleStats,
 }
 
+impl RuleEval<'_> {
+    fn text(&self) -> &str {
+        self.text.get_or_init(|| self.value.display())
+    }
+
+    fn text_lower(&self) -> &str {
+        self.text_lower.get_or_init(|| self.text().to_lowercase())
+    }
+}
+
 fn simple_rule_style<'a>(ctx: &RuleEval<'_>, rule: &'a CfRule) -> Option<&'a Style> {
-    let RuleEval { wb, sheet, cell, first, value, text, stats } = ctx;
+    let RuleEval { wb, sheet, cell, first, value, stats, .. } = ctx;
     match rule {
         CfRule::CellIs { op, a, b, style } => {
             let eval = |f: &str| gridcraft_calc::evaluate(wb, *sheet, *cell, &relative(f, *first, *cell));
@@ -519,27 +626,23 @@ fn simple_rule_style<'a>(ctx: &RuleEval<'_>, rule: &'a CfRule) -> Option<&'a Sty
             gridcraft_calc::evaluate(wb, *sheet, *cell, &relative(formula, *first, *cell)).to_bool().unwrap_or(false).then_some(style.as_ref())
         }
         CfRule::ContainsText { text: needle, style } => {
-            (!value.is_error() && text.to_lowercase().contains(&needle.to_lowercase())).then_some(style.as_ref())
+            (!value.is_error() && ctx.text_lower().contains(&needle.to_lowercase())).then_some(style.as_ref())
         }
         CfRule::NotContainsText { text: needle, style } => {
-            (value.is_error() || !text.to_lowercase().contains(&needle.to_lowercase())).then_some(style.as_ref())
+            (value.is_error() || !ctx.text_lower().contains(&needle.to_lowercase())).then_some(style.as_ref())
         }
         CfRule::BeginsWith { text: needle, style } => {
-            (!value.is_error() && text.to_lowercase().starts_with(&needle.to_lowercase())).then_some(style.as_ref())
+            (!value.is_error() && ctx.text_lower().starts_with(&needle.to_lowercase())).then_some(style.as_ref())
         }
         CfRule::EndsWith { text: needle, style } => {
-            (!value.is_error() && text.to_lowercase().ends_with(&needle.to_lowercase())).then_some(style.as_ref())
+            (!value.is_error() && ctx.text_lower().ends_with(&needle.to_lowercase())).then_some(style.as_ref())
         }
-        CfRule::Blanks { style } => (value.is_empty() || text.trim().is_empty()).then_some(style.as_ref()),
-        CfRule::NoBlanks { style } => (!value.is_empty() && !text.trim().is_empty()).then_some(style.as_ref()),
+        CfRule::Blanks { style } => (value.is_empty() || ctx.text().trim().is_empty()).then_some(style.as_ref()),
+        CfRule::NoBlanks { style } => (!value.is_empty() && !ctx.text().trim().is_empty()).then_some(style.as_ref()),
         CfRule::Errors { style } => value.is_error().then_some(style.as_ref()),
         CfRule::NoErrors { style } => (!value.is_error()).then_some(style.as_ref()),
-        CfRule::Duplicate { style } => {
-            (!value.is_empty() && stats.counts.get(&text.to_lowercase()).copied().unwrap_or(0) > 1).then_some(style.as_ref())
-        }
-        CfRule::Unique { style } => {
-            (!value.is_empty() && stats.counts.get(&text.to_lowercase()).copied().unwrap_or(0) == 1).then_some(style.as_ref())
-        }
+        CfRule::Duplicate { style } => (!value.is_empty() && stats.counts.get(ctx.text_lower()).copied().unwrap_or(0) > 1).then_some(style.as_ref()),
+        CfRule::Unique { style } => (!value.is_empty() && stats.counts.get(ctx.text_lower()).copied().unwrap_or(0) == 1).then_some(style.as_ref()),
         _ => None,
     }
 }
@@ -585,9 +688,10 @@ impl CfCache {
     fn ensure_index(&mut self, sh: &Sheet, sheet: usize) {
         let stale = self.index.as_ref().is_none_or(|idx| idx.sheet != sheet || idx.rule_count != sh.cond_formats.len());
         if stale {
-            if self.index.as_ref().is_some_and(|idx| idx.sheet != sheet) {
-                self.stats.clear();
-            }
+            // Group IDs are reassigned whenever the index is rebuilt, so cached `(group_id, need)`
+            // statistics and their scan counter must reset together with the index.
+            self.stats.clear();
+            self.stats_cells_scanned = 0;
             self.index = Some(SheetCfIndex::build(sh, sheet));
         }
     }
@@ -724,9 +828,11 @@ impl CfCache {
         let mut out = CfLook::default();
         let mut any = false;
         let v = sh.value(c);
-        let text = v.display();
+        let text = std::cell::OnceCell::new();
+        let text_lower = std::cell::OnceCell::new();
         let no_stats = RuleStats::default();
         let stats_map = &mut self.stats;
+        let stats_scanned = &mut self.stats_cells_scanned;
         for &rank in rule_ranks {
             if let Some(rem) = budget.as_deref_mut() {
                 if *rem == 0 {
@@ -739,10 +845,16 @@ impl CfCache {
             let cf = &sh.cond_formats[idx];
             let first = meta.first.unwrap_or(c);
             let st: &RuleStats = match stats_need(&cf.rule) {
-                Some(need) => &*stats_map.entry(idx).or_insert_with(|| RuleStats::build(sh, &cf.ranges, need)),
+                Some(need) => stats_map.entry((meta.group_id, need)).or_insert_with(|| {
+                    let remaining = MAX_TOTAL_STATS_SCAN.saturating_sub(*stats_scanned);
+                    let cap = remaining.min(STATS_SCAN_LIMIT);
+                    let (built, scanned) = RuleStats::build_capped(sh, &cf.ranges, need, cap);
+                    *stats_scanned = stats_scanned.saturating_add(scanned);
+                    built
+                }),
                 None => &no_stats,
             };
-            let context = RuleEval { wb, sheet, cell: c, first, value: &v, text: &text, stats: st };
+            let context = RuleEval { wb, sheet, cell: c, first, value: &v, text: &text, text_lower: &text_lower, stats: st };
             let matched_style = simple_rule_style(&context, &cf.rule).or_else(|| match &cf.rule {
                 CfRule::Top10 { bottom, percent, rank, style } => match v.as_f64() {
                     Some(n) if !st.sorted.is_empty() => {
@@ -1347,5 +1459,67 @@ mod tests {
         assert!(cache.look_budgeted(&wb, 0, CellRef::new(10, 0), &mut budget).is_some());
         assert_eq!(budget, 0);
         assert!(cache.look_budgeted(&wb, 0, CellRef::new(10, 0), &mut budget).is_none());
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // tests run only off wasm, where the clock exists
+    fn duplicate_stats_rules_share_group_cache_and_cap_total_scan_budget() {
+        let mut wb = Workbook::new();
+        let red_fill =
+            Style { fill: gridcraft_model::Fill { pattern: PatternType::Solid, fg: Color::Rgb(0xFF0000), bg: Color::Auto }, ..Default::default() };
+        let sh = wb.sheet_mut(0).unwrap();
+        for r in 0..100_000u32 {
+            sh.set_value(CellRef::new(r, 0), Value::text(format!("k{}", r % 1000)));
+        }
+        // Variant 1: 200 duplicateValues rules sharing identical sqref A:A must share ONE scan.
+        for i in 0..200u32 {
+            sh.cond_formats.push(CondFormat {
+                ranges: vec![RangeRef::cols(0, 0)],
+                rule: CfRule::Duplicate { style: Box::new(red_fill.clone()) },
+                priority: i + 1,
+                stop_if_true: false,
+            });
+        }
+        let t0 = std::time::Instant::now();
+        reset_scanned();
+        let mut cache = CfCache::new();
+        let first = cache.look(&wb, 0, CellRef::new(0, 0)).and_then(|l| l.style).expect("A1 duplicate fill");
+        let last = cache.look(&wb, 0, CellRef::new(99_999, 0)).and_then(|l| l.style).expect("A100000 duplicate fill");
+        assert_eq!(first.fill.fg, Color::Rgb(0xFF0000));
+        assert_eq!(last.fill.fg, Color::Rgb(0xFF0000));
+        assert_eq!(scanned_count(), 100_000, "200 identical-sqref duplicate rules must scan A:A exactly once");
+        let lay = crate::cmd::print::layout_sheet(&wb, 0, &crate::cmd::print::PrintOptions::default(), None).unwrap();
+        let mut first_page = lay.clone();
+        first_page.pages.truncate(1);
+        let pdf = crate::cmd::print::render_pdf(&wb, &[first_page], "", "").unwrap();
+        assert_eq!(pdf.pages, 1);
+        let elapsed_same = t0.elapsed();
+        assert!(elapsed_same < std::time::Duration::from_secs(2), "identical-sqref 200 rules took {elapsed_same:?}");
+
+        // Variant 2: 200 duplicateValues rules on distinct overlapping ranges A1:A100000, A2:A100000, ...
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.cond_formats.clear();
+        for i in 0..200u32 {
+            sh.cond_formats.push(CondFormat {
+                ranges: vec![RangeRef::new(CellRef::new(i, 0), CellRef::new(99_999, 0))],
+                rule: CfRule::Duplicate { style: Box::new(red_fill.clone()) },
+                priority: i + 1,
+                stop_if_true: false,
+            });
+        }
+        let t1 = std::time::Instant::now();
+        reset_scanned();
+        let mut cache = CfCache::new();
+        let hit = cache.look(&wb, 0, CellRef::new(200, 0)).and_then(|l| l.style).expect("A201 duplicate fill");
+        assert_eq!(hit.fill.fg, Color::Rgb(0xFF0000));
+        let scanned_look = scanned_count();
+        assert!(scanned_look <= MAX_TOTAL_STATS_SCAN, "distinct overlapping stats rules exceeded per-cache scan budget: {scanned_look}");
+        let lay = crate::cmd::print::layout_sheet(&wb, 0, &crate::cmd::print::PrintOptions::default(), None).unwrap();
+        let mut first_page = lay.clone();
+        first_page.pages.truncate(1);
+        let pdf = crate::cmd::print::render_pdf(&wb, &[first_page], "", "").unwrap();
+        assert_eq!(pdf.pages, 1);
+        let elapsed_distinct = t1.elapsed();
+        assert!(elapsed_distinct < std::time::Duration::from_secs(2), "distinct-range 200 rules took {elapsed_distinct:?}");
     }
 }
