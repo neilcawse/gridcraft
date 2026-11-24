@@ -1,6 +1,8 @@
-//! OPC package access through `craft-opc`: zip parts read against GridCraft's limits,
-//! relationships with GridCraft's `Rel`, part-name resolution, and a deterministic zip writer.
-//! Parts are parsed with this crate's XML reader.
+//! Bounded ZIP part reads, with `craft-opc` names, relationships and ZIP output,
+//! and `craft-xlsx` worksheet streaming.
+
+use std::collections::HashMap;
+use std::io::{Cursor, Read as _};
 
 use crate::IoError;
 use crate::xml::{self, El};
@@ -17,7 +19,9 @@ pub const MAX_ENTRIES: usize = 200_000;
 const LIMITS: craft_opc::Limits = craft_opc::Limits::new(MAX_ENTRIES, MAX_PART, MAX_TOTAL);
 
 pub struct Package<'a> {
-    opc: craft_opc::LazyPackage<'a>,
+    zip: zip::ZipArchive<Cursor<&'a [u8]>>,
+    names: HashMap<String, usize>,
+    total: u64,
     craft: craft_xlsx::Package<'a>,
 }
 
@@ -26,7 +30,8 @@ pub struct Package<'a> {
 pub struct Rel {
     pub id: String,
     /// Last path segment of the relationship type (`worksheet`, `styles`, …): the same for the
-    /// transitional and strict namespaces.
+    /// transitional and strict namespaces, but for the two kinds Strict spells without a hyphen
+    /// (`extendedProperties`, `customProperties`), which are named as Transitional does.
     pub kind: String,
     /// Resolved part name (no leading `/`), or the raw target for external relationships.
     pub target: String,
@@ -59,9 +64,19 @@ pub(crate) fn craft_error(e: craft_xlsx::Error) -> IoError {
 
 impl<'a> Package<'a> {
     pub fn open(bytes: &'a [u8]) -> Result<Package<'a>, IoError> {
-        let opc = craft_opc::LazyPackage::open(bytes, &LIMITS).map_err(error)?;
+        craft_opc::check_entry_count(bytes, MAX_ENTRIES as u64).map_err(error)?;
+        let zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| IoError::Zip(e.to_string()))?;
+        if zip.len() > MAX_ENTRIES {
+            return Err(IoError::TooLarge(format!("{} zip entries", zip.len())));
+        }
+        let mut names = HashMap::with_capacity(zip.len());
+        for idx in 0..zip.len() {
+            if let Some(name) = zip.name_for_index(idx) {
+                names.entry(normalize(name)).or_insert(idx);
+            }
+        }
         let craft = craft_xlsx::Package::open(bytes, &craft_xlsx::Limits::default()).map_err(craft_error)?;
-        Ok(Package { opc, craft })
+        Ok(Package { zip, names, total: 0, craft })
     }
 
     pub(crate) fn craft_mut(&mut self) -> &mut craft_xlsx::Package<'a> {
@@ -71,27 +86,59 @@ impl<'a> Package<'a> {
     /// Every part's (normalized) name, sorted.
     #[cfg(test)]
     pub fn names(&self) -> Vec<String> {
-        self.opc.names().into_iter().map(str::to_string).collect()
+        let mut names: Vec<_> = self.names.keys().cloned().collect();
+        names.sort_unstable();
+        names
     }
 
     pub fn has(&self, part: &str) -> bool {
-        self.opc.has(part)
+        self.names.contains_key(&normalize(part))
     }
 
     /// Reads a part's bytes; `Ok(None)` when it doesn't exist.
     pub fn read(&mut self, part: &str) -> Result<Option<Vec<u8>>, IoError> {
-        self.opc.read(part).map_err(error)
+        self.read_limited(part, MAX_PART)
     }
 
-    /// Reads a part the reader can do without (the caller warns and goes on when it fails). A read
-    /// that fails partway is charged this part's whole allowance instead of ending the package's.
-    pub fn read_optional_limited(&mut self, part: &str, maximum: u64) -> Result<Option<Vec<u8>>, IoError> {
-        self.opc.read_optional_limited(part, maximum).map_err(error)
-    }
-
-    /// Reads a small metadata part without allowing it to expand to the general part limit.
+    /// Reads a small metadata part without allowing it to expand to the general part limit. A part
+    /// whose directory entry declares no bytes is empty and is not decompressed: some producers
+    /// write an empty file as a deflate entry with no stream at all, which no reader can decode.
+    ///
+    /// The package budget is charged the bytes this read produced, whether it succeeded or failed
+    /// partway: a damaged part costs what was decompressed of it and no more, so it can't make the
+    /// parts read after it fail. Only a package that really expands past [`MAX_TOTAL`] has no
+    /// budget left.
     pub fn read_limited(&mut self, part: &str, maximum: u64) -> Result<Option<Vec<u8>>, IoError> {
-        self.opc.read_limited(part, maximum).map_err(error)
+        let maximum = maximum.min(MAX_PART);
+        let Some(&idx) = self.names.get(&normalize(part)) else {
+            return Ok(None);
+        };
+        let zip_error = |e| IoError::Zip(format!("{part}: {e}"));
+        let size = self.zip.by_index_raw(idx).map_err(zip_error)?.size();
+        if size > maximum {
+            return Err(IoError::TooLarge(format!("{part} expands to {size} bytes")));
+        }
+        if size == 0 {
+            return Ok(Some(Vec::new()));
+        }
+        let remaining = MAX_TOTAL.saturating_sub(self.total);
+        let limit = maximum.min(remaining);
+        let mut f = self.zip.by_index(idx).map_err(zip_error)?;
+        let mut out = Vec::with_capacity(size.min(limit).min(16 * 1024 * 1024) as usize);
+        let read = (&mut f).take(limit + 1).read_to_end(&mut out);
+        // What was produced is spent, however the read ended; the byte past `limit` that shows an
+        // overrun is part of it, so repeated attempts at an oversized part can't decompress it
+        // for free.
+        self.total = self.total.saturating_add(out.len() as u64).min(MAX_TOTAL);
+        if out.len() as u64 > limit {
+            return Err(IoError::TooLarge(if remaining < maximum {
+                "package expands to more than 1 GB".into()
+            } else {
+                format!("{part} expands to more than {maximum} bytes")
+            }));
+        }
+        read.map_err(|e| IoError::Zip(format!("{part}: {e}")))?;
+        Ok(Some(out))
     }
 
     pub fn read_xml(&mut self, part: &str) -> Result<Option<El>, IoError> {
@@ -104,12 +151,14 @@ impl<'a> Package<'a> {
     /// Relationships of a part (`xl/workbook.xml` → `xl/_rels/workbook.xml.rels`). Missing or
     /// broken rels parts give an empty list.
     pub fn rels(&mut self, part: &str) -> Result<Vec<Rel>, IoError> {
-        let rels = self.opc.rels(part).map_err(error)?;
-        Ok(rels
-            .list
-            .into_iter()
-            .map(|r| {
-                let kind = r.kind().to_string();
+        let Some(bytes) = self.read(&craft_opc::rels_path(part))? else { return Ok(Vec::new()) };
+        let rels = craft_opc::Rels::parse_in(&bytes, part, |n| self.has(n).then(|| n.to_string()));
+        Ok(rels.list.into_iter().map(|r| {
+                let kind = match r.kind() {
+                    "extendedProperties" => "extended-properties",
+                    "customProperties" => "custom-properties",
+                    other => other,
+                }.to_string();
                 Rel { id: r.id, kind, target: r.target, external: r.external }
             })
             .collect())
@@ -150,6 +199,7 @@ impl ZipOut {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{Entry, damaged_zip};
 
     #[test]
     fn resolving() {
@@ -160,5 +210,61 @@ mod tests {
         assert_eq!(resolve("a", "../../../x"), "x");
         assert_eq!(split_dir("xl/workbook.xml"), ("xl", "workbook.xml"));
         assert_eq!(split_dir("x.xml"), ("", "x.xml"));
+    }
+
+    /// A read that runs over the package's allowance spends it: loops over many oversized parts
+    /// (a sheet's optional VML relationships, for one) otherwise re-decompress the remaining
+    /// allowance again and again.
+    #[test]
+    fn an_over_budget_read_ends_the_package_budget() {
+        let z = crate::tests::make_zip(&[("a.xml", b"0123456789"), ("b.xml", b"hello")]);
+        let mut pkg = Package::open(&z).unwrap();
+        assert!(pkg.read("a.xml").unwrap().is_some());
+        assert_eq!(pkg.total, 10);
+        // Nothing left to spend within the per-part limit either.
+        pkg.total = MAX_TOTAL - 1;
+        assert!(matches!(pkg.read("b.xml"), Err(IoError::TooLarge(m)) if m.contains("1 GB")));
+        assert_eq!(pkg.total, MAX_TOTAL, "the over-budget read is charged");
+        // Repeated attempts stay cheap errors: no allowance is left to pay for.
+        assert!(matches!(pkg.read("b.xml"), Err(IoError::TooLarge(_))));
+    }
+
+    /// A part that fails to read is charged the bytes that were read of it, not the package's
+    /// whole allowance: the parts read after it still open, with their true error or content.
+    #[test]
+    fn a_damaged_part_costs_only_what_was_read_of_it() {
+        let z = damaged_zip(&[Entry::BadChecksum("a.xml", b"<a>damaged</a>"), Entry::Intact("b.xml", b"hello")]);
+        let mut pkg = Package::open(&z).unwrap();
+        assert!(matches!(pkg.read_limited("a.xml", 1024), Err(IoError::Zip(_))));
+        assert_eq!(pkg.total, 14, "the failed read is charged what it produced");
+        assert_eq!(pkg.read("b.xml").unwrap().as_deref(), Some(&b"hello"[..]));
+        // Reading the damaged part again fails the same way, never as an exhausted package.
+        assert!(matches!(pkg.read("a.xml"), Err(IoError::Zip(_))));
+        assert_eq!(pkg.total, 14 + 5 + 14);
+    }
+
+    /// A stream that fails before it produces anything costs nothing, and the parts after it are
+    /// read with the whole budget: the old accounting made the next read fail with "the package
+    /// expands to more than 1 GB".
+    #[test]
+    fn an_undecodable_part_leaves_the_budget_for_the_parts_after_it() {
+        let z = damaged_zip(&[Entry::BadStream("a.bin", 40), Entry::Intact("b.xml", b"hello")]);
+        let mut pkg = Package::open(&z).unwrap();
+        assert!(matches!(pkg.read_limited("a.bin", 1024), Err(IoError::Zip(_))));
+        assert_eq!(pkg.total, 0);
+        assert_eq!(pkg.read_limited("b.xml", 1024).unwrap().as_deref(), Some(&b"hello"[..]));
+        assert!(pkg.read("a.bin").is_err());
+        assert_eq!(pkg.read("b.xml").unwrap().as_deref(), Some(&b"hello"[..]));
+    }
+
+    /// A part whose directory entry declares 0 bytes is an empty part, read as such even when its
+    /// deflate entry has no stream (the thumbnail some producers write that way).
+    #[test]
+    fn a_part_declared_empty_is_empty() {
+        let z = damaged_zip(&[Entry::EmptyWithoutStream("docProps/thumbnail.wmf"), Entry::Intact("b.xml", b"hello")]);
+        let mut pkg = Package::open(&z).unwrap();
+        assert_eq!(pkg.read_limited("docProps/thumbnail.wmf", 1024).unwrap(), Some(vec![]));
+        assert_eq!(pkg.total, 0);
+        assert_eq!(pkg.read("b.xml").unwrap().as_deref(), Some(&b"hello"[..]));
     }
 }

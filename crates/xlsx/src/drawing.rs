@@ -512,7 +512,7 @@ const MAX_ANNOTATION_RELS_BYTES: u64 = 4 * 1024 * 1024;
 
 fn optional_annotation_rels(cx: &mut Ctx<'_>, part: &str) -> Result<Option<Vec<crate::package::Rel>>, IoError> {
     let rels_part = craft_opc::rels_path(part);
-    match cx.pkg.read_optional_limited(&rels_part, MAX_ANNOTATION_RELS_BYTES) {
+    match cx.pkg.read_limited(&rels_part, MAX_ANNOTATION_RELS_BYTES) {
         Ok(Some(bytes)) => {
             let rels = craft_opc::Rels::parse_in(&bytes, part, |n| cx.pkg.has(n).then(|| n.to_string()));
             Ok(Some(
@@ -535,7 +535,7 @@ fn optional_annotation_rels(cx: &mut Ctx<'_>, part: &str) -> Result<Option<Vec<c
 }
 
 fn optional_annotation_xml(cx: &mut Ctx<'_>, part: &str) -> Result<Option<El>, IoError> {
-    match cx.pkg.read_optional_limited(part, MAX_ANNOTATION_BYTES) {
+    match cx.pkg.read_limited(part, MAX_ANNOTATION_BYTES) {
         Ok(Some(b)) => match crate::xml::parse(&b) {
             Ok(e) => Ok(Some(e)),
             Err(e) => {

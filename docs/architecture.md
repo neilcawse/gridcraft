@@ -182,10 +182,12 @@ Calc treats a Python cell as a graph node that reads nothing: a pass takes its k
 of evaluating it, so an array result spills, is blocked and unblocked, and reaches its dependents
 through the same code as a formula's. The xlsx reader and writer map Python cells to and from
 `_xlfn._xlws.PY(index,n)` formulas with cached values and the workbook's Python part, which holds
-the code (`xlsx::python_part`, [MS-XLSX] 2.3.10); `io::adopt_python` and `io::enforce_python_limits`
-bound what a file can make the app hold (result size, spill ranges, total rebuilt cells, code
-size). This build runs no Python: `python.set` stores code, and new or changed code shows
-`#BLOCKED!`.
+the code (`xlsx::python_part`, [MS-XLSX] 2.3.10). Only a file that declares Python cells makes
+one: no other format's `PY(…)` formula becomes a Python cell (an `.xls` call to a user-defined
+function named PY stays that formula and array). `io::adopt_python` and
+`io::enforce_python_limits` bound what a file can make the app hold (result size, spill ranges,
+total rebuilt cells, code size). This build runs no Python: `python.set` stores code, and new or
+changed code shows `#BLOCKED!`.
 
 In ui-egui, Python mode is a state of the shared cell editor (`EditState::python`) that edits in
 the formula bar only, through `code_editor::code_field`: the code editor's in-order key handling

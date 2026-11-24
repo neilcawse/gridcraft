@@ -1,5 +1,5 @@
-use super::read::{first_free_block, merge_vml};
-use super::write::{NameMap, attach, part_rels_xml, remap, write_parts};
+use super::read::{apply_note_fills, first_free_block, merge_vml, relids_in};
+use super::write::{NameMap, attach, part_rels_xml, reachable_in, remap, write_parts};
 use super::*;
 
 /// A sheet's kept content being written.
@@ -16,6 +16,16 @@ impl<'a> SheetKept<'a> {
         let names = write_parts(out, &p.parts);
         let ids = attach(rels, &p.rels, &names);
         SheetKept { p: Some(p), names, ids }
+    }
+
+    /// The table `id` (in the model) with the parts that hang off its table part, when
+    /// its columns `cols` are still those of the file: a column that showed a query field must
+    /// still be there, or the query table would point at nothing and the table is written without
+    /// it.
+    pub fn table_binding(&self, id: u32, cols: &[String]) -> Option<TableBinding<'a>> {
+        let table = self.p?.tables.iter().find(|t| t.id == id)?;
+        let (ids, fields) = match_columns(&table.columns, cols)?;
+        Some(TableBinding { table, ids, fields })
     }
 
     fn vml(&self) -> Option<&'a PreservedPart> {
@@ -36,11 +46,36 @@ impl<'a> SheetKept<'a> {
     }
 
     /// GridCraft's notes and form controls VML for part `name`, merged with the kept control and
-    /// object shapes.
+    /// object shapes, and with the pictures that fill the boxes of notes.
     pub fn notes_vml(&self, ours: String, name: &str, out: &mut Out) -> String {
-        let Some(vml) = self.vml() else { return ours };
-        self.write_vml_rels(vml, name, out);
-        merge_vml(&String::from_utf8_lossy(&vml.data), &ours)
+        let text = match self.vml() {
+            Some(vml) => {
+                self.write_vml_rels(vml, name, out);
+                merge_vml(&String::from_utf8_lossy(&vml.data), &ours)
+            }
+            None => ours,
+        };
+        self.fill_notes(text, name, out)
+    }
+
+    /// `vml` with the kept pictures in the boxes of the notes they filled. The images and the
+    /// drawing's relationships to them are written with the fills that went in; when the drawing
+    /// is a kept one with relationships of its own, those are already written.
+    fn fill_notes(&self, vml: String, name: &str, out: &mut Out) -> String {
+        let Some(nf) = self.p.and_then(|p| p.note_fills.as_ref()) else { return vml };
+        let (text, used) = apply_note_fills(&vml, &nf.fills);
+        if used.is_empty() {
+            return vml;
+        }
+        if self.vml().is_none() {
+            let ids: HashSet<String> = used.iter().flat_map(|f| relids_in(&f.xml)).collect();
+            let rels: Vec<PreservedRel> = nf.rels.iter().filter(|r| ids.contains(&r.id)).cloned().collect();
+            let needed: HashSet<String> = rels.iter().flat_map(|r| reachable_in(&nf.parts, r)).collect();
+            let parts: Vec<PreservedPart> = nf.parts.iter().filter(|q| needed.contains(&normalize(&q.name))).cloned().collect();
+            let names = write_parts(out, &parts);
+            out.part(&rels_part_name(name), None, part_rels_xml(&rels, &names).into_bytes());
+        }
+        text
     }
 
     /// The kept VML drawing of a sheet without notes; its new relationship id.
@@ -58,8 +93,9 @@ impl<'a> SheetKept<'a> {
         self.ids.get(old).map(String::as_str)
     }
 
-    /// The kept sheet elements, in schema order, with GridCraft's own form control entries
-    /// (`controls`, see `controls::write`) in the sheet's one `<controls>` element.
+    /// The kept sheet elements that go after `<legacyDrawing>`, in schema order, with GridCraft's
+    /// own form control entries (`controls`, see `controls::write`) in the sheet's one
+    /// `<controls>` element.
     pub fn elements(&self, controls: &str) -> String {
         let mut s = String::new();
         let mut placed = controls.is_empty();
@@ -85,6 +121,103 @@ impl<'a> SheetKept<'a> {
         }
         s
     }
+
+    /// The kept `<customSheetViews>` (this sheet's part of each custom view, with the printer
+    /// settings of each): they go after the sheet's filter and before `<mergeCells>`.
+    pub fn custom_sheet_views(&self) -> String {
+        self.slot(SLOT_CUSTOM_SHEET_VIEWS)
+    }
+
+    /// The kept `<customProperties>`: they go right after `<colBreaks>`.
+    pub fn custom_properties(&self) -> String {
+        self.slot(SLOT_CUSTOM_PROPERTIES)
+    }
+
+    fn slot(&self, slot: &str) -> String {
+        let Some(p) = self.p else { return String::new() };
+        p.elements.iter().filter(|e| e.slot == slot).filter_map(|e| remap(&e.xml, &self.ids)).collect()
+    }
+}
+
+/// The parts that hang off a table part, and the file's numbering of the table's columns, for a
+/// table that is still the one the file had (see [`SheetKept::table_binding`]).
+pub struct TableBinding<'a> {
+    table: &'a PreservedTable,
+    /// The `id` of each `<tableColumn>`, in column order.
+    ids: Vec<u32>,
+    /// The query table field each column shows, in column order.
+    fields: Vec<Option<u32>>,
+}
+
+impl TableBinding<'_> {
+    /// `tableType` of the table (`queryTable`).
+    pub fn table_type(&self) -> Option<&str> {
+        self.table.table_type.as_deref()
+    }
+
+    /// `connectionId` of the table.
+    pub fn connection_id(&self) -> Option<u32> {
+        self.table.connection_id
+    }
+
+    /// The `id` of column `i`, when the file numbered it.
+    pub fn column_id(&self, i: usize) -> Option<u32> {
+        self.ids.get(i).copied()
+    }
+
+    /// `queryTableFieldId` of column `i`.
+    pub fn query_field_id(&self, i: usize) -> Option<u32> {
+        self.fields.get(i).copied().flatten()
+    }
+
+    /// Writes the parts behind the table part `table_part` and the relationships to them.
+    pub fn write(&self, table_part: &str, out: &mut Out) {
+        let names = write_parts(out, &self.table.parts);
+        out.part(&rels_part_name(table_part), None, part_rels_xml(&self.table.rels, &names).into_bytes());
+    }
+}
+
+/// Pairs the columns a table has now (`cols`, their header texts) with the columns the file
+/// numbered: by name, or by position for a column that was renamed. Returns the `id` of each
+/// current column (new ones get a number no other column has) and the query field it shows, or
+/// `None` when a column that showed a query field is gone.
+fn match_columns(file: &[PreservedTableColumn], cols: &[String]) -> Option<(Vec<u32>, Vec<Option<u32>>)> {
+    let by_name: HashMap<String, usize> = file.iter().enumerate().map(|(i, c)| (c.name.to_lowercase(), i)).collect();
+    let mut taken = vec![false; file.len()];
+    let mut found: Vec<Option<usize>> = cols
+        .iter()
+        .map(|c| {
+            let i = by_name.get(&c.to_lowercase()).copied()?;
+            let slot = taken.get_mut(i).filter(|t| !**t)?;
+            *slot = true;
+            Some(i)
+        })
+        .collect();
+    // A column nobody else has the name of, at the position of a column that lost its name: renamed.
+    for (j, f) in found.iter_mut().enumerate() {
+        if f.is_none()
+            && let Some(slot) = taken.get_mut(j).filter(|t| !**t)
+        {
+            *slot = true;
+            *f = Some(j);
+        }
+    }
+    if file.iter().zip(&taken).any(|(c, &t)| !t && c.query_field_id.is_some()) {
+        return None;
+    }
+    let mut next = file.iter().map(|c| c.id).max().unwrap_or(0);
+    let mut ids = Vec::with_capacity(cols.len());
+    for f in &found {
+        ids.push(match f.and_then(|i| file.get(i)) {
+            Some(c) => c.id,
+            None => {
+                next = next.saturating_add(1);
+                next
+            }
+        });
+    }
+    let fields = found.iter().map(|f| f.and_then(|i| file.get(i)).and_then(|c| c.query_field_id)).collect();
+    Some((ids, fields))
 }
 
 /// Where GridCraft's control entries go in a kept `<controls>` fragment: just before the close

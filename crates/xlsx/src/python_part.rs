@@ -71,7 +71,7 @@ impl ScriptsIn {
 pub fn read(cx: &mut Ctx<'_>, rels: &[crate::package::Rel]) -> Result<ScriptsIn, IoError> {
     let mut out = ScriptsIn { budget: MAX_CODE_BYTES, ..ScriptsIn::default() };
     let Some(rel) = rels.iter().find(|r| !r.external && r.kind.eq_ignore_ascii_case(REL_KIND)) else { return Ok(out) };
-    let bytes = match cx.pkg.read_optional_limited(&rel.target, MAX_PART_BYTES) {
+    let bytes = match cx.pkg.read_limited(&rel.target, MAX_PART_BYTES) {
         Ok(Some(b)) => b,
         Ok(None) => {
             cx.warn(format!("missing part {}", rel.target));
@@ -168,12 +168,24 @@ pub enum PyFormula {
     Missing,
 }
 
+/// Whether `text` (a file formula) calls the Python function by the name the file format gives
+/// it, `_xlfn._xlws.PY` ([MS-XLSX] 2.2.2 `solo-function`, in any letter case). A call to plain
+/// `PY` is a `user-defined-function-call` of the file (a VBA or add-in function, or a legacy
+/// `.xls` function saved on to xlsx), not Python, so the formula stays what the file says.
+fn names_python(text: &str) -> bool {
+    let text = text.trim_start().trim_start_matches('=').trim_start();
+    let prefix = text.get(..FILE_PREFIX.len());
+    let call = text.get(FILE_PREFIX.len()..).and_then(|rest| rest.get(..3));
+    prefix.is_some_and(|p| p.eq_ignore_ascii_case(FILE_PREFIX)) && call.is_some_and(|c| c.eq_ignore_ascii_case("PY("))
+}
+
 /// What a file formula makes: a Python cell from the Python part when it names a script, or from
-/// string literals ([`PyCode::from_formula`]). `formula` is the parsed formula, `raw` the
-/// formula's own text, which keeps line breaks in literal code.
+/// string literals ([`PyCode::from_formula`]), when the file's own text calls the function by its
+/// file name ([`names_python`]; the parsed `formula` has the prefixes read away). `raw` is the
+/// formula's own text, which also keeps line breaks in literal code.
 pub fn cell_code(scripts: &mut ScriptsIn, formula: &gridcraft_model::Formula, raw: &str) -> PyFormula {
     // The cheap test first: most formulas are not `PY(` calls.
-    if !gridcraft_model::python::is_py_formula(&formula.text) {
+    if !names_python(raw) || !gridcraft_model::python::is_py_formula(&formula.text) {
         return PyFormula::Not;
     }
     let expr = formula.expr_arc();
@@ -291,6 +303,12 @@ mod tests {
         for not in ["_xlfn._xlws.PY(-1,0)", "_xlfn._xlws.PY(0.5,0)", "_xlfn._xlws.PY(0,2)", "PY(A1,0)", "SUM(0,1)", "PYTHON_TYPE(A1)"] {
             assert_eq!(cell_code(&mut s, &formula(not), not), PyFormula::Not, "{not}");
         }
+        // A call to plain `PY` (or with one prefix of the pair) is a user-defined function of the
+        // file, however it is spelled: only `_xlfn._xlws.PY` names the Python function.
+        for udf in ["PY(0,0)", "PY(\"1+1\")", "PY(\"1+1\",0)", "_xlfn.PY(\"1\",0)", "_xlws.PY(\"1\",0)", "_xludf.PY(\"1\",0)"] {
+            assert_eq!(cell_code(&mut s, &formula(udf), udf), PyFormula::Not, "{udf}");
+        }
+        assert!(matches!(cell_code(&mut s, &formula("_XLFN._XLWS.py(\"1\",0)"), "_XLFN._XLWS.py(\"1\",0)"), PyFormula::Code(_)));
     }
 
     #[test]
@@ -299,7 +317,7 @@ mod tests {
         let code = "x".repeat(1_000);
         let mut s = ScriptsIn { scripts: vec![code], budget: 2_500, missing: 0 };
         let f = formula("_xlfn._xlws.PY(0,0)");
-        let taken = (0..5).filter(|_| matches!(cell_code(&mut s, &f, ""), PyFormula::Code(_))).count();
+        let taken = (0..5).filter(|_| matches!(cell_code(&mut s, &f, "_xlfn._xlws.PY(0,0)"), PyFormula::Code(_))).count();
         assert_eq!(taken, 2);
         assert_eq!(s.missing, 3);
         // A parameter repeated many times stops growing the code just past a cell's limit.

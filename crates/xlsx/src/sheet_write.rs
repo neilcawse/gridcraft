@@ -19,6 +19,7 @@ use gridcraft_model::{
 use crate::drawing::{Obj, image_content_type, image_ext};
 use crate::fmla::text_to_file;
 use crate::styles::{color_attrs, dxf_id, dxf_xml};
+use crate::passthrough::TableBinding;
 use crate::tables::{paper_id, px_to_col_width, px_to_pt};
 use crate::write::{
     CT_CHART, CT_COMMENTS, CT_DRAWING, CT_TABLE, CT_THREADED_COMMENTS, NS_MAIN, NS_REL, NS_THREADED, Out, REL_THREADED_COMMENT, Rels, XML_DECL,
@@ -194,10 +195,13 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> (
 
     let rows = build_craft_rows(SheetCellData { workbook: wb, index: si, sheet, overrides: &overrides, extra: &extra, dynamic: &dynamic }, &sid, out);
 
+    // Register preserved parts before building the sheet elements that reference them.
+    let kept = crate::passthrough::SheetKept::write(sheet, &mut rels, out);
     let (rules_frag, x14_cf) = build_sheet_rules(sheet, &mut part.features, &mut rels, out);
     push_fragment_kids(&mut part.root, &rules_frag);
-
-    let kept = build_sheet_printing(sheet, &mut part.features.print, &mut rels, out);
+    push_fragment_kids(&mut part.root, &kept.custom_sheet_views());
+    push_fragment_kids(&mut part.root, &kept.custom_properties());
+    build_sheet_printing(sheet, &mut part.features.print, &kept);
     part.features.drawing = write_sheet_drawing_rel(wb, si, sheet, &mut rels, out);
     let (legacy_rid, notes_frag) = write_sheet_notes_frag(sheet, si, &kept, &mut rels, out);
     part.features.legacy_drawing = legacy_rid;
@@ -209,8 +213,13 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> (
             out.table_id += 1;
             let n = out.tables;
             let name = table_name(&t.name, &mut used_names, out.table_id);
-            let xml = table_xml(t, cols, &name, out.table_id, out);
-            out.part(&format!("xl/tables/table{n}.xml"), Some(CT_TABLE), xml.into_bytes());
+            let bound = kept.table_binding(t.id, cols);
+            let xml = table_xml(t, cols, &name, out.table_id, bound.as_ref(), out);
+            let path = format!("xl/tables/table{n}.xml");
+            out.part(&path, Some(CT_TABLE), xml.into_bytes());
+            if let Some(b) = &bound {
+                b.write(&path, out);
+            }
             part.features.table_parts.push(rels.add("table", &format!("../tables/table{n}.xml")));
         }
     }
@@ -340,6 +349,25 @@ struct CellWriteInput<'a> {
     header_override: Option<&'a String>,
     spill_value: Option<&'a Value>,
     dynamic_range: Option<&'a RangeRef>,
+    /// The `vm` of value metadata kept by pass-through, for a cell that still holds its value.
+    value_meta: Option<u32>,
+    /// The reading (furigana) a text cell names instead of its text's first ([`named_reading`]).
+    reading: Option<Option<u32>>,
+}
+
+/// The reading a text cell names (`Sheet::phonetic_cells`: an index into `Workbook::phonetics`,
+/// or none), while the cell still holds that reading's text and it is not the text's first one.
+fn named_reading(wb: &Workbook, sheet: &Sheet, at: CellRef, cell: Option<&Cell>) -> Option<Option<u32>> {
+    let named = *sheet.phonetic_cells.get(&at)?;
+    let cell = cell.filter(|c| c.formula.is_none())?;
+    let Value::Text(t) = &cell.value else { return None };
+    // A text without any reading has only plain entries.
+    let first = wb.phonetics.iter().position(|p| p.text == **t)?;
+    match named {
+        None => Some(None),
+        Some(i) if i as usize != first && wb.phonetics.get(i as usize).is_some_and(|p| p.text == **t) => Some(Some(i)),
+        Some(_) => None,
+    }
 }
 
 fn write_sheet_extensions(s: &mut String, sheet: &Sheet, x14_cf: &str, slicers: &[crate::slicer::SheetSlicer], out: &mut Out, rels: &mut Rels) {
@@ -479,7 +507,7 @@ fn write_sheet_drawing_rel(wb: &Workbook, si: usize, sheet: &Sheet, rels: &mut R
     Some(rels.add("drawing", &format!("../drawings/drawing{dn}.xml")))
 }
 
-fn build_sheet_printing<'a>(sheet: &'a Sheet, print: &mut CraftPrint, rels: &mut Rels, out: &mut Out) -> crate::passthrough::SheetKept<'a> {
+fn build_sheet_printing(sheet: &Sheet, print: &mut CraftPrint, kept: &crate::passthrough::SheetKept<'_>) {
     let p = &sheet.print;
     if p.gridlines || p.headings || p.center_h || p.center_v {
         print.options = Some(CraftPrintOptions {
@@ -491,7 +519,8 @@ fn build_sheet_printing<'a>(sheet: &'a Sheet, print: &mut CraftPrint, rels: &mut
             ..Default::default()
         });
     }
-    let kept = crate::passthrough::SheetKept::write(sheet, rels, out);
+    // Margins are kept as f32: widen each through its shortest decimal, so 0.3 is written as
+    // `0.3`, as Excel writes it, and not as `0.30000001192092896` (#1609).
     let m = |i: usize| {
         let inches = p.margins.get(i).copied().unwrap_or(0.75);
         inches.to_string().parse::<f64>().unwrap_or(f64::from(inches))
@@ -538,7 +567,6 @@ fn build_sheet_printing<'a>(sheet: &'a Sheet, print: &mut CraftPrint, rels: &mut
     };
     print.row_breaks = to_breaks(&p.row_breaks, 16383);
     print.col_breaks = to_breaks(&p.col_breaks, 1048575);
-    kept
 }
 
 fn build_sheet_rules(sheet: &Sheet, features: &mut CraftFeatures, rels: &mut Rels, out: &mut Out) -> (String, String) {
@@ -577,7 +605,6 @@ fn build_sheet_rules(sheet: &Sheet, features: &mut CraftFeatures, rels: &mut Rel
     {
         frag.push_str(&autofilter_xml(af.range, &af.criteria, out));
     }
-
     let mut order: Vec<usize> = (0..sheet.cond_formats.len()).collect();
     order.sort_by_key(|&i| sheet.cond_formats.get(i).map(|c| c.priority).unwrap_or(0));
     let mut prio = vec![0u32; sheet.cond_formats.len()];
@@ -661,6 +688,8 @@ struct SheetCellData<'a> {
 
 fn build_craft_rows(data: SheetCellData<'_>, sid: &dyn Fn(gridcraft_model::StyleId) -> u32, out: &mut Out) -> Vec<CraftRow> {
     let SheetCellData { workbook, index, sheet, overrides, extra, dynamic } = data;
+    let metas = crate::passthrough::cell_meta_index(sheet, out);
+    // Cell storage is already row-major; sort only when extra cells need merging.
     let mut keys: Vec<(CellRef, Option<&Cell>)> = Vec::with_capacity(sheet.cells.len());
     keys.extend(sheet.cells.iter().map(|(c, cell)| (c, Some(cell))));
     if !sheet.cell_pictures.is_empty() || !extra.is_empty() || !overrides.is_empty() || !keys.is_sorted_by_key(|(c, _)| *c) {
@@ -697,6 +726,7 @@ fn build_craft_rows(data: SheetCellData<'_>, sid: &dyn Fn(gridcraft_model::Style
         let mut craft_cells = Vec::with_capacity(cells.len());
         for &(cell_ref, mut cell) in cells {
             let ov = overrides.get(&cell_ref);
+            let value_meta = metas.get(&cell_ref).filter(|m| crate::passthrough::cell_meta_holds(m, cell)).map(|m| m.vm);
             let ex = extra.get(&cell_ref);
             let mut legacy_cell = None;
             let array = dynamic.get(&cell_ref).copied().or_else(|| {
@@ -724,6 +754,8 @@ fn build_craft_rows(data: SheetCellData<'_>, sid: &dyn Fn(gridcraft_model::Style
                     header_override: ov,
                     spill_value: ex,
                     dynamic_range: array.as_ref(),
+                    value_meta,
+                    reading: if sheet.phonetic_cells.is_empty() { None } else { named_reading(workbook, sheet, cell_ref, cell) },
                 },
                 sid,
                 out,
@@ -745,7 +777,7 @@ fn build_craft_rows(data: SheetCellData<'_>, sid: &dyn Fn(gridcraft_model::Style
 }
 
 fn build_craft_cell(input: CellWriteInput<'_>, sid: &dyn Fn(gridcraft_model::StyleId) -> u32, out: &mut Out) -> CraftCell {
-    let CellWriteInput { reference: c, cell, picture, header_override: ov, spill_value: extra, dynamic_range: dynamic } = input;
+    let CellWriteInput { reference: c, cell, picture, header_override: ov, spill_value: extra, dynamic_range: dynamic, value_meta, reading } = input;
     let style = cell.map(|x| sid(x.style)).unwrap_or(0);
     let at = to_craft_cell_ref(c);
     if let Some(picture) = picture {
@@ -807,7 +839,7 @@ fn build_craft_cell(input: CellWriteInput<'_>, sid: &dyn Fn(gridcraft_model::Sty
             style,
             value: craft_val,
             formula: Some(CraftFormula { kind, text, shared_index: None, range, attrs: Vec::new() }),
-            value_metadata: None,
+            value_metadata: value_meta,
             cell_metadata,
             phonetic: false,
         };
@@ -816,11 +848,14 @@ fn build_craft_cell(input: CellWriteInput<'_>, sid: &dyn Fn(gridcraft_model::Sty
         Value::Empty | Value::Array(_) => CraftValue::Empty,
         Value::Number(n) => CraftValue::Number(*n),
         Value::Text(t) if extra.is_some() => CraftValue::Text(t.as_ref().into()),
-        Value::Text(t) => CraftValue::Shared(out.sst.index(t)),
+        Value::Text(t) => CraftValue::Shared(match reading.filter(|_| ov.is_none()) {
+            Some(r) => out.sst.index_with(t, r),
+            None => out.sst.index(t),
+        }),
         Value::Bool(b) => CraftValue::Bool(*b),
         Value::Error(e) => CraftValue::Error(to_craft_error(*e)),
     };
-    CraftCell { at, style, value: craft_val, ..Default::default() }
+    CraftCell { at, style, value: craft_val, value_metadata: value_meta, ..Default::default() }
 }
 
 const X14_NS: &str = "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main";

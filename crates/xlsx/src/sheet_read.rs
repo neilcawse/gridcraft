@@ -761,7 +761,12 @@ fn read_craft_cell(cx: &mut Ctx<'_>, sheet: &mut Sheet, st: &mut RowState, c: &c
     let value = match &c.value {
         CraftValue::Empty => Value::Empty,
         CraftValue::Shared(i) => match cx.sst.get(*i as usize) {
-            Some(s) => Value::Text(s.clone()),
+            Some(s) => {
+                if let Some(&Some(reading)) = cx.si_phonetics.get(*i as usize) {
+                    sheet.phonetic_cells.insert(pos, reading);
+                }
+                Value::Text(s.clone())
+            }
             None => {
                 cx.warn("some cells refer to missing shared strings");
                 Value::Empty
@@ -770,7 +775,10 @@ fn read_craft_cell(cx: &mut Ctx<'_>, sheet: &mut Sheet, st: &mut RowState, c: &c
         CraftValue::Text(t) => Value::Text(t.as_ref().into()),
         CraftValue::Inline(s) => Value::Text(s.text.as_ref().into()),
         CraftValue::Bool(b) => Value::Bool(*b),
-        CraftValue::Error(e) => Value::Error(map_craft_error(*e)),
+        CraftValue::Error(e) => {
+            let rich = c.value_metadata.and_then(|vm| vm.checked_sub(1)).and_then(|i| cx.rich_errors.get(i as usize)).copied().flatten();
+            Value::Error(rich.unwrap_or_else(|| map_craft_error(*e)))
+        }
         CraftValue::Date(d) => match parse_iso_datetime(d, cx.date_system) {
             Some(n) => Value::number(n),
             None => {
@@ -790,7 +798,8 @@ fn read_craft_cell(cx: &mut Ctx<'_>, sheet: &mut Sheet, st: &mut RowState, c: &c
         }
         let picture = (vm as usize).checked_sub(1).and_then(|n| cx.cell_pictures.get(n)).cloned().flatten();
         if picture.is_none() {
-            cx.warn("some cells have unsupported or missing value metadata; kept their scalar fallback (cell pictures may be missing)");
+            // Value metadata GridCraft doesn't model is kept by pass-through.
+            cx.value_meta.push((pos, vm));
         }
         picture
     });
@@ -851,6 +860,7 @@ fn read_craft_cell(cx: &mut Ctx<'_>, sheet: &mut Sheet, st: &mut RowState, c: &c
 }
 
 fn read_craft_formula(cx: &mut Ctx<'_>, st: &mut RowState, f: &CraftFormula, pos: CellRef, dynamic: bool) -> Option<Formula> {
+    // Keep the file's dynamic-array mark (and treat Google Sheets unwrapped formulas as dynamic).
     let mut unwrapped = false;
     let fm = read_craft_formula_text(cx, st, f, pos, dynamic, &mut unwrapped)?;
     let dynamic = dynamic || unwrapped;
@@ -1138,6 +1148,7 @@ mod tests {
             report: Default::default(),
             sst: vec![],
             phonetics: vec![],
+            si_phonetics: vec![],
             xf_map: vec![],
             dxfs: vec![],
             palette: vec![],
@@ -1147,6 +1158,8 @@ mod tests {
             next_id: 1,
             num_fmts: Default::default(),
             cell_pictures: vec![],
+            value_meta: vec![],
+            rich_errors: vec![],
             cf_ext_ids: vec![],
             known_function: None,
             python: Default::default(),

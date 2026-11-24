@@ -404,22 +404,6 @@ pub struct ReadControls {
     /// The VML shape numbers of the controls read into the model: GridCraft writes those, so they
     /// are left out of the kept content.
     pub modelled: HashSet<u64>,
-    /// The VML drawing also holds a control that the sheet doesn't list and the model doesn't
-    /// hold (a check box only the drawing has): the drawing is kept for it even when no
-    /// `<controls>` element is left to keep.
-    pub vml_only_unmodelled: bool,
-}
-
-/// Whether a VML shape the sheet doesn't list is a control that only pass-through can keep: it
-/// has client data that is neither a note (GridCraft writes notes) nor an embedded object's
-/// picture (`Pict`, which means nothing without its sheet entry).
-fn unlisted_kept(shape: &El) -> bool {
-    object_type_of(shape).is_some_and(|t| !t.eq_ignore_ascii_case("note") && !t.eq_ignore_ascii_case("pict"))
-}
-
-/// A VML shape's client data `ObjectType`, trimmed (`Note`, `Button`, `Checkbox`).
-fn object_type_of(shape: &El) -> Option<&str> {
-    shape.child("ClientData").and_then(|d| d.attr("ObjectType")).map(str::trim)
 }
 
 /// Whether a VML shape's client data is a note's: its `ObjectType` is `Note` in any case and with
@@ -509,13 +493,12 @@ pub fn read(cx: &mut Ctx<'_>, controls: Option<&El>, vml_rid: Option<&str>, rels
     }
     // Controls known only from the VML. The ones not read (a check box, or past the limit) stay
     // in the kept drawing.
-    let mut vml_only_unmodelled = false;
     for s in &shapes {
         let n = number_of(s);
         if n.is_some_and(|n| listed.contains(&n)) {
             continue;
         }
-        let modelled = n.filter(|_| sheet.controls.len() < MAX_CONTROLS).and_then(|n| {
+        let _ = n.filter(|_| sheet.controls.len() < MAX_CONTROLS).and_then(|n| {
             let p = props_from_vml(s)?;
             let (kind, anchor) = (p.kind?, vml_anchor(s, sheet)?);
             let id = cx.next_object_id();
@@ -523,11 +506,8 @@ pub fn read(cx: &mut Ctx<'_>, controls: Option<&El>, vml_rid: Option<&str>, rels
             read.insert(n);
             Some(())
         });
-        if modelled.is_none() && unlisted_kept(s) {
-            vml_only_unmodelled = true;
-        }
     }
-    ReadControls { modelled: read, vml_only_unmodelled }
+    ReadControls { modelled: read }
 }
 
 fn anchor_from_markers(a: &El, sheet: &Sheet) -> Option<Anchor> {

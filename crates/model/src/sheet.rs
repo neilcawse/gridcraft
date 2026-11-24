@@ -172,6 +172,11 @@ pub struct Sheet {
     /// tables). Goes away with the sheet; not in JSON.
     #[serde(skip)]
     pub preserved: Option<Arc<crate::preserved::Preserved>>,
+    /// Text cells whose reading (furigana) is not the first one of their text in
+    /// [`crate::Workbook::phonetics`]: the index of theirs there, or `None` for a cell whose text
+    /// has no reading. Applies while the cell holds that reading's text. Not in JSON.
+    #[serde(skip)]
+    pub phonetic_cells: BTreeMap<CellRef, Option<u32>>,
 }
 
 fn yes() -> bool {
@@ -236,6 +241,7 @@ impl Sheet {
             view_top_left: CellRef::default(),
             view: SheetViewMode::Normal,
             preserved: None,
+            phonetic_cells: BTreeMap::new(),
         }
     }
 

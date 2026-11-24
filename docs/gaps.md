@@ -34,18 +34,17 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 - **Estimate:** 25–40 h. [target-app-parity.md](target-app-parity.md#performance), [hardware-parity.md](hardware-parity.md)
 
 ### 3. Some unmodelled XLSX content is dropped on save (FF)
-- **Missing:** table and OLAP slicers and their caches (PivotTable slicers are read and written), timelines, the data model, query tables attached to
-  tables, unmodelled `extLst` entries (among them x14 data bar settings beyond a solid fill,
-  icon sets, colour scales and the text rules containsText, notContainsText, beginsWith and
-  endsWith), chart details. Pass-through (#330) keeps custom XML, external links, connections,
-  sheet query tables, printer settings, form and ActiveX controls, OLE objects and sheet
-  backgrounds; x14-only colour-scale, data-bar and icon-set rules with cross-sheet `cfvo` are
-  still dropped on read with a warning, while the other Excel 2010 conditional format rules
-  (including cross-sheet cell-value and expression rules) are read and written. In tested
-  synthetic files, Excel for Mac 16.114 stored cross-sheet expression and `cfvo` rules in x14;
-  GridCraft-written main-section cfvo files opened without a repair prompt.
+- **Missing:** table and OLAP slicers and their caches (PivotTable slicers are read and written),
+  timelines, unmodelled `extLst` entries, and some chart details. Pass-through uses a deny-list:
+  it keeps unmodelled relationship chains such as document tasks, external links, custom XML,
+  the Power Pivot data model, table query parts, custom views, and unmodelled document properties.
+  Unmodelled value metadata is kept while the cell still holds the same value.
+  X14-only colour scales, data bars and icon sets with cross-sheet `cfvo` are still dropped with
+  a warning; cross-sheet cell-value and expression rules are read and written. Tested synthetic
+  Excel for Mac 16.114 files used x14 for cross-sheet expression and `cfvo` rules; Excel opened
+  GridCraft-written main-section `cfvo` files without a repair prompt.
 - **Evidence:** `crates/xlsx/src/passthrough.rs` (what is kept, and why the rest isn't).
-- **Impact:** open-edit-save still simplifies workbooks with table or OLAP slicers, timelines or Power Pivot.
+- **Impact:** open-edit-save still simplifies workbooks with table or OLAP slicers or timelines.
 - **Estimate:** 6–10 h. [file-format-parity.md](file-format-parity.md)
 
 ### 4. Charts lose options on round trip; shallow chart model (F, FF)
