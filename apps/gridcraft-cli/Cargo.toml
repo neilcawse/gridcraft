@@ -17,6 +17,8 @@ path = "src/main.rs"
 gridcraft-sandbox = { workspace = true }
 gridcraft-engine = { workspace = true }
 gridcraft-mcp = { workspace = true }
+gridcraft-ui-egui = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
 # `check`: validating the packages GridCraft writes (content types, relationships).

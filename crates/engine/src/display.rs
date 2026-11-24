@@ -43,6 +43,90 @@ pub fn format(v: &Value, code: &str, wb: &Workbook) -> Formatted {
     format_value(v, &parsed(code), wb.date_system)
 }
 
+/// Style and RGB colours used to paint a grid cell, plus any conditional adornments.
+pub struct CellLook {
+    pub style: gridcraft_model::Style,
+    pub fill: Option<[u8; 3]>,
+    pub text_color: [u8; 3],
+    pub conditional: Option<crate::cf::CfLook>,
+}
+
+/// Resolves the base, table and conditional styles in the order used by the grid.
+/// Use a separate conditional-format cache for each sheet.
+pub fn cell_look(wb: &Workbook, si: usize, sh: &Sheet, c: CellRef, cf: &mut crate::cf::CfCache) -> CellLook {
+    use gridcraft_model::{Color, PatternType, Underline};
+
+    let mut style = match sh.table_at(c) {
+        Some(t) => crate::tables::table_cell_shown_style(wb, si, t, cf.table_edges(sh, t), c),
+        None => wb.styles.get(sh.style_id(c)).clone(),
+    };
+    let conditional = cf.look(wb, si, c);
+    if let Some(st) = conditional.as_ref().and_then(|l| l.style.as_ref()) {
+        if st.fill.pattern != PatternType::None {
+            style.fill = st.fill;
+        }
+        if st.font.color != Color::Auto {
+            style.font.color = st.font.color;
+        }
+        style.font.bold |= st.font.bold;
+        style.font.italic |= st.font.italic;
+        if st.font.underline != Underline::None {
+            style.font.underline = st.font.underline;
+        }
+        style.font.strike |= st.font.strike;
+        // In a differential style General means "not set" (#1163).
+        if st.num_fmt.as_str() != "General" {
+            style.num_fmt = st.num_fmt.clone();
+        }
+        if st.align.reading_order.is_some() {
+            style.align.reading_order = st.align.reading_order;
+        }
+        for (dst, src) in [
+            (&mut style.borders.left, st.borders.left),
+            (&mut style.borders.right, st.borders.right),
+            (&mut style.borders.top, st.borders.top),
+            (&mut style.borders.bottom, st.borders.bottom),
+        ] {
+            if !src.is_none() {
+                *dst = src;
+            }
+        }
+    }
+    let fill = conditional.as_ref().and_then(|l| l.scale_fill).or_else(|| match style.fill.pattern {
+        PatternType::None => None,
+        PatternType::Solid => style.fill.fg.resolve(&wb.theme),
+        _ => {
+            // Patterns are painted with a blend of foreground and background.
+            let fg = style.fill.fg.resolve(&wb.theme).unwrap_or([0, 0, 0]);
+            let bg = style.fill.bg.resolve(&wb.theme).unwrap_or([255, 255, 255]);
+            Some(std::array::from_fn(|i| ((u16::from(fg[i]) + 3 * u16::from(bg[i])) / 4) as u8))
+        }
+    });
+    let text_color = style.font.color.resolve(&wb.theme).unwrap_or([0, 0, 0]);
+    CellLook { style, fill, text_color, conditional }
+}
+
+/// Initial grid text, before glyph-measured clipping and expansion of repeat fills. Width and
+/// digit advance are in the same renderer units. The renderer handles formula localisation.
+pub fn grid_text(wb: &Workbook, sh: &Sheet, c: CellRef, v: &Value, code: &str, width: f32, digit_width: f32) -> Formatted {
+    let plain = |text, numeric| Formatted { text, color: None, numeric, fill: None };
+    if sh.show_formulas
+        && let Some(f) = sh.cell(c).and_then(|x| x.formula.as_ref())
+    {
+        return plain(format!("={}", f.text), false);
+    }
+    if (!sh.show_zeros && v.as_f64() == Some(0.0)) || (code == "checkbox" && matches!(v, Value::Bool(_) | Value::Empty)) {
+        return plain(String::new(), false);
+    }
+    if code == "General"
+        && let Value::Number(n) = v
+    {
+        let max_chars = ((width - 4.0) / digit_width).floor().max(1.0) as usize;
+        return plain(gridcraft_numfmt::format_general_fit(*n, max_chars.min(11)).unwrap_or_else(|| "#".repeat(max_chars.min(8192))), true);
+    }
+    format(v, code, wb)
+}
+
 /// Whether typing `t` back into a General cell would not give the text `t` again (it would parse
 /// as a number, boolean, error, date or formula, or lose a leading apostrophe). Such text is shown
 /// for editing with a leading `'`, as Excel does for text carrying a quote prefix, so that

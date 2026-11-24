@@ -59,14 +59,22 @@ impl SheetLines {
     }
 }
 
+fn sheet_zoom(sh: &Sheet) -> f32 {
+    (sh.zoom as f32 / 100.0).clamp(0.1, 4.0)
+}
+
+pub(super) fn sheet_scale(sh: &Sheet) -> f32 {
+    sheet_zoom(sh) * DISPLAY_SCALE
+}
+
 impl Geo {
     pub fn new(sh: &Sheet, rect: Rect, scroll: egui::Vec2) -> Geo {
         Geo::with_lines(sh, rect, scroll, &SheetLines::of(sh))
     }
     /// [`Geo::new`] with the sheet's `lines` already built (`SheetLines::of(sh)`).
     pub fn with_lines(sh: &Sheet, rect: Rect, scroll: egui::Vec2, lines: &SheetLines) -> Geo {
-        let zoom = (sh.zoom as f32 / 100.0).clamp(0.1, 4.0);
-        let z = zoom * DISPLAY_SCALE;
+        let zoom = sheet_zoom(sh);
+        let z = sheet_scale(sh);
         let header_h = if sh.show_headings { (COL_HEADER_H * zoom.max(0.75)).round() } else { 0.0 };
         let ri = lines.ri.clone();
         let ci = lines.ci.clone();
