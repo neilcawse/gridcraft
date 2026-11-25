@@ -6,7 +6,7 @@ use std::sync::Arc;
 use gridcraft_core::{CellRef, link_location, quote_sheet, split_sheet};
 use gridcraft_formula::{Expr, StructRef, same_name};
 
-use crate::workbook::{rewrite_table_tokens, spell_calls};
+use crate::workbook::rewrite_table_tokens;
 use crate::{CfRule, CfValueKind, Formula, PivotSource, PivotTable, Sheet, SlicerSource, TotalsFn, Workbook};
 
 pub type TablePosition = (usize, usize);
@@ -92,8 +92,11 @@ impl TableRefRewrite for TableRename<'_> {
         Some((source, found.rebound.is_none().then_some(self.new)))
     }
 
-    fn respell(&self, expr: Expr) -> Expr {
-        spell_calls(expr, &self.lambdas)
+    fn respell(&self, mut expr: Expr) -> Expr {
+        if !self.lambdas.is_empty() {
+            spell_lambda_calls(&mut expr, &self.lambdas, &mut Vec::new());
+        }
+        expr
     }
 
     fn keep_link_marker(&self) -> bool {
@@ -124,7 +127,8 @@ pub trait TableRefRewrite {
     fn keep_link_marker(&self) -> bool {
         false
     }
-    /// Restore user function call spelling after a changed expression is reparsed from text.
+    /// Spell user function calls in a changed expression. The parser upper-cases them
+    /// (`DOUBLE(…)` for `Double(…)`), in formula text and in a cell tree read from a native file.
     /// File repair leaves that to the reader's later pass over every formula.
     fn respell(&self, expr: Expr) -> Expr {
         expr
@@ -132,15 +136,60 @@ pub trait TableRefRewrite {
 }
 
 pub fn expression(rewrite: &impl TableRefRewrite, expr: &mut Expr, sheet: usize, owner: Option<TablePosition>) -> bool {
-    let changed = replace_tokens(rewrite, expr, sheet, owner);
+    let changed = rewrite_table_tokens(expr, &|name, structured, env| rewrite.replacement(name, structured, sheet, owner, env));
     if changed {
         *expr = rewrite.respell(std::mem::replace(expr, Expr::Missing));
     }
     changed
 }
 
-fn replace_tokens(rewrite: &impl TableRefRewrite, expr: &mut Expr, sheet: usize, owner: Option<TablePosition>) -> bool {
-    rewrite_table_tokens(expr, &|name, structured, env| rewrite.replacement(name, structured, sheet, owner, env))
+/// Spells calls of the workbook's LAMBDA names as the names are defined. A call of a LET or
+/// LAMBDA binder in scope is not a call of the workbook's name and keeps its spelling.
+fn spell_lambda_calls(mut e: &mut Expr, lambdas: &[String], env: &mut Vec<String>) {
+    while let Expr::Binary(_, a, b) = e {
+        spell_lambda_calls(b, lambdas, env);
+        e = a;
+    }
+    let before = env.len();
+    match e {
+        Expr::Call(name, args) if name == "LET" && args.len() >= 3 && args.len() % 2 != 0 => {
+            if let Some((body, pairs)) = args.split_last_mut() {
+                for [binder, value] in pairs.as_chunks_mut::<2>().0 {
+                    spell_lambda_calls(value, lambdas, env);
+                    if let Expr::Name(n) = binder {
+                        env.push(n.clone());
+                    }
+                }
+                spell_lambda_calls(body, lambdas, env);
+            }
+        }
+        Expr::Call(name, args) if name == "LAMBDA" => {
+            if let Some((body, params)) = args.split_last_mut() {
+                for param in params.iter() {
+                    if let Expr::Name(n) = param {
+                        env.push(n.trim_start_matches('[').trim_end_matches(']').into());
+                    }
+                }
+                spell_lambda_calls(body, lambdas, env);
+            }
+        }
+        Expr::Call(name, args) => {
+            if !env.iter().any(|local| same_name(local, name))
+                && let Some(defined) = lambdas.iter().find(|l| l.eq_ignore_ascii_case(name))
+            {
+                name.clone_from(defined);
+            }
+            args.iter_mut().for_each(|a| spell_lambda_calls(a, lambdas, env));
+        }
+        Expr::Invoke(callee, args) => {
+            spell_lambda_calls(callee, lambdas, env);
+            args.iter_mut().for_each(|a| spell_lambda_calls(a, lambdas, env));
+        }
+        Expr::Array(rows) => rows.iter_mut().flatten().for_each(|x| spell_lambda_calls(x, lambdas, env)),
+        Expr::Unary(_, x) | Expr::Paren(x) => spell_lambda_calls(x, lambdas, env),
+        _ => {}
+    }
+    env.truncate(before);
 }
 
 fn rewritten_text(rewrite: &impl TableRefRewrite, text: &str, sheet: usize, owner: Option<TablePosition>) -> Option<String> {
@@ -182,7 +231,7 @@ pub fn apply(rewrite: &impl TableRefRewrite, wb: &mut Workbook, formula_objects:
                         return None;
                     }
                     let mut expr = expr.clone();
-                    replace_tokens(rewrite, &mut expr, si, owner).then(|| (c, Formula { array: f.array, ..f.rewritten(expr) }))
+                    expression(rewrite, &mut expr, si, owner).then(|| (c, Formula { array: f.array, ..f.rewritten(expr) }))
                 })?
             })
             .collect();
@@ -430,6 +479,7 @@ mod tests {
             ("ROWS(sales)+ROWS(Sales_1)", "ROWS(Renamed)+ROWS(Sales_1)"),
             ("ROWS(Data!Sales)", "ROWS(Data!Renamed)"),
             ("Double(SUM(Sales[V]))", "Double(SUM(Renamed[V]))"),
+            ("LET(double,LAMBDA(x,x+1),DOUBLE(SUM(Sales[V])))", "LET(double,LAMBDA(x,x+1),DOUBLE(SUM(Renamed[V])))"),
         ];
         let mut wb = book();
         wb.names.push(name("Double", "LAMBDA(x,x*2)"));
@@ -451,6 +501,19 @@ mod tests {
         wb.rename_table(0, 0, "Renamed");
         let text = &wb.sheets[0].cell(at).unwrap().formula.as_ref().unwrap().text;
         assert_eq!(text, "LET(double,LAMBDA(x,x+1),DOUBLE(SUM(Renamed[V])))");
+    }
+
+    /// A native file caches each cell's tree parsed from its text, which upper-cases the calls.
+    #[test]
+    fn rename_keeps_lambda_call_spelling_of_a_cell_read_from_a_native_file() {
+        let mut wb = book();
+        wb.names.push(name("Double", "LAMBDA(x,x*2)"));
+        let at = CellRef::new(5, 5);
+        let formula: Formula = serde_json::from_str(r#"{"text":"Double(SUM(Sales[V]))","array":null}"#).unwrap();
+        wb.sheet_mut(0).unwrap().set_cell(at, Cell::formula(formula));
+        wb.rename_table(0, 0, "Renamed");
+        let text = &wb.sheets[0].cell(at).unwrap().formula.as_ref().unwrap().text;
+        assert_eq!(text, "Double(SUM(Renamed[V]))");
     }
 
     /// The interim X22 gate: interactive rename leaves formula objects as they are until Excel

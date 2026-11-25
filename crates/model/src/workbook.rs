@@ -806,7 +806,7 @@ impl Workbook {
 }
 
 /// Calls of the names in `lambdas` spelled as the names are.
-pub(crate) fn spell_calls(e: Expr, lambdas: &[String]) -> Expr {
+fn spell_calls(e: Expr, lambdas: &[String]) -> Expr {
     if lambdas.is_empty() {
         return e;
     }
