@@ -166,7 +166,7 @@ pub(super) fn table_flag(s: &mut Session, p: &Json, which: &str) -> Result<Json>
                     if v && t.range.end.row.saturating_add(1) >= MAX_ROWS {
                         return Err(EngineError::Other("There's no room below the table for the total row.".into()));
                     }
-                    let old = t.range;
+                    let full_proxy = sh.autofilter.as_ref().is_some_and(|af| af.range == t.range && t.matches_autofilter(af.range));
                     t.totals_row = v;
                     if v {
                         t.range.end.row += 1;
@@ -188,8 +188,8 @@ pub(super) fn table_flag(s: &mut Session, p: &Json, which: &str) -> Result<Json>
                         }
                     }
                     write_totals(sh, ti);
-                    // A worksheet filter over the whole table keeps covering the whole table.
-                    if let Some(af) = sh.autofilter.as_mut().filter(|af| af.range == old) {
+                    // A full-table proxy keeps covering the whole table, without changing its data scope.
+                    if full_proxy && let Some(af) = &mut sh.autofilter {
                         af.range = sh.tables[ti].range;
                     }
                     cx.structural = true;
