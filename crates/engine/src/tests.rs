@@ -1,5 +1,5 @@
 use gridcraft_core::{CellRef, Value};
-use serde_json::json;
+use serde_json::{Value as Json, json};
 
 use crate::Session;
 
@@ -7875,7 +7875,7 @@ fn whole_row_paste_needs_row_formatting_on_a_protected_sheet() {
     }
 }
 
-/// The `x25-autofill-whole-rows` workbook: rows 3, 4 and 8 carry a custom height and a row style
+/// Synthetic whole-row AutoFill input: rows 3, 4 and 8 carry a custom height and a row style
 /// (red bold, blue bold, green) that their cells share; column A counts and column B doubles it.
 fn whole_row_autofill_fixture(s: &mut Session) -> [gridcraft_model::StyleId; 3] {
     use gridcraft_model::{Color, Fill, LineInfo, Style};
@@ -7965,6 +7965,11 @@ fn whole_row_autofill_upward_and_without_formatting() {
     let before = s.doc().unwrap().wb.sheet(0).unwrap().rows.clone();
     s.execute("edit.autoFill", json!({"source": "3:4", "target": "3:9", "mode": "values"})).unwrap();
     assert_eq!(s.doc().unwrap().wb.sheet(0).unwrap().rows, before);
+    // A one-row extension of the two-row source starts with its last line, not its first.
+    s.execute("edit.autoFill", json!({"source": "3:4", "target": "2:4"})).unwrap();
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    assert_eq!((sh.rows[&1].style, sh.style_id(CellRef::new(1, 0))), (Some(blue), blue));
+    s.execute("edit.undo", json!({})).unwrap();
     s.execute("edit.autoFill", json!({"source": "3:4", "target": "1:4"})).unwrap();
     let sh = s.doc().unwrap().wb.sheet(0).unwrap();
     assert_eq!([0, 1].map(|r| sh.rows.get(&r).and_then(|l| l.style)), [Some(red), Some(blue)]);
@@ -7972,7 +7977,8 @@ fn whole_row_autofill_upward_and_without_formatting() {
     assert_eq!([sh.row_height(0), sh.row_height(1)], [40., 38. * 4. / 3.]);
 }
 
-/// Not measured: whole columns follow the rows by symmetry (width and column style repeat).
+/// Inferred: a whole column repeats its width and style. One column of extension is the
+/// smallest command-level case: the cell fill still visits the full grid height.
 #[test]
 fn whole_column_autofill_repeats_source_column_formatting() {
     use gridcraft_model::{LineInfo, Style};
@@ -7985,16 +7991,221 @@ fn whole_column_autofill_repeats_source_column_formatting() {
     let bold = wb.styles.intern(bold);
     let sh = wb.sheet_mut(0).unwrap();
     sh.cols.insert(1, LineInfo { size: Some(123.), style: Some(bold), ..Default::default() });
-    sh.cols.insert(3, LineInfo { size: Some(45.), ..Default::default() });
-    s.execute("edit.autoFill", json!({"source": "B:C", "target": "B:E"})).unwrap();
+    sh.cols.insert(2, LineInfo { size: Some(45.), ..Default::default() });
+    s.execute("edit.autoFill", json!({"source": "B:B", "target": "B:C"})).unwrap();
     let sh = s.doc().unwrap().wb.sheet(0).unwrap();
-    assert_eq!([sh.col_width(3), sh.col_width(4)], [123., sh.default_col_width]);
-    assert_eq!([sh.cols.get(&3).and_then(|l| l.style), sh.cols.get(&4).and_then(|l| l.style)], [Some(bold), None]);
-    assert_eq!(sh.style_id(CellRef::parse("D10").unwrap()), bold);
+    assert_eq!(sh.col_width(2), 123.);
+    assert_eq!(sh.style_id(CellRef::parse("C10").unwrap()), bold);
+    assert_eq!(v(&s, "C1"), Value::Number(1.));
     s.execute("edit.undo", json!({})).unwrap();
     let sh = s.doc().unwrap().wb.sheet(0).unwrap();
-    assert_eq!(sh.col_width(3), 45.);
-    assert_eq!(sh.cols.get(&3).and_then(|l| l.style), None);
+    assert_eq!(sh.col_width(2), 45.);
+    assert_eq!(sh.cols.get(&2).and_then(|l| l.style), None);
+    assert_eq!(v(&s, "C1"), Value::Empty);
+    assert_line_edit_refused(&mut s, "edit.autoFill", json!({"source": "B:B", "target": "B:F"}), "range too large");
+}
+
+#[test]
+fn whole_row_autofill_keeps_destination_visibility() {
+    let mut s = s();
+    whole_row_autofill_fixture(&mut s);
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let rows = &mut wb.sheet_mut(0).unwrap().rows;
+    rows.get_mut(&2).unwrap().hidden = true;
+    let dest = rows.get_mut(&7).unwrap();
+    dest.hidden = true;
+    dest.outline = 1;
+    dest.collapsed = true;
+    s.execute("edit.autoFill", json!({"source": "3:4", "target": "3:9"})).unwrap();
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    assert!(sh.rows[&2].hidden && !sh.rows[&4].hidden && sh.rows[&7].hidden);
+    assert_eq!((sh.rows[&7].outline, sh.rows[&7].collapsed), (1, true));
+}
+
+#[test]
+fn autofill_formats_uses_inherited_source_style_for_whole_rows_only() {
+    for (source, target, whole) in [("3:3", "3:5", true), ("C3", "C3:C5", false)] {
+        let mut s = s();
+        let [red, _, _] = whole_row_autofill_fixture(&mut s);
+        s.execute("cell.set", json!({"cell": "C5", "input": "=3+4"})).unwrap();
+        s.execute("edit.autoFill", json!({"source": source, "target": target, "mode": "formats"})).unwrap();
+        assert_eq!(s.execute("cell.get", json!({"cell": "C5"})).unwrap()["formula"], "=3+4");
+        let sh = s.doc().unwrap().wb.active().unwrap();
+        assert_eq!(sh.style_id(CellRef::parse("C5").unwrap()), if whole { red } else { Default::default() });
+        assert_eq!(sh.rows.get(&4).and_then(|l| l.style), whole.then_some(red));
+    }
+}
+
+#[test]
+fn autofill_values_uses_inherited_destination_style_for_whole_rows_only() {
+    for (source, target, whole) in [("7:7", "7:8", true), ("C7", "C7:C8", false)] {
+        let mut s = s();
+        let [_, _, green] = whole_row_autofill_fixture(&mut s);
+        s.execute("cell.set", json!({"cell": "C7", "input": "from above"})).unwrap();
+        let before = s.doc().unwrap().wb.active().unwrap().rows.clone();
+        s.execute("edit.autoFill", json!({"source": source, "target": target, "mode": "values"})).unwrap();
+        assert_eq!(v(&s, "C8"), Value::from("from above"));
+        let sh = s.doc().unwrap().wb.active().unwrap();
+        assert_eq!(sh.style_id(CellRef::parse("C8").unwrap()), if whole { green } else { Default::default() });
+        assert_eq!(sh.rows, before);
+    }
+}
+
+fn assert_line_edit_refused(s: &mut Session, id: &str, params: Json, reason: &str) {
+    let d = s.doc().unwrap();
+    let (before, undo, redo, selection) = (d.wb.clone(), d.undo.len(), d.redo.len(), d.selection.clone());
+    let result = s.execute(id, params);
+    assert!(result.unwrap_err().to_string().contains(reason));
+    let d = s.doc().unwrap();
+    assert!(std::sync::Arc::ptr_eq(&d.wb, &before), "refusal must not commit any cells or lines");
+    assert_eq!((d.undo.len(), d.redo.len()), (undo, redo));
+    assert_eq!(d.selection.a1(), selection.a1());
+}
+
+#[test]
+fn whole_row_autofill_refuses_inherited_protection_changes() {
+    use gridcraft_model::{LineInfo, SheetProtection, Style};
+
+    for (locked, hidden) in [(false, false), (true, true)] {
+        let mut s = s();
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let mut style = Style::default();
+        style.protection.locked = locked;
+        style.protection.hidden = hidden;
+        let id = wb.styles.intern(style);
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.rows.insert(2, LineInfo { size: Some(40.), style: Some(id), custom: true, ..Default::default() });
+        sh.protection = Some(SheetProtection { format_rows: true, ..Default::default() });
+        assert_line_edit_refused(&mut s, "edit.autoFill", json!({"source": "3:3", "target": "3:4"}), "can't change cell protection");
+    }
+}
+
+#[test]
+fn whole_row_paste_refuses_inherited_protection_changes() {
+    use gridcraft_model::{LineInfo, SheetProtection, Style};
+
+    let mut s = s();
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let mut unlocked = Style::default();
+    unlocked.protection.locked = false;
+    let id = wb.styles.intern(unlocked);
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.rows.insert(2, LineInfo { style: Some(id), ..Default::default() });
+    sh.protection = Some(SheetProtection { format_rows: true, ..Default::default() });
+    s.execute("edit.copy", json!({"range": "3:3"})).unwrap();
+    assert_line_edit_refused(&mut s, "edit.paste", json!({"at": "A4"}), "can't change cell protection");
+}
+
+#[test]
+fn whole_row_transfer_checks_whether_explicit_style_still_masks_line_protection() {
+    use gridcraft_model::{LineInfo, SheetProtection, Style};
+
+    for (paste, retain_mask) in [(false, false), (true, false), (false, true)] {
+        let mut s = s();
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let mut unlocked = Style::default();
+        unlocked.protection.locked = false;
+        let unlocked = wb.styles.intern(unlocked);
+        let mut locked = Style::default();
+        locked.font.bold = true;
+        let locked = wb.styles.intern(locked);
+        let sh = wb.sheet_mut(0).unwrap();
+        // A4 is the only position where the line replacement can change inherited flags.
+        for col in 1..gridcraft_core::MAX_COLS {
+            sh.cols.insert(col, LineInfo { style: Some(unlocked), ..Default::default() });
+        }
+        sh.rows.insert(2, LineInfo { style: Some(unlocked), ..Default::default() });
+        let at = CellRef::parse("A4").unwrap();
+        sh.set_style(at, locked);
+        if retain_mask {
+            sh.set_style(CellRef::parse("A3").unwrap(), locked);
+        }
+        sh.protection = Some(SheetProtection { format_rows: true, ..Default::default() });
+        if paste {
+            s.execute("edit.copy", json!({"range": "3:3"})).unwrap();
+            assert_line_edit_refused(&mut s, "edit.paste", json!({"at": "A4"}), "can't change cell protection");
+        } else {
+            let params = json!({"source": "3:3", "target": "3:4", "mode": "formats"});
+            if retain_mask {
+                s.execute("edit.autoFill", params).unwrap();
+                let sh = s.doc().unwrap().wb.active().unwrap();
+                assert_eq!(sh.rows[&3].style, Some(unlocked));
+                assert_eq!(sh.style_id(at), locked);
+            } else {
+                assert_line_edit_refused(&mut s, "edit.autoFill", params, "can't change cell protection");
+            }
+        }
+    }
+}
+
+#[test]
+fn whole_row_autofill_allows_formatting_with_unchanged_protection() {
+    let mut s = s();
+    let [red, _, _] = whole_row_autofill_fixture(&mut s);
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.protection = Some(gridcraft_model::SheetProtection { format_rows: true, ..Default::default() });
+    s.execute("edit.autoFill", json!({"source": "3:3", "target": "3:5", "mode": "formats"})).unwrap();
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    assert_eq!((sh.row_height(4), sh.style_id(CellRef::parse("C5").unwrap())), (40., red));
+}
+
+#[test]
+fn whole_row_cut_compares_protection_for_the_final_lines() {
+    use gridcraft_model::{LineInfo, SheetProtection, Style};
+
+    for (unlocked, at) in [(false, "A4"), (true, "A8")] {
+        let mut s = s();
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let mut style = Style::default();
+        style.protection.locked = false;
+        style.font.bold = true;
+        let id = wb.styles.intern(style);
+        let sh = wb.sheet_mut(0).unwrap();
+        for (row, size) in [(2, 40.), (3, 50.)] {
+            sh.rows.insert(row, LineInfo { size: Some(size), style: Some(id), custom: true, ..Default::default() });
+        }
+        if !unlocked {
+            // The vacated source falls back to column styles with the same nondefault flags.
+            for col in 0..gridcraft_core::MAX_COLS {
+                sh.cols.insert(col, LineInfo { style: Some(id), ..Default::default() });
+            }
+            sh.rows.insert(4, LineInfo { style: Some(id), ..Default::default() });
+        }
+        // The non-overlapping destination already has the same protection. Only the source
+        // reset to default can change flags in this case.
+        if unlocked {
+            for row in 7..=8 {
+                sh.rows.insert(row, LineInfo { style: Some(id), ..Default::default() });
+            }
+        }
+        sh.protection = Some(SheetProtection { format_rows: true, ..Default::default() });
+        s.execute("edit.cut", json!({"range": "3:4"})).unwrap();
+        if unlocked {
+            assert_line_edit_refused(&mut s, "edit.paste", json!({"at": at}), "can't change cell protection");
+        } else {
+            let at_source = CellRef::parse("A3").unwrap();
+            assert_eq!(s.doc().unwrap().wb.active().unwrap().style_id(at_source), id);
+            s.execute("edit.paste", json!({"at": at})).unwrap();
+            let sh = s.doc().unwrap().wb.active().unwrap();
+            assert!(!sh.rows.contains_key(&2));
+            assert_eq!(sh.style_id(at_source), id);
+            assert_eq!((sh.row_height(3), sh.rows[&3].style, sh.row_height(4), sh.rows[&4].style), (40., Some(id), 50., Some(id)));
+        }
+    }
+}
+
+#[test]
+fn whole_row_autofill_refusal_leaves_cells_lines_and_history_unchanged() {
+    let mut s = s();
+    whole_row_autofill_fixture(&mut s);
+    assert_line_edit_refused(&mut s, "edit.autoFill", json!({"source": "3:4", "target": "3:308"}), "range too large");
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    wb.sheet_mut(0).unwrap().protection = Some(gridcraft_model::SheetProtection::default());
+    assert_line_edit_refused(&mut s, "edit.autoFill", json!({"source": "3:4", "target": "3:9"}), "Formatting rows");
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    wb.sheet_mut(0).unwrap().protection.as_mut().unwrap().format_rows = true;
+    assert_line_edit_refused(&mut s, "edit.autoFill", json!({"source": "3:4", "target": "3:9"}), "trying to change is on a protected sheet");
 }
 
 /// ft-3ir.10.16: pasting whole columns walked every one of their 1,048,576 rows and added one

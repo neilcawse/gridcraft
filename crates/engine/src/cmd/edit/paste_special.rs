@@ -112,6 +112,8 @@ pub(super) fn paste_internal(s: &mut Session, p: &Json, transfer_lines: bool) ->
             }
             *style_map.entry(id).or_insert_with(|| wb.styles.intern(src_wb.styles.get(id).clone()))
         };
+        let protected_dest = line_axis.and_then(|_| cx.wb.sheets.get(dest_sheet).filter(|sh| sh.is_protected()).cloned());
+        let mut protected_source = None;
         if let Some(axis) = line_axis {
             let (first, last) = (axis.index(src.start), axis.index(src.end));
             let dest = axis.index(at);
@@ -127,10 +129,20 @@ pub(super) fn paste_internal(s: &mut Session, p: &Json, transfer_lines: bool) ->
             };
             let from = live.as_deref().unwrap_or(src_sheet);
             let incoming = axis.lines(from).range(first..=last).map(|(&i, &info)| (dest + (i - first), info));
-            if cut_move && (clip.sheet != dest_sheet || first != dest) {
-                axis.replace(cx, clip.sheet, first, last, std::iter::empty(), &mut map_style)?;
+            let (dest_last, moving) = (dest + (last - first), cut_move && (clip.sheet != dest_sheet || first != dest));
+            if moving && clip.sheet == dest_sheet && first <= dest_last && dest <= last {
+                // Replace overlapping lines directly with their final format so the row/column
+                // formatting permission is checked against actual changes, not a temporary reset.
+                axis.replace(cx, dest_sheet, first.min(dest)..=last.max(dest_last), incoming, &mut map_style, true)?;
+            } else {
+                if moving {
+                    axis.replace(cx, clip.sheet, first..=last, std::iter::empty(), &mut map_style, true)?;
+                }
+                axis.replace(cx, dest_sheet, dest..=dest_last, incoming, &mut map_style, true)?;
             }
-            axis.replace(cx, dest_sheet, dest, dest + (last - first), incoming, &mut map_style)?;
+            if moving && clip.sheet != dest_sheet {
+                protected_source = live.filter(|sh| sh.is_protected());
+            }
         }
         let mut moved_formulas = std::collections::BTreeMap::new();
         let mut moved_pictures = std::collections::BTreeMap::new();
@@ -392,6 +404,21 @@ pub(super) fn paste_internal(s: &mut Session, p: &Json, transfer_lines: bool) ->
             }
         }
         let pasted = RangeRef::new(at, at.offset_clamped(i64::from(tiles_r * h) - 1, i64::from(tiles_c * w) - 1));
+        if let Some(axis) = line_axis {
+            if let Some(before) = &protected_dest {
+                if cut_move && clip.sheet == dest_sheet && src.intersects(&pasted) {
+                    axis.check_protection(&cx.wb, dest_sheet, before, src.union(&pasted))?;
+                } else {
+                    axis.check_protection(&cx.wb, dest_sheet, before, pasted)?;
+                    if cut_move && clip.sheet == dest_sheet {
+                        axis.check_protection(&cx.wb, dest_sheet, before, src)?;
+                    }
+                }
+            }
+            if let Some(before) = &protected_source {
+                axis.check_protection(&cx.wb, clip.sheet, before, src)?;
+            }
+        }
         if !link && matches!(what, What::All | What::AllExceptBorders | What::Validation) {
             paste_validations(cx, src_sheet, src, dest_sheet, pasted, PasteMode { transpose, skip_blanks, skip_rows: &skip_rows })?;
         }
@@ -472,6 +499,13 @@ impl LineAxis {
         }
     }
 
+    pub(super) fn span(self, first: u32, last: u32) -> RangeRef {
+        match self {
+            Self::Rows => RangeRef::rows(first, last),
+            Self::Columns => RangeRef::cols(first, last),
+        }
+    }
+
     pub(super) fn lines(self, sheet: &Sheet) -> &BTreeMap<u32, LineInfo> {
         match self {
             Self::Rows => &sheet.rows,
@@ -485,24 +519,24 @@ impl LineAxis {
         self,
         cx: &mut Ctx,
         sheet: usize,
-        first: u32,
-        last: u32,
+        span: std::ops::RangeInclusive<u32>,
         incoming: impl Iterator<Item = (u32, LineInfo)>,
         map_style: &mut impl FnMut(StyleId, &mut Workbook) -> StyleId,
+        copy_hidden: bool,
     ) -> Result<()> {
         let target = cx.wb.sheets.get(sheet).ok_or(EngineError::NoDocument)?;
         let lines = self.lines(target);
         let mut incoming = incoming.peekable();
         // Take the union of recorded source and destination lines, not the entire axis.
-        let mut existing = lines.range(first..=last).map(|(&i, &info)| (i, info)).peekable();
+        let mut existing = lines.range(span).map(|(&i, &info)| (i, info)).peekable();
         let mut changes = Vec::new();
         while let Some(i) = existing.peek().map(|x| x.0).into_iter().chain(incoming.peek().map(|x| x.0)).min() {
             let old = existing.next_if(|x| x.0 == i).map(|x| x.1).unwrap_or_default();
             let new = incoming.next_if(|x| x.0 == i).map(|x| x.1).unwrap_or_default();
-            // Properties not measured by Range.Copy/Cut/AutoFill remain attached to their original lines.
+            // Outline, collapse, boundary edges and bare-row markers stay on their own lines.
             let info = LineInfo {
                 size: new.size,
-                hidden: new.hidden,
+                hidden: if copy_hidden { new.hidden } else { old.hidden },
                 custom: new.custom,
                 saved_size: new.saved_size,
                 saved_col_flags: new.saved_col_flags,
@@ -543,6 +577,70 @@ impl LineAxis {
                 lines.remove(&i);
             } else {
                 lines.insert(i, info);
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks protection against the final staged state, including cells that gain or lose
+    /// explicit formatting. Only unrepresented cells need a separate inheritance check.
+    pub(super) fn check_protection(self, wb: &Workbook, sheet: usize, before: &Sheet, span: RangeRef) -> Result<()> {
+        let after = wb.sheet(sheet).ok_or(EngineError::NoDocument)?;
+        let flags = |id| wb.styles.get(id).protection;
+        for (at, _) in before.cells.iter_range(span).chain(after.cells.iter_range(span).filter(|(at, _)| before.cell(*at).is_none())) {
+            if flags(before.style_id(at)) != flags(after.style_id(at)) {
+                return Err(EngineError::Other(crate::cmd::PROTECTION_FLAGS.into()));
+            }
+        }
+        let range = self.index(span.start)..=self.index(span.end);
+        let old = self.lines(before);
+        let new = self.lines(after);
+        let indices = old.range(range.clone()).chain(new.range(range).filter(|(i, _)| !old.contains_key(i)));
+        for (&i, _) in indices {
+            self.check_blank_protection(wb, before, after, i)?;
+        }
+        Ok(())
+    }
+
+    fn check_blank_protection(self, wb: &Workbook, before: &Sheet, after: &Sheet, i: u32) -> Result<()> {
+        // Whole-line transfers never edit the perpendicular line formats.
+        let style = |sh| self.lines(sh).get(&i).and_then(|line| line.style);
+        let flags = |id| wb.styles.get(id).protection;
+        let (old, new) = (style(before).map(flags), style(after).map(flags));
+        if old == new {
+            return Ok(());
+        }
+        let default = flags(StyleId::DEFAULT);
+        let flips = |fallback| old.unwrap_or(fallback) != new.unwrap_or(fallback);
+        // Count cells whose *inherited* flags would change using the sparse perpendicular
+        // formats, then subtract explicit cells (which override both line styles).
+        let flips_default = flips(default);
+        let n = match self {
+            Self::Rows => {
+                let mut n = if flips_default { gridcraft_core::MAX_COLS } else { 0 };
+                if old.is_none() || new.is_none() {
+                    for id in before.cols.values().filter_map(|line| line.style) {
+                        match (flips_default, flips(flags(id))) {
+                            (true, false) => n -= 1,
+                            (false, true) => n += 1,
+                            _ => (),
+                        }
+                    }
+                }
+                n
+            }
+            Self::Columns if flips_default => gridcraft_core::MAX_ROWS - before.rows.values().filter(|line| line.style.is_some()).count() as u32,
+            Self::Columns => 0,
+        };
+        if n != 0 {
+            let span = self.span(i, i);
+            let explicit = before.cells.iter_range(span).chain(after.cells.iter_range(span).filter(|(at, _)| before.cell(*at).is_none()));
+            let masked = explicit.filter(|(at, _)| match self {
+                Self::Rows => flips(before.cols.get(&at.col).and_then(|line| line.style).map_or(default, flags)),
+                Self::Columns => before.rows.get(&at.row).is_none_or(|line| line.style.is_none()),
+            });
+            if masked.take(n as usize).count() < n as usize {
+                return Err(EngineError::Other(crate::cmd::PROTECTION_FLAGS.into()));
             }
         }
         Ok(())

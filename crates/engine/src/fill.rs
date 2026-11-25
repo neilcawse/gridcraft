@@ -87,7 +87,7 @@ pub fn holds_source_in_corner(src: RangeRef, target: RangeRef) -> bool {
 
 /// Fills `target` (which contains `src` at one edge) from the pattern in `src`.
 pub fn fill(cx: &mut Ctx, sheet: usize, src: RangeRef, target: RangeRef, mode: FillMode) -> Result<()> {
-    fill_except(cx, sheet, src, target, mode, &std::collections::BTreeSet::new())
+    fill_impl(cx, sheet, src, target, mode, &std::collections::BTreeSet::new(), src.is_full_rows() != src.is_full_cols())
 }
 
 /// [`fill`], leaving the rows in `skip_rows` untouched (Fill Down over a filtered range).
@@ -98,6 +98,18 @@ pub fn fill_except(
     target: RangeRef,
     mode: FillMode,
     skip_rows: &std::collections::BTreeSet<u32>,
+) -> Result<()> {
+    fill_impl(cx, sheet, src, target, mode, skip_rows, false)
+}
+
+fn fill_impl(
+    cx: &mut Ctx,
+    sheet: usize,
+    src: RangeRef,
+    target: RangeRef,
+    mode: FillMode,
+    skip_rows: &std::collections::BTreeSet<u32>,
+    whole_line: bool,
 ) -> Result<()> {
     let custom = cx.wb.custom_lists.clone();
     let Some(sh) = cx.wb.sheet(sheet) else { return Ok(()) };
@@ -172,7 +184,7 @@ pub fn fill_except(
             match mode {
                 FillMode::Formats => {
                     let mut existing = sh.cell(*t).cloned().unwrap_or_default();
-                    existing.style = cell.style;
+                    existing.style = if whole_line && scell.is_none() && existing.has_content() { sh.style_id(sc) } else { cell.style };
                     writes.push((*t, Some(existing)));
                     continue;
                 }
@@ -192,7 +204,7 @@ pub fn fill_except(
                     {
                         cell.value = v;
                     }
-                    cell.style = style;
+                    cell.style = if whole_line && mode == FillMode::ValuesOnly && cell.has_content() { sh.style_id(*t) } else { style };
                 }
             }
             if let Some(picture) = sh.cell_pictures.get(&sc) {

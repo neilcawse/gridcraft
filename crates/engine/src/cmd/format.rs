@@ -251,11 +251,10 @@ pub(crate) fn apply_style(s: &mut Session, p: &Json, f: impl Fn(&mut Style)) -> 
         // that flips `locked` from the format permission would authorize content edits that
         // the password should still gate, so those flags may not change (Excel keeps that
         // checkbox disabled while the sheet is protected).
-        const FLAG_GUARD: &str = "You can't change cell protection on a protected sheet. Unprotect it first.";
         macro_rules! guard_flags {
             ($old:expr, $new:expr) => {
                 if guarded && cx.wb.styles.get($old).protection != cx.wb.styles.get($new).protection {
-                    return Err(EngineError::Other(FLAG_GUARD.into()));
+                    return Err(EngineError::Other(super::PROTECTION_FLAGS.into()));
                 }
             };
         }

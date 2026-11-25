@@ -710,6 +710,8 @@ fn check_protection(old: &Workbook, new: &Workbook, unlocked: &[(String, String)
     Ok(())
 }
 
+pub(crate) const PROTECTION_FLAGS: &str = "You can't change cell protection on a protected sheet. Unprotect it first.";
+
 /// Refuses an action a protected sheet does not allow, by the tick box for it in Review ▸ Protect
 /// Sheet. `what` names the action in the message. An unprotected sheet allows everything.
 ///
