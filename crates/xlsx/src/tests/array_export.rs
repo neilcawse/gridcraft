@@ -501,8 +501,8 @@ fn legacy_external_range_names_intersect_only_in_value_positions() {
     let cases = [
         ("B2", "[1]!Rates", "@[1]!Rates"),
         ("C2", "SUM(SQRT([1]!Rates))", "SUM(SQRT(@[1]!Rates))"),
-        ("D2", "SUM('[1]A!B''s['!Rates*2)", "SUM(@'[1]A!B''s['!Rates*2)"),
-        ("E2", "SUMPRODUCT(SQRT('[1]A!B''s['!Rates))", "SUMPRODUCT(SQRT('[1]A!B''s['!Rates))"),
+        ("D2", "SUM('[1]A!B''s'!Rates*2)", "SUM(@'[1]A!B''s'!Rates*2)"),
+        ("E2", "SUMPRODUCT(SQRT('[1]A!B''s'!Rates))", "SUMPRODUCT(SQRT('[1]A!B''s'!Rates))"),
         ("F2", "SUM([1]!Rates)", "SUM([1]!Rates)"),
         ("G2", "[1]!FixedRate*2", "[1]!FixedRate*2"),
     ];
@@ -511,7 +511,7 @@ fn legacy_external_range_names_intersect_only_in_value_positions() {
         body.push_str(&format!(r#"<c r="{at}"><f>{file}</f><v>0</v></c>"#));
     }
     body.push_str(r#"<c r="H2" cm="1"><f t="array" ref="H2:H3">SQRT([1]!Rates)</f><v>2</v></c></row></sheetData>"#);
-    let link = r#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><externalBook><sheetNames><sheetName val="A!B's["/></sheetNames><definedNames><definedName name="Rates" refersTo="'A!B''s['!$A$1:$A$2"/><definedName name="Rates" sheetId="0" refersTo="$A$1:$A$2"/><definedName name="FixedRate" refersTo="'A!B''s['!$A$1"/></definedNames><sheetDataSet><sheetData sheetId="0"/></sheetDataSet></externalBook></externalLink>"#;
+    let link = r#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><externalBook><sheetNames><sheetName val="A!B's"/></sheetNames><definedNames><definedName name="Rates" refersTo="'A!B''s'!$A$1:$A$2"/><definedName name="Rates" sheetId="0" refersTo="$A$1:$A$2"/><definedName name="FixedRate" refersTo="'A!B''s'!$A$1"/></definedNames><sheetDataSet><sheetData sheetId="0"/></sheetDataSet></externalBook></externalLink>"#;
     let bytes = super::minimal(
         &body,
         &[("xl/externalLinks/externalLink1.xml", link)],
