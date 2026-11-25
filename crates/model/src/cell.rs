@@ -14,7 +14,7 @@ use crate::style::StyleId;
 #[serde(from = "SavedFormula")]
 pub struct Formula {
     pub text: String,
-    /// Imported formula-bar spelling, only when it differs from canonical text in layout alone.
+    /// Imported formula-bar spelling, only when it differs from canonical text.
     /// A rewrite that changes the expression discards it rather than trying to preserve the
     /// original layout. Boxed twice so the common `None` costs one pointer, keeping a formula
     /// in the same allocation size class it had without this field.
