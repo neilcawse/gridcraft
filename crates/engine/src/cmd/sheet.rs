@@ -443,7 +443,13 @@ fn drawn_box_moved(before: &Sheet, after: &Sheet, r: gridcraft_model::DrawingRef
         gridcraft_model::DrawingRef::Group(id) => after.group_contents(id),
         _ => Vec::new(),
     };
-    std::iter::once(r).chain(members).any(|m| rect(before, m) != rect(after, m))
+    // Summing the same line sizes in a different order can perturb row_top/col_left.
+    // Compare at the drawing writer's whole-EMU precision, not raw pixel precision.
+    let differs = |a: f64, b: f64| a != b && (!a.is_finite() || !b.is_finite() || (a * 9525.0).round() != (b * 9525.0).round());
+    std::iter::once(r).chain(members).any(|m| match (rect(before, m), rect(after, m)) {
+        (Some(a), Some(b)) => differs(a.x, b.x) || differs(a.y, b.y) || differs(a.w, b.w) || differs(a.h, b.h),
+        (a, b) => a.is_some() != b.is_some(),
+    })
 }
 
 /// Whether a formula's 3-D references cover a different set of sheets after a structural edit.

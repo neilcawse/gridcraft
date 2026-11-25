@@ -5547,6 +5547,85 @@ fn structural_edit_drops_fixed_placement_only_when_its_drawn_position_moves() {
 }
 
 #[test]
+fn structural_edit_keeps_fixed_placement_despite_row_top_roundoff() {
+    use gridcraft_model::{AnchorMode, DrawingFile, DrawingPlacement, DrawingRef, LineInfo};
+    let mut s = s();
+    let r = DrawingRef::Image(add_image(&mut s, "B7", AnchorMode::Absolute));
+    let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+    sh.default_row_height = 20.0;
+    // The same tiny row height leaves and enters the prefix above B7. Its contribution
+    // is added before the large custom height before the deletion, and after it afterward.
+    for (row, size) in [(0, 6e-10), (2, 50.3), (6, 6e-10)] {
+        sh.rows.insert(row, LineInfo { size: Some(size), ..LineInfo::default() });
+    }
+    let anchor = sh.images[0].anchor;
+    let before = sh.anchor_rect(&anchor);
+    let placement = DrawingPlacement::Absolute { pos: (609_600, 1_240_000), ext: (381_000, 381_000) };
+    sh.drawing_files.insert(r, DrawingFile { anchor, placement: placement.clone() });
+    s.execute("home.deleteRows", json!({"rows": "1:1"})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    let after = sh.anchor_rect(&sh.images[0].anchor);
+    assert_ne!(before.y, after.y);
+    assert!((before.y - after.y).abs() < 1e-12);
+    assert_eq!(sh.drawing_files.get(&r).map(|file| &file.placement), Some(&placement));
+}
+
+#[test]
+fn structural_edit_compares_fixed_placement_in_whole_emu() {
+    use gridcraft_model::{AnchorMode, DrawingFile, DrawingPlacement, DrawingRef, LineInfo};
+    for (before_emu, after_emu, kept) in [(0.45, -0.45, true), (0.625, 0.375, false)] {
+        let mut s = s();
+        let r = DrawingRef::Image(add_image(&mut s, "B7", AnchorMode::Absolute));
+        let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+        sh.default_row_height = 20.0;
+        for (row, offset) in [(0, before_emu), (6, after_emu)] {
+            sh.rows.insert(row, LineInfo { size: Some((20.0 + offset / 9525.0) as f32), ..LineInfo::default() });
+        }
+        let anchor = sh.images[0].anchor;
+        let before = sh.anchor_rect(&anchor).y * 9525.0;
+        let placement = DrawingPlacement::Absolute { pos: (609_600, before.round() as i64), ext: (381_000, 381_000) };
+        sh.drawing_files.insert(r, DrawingFile { anchor, placement });
+        s.execute("home.deleteRows", json!({"rows": "1:1"})).unwrap();
+        let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+        let after = sh.anchor_rect(&sh.images[0].anchor).y * 9525.0;
+        assert!((0.2..1.0).contains(&(before - after)));
+        assert_eq!(before.round() == after.round(), kept);
+        assert_eq!(sh.drawing_files.contains_key(&r), kept);
+    }
+}
+
+#[test]
+fn structural_edit_drops_fixed_group_placement_when_only_a_member_moves() {
+    use gridcraft_model::{AnchorMode, DrawingFile, DrawingPlacement, DrawingRef, LineInfo};
+    let mut s = s();
+    let first = add_image(&mut s, "B2", AnchorMode::Absolute);
+    let second = add_image(&mut s, "B7", AnchorMode::Absolute);
+    group_objects(&mut s, vec![DrawingRef::Image(first), DrawingRef::Image(second)]);
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.rows.insert(4, LineInfo { size: Some(50.0), ..LineInfo::default() });
+    let (mut imported, _) = gridcraft_xlsx::read_xlsx(&gridcraft_xlsx::write_xlsx(wb).unwrap()).unwrap();
+    let sh = imported.sheet_mut(0).unwrap();
+    let group = &sh.groups[0];
+    assert!(sh.source_group(group).is_some());
+    let anchor = group.anchor;
+    let reference = DrawingRef::Group(group.id);
+    let before = sh.anchor_rect(&anchor);
+    let member = group.members[1];
+    let member_before = sh.drawing_rect(member).unwrap();
+    let emu = |px: f64| (px * 9525.0).round() as i64;
+    let placement = DrawingPlacement::Absolute { pos: (emu(before.x), emu(before.y)), ext: (emu(before.w), emu(before.h)) };
+    sh.drawing_files.insert(reference, DrawingFile { anchor, placement });
+    s.doc_mut().unwrap().wb = std::sync::Arc::new(imported);
+    s.execute("home.deleteRows", json!({"rows": "5:5"})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert_eq!(sh.anchor_rect(&sh.groups[0].anchor), before);
+    assert_ne!(sh.drawing_rect(member), Some(member_before));
+    assert!(!sh.drawing_files.contains_key(&reference));
+    assert!(sh.groups[0].file.as_ref().unwrap().edited);
+}
+
+#[test]
 fn line_changes_follow_sheet_identity_through_rename_in_the_same_commit() {
     use gridcraft_model::{AnchorMode, DrawingFile, DrawingMarker, DrawingPlacement, DrawingRef, LineInfo};
     let mut s = s();
