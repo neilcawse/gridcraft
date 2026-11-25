@@ -7491,6 +7491,80 @@ fn validation_areas(s: &Session) -> Vec<String> {
     out
 }
 
+#[test]
+fn whole_row_paste_copies_height_and_undoes_and_redoes_it() {
+    use gridcraft_model::LineInfo;
+
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "A3", "input": "source"})).unwrap();
+    let heights = [44., 62.];
+    let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+    for (row, size) in [(2, heights[0]), (3, heights[1]), (7, 80.), (8, 90.)] {
+        sh.rows.insert(row, LineInfo { size: Some(size), custom: true, ..Default::default() });
+    }
+    let heights_at = |s: &Session, row| {
+        let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+        [sh.row_height(row), sh.row_height(row + 1)]
+    };
+    s.execute("edit.copy", json!({"range": "3:4"})).unwrap();
+    s.execute("selection.set", json!({"range": "8:9"})).unwrap();
+    s.execute("edit.paste", json!({})).unwrap();
+    assert_eq!(v(&s, "A8"), Value::from("source"));
+    assert_eq!(heights_at(&s, 7), heights, "the second row has no cells");
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(heights_at(&s, 7), [80., 90.]);
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(heights_at(&s, 7), heights);
+    s.execute("selection.set", json!({"range": "11:12"})).unwrap();
+    s.execute("edit.paste", json!({})).unwrap();
+    assert_eq!(heights_at(&s, 10), heights);
+    assert_eq!(heights_at(&s, 2), heights);
+}
+
+#[test]
+fn whole_column_paste_copies_width_and_format_to_another_sheet() {
+    use gridcraft_model::{LineInfo, Style};
+
+    let mut s = s();
+    s.execute("home.insertSheet", json!({"name": "Destination"})).unwrap();
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let mut bold = Style::default();
+    bold.font.bold = true;
+    let style = wb.styles.intern(bold);
+    let source = wb.sheet_index("Sheet1").unwrap();
+    let target = wb.sheet_index("Destination").unwrap();
+    let sh = wb.sheet_mut(source).unwrap();
+    sh.cols.insert(2, LineInfo { size: Some(123.), style: Some(style), ..Default::default() });
+    sh.cols.insert(3, LineInfo { size: Some(234.), ..Default::default() });
+    s.execute("edit.copy", json!({"sheet": "Sheet1", "range": "C:D"})).unwrap();
+    s.execute("sheet.activate", json!({"sheet": "Destination"})).unwrap();
+    s.execute("edit.paste", json!({"at": "H1"})).unwrap();
+    let wb = &s.doc().unwrap().wb;
+    let sh = wb.sheet(target).unwrap();
+    assert_eq!([sh.col_width(7), sh.col_width(8)], [123., 234.]);
+    assert!(wb.styles.get(sh.style_id(CellRef::parse("H10").unwrap())).font.bold);
+    assert_eq!(wb.sheet(source).unwrap().col_width(2), 123.);
+}
+
+#[test]
+fn ordinary_range_paste_keeps_destination_line_sizes() {
+    use gridcraft_model::LineInfo;
+
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "C3", "input": "source"})).unwrap();
+    let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+    sh.rows.insert(2, LineInfo { size: Some(44.), custom: true, ..Default::default() });
+    sh.rows.insert(7, LineInfo { size: Some(80.), custom: true, ..Default::default() });
+    sh.cols.insert(2, LineInfo { size: Some(123.), ..Default::default() });
+    sh.cols.insert(7, LineInfo { size: Some(234.), ..Default::default() });
+    s.execute("edit.copy", json!({"range": "C3:D4"})).unwrap();
+    s.execute("edit.paste", json!({"at": "H8"})).unwrap();
+    assert_eq!(v(&s, "H8"), Value::from("source"));
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert_eq!(sh.row_height(7), 80.);
+    assert_eq!(sh.col_width(7), 234.);
+}
+
 /// ft-3ir.10.16: pasting whole columns walked every one of their 1,048,576 rows and added one
 /// single-cell validation rule per pasted cell, re-cutting every rule each time (the fuzz run
 /// aborted on a 34 GB allocation). Validation now pastes as ranges and only cells that hold
