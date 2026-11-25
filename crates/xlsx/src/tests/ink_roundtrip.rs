@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use gridcraft_model::{Anchor, AnchorMode, Color, Shape, ShapeKind, Sheet, Workbook};
 
-use super::minimal;
+use super::{minimal, read_xlsx_legacy as read_xlsx};
+use crate::write_xlsx;
 use crate::xml::{self, El};
-use crate::{read_xlsx, write_xlsx};
 
 const POINTS: &str = r#"<a:moveTo><a:pt x="-20" y="10"/></a:moveTo><a:lnTo><a:pt x="100" y="80"/></a:lnTo><a:lnTo><a:pt x="180" y="20"/></a:lnTo>"#;
 const PATH: &str = r#"<a:path w="200" h="100" fill="none">"#;

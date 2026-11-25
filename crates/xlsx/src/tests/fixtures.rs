@@ -3,8 +3,7 @@
 use gridcraft_core::{CellError, CellRef, DateSystem, RangeRef, Value};
 use gridcraft_model::{AnchorMode, CalcMode, CfRule, Color, DrawingRef, HAlign, PatternType, StyleId, Underline, Visibility};
 
-use super::minimal;
-use crate::read_xlsx;
+use super::{minimal, read_xlsx_legacy as read_xlsx};
 
 fn at(a: &str) -> CellRef {
     CellRef::parse(a).unwrap()
@@ -1280,13 +1279,20 @@ fn custom_widths_equal_to_the_default_round_trip() {
     for c in 3..=6 {
         assert_eq!(s.cols.get(&c).and_then(|i| i.size), Some(64.0), "read col {c}");
     }
-    assert_eq!(s.cols.get(&7), None, "a width without customWidth equal to the default stays the default");
+    assert_eq!(s.cols.get(&7).and_then(|i| i.size), None, "a width without customWidth equal to the default stays inherited for layout");
     let bytes = crate::write_xlsx(&wb).unwrap();
     let mut pkg = crate::package::Package::open(&bytes).unwrap();
     let sheet = pkg.read_xml("xl/worksheets/sheet1.xml").unwrap().unwrap();
-    let cols: Vec<_> =
-        sheet.child("cols").unwrap().kids("col").map(|c| (c.attr_u32("min"), c.attr_u32("max"), c.flag("customWidth", false))).collect();
-    assert_eq!(cols, [(Some(4), Some(7), true)]);
+    let cols: Vec<_> = sheet
+        .child("cols")
+        .unwrap()
+        .kids("col")
+        .map(|c| (c.attr_u32("min"), c.attr_u32("max"), c.attr("width").unwrap().parse::<f64>().unwrap(), c.flag("customWidth", false)))
+        .collect();
+    assert_eq!(
+        cols,
+        [(Some(4), Some(5), 9.08, true), (Some(6), Some(6), 9.140625, true), (Some(7), Some(7), 9.2, true), (Some(8), Some(8), 9.140625, false)]
+    );
 }
 
 #[test]

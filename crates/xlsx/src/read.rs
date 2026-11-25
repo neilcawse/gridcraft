@@ -256,10 +256,10 @@ fn read_shared_strings(cx: &mut Ctx<'_>, wb_rels: &[Rel]) -> Result<(), IoError>
     Ok(())
 }
 
-fn select_geometry(cx: &mut Ctx<'_>, wb: &Workbook) {
+fn select_geometry(cx: &mut Ctx<'_>, wb: &Workbook, profile: fn(&gridcraft_model::Font) -> gridcraft_model::Geometry) {
     let normal =
         &wb.cell_styles.iter().find(|(name, _)| name.eq_ignore_ascii_case("Normal")).map_or(cx.styles.get(StyleId::DEFAULT), |(_, s)| s).font;
-    cx.geometry = gridcraft_model::Geometry::host(normal);
+    cx.geometry = profile(normal);
     if cx.geometry != gridcraft_model::Geometry::Legacy {
         cx.normal_row_height_px = gridcraft_model::geometry::mac_line_height_pt(normal) * (4.0 / 3.0);
     }
@@ -363,7 +363,11 @@ fn selected_workbook_view(workbook: &El) -> Option<&El> {
     views.kids("workbookView").find(|view| view.attr("visibility").unwrap_or("visible") == "visible").or_else(|| views.child("workbookView"))
 }
 
-pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(Workbook, ReadReport), IoError> {
+pub fn read_xlsx<'a>(
+    bytes: &'a [u8],
+    opts: crate::ReadOptions<'a>,
+    profile: fn(&gridcraft_model::Font) -> gridcraft_model::Geometry,
+) -> Result<(Workbook, ReadReport), IoError> {
     let functions = opts.functions;
     let known_function = opts.known_function;
     let pkg = Package::open(bytes)?;
@@ -420,7 +424,7 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
     wb.sheets.clear();
 
     read_workbook_styles(&mut cx, &mut wb, &wb_rels)?;
-    select_geometry(&mut cx, &wb);
+    select_geometry(&mut cx, &wb, profile);
     read_shared_strings(&mut cx, &wb_rels)?;
 
     if let Some(r) = find_rel(&wb_rels, "person").cloned()

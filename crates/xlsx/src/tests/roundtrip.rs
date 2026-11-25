@@ -829,16 +829,14 @@ fn xlsx_geometry_attributes_survive_layout_conversion() {
     for format in ["", custom_format] {
         let cols = r#"<cols><col min="1" max="1" width="8.30078125" customWidth="1"/></cols>"#;
         let rows = r#"<sheetData><row r="1" ht="15.51" customHeight="1"/><row r="2" ht="14.1234"/></sheetData>"#;
-        let wb = read_xlsx(&super::minimal(&format!("{format}{cols}{rows}"), &[], "", "")).unwrap().0;
+        let bytes = super::minimal(&format!("{format}{cols}{rows}"), &[], "", "");
+        let wb = crate::read::read_xlsx(&bytes, crate::ReadOptions::default(), Geometry::mac).unwrap().0;
         let sheet = &wb.sheets[0];
-        let mac = matches!(sheet.geometry, Geometry::Mac { .. });
         assert_eq!(sheet.rows[&0].saved_size, Some(15.51));
         assert_eq!(sheet.rows[&1].saved_size, Some(14.1234));
         assert_eq!(sheet.cols[&0].saved_size, Some(8.30078125));
-        if mac {
-            assert_eq!(sheet.row_height(0), 20.0);
-            assert_eq!(sheet.row_height(1), if format.is_empty() { 20.0 } else { 28.0 });
-        }
+        assert_eq!(sheet.row_height(0), 20.0);
+        assert_eq!(sheet.row_height(1), if format.is_empty() { 20.0 } else { 28.0 });
         let bytes = write_xlsx(&wb).unwrap();
         let mut pkg = Package::open(&bytes).unwrap();
         let xml = pkg.read_xml("xl/worksheets/sheet1.xml").unwrap().unwrap();
