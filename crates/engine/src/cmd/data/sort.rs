@@ -226,19 +226,18 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
         // The object's own geometry (its top-left anchor cell, offset and size) is read from the
         // pre-sort `sh`; a two-cell object's bottom-right cell is derived from its size here so it
         // can be re-fitted to the lines it spans after the sort.
-        let objs: Vec<Anchor> = sh.object_anchors().copied().collect();
-        let refs: Vec<gridcraft_model::ObjRef> = sh.object_refs().collect();
-        let descs: Vec<(u32, u32, f32, f32)> = objs
-            .iter()
-            .map(|a| {
+        let objs: Vec<_> = sh
+            .object_refs()
+            .zip(sh.object_anchors().copied())
+            .map(|(o, a)| {
                 let x2 = sh.col_left(a.cell.col) + a.dx as f64 + a.width.max(0.0) as f64;
                 let y2 = sh.row_top(a.cell.row) + a.dy as f64 + a.height.max(0.0) as f64;
                 let tc = sh.col_at(x2);
                 let tr = sh.row_at(y2);
-                (tc, tr, (x2 - sh.col_left(tc)) as f32, (y2 - sh.row_top(tr)) as f32)
+                (o, a, (tc, tr, (x2 - sh.col_left(tc)) as f32, (y2 - sh.row_top(tr)) as f32))
             })
             .collect();
-        let shm = cx.sheet_mut(sheet)?;
+        let shm = cx.wb.sheet_mut(sheet).ok_or_else(|| EngineError::Other("no such sheet".into()))?;
         for (c, cell) in &moved {
             match cell {
                 Some(x) => shm.set_cell(*c, x.clone()),
@@ -274,21 +273,19 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
                 }
             }
         }
-        // Re-anchor floating objects now that the row heights are final. `objs` was collected in
-        // `object_anchors` order, which `object_anchors_mut` repeats.
+        // Re-anchor floating objects on the sorted grid, before automatic row fitting.
         // Only objects anchored inside the sorted block move: within its lines on the sort axis
         // and within its span on the other axis (a picture beside the block stays put).
         let (b0, b1) = if by_cols { (body.start.col, body.end.col) } else { (body.start.row, body.end.row) };
         let (o0, o1) = if by_cols { (body.start.row, body.end.row) } else { (body.start.col, body.end.col) };
-        let new_anchors: Vec<Option<Anchor>> = objs
+        let new_anchors: Vec<_> = objs
             .into_iter()
-            .zip(descs)
-            .map(|(a, desc)| {
+            .map(|(o, a, desc)| {
                 let other = if by_cols { a.cell.row } else { a.cell.col };
-                if other < o0 || other > o1 { None } else { sorted_anchor(shm, a, desc, by_cols, b0, b1, &dst_of) }
+                (o, if other < o0 || other > o1 { None } else { sorted_anchor(shm, a, desc, by_cols, b0, b1, &dst_of) })
             })
             .collect();
-        for (a, n) in shm.object_anchors_mut().zip(&new_anchors) {
+        for (a, (_, n)) in shm.object_anchors_mut().zip(&new_anchors) {
             if let Some(n) = n {
                 *a = *n;
             }
@@ -296,8 +293,12 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
         // What the sort placed is on the lines it leaves: following the sorted row heights must
         // not move it again (though the row fit after the sort does).
         let uid = shm.uid.get();
-        cx.placed.extend(refs.into_iter().zip(&new_anchors).filter(|(_, n)| n.is_some()).map(|(o, _)| (uid, o)));
-        let shm = cx.sheet_mut(sheet)?;
+        for (o, anchor) in new_anchors {
+            if let Some(anchor) = anchor {
+                shm.discard_stale_drawing_placement(o, anchor);
+                cx.placed.push((uid, o));
+            }
+        }
         shm.discard_changed_drawing_files();
         for (c, _) in moved {
             cx.changed.push((sheet, c));

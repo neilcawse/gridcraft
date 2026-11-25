@@ -268,6 +268,17 @@ impl Sheet {
         }
     }
 
+    /// A command can place an object on a changed grid without changing its editable anchor.
+    /// Keep its file placement only if the markers still describe that anchor on this grid.
+    pub fn discard_stale_drawing_placement(&mut self, o: crate::ObjRef, anchor: Anchor) {
+        if let Some(r) = crate::sheet::drawing_reference(o)
+            && let Some(file) = self.drawing_files.get(&r)
+            && (file.anchor != anchor || file.placement.anchor(self) != anchor)
+        {
+            self.invalidate_drawing_file(r);
+        }
+    }
+
     /// Forget file placement after a bulk operation changes the anchors directly.
     pub fn discard_changed_drawing_files(&mut self) {
         let mut files = std::mem::take(&mut self.drawing_files);

@@ -245,6 +245,27 @@ fn a_chart_the_sort_moves_still_follows_the_row_fit_after_it() {
     assert!((r.y - top).abs() < 1e-3 && (r.y + r.h - bottom).abs() < 1e-3, "chart {r:?} spans rows 4 to 6 over the fitted rows ({top}, {bottom})");
 }
 
+#[test]
+fn a_sort_that_keeps_the_editable_anchor_does_not_reuse_stale_markers_during_fit() {
+    let mut s = chart_with_named_end_row(3, 50 * 9525, &[]);
+    s.execute("range.setValues", json!({"range": "A1", "values": [[3], [2], [1]]})).unwrap();
+    s.execute("home.rowHeight", json!({"rows": "1:1", "points": 37.5})).unwrap();
+    {
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let large = wb.styles.derive(StyleId::DEFAULT, |st| st.font.size = 36.0);
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.set_style(CellRef::new(2, 0), large);
+        sh.rows.entry(2).or_default().size = Some(sh.default_row_height);
+    }
+    let before = chart_rect(&s);
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert!(sh.drawing_files.contains_key(&DrawingRef::Chart(sh.charts[0].id)));
+    s.execute("data.sort", json!({"range": "A1:D3", "header": false, "keys": [{"column": "A"}]})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert!(sh.row_height(0) > sh.default_row_height + 20.0, "the tall content sorted into row 1 fits there");
+    assert_rect(chart_rect(&s), ObjectRect { y: sh.row_top(1), ..before }, "the fit above the chart only moves it");
+}
+
 /// The row fit after a deletion re-measures the chart against the remapped rows.
 #[test]
 fn a_row_fit_after_a_deletion_sizes_the_shifted_chart() {
