@@ -155,6 +155,7 @@ refresh. Counted under features (Get & Transform, ~10% ready), not here.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-25 | minor | Renaming a table now updates defined-name formulas (including names scoped to retained sheets), calculated-column and custom-total formulas, and PivotTable sources that directly name the table, in the same undoable edit as cell references and table slicers. Literal totals labels and opaque package parts are unchanged. See [Microsoft's structured-reference rename rule](https://support.microsoft.com/en-us/excel/using-structured-references-with-excel-tables). |
 | 2026-11-25 | minor | XLSX: table slicers (Excel 2013 `x15:tableSlicerCache`) now round-trip, including table and column bindings, style, item options, and `sle15` drawing frames. Slicers follow table and column renames; removing a source table or column removes its slicers in the same undoable edit. Import and save warn and skip unresolved slicers. A dropped slicer leaves no cache, part, list entry or frame. Its imported `#N/A` marker survives as an ordinary workbook name, as for pivot slicers; no new marker is written. |
 | 2026-11-13 | minor | PDF of a right-to-left sheet keeps explicit Left and Right alignment on the side the grid shows them |
 | 2026-11-12 | minor | `.xls` files open with their data validation (drop-down lists, input messages, error alerts and the rules), read by craft-xls and mapped as the `.xlsx` reader maps the same rules. A rule Excel would refuse, or one past 65,536 in a workbook, is skipped with a warning (#3634, from #3636) |

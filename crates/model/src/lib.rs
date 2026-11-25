@@ -18,6 +18,7 @@ pub mod sheet;
 mod sidecars;
 pub mod store;
 pub mod style;
+pub mod table_refs;
 pub mod workbook;
 
 pub use cell::{Cell, CellPicture, Formula};

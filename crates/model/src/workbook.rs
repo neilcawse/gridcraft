@@ -11,33 +11,6 @@ use crate::cell::Formula;
 use crate::sheet::Sheet;
 use crate::style::{StyleTable, Theme};
 
-struct TableRename<'a> {
-    wb: &'a Workbook,
-    old: &'a str,
-    new: &'a str,
-}
-
-impl TableRename<'_> {
-    fn replacement(&self, n: &str, sheet: usize, env: &[String]) -> Option<Expr> {
-        if n.starts_with('[') {
-            return None;
-        }
-        let (scope, bare, qualifier) = match n.rsplit_once('!') {
-            Some((s, b)) => (self.wb.sheet_index(s)?, b, Some(s)),
-            None => (sheet, n, None),
-        };
-        if !bare.eq_ignore_ascii_case(self.old) || self.wb.name(bare, scope).is_some() {
-            return None;
-        }
-        let renamed = qualifier.map_or_else(|| self.new.into(), |s| format!("{s}!{}", self.new));
-        Some(if env.iter().any(|local| gridcraft_formula::same_name(local, &renamed)) || self.wb.name(self.new, scope).is_some() {
-            Expr::Struct(gridcraft_formula::StructRef { table: self.new.into(), specifiers: vec![], col_start: None, col_end: None })
-        } else {
-            Expr::Name(renamed)
-        })
-    }
-}
-
 /// Rewrites table tokens and free names, leaving LET/LAMBDA binders, bound names and text alone.
 /// The callback receives a name, whether it is the table token of a structured reference, and
 /// the lexical binders currently in scope. For a table token it returns the new name, or any
@@ -111,20 +84,6 @@ pub fn rewrite_table_tokens(e: &mut Expr, replacement: &impl Fn(&str, bool, &[St
             }
     }
     visit(e, &mut Vec::new(), replacement)
-}
-
-impl TableRename<'_> {
-    fn might_use_table(&self, e: &Expr) -> bool {
-        let mut found = false;
-        e.walk(&mut |e| {
-            found |= match e {
-                Expr::Name(n) => n.rsplit('!').next().is_some_and(|n| n.eq_ignore_ascii_case(self.old)),
-                Expr::Struct(r) => r.table.eq_ignore_ascii_case(self.old),
-                _ => false,
-            };
-        });
-        found
-    }
 }
 
 /// Most equation source, in bytes, one [`Workbook::refresh_equations`] lays out: about 2,500
@@ -735,59 +694,12 @@ impl Workbook {
         }
         None
     }
-    /// Renames the `ti`th table of the `si`th sheet to `name` (Table Design > Table Name).
-    /// Bound PivotTables, slicers and cell references to the table follow the rename.
+    /// Renames a table using the original workbook to resolve references. Callers with an
+    /// existing original snapshot can apply [`crate::table_refs::TableRename`] directly.
     pub fn rename_table(&mut self, si: usize, ti: usize, name: &str) {
-        let Some(t) = self.sheets.get(si).and_then(|s| s.tables.get(ti)) else { return };
-        let (old, uid) = (t.name.clone(), t.uid);
-        let found_by_name = self.table(&old) == Some((si, ti));
-        Arc::make_mut(&mut self.sheets[si]).tables[ti].name = name.to_string();
-        self.follow_renamed_definition(uid);
-        if !found_by_name {
-            return;
-        }
-        let names_old = |s: &crate::Slicer| matches!(&s.source, crate::SlicerSource::Table { table, .. } if table.eq_ignore_ascii_case(&old));
-        for sheet in self.sheets.iter_mut().filter(|sh| sh.slicers.iter().any(names_old)) {
-            for sl in Arc::make_mut(sheet).slicers.iter_mut() {
-                if let crate::SlicerSource::Table { table, .. } = &mut sl.source
-                    && table.eq_ignore_ascii_case(&old)
-                {
-                    *table = name.to_string();
-                }
-            }
-        }
-        for i in 0..self.sheets.len() {
-            let rename = TableRename { wb: self, old: &old, new: name };
-            let rewritten: Vec<(CellRef, Formula)> = self.sheets[i]
-                .cells
-                .iter()
-                .filter_map(|(c, cell)| {
-                    let f = cell.formula.as_ref()?;
-                    f.with_expr(|e| {
-                        if !rename.might_use_table(e) {
-                            return None;
-                        }
-                        let mut ne = e.clone();
-                        rewrite_table_tokens(&mut ne, &|n, structured, env| {
-                            if structured {
-                                n.eq_ignore_ascii_case(rename.old).then(|| Expr::Name(rename.new.into()))
-                            } else {
-                                rename.replacement(n, i, env)
-                            }
-                        })
-                        .then(|| (c, Formula { array: f.array, ..f.rewritten(ne) }))
-                    })?
-                })
-                .collect();
-            if rewritten.is_empty() {
-                continue;
-            }
-            let sheet = Arc::make_mut(&mut self.sheets[i]);
-            for (c, f) in rewritten {
-                if let Some(cell) = sheet.cells.get_mut(c) {
-                    cell.formula = Some(Arc::new(f));
-                }
-            }
+        let original = self.clone();
+        if let Some(rename) = crate::table_refs::TableRename::new(&original, (si, ti), name) {
+            rename.apply(self);
         }
     }
 

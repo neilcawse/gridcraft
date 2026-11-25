@@ -278,9 +278,16 @@ pub(super) fn table_rename(s: &mut Session, p: &Json) -> Result<Json> {
     if wb.table(&name).is_some_and(|x| x != (si, ti)) || wb.names.iter().any(|n| n.name.eq_ignore_ascii_case(&name)) {
         return Err(EngineError::Other("The name entered already exists. Enter a unique name.".into()));
     }
+    let original = s.doc()?.wb.clone();
     edit(s, |cx| {
-        // Structured references and PivotTables naming the table follow the rename.
-        cx.wb.rename_table(si, ti, &name);
+        use gridcraft_model::table_refs::{self, TableRename};
+        if let Some(rename) = TableRename::new(&original, (si, ti), &name) {
+            rename.apply(&mut cx.wb);
+            gridcraft_xlsx::rewrite_kept_names(&mut cx.wb, |mut expr| {
+                table_refs::expression(&rename, &mut expr, usize::MAX, None);
+                expr
+            });
+        }
         cx.structural = true;
         Ok(Json::Null)
     })
