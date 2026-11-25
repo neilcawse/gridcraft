@@ -125,43 +125,42 @@ fn info(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
 // ---------------------------------------------------------------------------------------------
 // Logical
 
-/// Collects booleans for AND/OR/XOR: references and arrays contribute numbers and booleans
-/// (text and blanks skipped); direct scalars coerce (empty literal = FALSE).
-fn logicals(a: &[Arg]) -> R<Vec<bool>> {
-    let mut out = Vec::new();
+/// Reduces AND/OR/XOR without short-circuiting evaluation errors. Text in references and
+/// arrays is ignored; direct text recognizes TRUE/FALSE but contributes no other values.
+fn logical(a: &[Arg], mut result: bool, fold: impl Fn(bool, bool) -> bool) -> R<Value> {
+    let mut seen = false;
     for arg in a {
-        match &arg.value {
-            Value::Array(arr) => {
-                for v in arr.iter() {
-                    match v {
-                        Value::Number(n) => out.push(*n != 0.0),
-                        Value::Bool(b) => out.push(*b),
-                        Value::Error(e) => return Err(*e),
-                        _ => {}
-                    }
-                }
-            }
-            Value::Error(e) => return Err(*e),
-            Value::Number(n) => out.push(*n != 0.0),
-            Value::Bool(b) => out.push(*b),
-            _ if arg.from_ref => {}
-            v => out.push(v.to_bool()?),
+        let (values, allow_text) = match &arg.value {
+            Value::Array(arr) => (arr.data.as_slice(), false),
+            v => (std::slice::from_ref(v), !arg.from_ref),
+        };
+        for v in values {
+            let b = match v {
+                Value::Number(n) => *n != 0.0,
+                Value::Bool(b) => *b,
+                Value::Error(e) => return Err(*e),
+                Value::Empty if allow_text => false,
+                Value::Text(_) if allow_text => match v.to_bool() {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                },
+                _ => continue,
+            };
+            seen = true;
+            result = fold(result, b);
         }
     }
-    if out.is_empty() {
-        return Err(CellError::Value);
-    }
-    Ok(out)
+    if seen { Ok(Value::Bool(result)) } else { Err(CellError::Value) }
 }
 
 fn and(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    Ok(Value::Bool(logicals(a)?.iter().all(|b| *b)))
+    logical(a, true, |x, y| x && y)
 }
 fn or(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    Ok(Value::Bool(logicals(a)?.iter().any(|b| *b)))
+    logical(a, false, |x, y| x || y)
 }
 fn xor(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    Ok(Value::Bool(logicals(a)?.iter().filter(|b| **b).count() % 2 == 1))
+    logical(a, false, |x, y| x ^ y)
 }
 fn not(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     Ok(Value::Bool(!first(a).to_bool()?))
@@ -558,6 +557,10 @@ mod tests {
         is_err(ev("AND", vec![rf(arr(vec![vec![tv("x")]]))]), CellError::Value);
         is_err(ev("AND", vec![t("abc")]), CellError::Value);
         assert_eq!(ev("AND", vec![t("TRUE")]), Value::Bool(true));
+        assert_eq!(ev("AND", vec![t(""), b(true)]), Value::Bool(true));
+        assert_eq!(ev("AND", vec![b(false), t("text")]), Value::Bool(false));
+        assert_eq!(ev("OR", vec![t(""), b(false)]), Value::Bool(false));
+        is_err(ev("AND", vec![b(false), t("text"), e(CellError::NA)]), CellError::NA);
         is_err(ev("OR", vec![b(false), e(CellError::Div0)]), CellError::Div0);
         assert_eq!(ev("OR", vec![b(false), n(2.0)]), Value::Bool(true));
         assert_eq!(ev("OR", vec![b(false), b(false)]), Value::Bool(false));

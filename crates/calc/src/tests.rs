@@ -2393,6 +2393,29 @@ fn blank_lookup_values_match_excel_windows_observation() {
 }
 
 #[test]
+fn cell_prefix_reports_the_alignment_of_text() {
+    use gridcraft_model::{Alignment, HAlign, Style};
+    let mut t = T::new();
+    for (cell, input, align, want) in [
+        ("A1", "label", HAlign::General, "'"),
+        ("A2", "label", HAlign::Left, "'"),
+        ("A3", "label", HAlign::Center, "^"),
+        ("A4", "label", HAlign::Right, "\""),
+        ("A5", "label", HAlign::Fill, "\\"),
+        ("A6", "label", HAlign::Justify, ""),
+        ("A7", "42", HAlign::Center, ""),
+        ("A8", "=\"\"", HAlign::Center, ""),
+        ("A9", "", HAlign::Center, ""),
+    ] {
+        t.set(cell, input);
+        let id = t.wb.styles.intern(Style { align: Alignment { h: align, ..Default::default() }, ..Default::default() });
+        t.wb.sheet_mut(0).unwrap().set_style(c(cell), id);
+        t.set("B1", &format!("=CELL(\"prefix\",{cell})"));
+        assert_eq!(t.get("B1"), Value::text(want), "{cell}");
+    }
+}
+
+#[test]
 fn cell_width_is_the_column_width_dialog_value_rounded() {
     // #735: Excel 365 values. Widths in px as `home.columnWidth {"chars"}` sets them
     // (chars * 7 + 5): 10.71 -> 80, 12 -> 89, 10.57 -> 79, 2.86 -> 25; B keeps the default 8.43 (64).

@@ -139,8 +139,15 @@ fn isoweek(sys: DateSystem, s: i64) -> R<i64> {
 
 fn weeknum(a: &[Arg], c: &mut dyn Ctx) -> R<Value> {
     let sys = c.date_system();
+    if matches!(scalar(arg(a, 0)?), Value::Bool(_)) {
+        return Err(CellError::Value);
+    }
     let s = day_arg(a, 0, sys)?;
-    let t = to_int(opt_num(a, 1, 1.0)?)?;
+    let return_type = a.get(1).map_or(Value::Number(1.0), scalar);
+    if matches!(return_type, Value::Bool(_)) {
+        return Err(CellError::Value);
+    }
+    let t = to_int(return_type.to_number()?)?;
     let start = match t {
         1 | 17 => 0,
         2 | 11 => 1,
@@ -669,6 +676,9 @@ mod tests {
         close(ev("ISOWEEKNUM", vec![n(d(2026.0, 10.0, 7.0))]), 41.0);
         close(ev("ISOWEEKNUM", vec![n(d(2024.0, 12.0, 30.0))]), 1.0);
         is_err(ev("WEEKNUM", vec![n(1.0), n(3.0)]), CellError::Num);
+        is_err(ev("WEEKNUM", vec![b(true), e(CellError::NA)]), CellError::Value);
+        is_err(ev("WEEKNUM", vec![n(jan1), b(true)]), CellError::Value);
+        is_err(ev("WEEKNUM", vec![n(-1.0), b(true)]), CellError::Num);
     }
 
     #[test]

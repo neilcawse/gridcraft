@@ -152,10 +152,32 @@ fractions such as `-0.5` return `#NUM!`, including inside ranges and beside a ze
 Positive fractional inputs still truncate, and signed zero remains valid. Covered by
 `gcd_and_lcm_reject_negative_fractions_before_truncation`; function counts and estimates are unchanged.
 
+`CELL("prefix")` uses horizontal alignment for nonempty text. XIRR treats a blank cash flow
+as zero without dropping its date. WEEKNUM rejects Boolean dates and return types. AND, OR
+and XOR ignore nonlogical text without suppressing cell errors. GCD and LCM accept numeric
+and date text and distinguish missing arguments, blank single cells and blanks inside ranges.
+LOGEST reports invalid known-y error values as `#VALUE!`, without changing LINEST or its
+predictor-error behavior. CONCAT still flattens ranges and enforces the 32,767-character limit.
+`CELL("width")` reads the XLSX base column width for a default-width column when no explicit
+sheet default width overrides it. This does not affect layout or the XLSX writer.
+
+**ACCRINT residual:** The public IronCalc cases include 30 matched TRUE/FALSE pairs with
+settlement after first interest. In 27 pairs, the FALSE cache is equal to or higher than the
+TRUE cache. This conflicts with [Microsoft's calc_method description][accrint], under which
+FALSE skips the accrued period from issue to first interest. The accrual algorithm is unchanged.
+
+[accrint]: https://support.microsoft.com/en-us/excel/functions/accrint-function
+
+FORMULATEXT can return the original layout of an imported XLSX formula. It displays Excel's
+formula-bar spellings for compatibility functions, leaves canonical evaluation and XLSX
+output alone, and falls back to canonical text when the expression changes. Re-entering a
+different spelling also falls back to canonical text.
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-24 | minor | Corrected corpus-backed argument and reference behavior for CELL, XIRR, WEEKNUM, logical folds, GCD/LCM, LOGEST and FORMULATEXT |
 | 2026-11-04 | minor | GCD and LCM reject negative fractional arguments before truncation; scalar and range regressions in the extracted math tests preserve positive truncation and signed-zero behavior; estimates unchanged |
 | 2026-11-03 | minor | GROUPBY: a total depth of 2 or more adds a subtotal line for each group of the leading key columns (after the group, or before it for a negative depth) and labels the last line Grand Total; a depth past the key columns, or above 1 with `field_relationship` 1, is `#VALUE!`, as in Excel (#1456 item 1) |
 | 2026-11-01 | minor | Python in cells row: Python mode in the formula bar |

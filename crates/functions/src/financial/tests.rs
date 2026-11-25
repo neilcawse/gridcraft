@@ -160,6 +160,11 @@ fn cash_flows() {
     close_tol(ev("XNPV", vec![n(0.09), rf(vals.clone()), rf(dates.clone())]), 2086.647602, 1e-9);
     close_tol(ev("XIRR", vec![rf(vals.clone()), rf(dates)]), 0.373362535, 1e-7);
     is_err(ev("XNPV", vec![n(0.09), rf(vals), rf(col(&[1.0, 2.0]))]), CellError::Num);
+    let dates = rf(row(&[1.0, 101.0, 366.0]));
+    let values = rf(arr(vec![vec![nv(-100.0), Value::Empty, nv(120.0)]]));
+    close_tol(ev("XIRR", vec![values, dates.clone()]), 0.2, 1e-9);
+    let positive = rf(arr(vec![vec![nv(100.0), Value::Empty, nv(120.0)]]));
+    is_err(ev("XIRR", vec![positive, dates]), CellError::Num);
     let m = col(&[-120000.0, 39000.0, 30000.0, 21000.0, 37000.0, 46000.0]);
     close_tol(ev("MIRR", vec![rf(m), n(0.1), n(0.12)]), 0.1260943, 1e-6);
     close_tol(ev("MIRR", vec![rf(col(&[-120000.0, 39000.0, 30000.0, 21000.0])), n(0.1), n(0.12)]), -0.048044655, 1e-7);

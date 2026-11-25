@@ -110,6 +110,10 @@ pub struct Sheet {
     /// Default column width and row height in pixels at 96 dpi (a file stores row heights in points).
     pub default_col_width: f32,
     pub default_row_height: f32,
+    /// Imported base column width in characters, when no explicit default width overrides it.
+    /// Only CELL("width") reads this; layout uses `default_col_width`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xlsx_base_col_width: Option<u8>,
     pub merges: Vec<RangeRef>,
     /// Frozen rows and columns (top/left).
     pub freeze: Option<(u32, u32)>,
@@ -213,6 +217,7 @@ impl Sheet {
             rows: BTreeMap::new(),
             default_col_width: DEFAULT_COL_WIDTH,
             default_row_height: DEFAULT_ROW_HEIGHT,
+            xlsx_base_col_width: None,
             merges: vec![],
             freeze: None,
             tab_color: None,

@@ -481,7 +481,17 @@ impl<'h> Evaluator<'h> {
                     _ => "v",
                 }))
             }
-            "width" => Ev::V(Value::number(sheet.map_or(8.43, |s| gridcraft_model::points_to_chars(s.col_width(c.col) as f64)).round())),
+            "width" => {
+                let chars = sheet.map_or(8.43, |s| {
+                    if let Some(base) = s.xlsx_base_col_width
+                        && s.cols.get(&c.col).is_none_or(|i| !i.hidden && i.size.is_none())
+                    {
+                        return f64::from(base);
+                    }
+                    gridcraft_model::points_to_chars(f64::from(s.col_width(c.col)))
+                });
+                Ev::V(Value::number(chars.round()))
+            }
             // Excel's `<folder>/[<file>]<sheet>`, which the classic sheet-name formula splits on
             // the `]`. Empty until the workbook has a file of its own, as in Excel (#1489).
             "filename" => Ev::V(Value::text(match &wb.source_path {
@@ -499,7 +509,22 @@ impl<'h> Evaluator<'h> {
                 Ev::V(Value::text(cell_format_code(&code)))
             }
             "color" | "parentheses" => Ev::V(Value::Number(0.0)),
-            "prefix" => Ev::V(Value::text("")),
+            "prefix" => {
+                use gridcraft_model::HAlign;
+                let align = sheet.map(|s| wb.styles.get(s.style_id(c)).align.h);
+                let prefix = if matches!(self.cell(a.sheet, c), Value::Text(t) if !t.is_empty()) {
+                    match align {
+                        Some(HAlign::General | HAlign::Left) => "'",
+                        Some(HAlign::Right) => "\"",
+                        Some(HAlign::Center) => "^",
+                        Some(HAlign::Fill) => "\\",
+                        _ => "",
+                    }
+                } else {
+                    ""
+                };
+                Ev::V(Value::text(prefix))
+            }
             _ => err(CellError::Value),
         }
     }
