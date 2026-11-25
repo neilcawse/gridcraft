@@ -478,11 +478,15 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
         edits,
         ..
     } = ctx;
-    let shifted: Vec<u64> = edits
+    // Sheets whose lines an insert or delete shifted: their objects were re-anchored then, so
+    // only the row fit that follows still moves lines under them.
+    let restructured: Vec<u64> = edits
         .iter()
         .filter(|(_, e)| matches!(e, gridcraft_formula::adjust::Edit::Insert { .. } | gridcraft_formula::adjust::Edit::Delete { .. }))
-        .filter_map(|(s, _)| wb.sheet_index(s).and_then(|i| wb.sheet(i)).filter(|sh| !sh.drawing_files.is_empty()).map(|sh| sh.uid.get()))
+        .filter_map(|(s, _)| wb.sheet_index(s).and_then(|i| wb.sheet(i)).map(|sh| sh.uid.get()))
         .collect();
+    let shifted: Vec<u64> =
+        restructured.iter().copied().filter(|&uid| wb.sheets.iter().any(|sh| sh.uid.get() == uid && !sh.drawing_files.is_empty())).collect();
     if let Some(log) = d.edits.as_mut() {
         log.extend(edits);
     }
@@ -528,14 +532,27 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
     fit_rows.dedup();
     let mut sweep: Option<(usize, MergeSweep)> = None;
     let mut shifted_fit = None::<(usize, sheet::ShiftedDrawingFit)>;
+    // The lines of a restructured sheet before its row fit, to re-place its objects after it.
+    let mut fit_lines = None::<(usize, gridcraft_model::Sheet)>;
+    let follow_fit = |wb: &mut Workbook, lines: Option<(usize, gridcraft_model::Sheet)>| {
+        if let Some((si, lines)) = lines
+            && let Some(sh) = wb.sheet_mut(si)
+        {
+            sh.follow_line_sizes(&lines, &|_, _| false);
+        }
+    };
     let mut left = MERGE_FIT_WORK;
     for (si, row) in fit_rows {
         if sweep.as_ref().is_none_or(|(at, _)| *at != si) {
             if let Some((prev, fit)) = shifted_fit.take() {
                 fit.finish(&mut wb, prev);
             }
+            follow_fit(&mut wb, fit_lines.take());
             if let Some(sh) = wb.sheet(si).filter(|sh| !shifted.is_empty() && shifted.contains(&sh.uid.get())) {
                 shifted_fit = Some((si, sheet::ShiftedDrawingFit::new(sh)));
+            }
+            if let Some(sh) = wb.sheet(si).filter(|sh| restructured.contains(&sh.uid.get()) && sh.object_anchors().next().is_some()) {
+                fit_lines = Some((si, sh.line_geometry()));
             }
             if let Some((_, old)) = &sweep {
                 left = old.left();
@@ -555,9 +572,11 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
     if let Some((si, fit)) = shifted_fit {
         fit.finish(&mut wb, si);
     }
+    follow_fit(&mut wb, fit_lines);
     if let Some(t0) = t0 {
         eprintln!("commit: + rows {:?}", since(t0));
     }
+    sheet::follow_line_changes(&d.wb, &mut wb, &restructured);
     sheet::discard_placement_after_line_changes(&d.wb, &mut wb, &shifted);
     d.wb = std::sync::Arc::new(wb);
     d.selection = sel;

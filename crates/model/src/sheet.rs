@@ -23,7 +23,7 @@ pub enum Visibility {
     VeryHidden,
 }
 
-fn drawing_reference(o: ObjRef) -> Option<crate::DrawingRef> {
+pub(crate) fn drawing_reference(o: ObjRef) -> Option<crate::DrawingRef> {
     use crate::DrawingRef;
     match o.kind {
         ObjKind::Chart => Some(DrawingRef::Chart(o.id)),

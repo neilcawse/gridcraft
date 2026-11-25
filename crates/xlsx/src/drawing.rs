@@ -45,63 +45,6 @@ fn ext_px(e: Option<&El>) -> (f32, f32) {
     }
 }
 
-fn emu_to_px(v: i64) -> f64 {
-    (v as f64 / EMU_PER_PX).clamp(-1e7, 1e7)
-}
-
-fn craft_marker(m: CraftMarker) -> (CellRef, f64, f64) {
-    let col = m.col.min(MAX_COLS - 1);
-    let row = m.row.min(MAX_ROWS - 1);
-    (CellRef::new(row, col), emu_to_px(m.col_off).max(0.0), emu_to_px(m.row_off).max(0.0))
-}
-
-fn placement_to_anchor(p: &CraftPlacement, sheet: &Sheet) -> Anchor {
-    let layout_px = |px: f64| {
-        if sheet.geometry == gridcraft_model::Geometry::Legacy { f64::from(px as f32) } else { px }
-    };
-    match p {
-        CraftPlacement::TwoCell { from, to, edit_as } => {
-            let (cell, dx, dy) = craft_marker(*from);
-            let (to, tdx, tdy) = craft_marker(*to);
-            let x1 = sheet.col_left(cell.col) + layout_px(dx);
-            let y1 = sheet.row_top(cell.row) + layout_px(dy);
-            let x2 = sheet.col_left(to.col) + layout_px(tdx);
-            let y2 = sheet.row_top(to.row) + layout_px(tdy);
-            let mode = match edit_as.as_deref() {
-                Some("absolute") => AnchorMode::Absolute,
-                Some("oneCell") => AnchorMode::MoveOnly,
-                _ => AnchorMode::MoveAndSize,
-            };
-            Anchor { cell, dx: dx as f32, dy: dy as f32, width: (x2 - x1).max(0.0) as f32, height: (y2 - y1).max(0.0) as f32, mode }
-        }
-        CraftPlacement::OneCell { from, cx, cy } => {
-            let (cell, dx, dy) = craft_marker(*from);
-            Anchor {
-                cell,
-                dx: dx as f32,
-                dy: dy as f32,
-                width: emu_to_px(*cx).max(0.0) as f32,
-                height: emu_to_px(*cy).max(0.0) as f32,
-                mode: AnchorMode::MoveOnly,
-            }
-        }
-        CraftPlacement::Absolute { x, y, cx, cy } => {
-            let x = layout_px(emu_to_px(*x).max(0.0));
-            let y = layout_px(emu_to_px(*y).max(0.0));
-            let col = sheet.col_at(x);
-            let row = sheet.row_at(y);
-            Anchor {
-                cell: CellRef::new(row, col),
-                dx: (x - sheet.col_left(col)).max(0.0) as f32,
-                dy: (y - sheet.row_top(row)).max(0.0) as f32,
-                width: emu_to_px(*cx).max(0.0) as f32,
-                height: emu_to_px(*cy).max(0.0) as f32,
-                mode: AnchorMode::Absolute,
-            }
-        }
-    }
-}
-
 fn drawing_placement(p: &CraftPlacement) -> DrawingPlacement {
     let marker = |m: CraftMarker| DrawingMarker { col: m.col, row: m.row, col_off: m.col_off, row_off: m.row_off };
     match p {
@@ -336,13 +279,14 @@ pub fn read_drawing(cx: &mut Ctx<'_>, part: &str, sheet: &mut Sheet) -> Result<(
         };
         for craft_a in anchors {
             n += 1;
-            let anchor = placement_to_anchor(&craft_a.placement, sheet);
+            let placement = drawing_placement(&craft_a.placement);
+            let anchor = placement.anchor(sheet);
             let px = 1.0 / EMU_PER_PX;
             let place = Place { anchor, rect: sheet.anchor_rect(&anchor), scale: (px, px), flip: (false, false) };
             let obj_el = from_craft_el(&craft_a.object);
             for obj in drawing_objects(std::slice::from_ref(&obj_el)) {
                 if let Some(reference) = read_object(cx, (part, n), &rels, sheet, obj, place, 0)? {
-                    sheet.drawing_files.insert(reference, DrawingFile { anchor, placement: drawing_placement(&craft_a.placement) });
+                    sheet.drawing_files.insert(reference, DrawingFile { anchor, placement: placement.clone() });
                     sheet.drawing_order.insert(reference, n);
                 }
             }
@@ -1592,10 +1536,12 @@ mod mac_marker_tests {
     }
 
     fn edge_anchor(sheet: &Sheet, col_off: i64) -> Anchor {
-        placement_to_anchor(
-            &CraftPlacement::TwoCell { from: CraftMarker::default(), to: CraftMarker { col: 5, col_off, ..CraftMarker::default() }, edit_as: None },
-            sheet,
-        )
+        drawing_placement(&CraftPlacement::TwoCell {
+            from: CraftMarker::default(),
+            to: CraftMarker { col: 5, col_off, ..CraftMarker::default() },
+            edit_as: None,
+        })
+        .anchor(sheet)
     }
 
     #[test]

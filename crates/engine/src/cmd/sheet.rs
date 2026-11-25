@@ -380,11 +380,40 @@ impl ShiftedDrawingFit {
     }
 }
 
+/// Row heights and column widths an edit changed without shifting lines (sizes, automatic row
+/// fits, sorted row heights) move what sits on them. Each object the edit didn't place itself
+/// follows by its anchor mode: "move and size with cells" keeps both corners on their cells,
+/// "move but don't size" keeps its size and "don't move or size" its place (ECMA-376 Part 1,
+/// 20.5.3.2 `ST_EditAs`). Restructured sheets re-placed theirs when the lines shifted, and
+/// again after their row fit.
+pub(crate) fn follow_line_changes(old: &gridcraft_model::Workbook, wb: &mut gridcraft_model::Workbook, restructured: &[u64]) {
+    for si in 0..wb.sheets.len() {
+        let Some(after) = wb.sheets.get(si).filter(|sh| sh.object_anchors().next().is_some()) else { continue };
+        let uid = after.uid.get();
+        if restructured.contains(&uid) {
+            continue;
+        }
+        let Some(before) = old.sheets.get(si).filter(|sh| sh.uid.get() == uid).or_else(|| old.sheets.iter().find(|sh| sh.uid.get() == uid)) else {
+            continue;
+        };
+        if Arc::ptr_eq(before, after) || !after.lines_differ(before) {
+            continue;
+        }
+        let before = Arc::clone(before);
+        let Some(sh) = wb.sheet_mut(si) else { continue };
+        sh.follow_line_sizes(&before, &|o, a| {
+            let was = if o.kind == gridcraft_model::ObjKind::Group { before.drawing_group(o.id).map(|g| g.anchor) } else { before.object_anchor(o) };
+            was != Some(*a)
+        });
+    }
+}
+
 /// Row heights, column widths and line visibility that change without a structural shift
 /// (sizes, hide/unhide, filters, outlines, sorted row heights, automatic row fits) move or
-/// resize what the user sees without touching object anchors. A stored source placement over a
-/// changed line, or a fixed one after an earlier changed line, no longer describes that object,
-/// so it is dropped with its group transforms and regenerated from the editable geometry.
+/// resize what the user sees ([`follow_line_changes`] re-measures the anchors). A stored source
+/// placement over a changed line, or a fixed one after an earlier changed line, no longer
+/// describes that object's file markers, so it is dropped with its group transforms and
+/// regenerated from the editable geometry.
 /// Structurally shifted sheets have already remapped their markers, and their subsequent
 /// auto-fit is checked separately against the remapped grid. A fixed object there keeps its
 /// model cell while lines of another size move in above it, so its placement is dropped when the

@@ -16,7 +16,7 @@ On macOS, XLSX imports use worksheet sizing measured with Excel for Mac 16.115.2
 An automatic row with one explicitly styled cell fits the larger of its row format's font (`s` with `customFormat="1"`; without `customFormat` the row style is ignored) and that cell's font, valued or not. Measured with Calibri 36 against Calibri 11 in a Calibri 11 workbook, one cell in column A and no column styles, identically on ordinary and switched sheets: a 36 pt row format over an 11 pt cell, valued or not, and an 11 pt row format over a valueless 36 pt cell all fit to 47 pt, like a populated 36 pt cell; a 36 pt row style without `customFormat` reads 15 pt. On a custom-default sheet that no saved `ht` has switched, every row keeps the floor. Unmeasured: rows with several cells (GridCraft takes the tallest cell), cells without `s`, other families and sizes, and wrapped valueless cells. Bare rows were measured only in an unstyled Calibri 11 workbook.
 
 Layout conversions do not overwrite imported numeric width or height values on save, although the XLSX codec may normalize spelling and equivalent boolean attributes. On other hosts an automatic row can grow during import without changing its original saved `ht`. If a later edit changes the fitted height, the original `ht` no longer overrides the new height on save. Unchanged drawing placements and group transforms are kept from the source; edits that invalidate them regenerate those fields from the model.
-After import, an automatic row inside a two-cell anchor can grow, leaving the in-app editable box stale until the next edit. Saved placement is unaffected.
+Drawings are placed after the open's automatic row fit, on both profiles: see the drawing placement paragraphs below.
 
 Legacy scalar `INDEX(range, MATCH(...))` formulas remain ordinary formulas on save, including when
 shared formulas are expanded during import (`array_export.rs`, #1505).
@@ -65,8 +65,22 @@ Untouched supported worksheet drawings in XLSX and XLSM keep their original `two
 `oneCellAnchor`, or `absoluteAnchor` spelling and placement. This includes the presence of
 `editAs`, signed and out-of-cell marker offsets, exact EMU position and extent, and optional
 `off`, `ext`, `chOff`, and `chExt` in nested group transforms. Saved placement does not depend
-on the host's sheet metrics. This does not correct the in-app display position when automatic
-row heights change after drawing import.
+on the host's sheet metrics.
+
+Opening places worksheet drawings over the row heights the open settles on, after the automatic
+row fit (Mac profile, and the grow-only fit elsewhere, including oversized fonts, #833), not over
+the saved `ht` values the reader first meets. Spec-derived from ECMA-376 Part 1 (20.5.2.33
+`twoCellAnchor`, 20.5.2.24 `oneCellAnchor`, 20.5.2.1 `absoluteAnchor`): a two-cell anchor spans
+its `from` and `to` markers, a one-cell anchor starts at its `from` marker with its own extent,
+and an absolute anchor keeps its sheet position. A row the fit grows inside a two-cell anchor
+therefore grows the object, and one above any cell anchor moves it. This applies to every
+`editAs` of a two-cell anchor: `ST_EditAs` (20.5.3.2) describes how the object follows rows and
+columns resized afterwards. Whether Excel for Mac treats its own open-time row fit as such a
+resize for `editAs="oneCell"` or `"absolute"` is unmeasured. A group read with its placement
+carries its members along. Untouched objects still save their original markers, and the
+in-app display, print/PDF, `display --json` and markers rebuilt after an edit all use the same
+placement. Chart `userShapes` annotations and form controls, which are read without a stored
+placement, follow the fitted rows by their anchor mode.
 
 An explicit move, resize, anchor-mode change, or member edit discards the affected source
 placement and regenerates it from editable geometry. A whole-sheet copy keeps placement because
@@ -80,15 +94,21 @@ sizing with cells, moving without sizing, and remaining fixed. It is not a claim
 anchor spelling Excel chooses after an edit. Separate chart `userShapes` annotations, VML,
 and unsupported drawing objects do not acquire worksheet placement from this path.
 
-Other edits that change row heights, column widths or line visibility after opening (row height
-and column width, standard width, hide/unhide, filters, outlines, sorted row heights, automatic
-row fits after an edit) drop the placement of any object over a changed line, and of a fixed
-(`absolute`) object after an earlier changed line, because the object the user sees no longer
-matches the stored markers. The span includes both a marker's named cell and the cell reached
-by its signed offset. Disjoint line changes do not affect objects in the gap, and an automatic
-row fit after a structural edit is checked against the remapped placement. A fixed object keeps
-its cell through an insert or delete, so its placement is also dropped when the rounded EMU
-box of the object or a grouped member changes.
+Other edits that change row heights or column widths after opening (row height and column
+width, standard width, sorted row heights, automatic row fits after an edit, including the fit
+after an insert or delete) move and size objects by their anchor mode, following `ST_EditAs`:
+"move and size with cells" keeps both corners on their cells, "move but don't size" keeps its
+size and follows its top-left cell, and "don't move or size" keeps its place on the sheet. A
+group follows its own mode and scales its members with it. Hiding or showing a line leaves
+objects as they were, since only the size, not the corner's place, of a collapsed line would be
+known when it is shown again. These edits, and hide/unhide, filters and outlines, also drop the
+stored placement of any object over a changed line, and of a fixed (`absolute`) object after an
+earlier changed line, because the object the user sees no longer matches the stored markers.
+The span includes both a marker's named cell and the cell reached by its signed offset.
+Disjoint line changes do not affect objects in the gap, and an automatic row fit after a
+structural edit is checked against the remapped placement. A fixed object keeps its cell
+through an insert or delete, so its placement is also dropped when the rounded EMU box of the
+object or a grouped member changes.
 
 Imported objects keep their source stacking order and nonvisual IDs and names; a name is kept
 even when its ID is the placeholder `0`, which is renumbered. Bring Forward and Send Backward

@@ -213,6 +213,141 @@ fn mac_invalid_custom_default_does_not_suppress_automatic_row_fit() {
     assert_eq!(wb.sheet(0).unwrap().row_height(0), 47. * (4.0 / 3.0));
 }
 
+/// The box a DrawingML placement describes over `sh`'s lines, worked out from the markers:
+/// offsets in whole pixels, so both profiles lay them out alike.
+fn placement_box(sh: &gridcraft_model::Sheet, p: &gridcraft_model::DrawingPlacement) -> gridcraft_model::ObjectRect {
+    use gridcraft_model::{DrawingMarker, DrawingPlacement, ObjectRect};
+    let px = |emu: i64| emu as f64 / 9525.0;
+    let at = |m: &DrawingMarker| (sh.col_left(m.col) + px(m.col_off), sh.row_top(m.row) + px(m.row_off));
+    match p {
+        DrawingPlacement::TwoCell { from, to, .. } => {
+            let ((x1, y1), (x2, y2)) = (at(from), at(to));
+            ObjectRect { x: x1, y: y1, w: x2 - x1, h: y2 - y1 }
+        }
+        DrawingPlacement::OneCell { from, ext } => {
+            let (x, y) = at(from);
+            ObjectRect { x, y, w: px(ext.0), h: px(ext.1) }
+        }
+        DrawingPlacement::Absolute { pos, ext } => ObjectRect { x: px(pos.0), y: px(pos.1), w: px(ext.0), h: px(ext.1) },
+    }
+}
+
+/// A sheet on `geometry` whose rows 1 (above the drawings) and 4 (inside them) hold 36 pt text
+/// that their heights as read don't fit.
+fn book_with_unfitted_rows(geometry: gridcraft_model::Geometry) -> Workbook {
+    use gridcraft_model::StyleId;
+    let mut wb = Workbook::new();
+    let large = wb.styles.derive(StyleId::DEFAULT, |s| s.font.size = 36.0);
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.geometry = geometry;
+    for row in [0, 3] {
+        sh.set_value(CellRef::new(row, 0), gridcraft_core::Value::text("tall"));
+        sh.set_style(CellRef::new(row, 0), large);
+    }
+    wb
+}
+
+fn assert_box(got: gridcraft_model::ObjectRect, want: gridcraft_model::ObjectRect, what: &str) {
+    let close = |a: f64, b: f64| (a - b).abs() < 1e-3;
+    assert!(close(got.x, want.x) && close(got.y, want.y) && close(got.w, want.w) && close(got.h, want.h), "{what}: {got:?}, expected {want:?}");
+}
+
+/// On open, a drawing sits where its anchor puts it over the rows the open fitted, on both
+/// profiles (ECMA-376 Part 1, 20.5.2.33 `twoCellAnchor`: from and to markers, whatever its
+/// `editAs`; 20.5.2.24 `oneCellAnchor`: from marker and extent; 20.5.2.1 `absoluteAnchor`: a
+/// sheet position). The reader placed it over the heights the file saved, before the fit.
+/// Its stored placement stays current, so an unedited save writes the markers it read.
+#[test]
+fn open_places_drawings_over_the_rows_it_fits_on_both_profiles() {
+    use gridcraft_model::{AnchorMode, DrawingFile, DrawingMarker, DrawingPlacement, DrawingRef, Geometry, Image};
+    let emu = |px: i64| px * 9525;
+    let from = DrawingMarker { col: 1, row: 1, col_off: emu(3), row_off: emu(4) };
+    let to = DrawingMarker { col: 4, row: 6, col_off: emu(5), row_off: emu(6) };
+    let ext = (emu(200), emu(90));
+    let two = |edit_as: Option<&str>| DrawingPlacement::TwoCell { from, to, edit_as: edit_as.map(str::to_owned) };
+    for geometry in [Geometry::Legacy, Geometry::Mac { digit_pt: 7 }] {
+        for (placement, mode) in [
+            (two(None), AnchorMode::MoveAndSize),
+            (two(Some("oneCell")), AnchorMode::MoveOnly),
+            (two(Some("absolute")), AnchorMode::Absolute),
+            (DrawingPlacement::OneCell { from, ext }, AnchorMode::MoveOnly),
+            (DrawingPlacement::Absolute { pos: (emu(70), emu(30)), ext }, AnchorMode::Absolute),
+        ] {
+            let what = format!("{geometry:?} {placement:?}");
+            let mut wb = book_with_unfitted_rows(geometry);
+            let sh = wb.sheet_mut(0).unwrap();
+            let read = sh.rect_anchor(placement_box(sh, &placement), mode);
+            let heights = [sh.row_height(0), sh.row_height(3)];
+            sh.images.push(Image { id: 1, anchor: read, data: vec![1].into(), mime: "image/png".into(), alt: String::new() });
+            sh.drawing_files.insert(DrawingRef::Image(1), DrawingFile { anchor: read, placement: placement.clone() });
+            fit_imported_rows(&mut wb);
+            let sh = wb.sheet(0).unwrap();
+            assert!(sh.row_height(0) > heights[0] + 1.0 && sh.row_height(3) > heights[1] + 1.0, "{what}: the open fits both rows");
+            let anchor = sh.images[0].anchor;
+            assert_eq!(anchor.mode, mode, "{what}");
+            assert_box(sh.anchor_rect(&anchor), placement_box(sh, &placement), &what);
+            assert_eq!(sh.drawing_files[&DrawingRef::Image(1)].anchor, anchor, "{what}: the stored placement still describes it");
+        }
+    }
+}
+
+/// A group read with its placement moves and sizes with it on open, members included, and its
+/// file transform still describes it.
+#[test]
+fn open_places_a_group_over_the_rows_it_fits() {
+    use gridcraft_model::{AnchorMode, DrawingFile, DrawingGroup, DrawingMarker, DrawingPlacement, DrawingRef, Geometry, GroupFile, GroupFileMember, Image};
+    let emu = |px: i64| px * 9525;
+    let from = DrawingMarker { col: 1, row: 1, col_off: 0, row_off: 0 };
+    let to = DrawingMarker { col: 4, row: 6, col_off: 0, row_off: 0 };
+    let placement = DrawingPlacement::TwoCell { from, to, edit_as: None };
+    for geometry in [Geometry::Legacy, Geometry::Mac { digit_pt: 7 }] {
+        let mut wb = book_with_unfitted_rows(geometry);
+        let sh = wb.sheet_mut(0).unwrap();
+        let read = sh.rect_anchor(placement_box(sh, &placement), AnchorMode::MoveAndSize);
+        let extent = (emu(100), emu(100));
+        sh.images.push(Image { id: 1, anchor: read, data: vec![1].into(), mime: "image/png".into(), alt: String::new() });
+        let member = GroupFileMember { reference: DrawingRef::Image(1), anchor: read, off: (0, 0), ext: extent };
+        let file = GroupFile {
+            anchor: read,
+            off: (0, 0),
+            ext: extent,
+            child_offset: (0, 0),
+            child_extent: extent,
+            model_child_offset: (0, 0),
+            model_child_extent: extent,
+            fields: [true; 4],
+            has_transform: true,
+            edited: false,
+            complete: true,
+            flip: (false, false),
+            rotation: 0,
+            member_rotations: vec![],
+            members: vec![member],
+        };
+        sh.groups.push(DrawingGroup {
+            id: 2,
+            name: "Group".into(),
+            anchor: read,
+            child_offset: (0, 0),
+            child_extent: extent,
+            flip: (false, false),
+            rotation: 0,
+            member_rotations: vec![],
+            members: vec![DrawingRef::Image(1)],
+            file: Some(file),
+        });
+        sh.drawing_files.insert(DrawingRef::Group(2), DrawingFile { anchor: read, placement: placement.clone() });
+        fit_imported_rows(&mut wb);
+        let sh = wb.sheet(0).unwrap();
+        let want = placement_box(sh, &placement);
+        let group = sh.drawing_group(2).unwrap();
+        assert_box(sh.anchor_rect(&group.anchor), want, &format!("{geometry:?} group"));
+        assert_box(sh.anchor_rect(&sh.images[0].anchor), want, &format!("{geometry:?} member"));
+        assert!(sh.source_group(group).is_some(), "{geometry:?}: the file transform still describes the group");
+        assert_eq!(sh.drawing_files[&DrawingRef::Group(2)].anchor, group.anchor);
+    }
+}
+
 fn book(rtl: bool, cells: &[(&str, gridcraft_core::Value, gridcraft_model::HAlign)]) -> Workbook {
     let mut wb = Workbook::new();
     let ids: Vec<_> = cells.iter().map(|(_, _, h)| wb.styles.derive(gridcraft_model::StyleId::DEFAULT, |st| st.align.h = *h)).collect();

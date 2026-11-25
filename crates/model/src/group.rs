@@ -127,7 +127,7 @@ impl ObjectRect {
 }
 
 /// The axis-aligned map taking `from` onto `to` (an axis without extent keeps its scale).
-fn map_rect(from: ObjectRect, to: ObjectRect, r: ObjectRect) -> ObjectRect {
+pub(crate) fn map_rect(from: ObjectRect, to: ObjectRect, r: ObjectRect) -> ObjectRect {
     let sx = if from.w > 0.0 { to.w / from.w } else { 1.0 };
     let sy = if from.h > 0.0 { to.h / from.h } else { 1.0 };
     ObjectRect { x: to.x + (r.x - from.x) * sx, y: to.y + (r.y - from.y) * sy, w: r.w * sx, h: r.h * sy }
@@ -402,7 +402,7 @@ impl Sheet {
         }
     }
 
-    fn drawing_anchor_mut(&mut self, r: DrawingRef) -> Option<&mut Anchor> {
+    pub(crate) fn drawing_anchor_mut(&mut self, r: DrawingRef) -> Option<&mut Anchor> {
         match r {
             DrawingRef::Chart(id) => self.charts.iter_mut().find(|o| o.id == id).map(|o| &mut o.anchor),
             DrawingRef::Image(id) => self.images.iter_mut().find(|o| o.id == id).map(|o| &mut o.anchor),

@@ -12,6 +12,7 @@ pub mod features;
 pub mod geometry;
 pub mod group;
 pub mod macros;
+mod line_follow;
 pub mod password;
 pub mod preserved;
 pub mod python;
