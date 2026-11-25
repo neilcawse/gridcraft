@@ -55,6 +55,13 @@ fn imported_formulatext_distinguishes_file_tokens_from_user_spellings() -> Resul
         <c r="H1" cm="1"><f>T[@['#This Row]] + 1</f><v>0</v></c>
         <c r="I1" cm="1"><f>_xlfn.LET(_xlpm._TRO_CUSTOM, _xlfn.LAMBDA(_xlpm.x, _xlpm.x), _xlpm._TRO_CUSTOM(A2))</f><v>0</v></c>
         <c r="J1" cm="1"><f>T[Prior '#This Row] + 1</f><v>0</v></c>
+        <c r="K1" cm="1"><f>_XLFN._tro_all(A1:E10) + 0</f><v>0</v></c>
+        <c r="L1" cm="1"><f>_XLUDF.myfn(A2) + 1</f><v>0</v></c>
+        <c r="M1" cm="1"><f>_xlfn.GROUPBY(A2:A4, B2:B4, _XLETA.sum)</f><v>0</v></c>
+        <c r="N1" cm="1"><f>T[[ #THIS ROW ],[A]] + 1</f><v>0</v></c>
+        <c r="O1" cm="1"><f>_xlBudget + _xlfn._TRO_ALL(A1:E10)</f><v>0</v></c>
+        <c r="P1" cm="1"><f>_xlBudget + T[[#This Row],[Prior '#This Row]]</f><v>0</v></c>
+        <c r="Q1" cm="1"><f>_xlBudget + T[@['#This Row]] + _xlfn.SINGLE(A2)</f><v>0</v></c>
     </row></sheetData>"#;
     let names = r#"<definedNames><definedName name="_xlBudget">3</definedName><definedName name="_XLLAMBDA">_xlfn.LAMBDA(_xlpm.x,_xlpm.x)</definedName></definedNames>"#;
     let (wb, _) = crate::read_xlsx(&super::minimal(body, &[], "", names))?;
@@ -71,6 +78,14 @@ fn imported_formulatext_distinguishes_file_tokens_from_user_spellings() -> Resul
         ("H1", "T[@['#This Row]] + 1"),
         ("I1", "LET(_TRO_CUSTOM, LAMBDA(x, x), _TRO_CUSTOM(A2))"),
         ("J1", "T[Prior '#This Row] + 1"),
+        // Mixed-case compatibility tokens, alone and beside user spellings, keep canonical text.
+        ("K1", "A1.:.E10+0"),
+        ("L1", "_xludf.MYFN(A2)+1"),
+        ("M1", "GROUPBY(A2:A4,B2:B4,SUM)"),
+        ("N1", "T[@A]+1"),
+        ("O1", "_xlBudget+A1.:.E10"),
+        ("P1", "_xlBudget+T[@[Prior '#This Row]]"),
+        ("Q1", "_xlBudget + T[@['#This Row]] + @A2"),
     ] {
         let at = CellRef::parse(cell).ok_or("invalid test address")?;
         let f = sheet.cell(at).and_then(|c| c.formula.as_deref()).ok_or("missing imported formula")?;
