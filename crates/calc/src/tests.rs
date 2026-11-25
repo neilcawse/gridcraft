@@ -442,6 +442,74 @@ fn linked_sheets_saved_without_cells_keep_the_saved_values() {
 }
 
 #[test]
+fn a_lookup_index_that_is_an_error_is_na_when_the_key_is_not_found() {
+    use gridcraft_model::{ExternalBook, ExternalSheet};
+    let mut t = T::new();
+    // Data's last update failed before any cell was saved: every cell of it is #REF!, the index
+    // read from it included, yet a key that isn't found is #N/A first.
+    let data = ExternalSheet { name: "Data".into(), refresh_error: true, ..Default::default() };
+    t.wb.external_books = vec![ExternalBook { sheets: vec![data], ..Default::default() }].into();
+    t.set("A1", "46349");
+    t.set("B1", "=VLOOKUP(A1,[1]Data!$E$1:$FM$65536,[1]Data!$FI$1)");
+    t.set("B2", "=-VLOOKUP(A1,'[1]Data'!$B$4:$AM$3999,'[1]Data'!$AA$1,FALSE)");
+    t.set("B3", "=HLOOKUP(A1,[1]Data!$A$1:$Z$9,[1]Data!$A$12)");
+    t.set("B4", "=SUMPRODUCT([1]Data!C1:C9,[1]Data!D1:D9)");
+    let na = Value::Error(CellError::NA);
+    assert_eq!([t.get("B1"), t.get("B2"), t.get("B3")], [na.clone(), na.clone(), na]);
+    assert_eq!(t.get("B4"), Value::Error(CellError::Ref));
+    // A key that is found gives the index's error.
+    for (at, v) in [("D1", "x"), ("D2", "y"), ("E1", "1"), ("E2", "2")] {
+        t.set(at, v);
+    }
+    t.set("B5", "=VLOOKUP(\"y\",D1:E2,1/0,FALSE)");
+    t.set("B6", "=VLOOKUP(\"z\",D1:E2,1/0,FALSE)");
+    t.set("B7", "=VLOOKUP(\"y\",{\"x\",1;\"y\",2},#NAME?,FALSE)");
+    assert_eq!([t.get("B5"), t.get("B6"), t.get("B7")], [Value::Error(CellError::Div0), Value::Error(CellError::NA), Value::Error(CellError::Name)]);
+}
+
+#[test]
+fn approximate_lookups_over_a_whole_linked_column_search_the_whole_column() {
+    use gridcraft_model::{ExternalBook, ExternalSheet};
+    let mut t = T::new();
+    // Sort!C10:C147: a 3, a heading, ascending dates 35462.. in C12:C142, then 5s in C143:C147;
+    // D holds a value only beside the dates.
+    let mut cells = vec![(c("C10"), Value::Number(3.0)), (c("C11"), Value::text("ER Date"))];
+    for r in 12..=142u32 {
+        cells.push((CellRef::new(r - 1, 2), Value::Number(35_462.0 + 91.0 * f64::from(r - 12))));
+        cells.push((CellRef::new(r - 1, 3), Value::Number(f64::from(r))));
+    }
+    for r in 143..=147u32 {
+        cells.push((CellRef::new(r - 1, 2), Value::Number(5.0)));
+    }
+    cells.sort_by_key(|(p, _)| *p);
+    t.wb.external_books =
+        vec![ExternalBook { sheets: vec![ExternalSheet { name: "Sort".into(), cells: cells.clone(), ..Default::default() }], ..Default::default() }]
+            .into();
+    // Excel's bisection starts at the middle of the column, far past the saved cells: its first
+    // probe is the last number saved, a 5 below the key, so it answers with C147's row.
+    t.set("A1", "=VLOOKUP(35797,[1]Sort!$C:$Z,2,TRUE)");
+    t.set("A2", "=LOOKUP(35797,[1]Sort!$C:$C,[1]Sort!$D:$D)");
+    t.set("A3", "=LOOKUP(35797,[1]Sort!$C:$D)");
+    t.set("A4", "=HLOOKUP(5,[1]Sort!$1:$2,2)");
+    assert_eq!([t.num("A1"), t.num("A2"), t.num("A3")], [0.0, 0.0, 0.0]);
+    assert_eq!(t.get("A4"), Value::Error(CellError::NA));
+    // A block of the size written is searched as such.
+    t.set("A5", "=VLOOKUP(35797,[1]Sort!$C$1:$D$147,2,TRUE)");
+    assert_eq!(t.num("A5"), 15.0);
+    // This workbook's own whole columns are searched over the used range, as before.
+    for (p, v) in cells {
+        let text = match v {
+            Value::Number(n) => n.to_string(),
+            Value::Text(s) => s.to_string(),
+            _ => continue,
+        };
+        t.set(&p.to_string(), &text);
+    }
+    t.set("A6", "=VLOOKUP(35797,$C:$D,2,TRUE)");
+    assert_eq!(t.num("A6"), 15.0);
+}
+
+#[test]
 fn offset_refuses_a_base_in_a_linked_workbook() {
     use gridcraft_model::{ExternalBook, ExternalSheet};
     let mut t = T::new();
