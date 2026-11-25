@@ -7621,40 +7621,34 @@ fn whole_column_copy_from_unstyled_source_resets_inherited_style() {
     assert_blank_column_style(s.doc().unwrap().wb.sheet(1).unwrap(), 7, &[0, 39], Default::default());
 }
 
-/// The destination workbook's style table numbers its styles differently; a raw index would
-/// land on its strikethrough style.
+/// Copy must transfer the style's contents, not its source workbook's style ID.
 #[test]
 fn whole_column_copy_maps_inherited_style_into_another_workbook() {
     use gridcraft_model::{LineInfo, Style};
 
     let mut s = s();
     let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
-    let mut italic = Style::default();
-    italic.font.italic = true;
-    wb.styles.intern(italic);
     let mut bold = Style::default();
     bold.font.bold = true;
-    let bold = wb.styles.intern(bold);
-    wb.sheet_mut(0).unwrap().cols.insert(2, LineInfo { style: Some(bold), ..Default::default() });
+    let source_id = wb.styles.intern(bold.clone());
+    wb.sheet_mut(0).unwrap().cols.insert(2, LineInfo { style: Some(source_id), ..Default::default() });
     s.execute("edit.copy", json!({"range": "C:C"})).unwrap();
     s.execute("file.new", json!({})).unwrap();
     let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
     let mut strike = Style::default();
     strike.font.strike = true;
-    wb.styles.intern(strike.clone());
-    strike.font.italic = true;
-    assert_eq!(wb.styles.intern(strike), bold, "both new workbooks number their styles alike");
+    wb.styles.intern(strike);
+    assert_ne!(wb.styles.get(source_id), &bold, "a raw ID must not resolve to the expected style");
     s.execute("edit.paste", json!({"at": "H1"})).unwrap();
     let wb = &s.doc().unwrap().wb;
     let sh = wb.sheet(0).unwrap();
     let cell = CellRef::new(39, 7);
     assert!(sh.cell(cell).is_none());
-    let font = &wb.styles.get(sh.style_id(cell)).font;
-    assert!(font.bold && !font.strike, "H40 must inherit bold mapped into this workbook");
+    assert_eq!(wb.styles.get(sh.style_id(cell)), &bold, "H40 must inherit the mapped style");
 }
 
 /// Overlapping same-sheet cut: the source is reset before the destination takes the lines as
-/// they were, so the shared column ends up with the moved style, and undo/redo restore both.
+/// they were, so the shared column ends up with the moved style, and undo/redo restore the styles.
 #[test]
 fn whole_column_cut_onto_an_overlapping_column_moves_inherited_styles() {
     use gridcraft_model::LineInfo;
@@ -7666,7 +7660,7 @@ fn whole_column_cut_onto_an_overlapping_column_moves_inherited_styles() {
     sh.cols.insert(3, LineInfo { style: Some(italic), ..Default::default() });
     let styles = |s: &Session| {
         let sh = s.doc().unwrap().wb.sheet(0).unwrap();
-        assert!((2..=4).all(|col| sh.cell(CellRef::new(39, col)).is_none()));
+        assert!(sh.cells.is_empty(), "whole-column cut must not store blank cells");
         [2, 3, 4].map(|col| sh.style_id(CellRef::new(39, col)))
     };
     let normal = Default::default();

@@ -218,8 +218,9 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 - Whole-line Paste Special (including All), Insert Copied Cells, drag-and-drop and filtered or
   packed paste retain their previous behavior; the X25 probes measured direct Copy/Cut, not these
   paths. Ordinary whole-column paste now transfers inherited column styles and a cut resets the
-  source column's; Excel readbacks of blank cells confirmed both. A default source column resets
-  the destination by the same rule, but that probe sampled no blank destination cell.
+  source column's; Excel readbacks of blank cells confirmed both. GridCraft also resets the
+  destination style when copying an unstyled source column. That Excel probe did not measure
+  the destination column's aggregate style or sample a blank destination cell.
   Hidden/outline/show-detail and saved XML flags were not recovered; a size of zero
   established only effective geometry.
 

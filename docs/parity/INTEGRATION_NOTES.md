@@ -65,13 +65,14 @@ gap belongs to [worksheet inspection and navigation](../gaps.md#25-used-workshee
 not the shared bounds for print, export or calculation.
 
 GridCraft transfers size and effective visibility for contiguous whole-line `edit.paste`, and
-transfers inherited row and column styles. An absent source resets those fields. No blank
-destination cell was sampled under a default source column, so its style reset follows the
-measured cut-source reset rather than a direct readback. Same-workbook Cut resets those fields
-on the source and moves them as they stand at paste time. If the original source sheet is no
-longer at the recorded index, GridCraft refuses the paste rather than clearing another sheet.
-Full-size explicit ranges and line syntax are equivalent. Line and cell edits share one undo
-entry and line changes respect the sheet's formatting permissions.
+transfers inherited row and column styles. An absent source resets those fields. For a default
+source column, that destination style reset is inferred: Excel showed the style reset on blank
+cells in the vacated Cut source, but the default-column Copy did not measure a blank destination
+cell or the destination column's aggregate style. Same-workbook Cut resets the transferred
+fields on the source and moves them as they stand at paste time. If the original source sheet
+is no longer at the recorded index, GridCraft refuses the paste rather than clearing another
+sheet. Full-size explicit ranges and line syntax are equivalent. Line and cell edits share one
+undo entry and line changes respect the sheet's formatting permissions.
 
 Zero size demonstrates effective geometry; the probes did not recover `Hidden`, `OutlineLevel`
 or `ShowDetail` values, nor did they save XML. Outline/collapse, thickness and bare markers stay
