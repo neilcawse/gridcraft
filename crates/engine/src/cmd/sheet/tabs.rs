@@ -317,14 +317,10 @@ fn copied_table_names(wb: &gridcraft_model::Workbook, tables: &[gridcraft_model:
     }
     use gridcraft_core::valid_table_name;
     use gridcraft_formula::fold_name;
-    let mut taken: std::collections::HashSet<String> =
-        wb.sheets.iter().flat_map(|s| s.tables.iter().map(|t| fold_name(&t.name))).chain(wb.names.iter().map(|n| fold_name(&n.name))).collect();
-    taken.extend(gridcraft_xlsx::kept_defined_names(wb).map(|n| fold_name(&n)));
-    // A cache can be imported without a matching defined-name marker. Do not displace its name.
-    taken.extend(wb.sheets.iter().flat_map(|s| &s.slicers).filter_map(|s| {
-        let name = &s.imported_cache.name;
-        (!name.is_empty()).then(|| fold_name(name))
-    }));
+    let reserved = reserved_table_names(wb);
+    let taken = |name: &str| reserved.contains(&fold_name(name));
+    // Names given to earlier tables of this copy.
+    let mut allocated = std::collections::HashSet::new();
     let mut next = wb.sheets.iter().map(|s| s.tables.len()).sum::<usize>() + 1;
     tables
         .iter()
@@ -351,10 +347,24 @@ fn copied_table_names(wb: &gridcraft_model::Workbook, tables: &[gridcraft_model:
                     }
                     fit(format!("_{n}"))
                 })
-                .find(|name| taken.insert(fold_name(name)))
+                .find(|name| !taken(name) && allocated.insert(fold_name(name)))
                 .unwrap_or_default()
         })
         .collect()
+}
+
+/// The spellings, folded, that a copied table can't take: the namespace tables share with defined
+/// names holds every table, every defined name of any scope (those of kept sheets too) and the
+/// name of an imported slicer cache, written as a workbook name when the file had no marker for it.
+/// X27's `Workbook::table_name_taken` checks the same namespace; once both lanes are in, the
+/// `taken` check in [`copied_table_names`] becomes `wb.table_name_taken(name, None)` and this goes.
+fn reserved_table_names(wb: &gridcraft_model::Workbook) -> std::collections::HashSet<String> {
+    use gridcraft_formula::fold_name;
+    let tables = wb.sheets.iter().flat_map(|s| &s.tables).map(|t| fold_name(&t.name));
+    let names = wb.names.iter().map(|n| fold_name(&n.name));
+    let kept = gridcraft_xlsx::kept_defined_names(wb).map(|n| fold_name(&n));
+    let caches = wb.sheets.iter().flat_map(|s| &s.slicers).map(|s| &s.imported_cache.name).filter(|n| !n.is_empty()).map(|n| fold_name(n));
+    tables.chain(names).chain(kept).chain(caches).collect()
 }
 
 pub(super) fn tab_color(s: &mut Session, p: &Json) -> Result<Json> {

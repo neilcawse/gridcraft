@@ -167,7 +167,7 @@ fn copy_shortens_a_255_character_table_name() {
     let mut s = single_table(&source);
     copy_data(&mut s);
     assert_eq!(tables(&s, "Data"), [source]);
-    assert_eq!(tables(&s, "Data (2)"), [copied.clone()]);
+    assert_eq!(tables(&s, "Data (2)"), [copied.as_str()]);
     assert_eq!(formula(&s, "Data (2)", "H1"), format!("SUM({copied}[Qty])"));
 }
 
