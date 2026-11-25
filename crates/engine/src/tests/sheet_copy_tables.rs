@@ -172,6 +172,20 @@ fn copy_shortens_a_255_character_table_name() {
 }
 
 #[test]
+fn copy_reserves_names_allocated_earlier_in_the_same_copy() {
+    let prefix = format!("T{}", "x".repeat(252));
+    let mut s = single_table(&format!("{prefix}AA"));
+    s.execute("range.setValues", json!({"range": "C1", "values": [["Qty"], [2]]})).unwrap();
+    let lower = prefix.to_ascii_lowercase();
+    s.execute("insert.table", json!({"range": "C1:C2", "name": format!("{lower}BB")})).unwrap();
+    // Two tables: the first skips suffix 4. The second starts at 5 but its truncated
+    // candidate folds to the same name the first just received.
+    s.execute("formulas.defineName", json!({"name": format!("{lower}4"), "refersTo": "=1"})).unwrap();
+    copy_data(&mut s);
+    assert_eq!(tables(&s, "Data (2)"), [format!("{prefix}5"), format!("{lower}6")]);
+}
+
+#[test]
 fn copy_reserves_kept_sheet_defined_names() {
     let mut s = book();
     let kept = gridcraft_model::PreservedSheet {

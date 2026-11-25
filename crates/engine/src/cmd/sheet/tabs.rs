@@ -318,7 +318,6 @@ fn copied_table_names(wb: &gridcraft_model::Workbook, tables: &[gridcraft_model:
     use gridcraft_core::valid_table_name;
     use gridcraft_formula::fold_name;
     let reserved = reserved_table_names(wb);
-    let taken = |name: &str| reserved.contains(&fold_name(name));
     // Names given to earlier tables of this copy.
     let mut allocated = std::collections::HashSet::new();
     let mut next = wb.sheets.iter().map(|s| s.tables.len()).sum::<usize>() + 1;
@@ -347,7 +346,10 @@ fn copied_table_names(wb: &gridcraft_model::Workbook, tables: &[gridcraft_model:
                     }
                     fit(format!("_{n}"))
                 })
-                .find(|name| !taken(name) && allocated.insert(fold_name(name)))
+                .find(|name| {
+                    let folded = fold_name(name);
+                    !reserved.contains(&folded) && allocated.insert(folded)
+                })
                 .unwrap_or_default()
         })
         .collect()
@@ -356,8 +358,9 @@ fn copied_table_names(wb: &gridcraft_model::Workbook, tables: &[gridcraft_model:
 /// The spellings, folded, that a copied table can't take: the namespace tables share with defined
 /// names holds every table, every defined name of any scope (those of kept sheets too) and the
 /// name of an imported slicer cache, written as a workbook name when the file had no marker for it.
-/// X27's `Workbook::table_name_taken` checks the same namespace; once both lanes are in, the
-/// `taken` check in [`copied_table_names`] becomes `wb.table_name_taken(name, None)` and this goes.
+/// After X27 merges, use `!wb.table_name_taken(name, None)` for the workbook check (pass the
+/// original spelling), drop this helper, and keep the folded `allocated` check for this copy.
+/// X27 additionally reserves the `_xlnm.` and `_xlchart.` prefixes.
 fn reserved_table_names(wb: &gridcraft_model::Workbook) -> std::collections::HashSet<String> {
     use gridcraft_formula::fold_name;
     let tables = wb.sheets.iter().flat_map(|s| &s.tables).map(|t| fold_name(&t.name));
