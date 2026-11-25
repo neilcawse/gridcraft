@@ -544,10 +544,10 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
     let mut left = MERGE_FIT_WORK;
     for (si, row) in fit_rows {
         if sweep.as_ref().is_none_or(|(at, _)| *at != si) {
+            follow_fit(&mut wb, fit_lines.take());
             if let Some((prev, fit)) = shifted_fit.take() {
                 fit.finish(&mut wb, prev);
             }
-            follow_fit(&mut wb, fit_lines.take());
             if let Some(sh) = wb.sheet(si).filter(|sh| !shifted.is_empty() && shifted.contains(&sh.uid.get())) {
                 shifted_fit = Some((si, sheet::ShiftedDrawingFit::new(sh)));
             }
@@ -569,10 +569,10 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
             }
         }
     }
+    follow_fit(&mut wb, fit_lines);
     if let Some((si, fit)) = shifted_fit {
         fit.finish(&mut wb, si);
     }
-    follow_fit(&mut wb, fit_lines);
     if let Some(t0) = t0 {
         eprintln!("commit: + rows {:?}", since(t0));
     }

@@ -139,6 +139,58 @@ fn hiding_a_row_inside_a_chart_keeps_its_size() {
     assert_rect(chart_rect(&s), before, "hidden row");
 }
 
+/// Round-trip a synthetic chart whose end marker cannot be reconstructed by hit-testing
+/// its drawn corner. The file explicitly says which row owns the offset.
+fn chart_with_named_end_row(to_row: u32, to_off: i64, zero_rows: &[u32]) -> Session {
+    use gridcraft_model::{DrawingFile, DrawingMarker, DrawingPlacement, LineInfo};
+    let s = chart_session("moveAndSize");
+    let mut wb = s.doc().unwrap().wb.as_ref().clone();
+    let sh = wb.sheet_mut(0).unwrap();
+    for &row in zero_rows {
+        sh.rows.insert(row, LineInfo { size: Some(0.0), custom: true, ..LineInfo::default() });
+    }
+    let from = DrawingMarker { col: 2, row: 1, col_off: 0, row_off: 0 };
+    let to = DrawingMarker { col: 5, row: to_row, col_off: 0, row_off: to_off };
+    let placement = DrawingPlacement::TwoCell { from, to, edit_as: None };
+    let anchor = placement.anchor(sh);
+    sh.charts[0].anchor = anchor;
+    sh.drawing_files.insert(DrawingRef::Chart(sh.charts[0].id), DrawingFile { anchor, placement });
+    let bytes = crate::io::save_bytes(&wb, "markers.xlsx").unwrap();
+    let mut session = Session::new();
+    session.execute("file.open", json!({"name": "markers.xlsx", "base64": crate::io::base64_encode(&bytes)})).unwrap();
+    session
+}
+
+#[test]
+fn chart_resize_uses_the_named_end_row_even_with_an_out_of_cell_offset() {
+    let mut s = chart_with_named_end_row(3, 50 * 9525, &[]);
+    let before = chart_rect(&s);
+    s.execute("home.rowHeight", json!({"rows": "4:4", "points": 40})).unwrap();
+    assert_rect(chart_rect(&s), before, "end marker belongs to row 4, not one of the later rows the offset reaches");
+}
+
+#[test]
+fn chart_resize_can_distinguish_coincident_markers_in_zero_height_rows() {
+    let mut s = chart_with_named_end_row(3, 0, &[3, 4]);
+    let before = chart_rect(&s);
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert_eq!(sh.row_top(3), sh.row_top(5));
+    assert!(!sh.is_row_hidden(3));
+    s.execute("home.rowHeight", json!({"rows": "4:4", "points": 40})).unwrap();
+    assert_rect(chart_rect(&s), before, "the marker stays at the start of row 4");
+}
+
+#[test]
+fn resizing_a_row_keeps_an_absolute_chart_beyond_ten_million_pixels_fixed() {
+    let mut s = chart_session("absolute");
+    let id = s.doc().unwrap().wb.sheet(0).unwrap().charts[0].id;
+    s.execute("object.move", json!({"kind": "chart", "id": id, "at": "C700001"})).unwrap();
+    let before = chart_rect(&s);
+    assert!(before.y > 1e7);
+    s.execute("home.rowHeight", json!({"rows": "1:1", "points": 40})).unwrap();
+    assert_rect(chart_rect(&s), before, "absolute position on a valid late worksheet row");
+}
+
 /// A row fitted to a larger font inside a "move and size with cells" chart grows the chart.
 #[test]
 fn a_row_fit_inside_a_chart_sizes_it() {
@@ -172,6 +224,23 @@ fn a_row_fit_after_a_deletion_sizes_the_shifted_chart() {
     let grown = height(&s, 3) - unfitted;
     assert!(grown > 20.0, "the rewritten formula's row fits");
     assert_rect(chart_rect(&s), ObjectRect { y: before.y - deleted, h: before.h + grown, ..before }, "after the deletion");
+}
+
+#[test]
+fn a_row_fit_after_deletion_uses_the_remapped_named_end_row() {
+    let mut s = chart_with_named_end_row(3, 50 * 9525, &[]);
+    s.execute("cell.set", json!({"cell": "B4", "input": "=A1"})).unwrap();
+    {
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let large = wb.styles.derive(StyleId::DEFAULT, |st| st.font.size = 36.0);
+        wb.sheet_mut(0).unwrap().set_style(CellRef::new(3, 1), large);
+    }
+    let height = |s: &Session, row| f64::from(s.doc().unwrap().wb.sheet(0).unwrap().row_height(row));
+    let before = chart_rect(&s);
+    let (deleted, unfitted) = (height(&s, 0), height(&s, 3));
+    s.execute("home.deleteRows", json!({"rows": "1:1"})).unwrap();
+    assert!(height(&s, 2) > unfitted + 20.0, "the rewritten formula's row fits");
+    assert_rect(chart_rect(&s), ObjectRect { y: before.y - deleted, ..before }, "the fitted row starts at the named end marker");
 }
 
 /// Two 40 px pictures at B3 and B6 grouped with `mode`, the group's box around them, and row 4

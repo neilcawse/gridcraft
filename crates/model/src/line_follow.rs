@@ -1,8 +1,8 @@
 //! Floating objects when row heights and column widths change without a structural shift.
 //!
-//! The model keeps an object's top-left cell and offset, and its size in pixels. A two-cell
-//! object's far corner is therefore not stored as a cell: when lines under it change size, the
-//! object has to be re-measured to keep following its cells the way Excel's `editAs` says
+//! The editable anchor keeps an object's top-left cell and offset, and its size in pixels.
+//! Use a live imported two-cell placement when available; otherwise infer the far corner from
+//! the old size. When line sizes change, the object follows its cells according to `editAs`
 //! (ECMA-376 Part 1, 20.5.3.2 `ST_EditAs`): "move and size with cells" keeps both corners on
 //! their cells, "move but don't size" keeps its size and follows its top-left cell, and "don't
 //! move or size" keeps its place on the sheet.
@@ -93,20 +93,24 @@ fn displaced(old: Axis<'_>, new: Axis<'_>, line: u32, offset: f32) -> bool {
 }
 
 /// `a` re-measured for lines changed from `old` to `new` by its mode; `None` when it stays.
-fn follow(old: &Sheet, new: &Sheet, a: &Anchor) -> Option<Anchor> {
+fn follow(old: &Sheet, new: &Sheet, a: &Anchor, placement: Option<&DrawingPlacement>) -> Option<Anchor> {
     let axes = |rows| (Axis { sheet: old, rows }, Axis { sheet: new, rows });
     let ((old_x, new_x), (old_y, new_y)) = (axes(false), axes(true));
     match a.mode {
         AnchorMode::MoveOnly => None,
         AnchorMode::MoveAndSize => {
-            let width = resized(old_x, new_x, a.cell.col, a.dx, a.width);
-            let height = resized(old_y, new_y, a.cell.row, a.dy, a.height);
+            let (width, height) = if let Some(placement @ DrawingPlacement::TwoCell { .. }) = placement {
+                let next = placement.anchor(new);
+                (f64::from(next.width), f64::from(next.height))
+            } else {
+                (resized(old_x, new_x, a.cell.col, a.dx, a.width), resized(old_y, new_y, a.cell.row, a.dy, a.height))
+            };
             let keep = |new: f64, old: f32| if (new - f64::from(old.max(0.0))).abs() <= SAME { old } else { new as f32 };
             let next = Anchor { width: keep(width, a.width), height: keep(height, a.height), ..*a };
             (next != *a).then_some(next)
         }
         AnchorMode::Absolute => (displaced(old_x, new_x, a.cell.col, a.dx) || displaced(old_y, new_y, a.cell.row, a.dy))
-            .then(|| new.rect_anchor(old.anchor_rect(a), AnchorMode::Absolute)),
+            .then(|| new.layout_rect_anchor(old.anchor_rect(a), AnchorMode::Absolute)),
     }
 }
 
@@ -184,7 +188,7 @@ impl Sheet {
             if same(target, self.anchor_rect(&a)) {
                 continue;
             }
-            let next = self.rect_anchor(target, a.mode);
+            let next = self.layout_rect_anchor(target, a.mode);
             match m {
                 DrawingRef::Group(gid) => {
                     if let Some(g) = self.groups.iter_mut().find(|g| g.id == gid) {
@@ -201,6 +205,10 @@ impl Sheet {
         if let Some(g) = self.groups.iter_mut().find(|g| g.id == id) {
             g.anchor = to;
         }
+    }
+
+    fn live_drawing_placement(&self, r: DrawingRef, anchor: Anchor) -> Option<&DrawingPlacement> {
+        self.drawing_files.get(&r).filter(|file| file.anchor == anchor).map(|file| &file.placement)
     }
 
     /// Re-places floating objects after row heights or column widths changed from `before`'s
@@ -229,16 +237,17 @@ impl Sheet {
                     if contents.iter().any(|&m| self.raw_drawing_anchor(m).is_some_and(|ma| settled(drawing_obj(m), &ma))) {
                         continue;
                     }
-                    let next = follow(before, &new, &a).unwrap_or(a);
+                    let next = follow(before, &new, &a, self.live_drawing_placement(DrawingRef::Group(id), a)).unwrap_or(a);
                     self.carry_group(id, before, &a, next);
                 }
                 Floating::Drawing(r) => {
-                    if let (Some(next), Some(slot)) = (follow(before, &new, &a), self.drawing_anchor_mut(r)) {
+                    let next = follow(before, &new, &a, self.live_drawing_placement(r, a));
+                    if let (Some(next), Some(slot)) = (next, self.drawing_anchor_mut(r)) {
                         *slot = next;
                     }
                 }
                 Floating::Control(id) => {
-                    if let (Some(next), Some(c)) = (follow(before, &new, &a), self.controls.iter_mut().find(|c| c.id == id)) {
+                    if let (Some(next), Some(c)) = (follow(before, &new, &a, None), self.controls.iter_mut().find(|c| c.id == id)) {
                         c.anchor = next;
                     }
                 }

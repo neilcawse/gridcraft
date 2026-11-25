@@ -142,15 +142,20 @@ impl Sheet {
     /// The anchor (top-left cell plus offset, clamped onto the sheet) for a box, with `mode`.
     pub fn rect_anchor(&self, r: ObjectRect, mode: AnchorMode) -> Anchor {
         let px = |v: f64| if v.is_finite() { v.clamp(0.0, 1e7) } else { 0.0 };
-        let (x, y) = (px(r.x), px(r.y));
+        self.layout_rect_anchor(ObjectRect { x: px(r.x), y: px(r.y), w: px(r.w), h: px(r.h) }, mode)
+    }
+
+    /// Re-anchor internal layout geometry without the input cap for object commands.
+    pub(crate) fn layout_rect_anchor(&self, r: ObjectRect, mode: AnchorMode) -> Anchor {
+        let (x, y) = (r.x.max(0.0), r.y.max(0.0));
         let col = self.col_at(x);
         let row = self.row_at(y);
         Anchor {
             cell: CellRef::new(row, col),
             dx: (x - self.col_left(col)).max(0.0) as f32,
             dy: (y - self.row_top(row)).max(0.0) as f32,
-            width: px(r.w) as f32,
-            height: px(r.h) as f32,
+            width: r.w.max(0.0) as f32,
+            height: r.h.max(0.0) as f32,
             mode,
         }
     }
