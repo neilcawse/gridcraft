@@ -7650,6 +7650,79 @@ fn paste_special_all_keeps_whole_line_sizes() {
     assert_eq!(s.doc().unwrap().wb.active().unwrap().row_height(7), 80.);
 }
 
+/// A Cut stays pending across edits and moves its cells as they are when pasted. The lines it
+/// moves are read then too, so a height set after the Cut moves with the row, also when the
+/// destination overlaps the source.
+#[test]
+fn whole_row_cut_moves_line_sizes_as_they_are_when_pasted() {
+    use gridcraft_model::LineInfo;
+
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "A3", "input": "move me"})).unwrap();
+    let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+    for row in [2, 3] {
+        sh.rows.insert(row, LineInfo { size: Some(100.), custom: true, ..Default::default() });
+    }
+    let default = sh.default_row_height;
+    let heights = |s: &Session| {
+        let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+        [2, 3, 4].map(|r| sh.row_height(r))
+    };
+    s.execute("edit.cut", json!({"range": "3:4"})).unwrap();
+    s.execute("home.rowHeight", json!({"rows": "3:3", "height": 50})).unwrap();
+    s.execute("edit.paste", json!({"at": "A4"})).unwrap();
+    assert_eq!(v(&s, "A4"), Value::from("move me"));
+    assert_eq!(heights(&s), [default, 50., 100.]);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(v(&s, "A3"), Value::from("move me"));
+    assert_eq!(heights(&s), [50., 100., default]);
+}
+
+/// A filter that leaves one run of copied rows showing packs the copy, which keeps its previous
+/// behavior: the destination lines are not replaced.
+#[test]
+fn filtered_whole_row_copy_keeps_destination_line_sizes() {
+    use gridcraft_model::LineInfo;
+
+    let mut s = s();
+    s.execute("range.setValues", json!({"range": "A1", "values": [["Val", "Tag"], ["a", "keep"], ["b", "keep"], ["c", "hide"]]})).unwrap();
+    s.execute("selection.set", json!({"range": "A1:B1"})).unwrap();
+    s.execute("data.filter", json!({})).unwrap();
+    assert_eq!(s.execute("data.filterBy", json!({"column": "B", "values": ["keep"]})).unwrap()["hiddenRows"], 1);
+    let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+    sh.rows.insert(1, LineInfo { size: Some(80.), custom: true, ..Default::default() });
+    s.execute("edit.copy", json!({"range": "2:4"})).unwrap();
+    s.execute("edit.paste", json!({"at": "A20"})).unwrap();
+    assert_eq!([v(&s, "A20"), v(&s, "A21"), v(&s, "A22")], [Value::from("a"), Value::from("b"), Value::Empty]);
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert_eq!(sh.row_height(19), sh.default_row_height);
+}
+
+#[test]
+fn whole_row_paste_needs_row_formatting_on_a_protected_sheet() {
+    use gridcraft_model::{LineInfo, SheetProtection};
+
+    for format_rows in [false, true] {
+        let mut s = s();
+        s.execute("home.insertSheet", json!({"name": "Locked"})).unwrap();
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        wb.sheet_mut(0).unwrap().rows.insert(2, LineInfo { size: Some(80.), custom: true, ..Default::default() });
+        let locked = wb.sheet_index("Locked").unwrap();
+        wb.sheet_mut(locked).unwrap().protection = Some(SheetProtection { format_rows, ..Default::default() });
+        s.execute("edit.copy", json!({"sheet": "Sheet1", "range": "3:3"})).unwrap();
+        s.execute("sheet.activate", json!({"sheet": "Locked"})).unwrap();
+        let pasted = s.execute("edit.paste", json!({"at": "A8"}));
+        let sh = s.doc().unwrap().wb.sheet(locked).unwrap();
+        if format_rows {
+            pasted.unwrap();
+            assert_eq!(sh.row_height(7), 80.);
+        } else {
+            assert!(pasted.unwrap_err().to_string().contains("Formatting rows"));
+            assert_eq!(sh.row_height(7), sh.default_row_height);
+        }
+    }
+}
+
 /// ft-3ir.10.16: pasting whole columns walked every one of their 1,048,576 rows and added one
 /// single-cell validation rule per pasted cell, re-cutting every rule each time (the fuzz run
 /// aborted on a 34 GB allocation). Validation now pastes as ranges and only cells that hold

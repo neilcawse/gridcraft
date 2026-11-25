@@ -115,10 +115,14 @@ pub(super) fn paste_internal(s: &mut Session, p: &Json, transfer_lines: bool) ->
         if let Some(axis) = line_axis {
             let (first, last) = (axis.index(src.start), axis.index(src.end));
             let dest = axis.index(at);
+            // A Cut moves its lines as they are now, like its cells; a copy pastes the snapshot.
+            // Read them before resetting a source the destination may overlap.
+            let from = if cut_move { cx.wb.sheet(clip.sheet).ok_or(EngineError::NoDocument)? } else { src_sheet };
+            let incoming: Vec<(u32, LineInfo)> = axis.lines(from).range(first..=last).map(|(&i, &info)| (dest + i - first, info)).collect();
             if cut_move && (clip.sheet != dest_sheet || first != dest) {
-                axis.replace(cx, clip.sheet, first, last, None, &mut map_style)?;
+                axis.replace(cx, clip.sheet, first, last, &[], &mut map_style)?;
             }
-            axis.replace(cx, dest_sheet, dest, dest + last - first, Some((src_sheet, first)), &mut map_style)?;
+            axis.replace(cx, dest_sheet, dest, dest + last - first, &incoming, &mut map_style)?;
         }
         let mut moved_formulas = std::collections::BTreeMap::new();
         let mut moved_pictures = std::collections::BTreeMap::new();
@@ -472,15 +476,12 @@ impl PasteLineAxis {
         sheet: usize,
         first: u32,
         last: u32,
-        source: Option<(&Sheet, u32)>,
+        incoming: &[(u32, LineInfo)],
         map_style: &mut impl FnMut(StyleId, &mut Workbook) -> StyleId,
     ) -> Result<()> {
         let target = cx.wb.sheets.get(sheet).ok_or(EngineError::NoDocument)?;
         let lines = self.lines(target);
-        let mut incoming = source
-            .into_iter()
-            .flat_map(|(src, start)| self.lines(src).range(start..=start + last - first).map(move |(&i, info)| (first + i - start, *info)))
-            .peekable();
+        let mut incoming = incoming.iter().copied().peekable();
         // Take the union of recorded source and destination lines, not the entire axis.
         let mut existing = lines.range(first..=last).map(|(&i, &info)| (i, info)).peekable();
         let mut changes = Vec::new();
