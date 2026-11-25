@@ -535,6 +535,25 @@ fn legacy_external_range_names_intersect_only_in_value_positions() {
     assert_eq!(dynamic.child("f").unwrap().text, "SQRT([1]!Rates)");
 }
 
+#[test]
+fn unreadable_external_name_ignores_same_named_host_range() {
+    let body = r#"<sheetData><row r="2"><c r="B2"><f>[1]!Rates</f><v>17</v></c><c r="C2"><f>Rates</f><v>0</v></c></row></sheetData>"#;
+    // The link contains a definition but no saved sheet data. The host range is unrelated.
+    let link = r#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><externalBook><sheetNames><sheetName val="Remote"/></sheetNames><definedNames><definedName name="Rates" refersTo="Remote!$A$1:$A$3"/></definedNames></externalBook></externalLink>"#;
+    let bytes = super::minimal(
+        body,
+        &[("xl/externalLinks/externalLink1.xml", link)],
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink" Target="externalLinks/externalLink1.xml"/>"#,
+        r#"<externalReferences><externalReference r:id="rId2"/></externalReferences><definedNames><definedName name="Rates">Data!$A$1:$A$3</definedName></definedNames>"#,
+    );
+    let (wb, _) = read_xlsx(&bytes).unwrap();
+    let sheet = wb.sheet(0).unwrap();
+    let linked = sheet.cell(at("B2")).unwrap();
+    assert_eq!(linked.formula.as_ref().unwrap().text, "[1]!Rates");
+    assert_eq!(linked.value, Value::Number(17.0));
+    assert_eq!(sheet.cell(at("C2")).unwrap().formula.as_ref().unwrap().text, "@Rates");
+}
+
 /// How `export` saved a formula, as comparable text.
 fn export_text(wb: &Workbook, at: CellRef, text: &str, names: &mut crate::array_formula::NameCache) -> String {
     use crate::array_formula::{Export, export};

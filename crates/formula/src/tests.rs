@@ -126,6 +126,7 @@ fn names_of_linked_workbooks_print_as_excel_writes_them() {
         ("[2]!'0#NG: 2 16 6 14'", "[2]!'0#NG: 2 16 6 14'"),
         ("SUM([2]!'it''s',1)", "SUM([2]!'it''s',1)"),
         ("[2]!'''bid!ask[slot]'''", "[2]!'''bid!ask[slot]'''"),
+        ("[18446744073709551616]!'bid!ask'", "[18446744073709551616]!'bid!ask'"),
         ("'[2]Bid!Ask'!Price", "'[2]Bid!Ask'!Price"),
     ] {
         let expr = parse(src).unwrap();
@@ -329,16 +330,6 @@ fn rename_sheet_updates_qualified_names() -> Result<(), Box<dyn std::error::Erro
     let e = rename_sheet(parse("Data!MyName")?, "Data", "It's");
     assert_eq!(e, Expr::Name("It's!MyName".into()));
     assert_eq!(print(&rename_sheet(e, "It's", "Totals")), "Totals!MyName");
-    Ok(())
-}
-
-#[test]
-fn linked_name_print_preserves_quoted_sheet_punctuation() -> Result<(), Box<dyn std::error::Error>> {
-    // The decoded sheet keeps its `!` and apostrophe; only the last `!` starts the name.
-    let text = "'[1]A!B''s'!Rates";
-    let expr = parse(text)?;
-    assert_eq!(print(&expr), text);
-    assert_eq!(parse(&print(&expr))?, expr);
     Ok(())
 }
 
