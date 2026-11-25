@@ -445,7 +445,8 @@ pub(crate) fn paint_objects(app: &mut SheetApp, p: &Painter, geo: &Geo, wb: &Arc
         }
         let start = p.add(egui::Shape::Noop);
         // A drop-down shows its chosen item as the source cell shows it now.
-        let shown = if c.kind == gridcraft_engine::model::ControlKind::Drop { gridcraft_engine::cmd::controls::drop_shown(wb, si, c) } else { String::new() };
+        let shown =
+            if c.kind == gridcraft_engine::model::ControlKind::Drop { gridcraft_engine::cmd::controls::drop_shown(wb, si, c) } else { String::new() };
         crate::form_controls::paint(p, r, c, geo.z, crate::form_controls::look(app, geo, c, r, hover), &shown);
         done(start, r);
     }

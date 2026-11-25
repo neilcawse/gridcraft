@@ -279,9 +279,9 @@ fn drawing_objects(children: &[El]) -> Vec<&El> {
         .collect()
 }
 
-/// Reads a sheet's drawing part. `control_shapes` are the shape numbers of the form controls the
-/// sheet lists: their DrawingML compatibility proxies (see [`control_proxy`]) are skipped, as the
-/// controls themselves are read (or kept) from the sheet's `<controls>`.
+/// Reads a sheet's drawing part. `control_shapes` are the VML shape numbers of the form controls
+/// read into the model: their DrawingML stand-ins (see [`control_proxy`]) are skipped, as GridCraft
+/// writes those controls itself. The stand-ins of controls left to pass-through are read as shapes.
 pub fn read_drawing(cx: &mut Ctx<'_>, part: &str, control_shapes: &HashSet<u64>, sheet: &mut Sheet) -> Result<(), IoError> {
     let Some(bytes) = cx.pkg.read(part)? else {
         cx.warn(format!("missing part {part}"));

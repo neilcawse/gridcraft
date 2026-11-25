@@ -172,13 +172,15 @@ fn vml_only_controls_are_read_and_clamped() {
     let (wb, report) = read_xlsx(&bytes).unwrap();
     assert!(report.warnings.iter().all(|w| !w.contains("form controls are not supported")), "{:?}", report.warnings);
     let c = &wb.sheet(0).unwrap().controls;
-    assert_eq!(c.len(), 3, "the drop-down and the shape without an anchor are skipped");
+    assert_eq!(c.len(), 4, "the shape without an anchor is skipped");
     assert_eq!((c[0].kind, c[0].min, c[0].max, c[0].step, c[0].value, c[0].horizontal), (ControlKind::Slider, 0, 30_000, 1, 30_000, true));
     assert!(c[0].page >= c[0].step && c[0].check_numbers().is_ok());
     assert_eq!((c[1].min, c[1].max), (9, 10), "a range with no width gets one");
     assert!(c[1].check_numbers().is_ok());
     assert_eq!(c[2].text, "Go");
     assert_eq!(c[2].action, Some(ControlAction::Macro { name: "Tidy".into(), input: MacroInput::Selection, output: None }));
+    assert_eq!((c[3].kind, c[3].list_range.as_deref(), c[3].selected), (ControlKind::Drop, None, 0), "a drop-down with nothing to list");
+    assert!(c[3].drop_lines >= 1);
 }
 
 /// A producer that quotes `shapeId` with single quotes: the control is read, and the kept
@@ -530,7 +532,7 @@ fn controls_come_from_the_legacy_drawing_not_the_header_and_footer_drawing() {
     );
     let (wb, _) = read_xlsx(&bytes).unwrap();
     let c = &wb.sheet(0).unwrap().controls;
-    assert_eq!(c.len(), 3, "{c:?}");
+    assert_eq!(c.len(), 4, "the VML_ONLY controls (scroll bar, spin button, button, drop-down): {c:?}");
     assert_eq!(c[2].text, "Go");
 }
 

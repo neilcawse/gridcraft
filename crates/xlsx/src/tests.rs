@@ -11,6 +11,7 @@ mod chart_read_tests;
 mod chart_ref_offsets;
 mod controls_tests;
 mod csv_tests;
+mod drop_down_tests;
 mod encrypted_tests;
 mod equation_tests;
 mod fixtures;

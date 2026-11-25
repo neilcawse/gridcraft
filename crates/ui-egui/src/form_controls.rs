@@ -509,26 +509,27 @@ pub fn drop_picker(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_open: b
     let width = r.width().max(60.0);
     let wb = d.wb.clone();
     let mut chosen = None;
-    let response = egui::Area::new(egui::Id::unique(("drop_list", id))).fixed_pos(at).pivot(pivot).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
-        egui::Frame::popup(ui.style()).inner_margin(2.0).show(ui, |ui| {
-            ui.set_min_width(width);
-            let mut area = egui::ScrollArea::vertical().max_height(height).min_scrolled_height(height).auto_shrink([false, true]);
-            // On opening, the chosen item is in view.
-            if !was_open && c.selected > 0 {
-                area = area.vertical_scroll_offset((c.selected - 1) as f32 * (DROP_ROW_H + gap));
-            }
-            area.show_rows(ui, DROP_ROW_H, len, |ui, range| {
-                let start = u32::try_from(range.start).unwrap_or(u32::MAX);
-                let count = u32::try_from(range.len()).unwrap_or(0);
-                for (i, text) in (start..).zip(drop_items(&wb, host, &c, start, count)) {
-                    let item = i.saturating_add(1);
-                    if ui.add(egui::Button::selectable(item == c.selected, text).min_size(vec2(width, DROP_ROW_H))).clicked() {
-                        chosen = Some(item);
-                    }
+    let response =
+        egui::Area::new(egui::Id::unique(("drop_list", id))).fixed_pos(at).pivot(pivot).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).inner_margin(2.0).show(ui, |ui| {
+                ui.set_min_width(width);
+                let mut area = egui::ScrollArea::vertical().max_height(height).min_scrolled_height(height).auto_shrink([false, true]);
+                // On opening, the chosen item is in view.
+                if !was_open && c.selected > 0 {
+                    area = area.vertical_scroll_offset((c.selected - 1) as f32 * (DROP_ROW_H + gap));
                 }
+                area.show_rows(ui, DROP_ROW_H, len, |ui, range| {
+                    let start = u32::try_from(range.start).unwrap_or(u32::MAX);
+                    let count = u32::try_from(range.len()).unwrap_or(0);
+                    for (i, text) in (start..).zip(drop_items(&wb, host, &c, start, count)) {
+                        let item = i.saturating_add(1);
+                        if ui.add(egui::Button::selectable(item == c.selected, text).min_size(vec2(width, DROP_ROW_H))).clicked() {
+                            chosen = Some(item);
+                        }
+                    }
+                });
             });
         });
-    });
     if let Some(item) = chosen {
         app.grid.drop_open = None;
         app.control_set(id, item as f64);

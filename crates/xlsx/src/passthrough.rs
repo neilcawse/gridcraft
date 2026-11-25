@@ -8,7 +8,7 @@
 //! XML, links to external workbooks with their `<externalReferences>`, data connections, the Power
 //! Pivot data model, XML maps,
 //! shared-workbook revision logs…) and each sheet (query tables, cells mapped to XML elements,
-//! form controls other than the buttons, scroll bars and spin buttons `controls.rs` models,
+//! form controls other than the buttons, scroll bars, spin buttons and drop-downs `controls.rs` models,
 //! ActiveX controls, OLE objects, the sheet background, custom sheet properties and
 //! printer settings, with the sheet's `<picture>`, `<oleObjects>` and `<controls>` XML, the `r:id`
 //! of `<pageSetup>`, every shape of the legacy VML drawing that isn't a note or a modelled

@@ -897,7 +897,7 @@ pub enum MacroInput {
     Fixed(String),
 }
 
-/// A form control (button, slider, spin button) floating over the sheet.
+/// A form control (button, slider, spin button, drop-down) floating over the sheet.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FormControl {
@@ -932,8 +932,9 @@ pub struct FormControl {
     pub list_range: Option<String>,
     /// A drop-down's chosen item, 1-based (0: none). The linked cell holds it too.
     pub selected: u32,
-    /// The rows a drop-down's open list shows before it scrolls.
+    /// The rows a drop-down's open list shows before it scrolls (at least 1).
     pub drop_lines: u32,
+    /// How a drop-down is drawn (`dropStyle`), kept for saving.
     pub drop_style: DropStyle,
 }
 

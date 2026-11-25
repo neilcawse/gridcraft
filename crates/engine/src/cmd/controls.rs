@@ -633,7 +633,7 @@ fn assign(s: &mut Session, p: &Json) -> Result<Json> {
     let (sheet, i, mut c) = find(s, CMD, p)?;
     check_unlocked(s, sheet, &c)?;
     if c.kind != ControlKind::Button {
-        return Err(bad(CMD, "only buttons run actions; a slider or spin button writes its value to its linked cell"));
+        return Err(bad(CMD, "only buttons run actions; a slider, spin button or drop-down writes its value to its linked cell"));
     }
     let action = action_param(s, CMD, p)?;
     if action.is_none() && bool_param(p, "clear") != Some(true) {
@@ -697,7 +697,7 @@ fn press(s: &mut Session, p: &Json) -> Result<Json> {
     const CMD: &str = "control.press";
     let (_, _, c) = find(s, CMD, p)?;
     if c.kind != ControlKind::Button {
-        return Err(bad(CMD, "only buttons can be pressed; use control.setValue for a slider or spin button"));
+        return Err(bad(CMD, "only buttons can be pressed; use control.setValue for a slider, spin button or drop-down"));
     }
     let name = c.display_name();
     match c.action {

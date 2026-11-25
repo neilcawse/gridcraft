@@ -482,7 +482,9 @@ pub fn format_params(app: &SheetApp, d: &Dialog) -> Result<Json, String> {
         return Ok(out);
     }
     if c.kind == ControlKind::Drop {
-        let lines = whole(&val(d, "dropLines")).filter(|n| *n >= 1).ok_or_else(|| format!("Drop down lines must be a whole number from 1 to {CONTROL_MAX}."))?;
+        let lines = whole(&val(d, "dropLines"))
+            .filter(|n| *n >= 1)
+            .ok_or_else(|| format!("Drop down lines must be a whole number from 1 to {CONTROL_MAX}."))?;
         out["dropLines"] = json!(lines);
         out["listRange"] = json!(val(d, "listRange").trim());
         out["link"] = json!(val(d, "link").trim());
@@ -528,7 +530,8 @@ pub fn format_dialog(app: &mut SheetApp, ui: &mut Ui, d: &mut Dialog, open: &mut
         d.values.insert("text".into(), json!(text));
     } else if c.kind == ControlKind::Drop {
         egui::Grid::new("format_control_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-            for (key, label, width) in [("listRange", "Input range:", 160.0), ("link", "Cell link:", 160.0), ("dropLines", "Drop down lines:", 90.0)] {
+            for (key, label, width) in [("listRange", "Input range:", 160.0), ("link", "Cell link:", 160.0), ("dropLines", "Drop down lines:", 90.0)]
+            {
                 ui.label(label);
                 text_field(ui, d, key, width);
                 ui.end_row();

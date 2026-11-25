@@ -9,9 +9,10 @@
 //! - a legacy VML shape with `x:ClientData`, in the sheet's VML drawing (shared with notes).
 //!
 //! Excel also writes a hidden DrawingML shape for each control (`cNvPr hidden="1"` with an
-//! `a14:compatExt spid`) for applications that don't know controls; the drawing reader drops that
-//! proxy for every control the sheet lists (see [`listed_shapes`]), so it never becomes a shape
-//! of its own, and GridCraft doesn't write one.
+//! `a14:compatExt spid` naming the VML shape) for applications that don't know controls. The
+//! drawing reader drops that stand-in for every control read here ([`ReadControls::modelled`]),
+//! so it doesn't also become a shape, and GridCraft doesn't write one. The stand-ins of controls
+//! left to pass-through are read as before.
 //!
 //! Reading prefers the properties part and falls back to the VML. Values are clamped to the
 //! 0..30000 whole numbers sliders and spin buttons take, and a drop-down's chosen item and rows
@@ -152,7 +153,11 @@ pub fn write(out: &mut Out, rels: &mut Rels, sheet: &Sheet, shape_id: impl Fn(us
             )
         };
         // A drop-down's box is not sized to its text (`autoLine`), as Excel writes it.
-        let mut pr = String::from(if c.kind == ControlKind::Drop { " defaultSize=\"0\" autoLine=\"0\" autoPict=\"0\"" } else { " defaultSize=\"0\" autoPict=\"0\"" });
+        let mut pr = String::from(if c.kind == ControlKind::Drop {
+            " defaultSize=\"0\" autoLine=\"0\" autoPict=\"0\""
+        } else {
+            " defaultSize=\"0\" autoPict=\"0\""
+        });
         if !c.print {
             pr.push_str(" print=\"0\"");
         }
@@ -486,13 +491,6 @@ pub struct ReadControls {
     /// The VML shape numbers of the controls read into the model: GridCraft writes those, so they
     /// are left out of the kept content.
     pub modelled: HashSet<u64>,
-}
-
-/// The shape numbers of every control a sheet's `<controls>` element lists, whether GridCraft
-/// models its kind or keeps it: their DrawingML compatibility proxies are not shapes of their own
-/// (see [`crate::drawing::read_drawing`]).
-pub fn listed_shapes(controls: Option<&El>) -> HashSet<u64> {
-    controls.map(controls_in).unwrap_or_default().into_iter().filter_map(|c| c.attr("shapeId").and_then(shape_number)).collect()
 }
 
 /// Whether a VML shape's client data is a note's: its `ObjectType` is `Note` in any case and with

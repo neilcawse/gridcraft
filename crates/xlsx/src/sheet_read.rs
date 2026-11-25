@@ -1,6 +1,6 @@
 //! Reading worksheet parts.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use craft_xlsx::{
@@ -262,10 +262,17 @@ pub fn read_sheet(cx: &mut Ctx<'_>, part: &str, name: &str) -> Result<(Sheet, cr
     }
     settle_python_spills_past_budget(&st, &mut sheet);
 
+    apply_craft_sheet_part(cx, &sheet_part, &rels, name, too_many_merges, &mut sheet)?;
     let root = from_craft_el(&sheet_part.root);
-    let control_shapes = crate::controls::listed_shapes(sheet_controls(&root));
-    apply_craft_sheet_part(cx, &sheet_part, &rels, name, too_many_merges, &control_shapes, &mut sheet)?;
+    // The controls are read before the drawing, so the DrawingML stand-ins of the ones read
+    // (`ReadControls::modelled`) are not also read as shapes.
     let read_controls = read_form_controls(cx, &root, &rels, &mut sheet);
+    if let Some(id) = &sheet_part.features.drawing
+        && let Some(rel) = rels.iter().find(|r| r.id == *id)
+    {
+        let target = rel.target.clone();
+        crate::drawing::read_drawing(cx, &target, &read_controls.modelled, &mut sheet)?;
+    }
     read_sheet_notes_and_tables(cx, &sheet_part, &rels, &mut sheet)?;
     Ok((sheet, read_controls))
 }
@@ -276,7 +283,6 @@ fn apply_craft_sheet_part(
     rels: &[Rel],
     name: &str,
     skip_merges: bool,
-    control_shapes: &HashSet<u64>,
     sheet: &mut Sheet,
 ) -> Result<(), IoError> {
     let mut rel_by_id: HashMap<&str, &Rel> = HashMap::with_capacity(rels.len());
@@ -395,12 +401,6 @@ fn apply_craft_sheet_part(
         read_craft_hyperlinks(cx, name, &sp.features.hyperlinks, &rel_by_id, sheet, &mut link_budget);
     }
     apply_craft_print(&sp.features.print, fit_to_page, sheet);
-    if let Some(id) = &sp.features.drawing
-        && let Some(rel) = rel_by_id.get(id.as_str()).copied()
-    {
-        let target = rel.target.clone();
-        crate::drawing::read_drawing(cx, &target, control_shapes, sheet)?;
-    }
     Ok(())
 }
 
@@ -670,17 +670,12 @@ fn read_craft_hyperlinks(
     }
 }
 
-/// The sheet's `<controls>` element (also inside `mc:AlternateContent`; the last one counts).
-fn sheet_controls(root: &El) -> Option<&El> {
-    root.children.iter().filter_map(crate::controls::controls_of).next_back()
-}
-
 /// Buttons, scroll bars, spin buttons and drop-downs: the `<controls>` list (also inside
 /// `mc:AlternateContent`) with its properties parts, else the shapes of the VML drawing that
 /// `<legacyDrawing r:id>` names (not the header and footer drawing of `<legacyDrawingHF>`).
 /// Returns the VML shape numbers read, so pass-through keeps only the others.
 fn read_form_controls(cx: &mut Ctx<'_>, root: &El, rels: &[Rel], sheet: &mut Sheet) -> crate::controls::ReadControls {
-    let controls = sheet_controls(root);
+    let controls = root.children.iter().filter_map(crate::controls::controls_of).next_back();
     let vml = root.child("legacyDrawing").and_then(|e| e.attr("id"));
     if controls.is_some() || vml.is_some() { crate::controls::read(cx, controls, vml, rels, sheet) } else { Default::default() }
 }
