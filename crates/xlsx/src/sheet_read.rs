@@ -452,8 +452,7 @@ fn apply_col_entry(cx: &Ctx<'_>, c: RawCol, remaining: &mut u64, sheet: &mut She
     if min == 0 || min > MAX_COLS || max < min {
         return Ok(());
     }
-    let mut info = LineInfo::default();
-    info.saved_size = c.width.filter(|w| w.is_finite());
+    let mut info = LineInfo { saved_size: c.width.filter(|w| w.is_finite()), ..Default::default() };
     if let Some(w) = c.width {
         let px = sheet.geometry.stored_width_px(w);
         if c.custom_width || px != sheet.default_col_width || matches!(sheet.geometry, gridcraft_model::Geometry::Mac { .. }) {
@@ -744,9 +743,7 @@ fn charge_cells(cx: &mut Ctx<'_>, n: u64) -> Result<(), IoError> {
 
 fn read_craft_row(cx: &mut Ctx<'_>, sheet: &mut Sheet, st: &mut RowState, row: &CraftRow) -> Result<(), craft_xlsx::Error> {
     let r = row.index;
-    let mut info = LineInfo::default();
-    info.custom = row.custom_height;
-    info.saved_size = row.height.filter(|h| h.is_finite());
+    let mut info = LineInfo { custom: row.custom_height, saved_size: row.height.filter(|h| h.is_finite()), ..Default::default() };
     let flag = |name| row.attrs.iter().any(|(k, v)| k == name && (v == "1" || v == "true"));
     info.thick_edges = (flag("thickTop"), flag("thickBot"));
     if let Some(ht) = row.height {

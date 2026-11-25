@@ -256,6 +256,15 @@ fn read_shared_strings(cx: &mut Ctx<'_>, wb_rels: &[Rel]) -> Result<(), IoError>
     Ok(())
 }
 
+fn select_geometry(cx: &mut Ctx<'_>, wb: &Workbook) {
+    let normal =
+        &wb.cell_styles.iter().find(|(name, _)| name.eq_ignore_ascii_case("Normal")).map_or(cx.styles.get(StyleId::DEFAULT), |(_, s)| s).font;
+    cx.geometry = gridcraft_model::Geometry::host(normal);
+    if cx.geometry != gridcraft_model::Geometry::Legacy {
+        cx.normal_row_height_px = gridcraft_model::geometry::mac_line_height_pt(normal) * (4.0 / 3.0);
+    }
+}
+
 fn read_workbook_styles(cx: &mut Ctx<'_>, wb: &mut Workbook, wb_rels: &[Rel]) -> Result<(), IoError> {
     // Theme, then styles: a font's link to the theme's body font is read against it.
     if let Some(r) = find_rel(wb_rels, "theme").cloned()
@@ -411,12 +420,7 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
     wb.sheets.clear();
 
     read_workbook_styles(&mut cx, &mut wb, &wb_rels)?;
-    let normal =
-        &wb.cell_styles.iter().find(|(name, _)| name.eq_ignore_ascii_case("Normal")).map_or(cx.styles.get(StyleId::DEFAULT), |(_, s)| s).font;
-    cx.geometry = gridcraft_model::Geometry::host(normal);
-    if cx.geometry != gridcraft_model::Geometry::Legacy {
-        cx.normal_row_height_px = gridcraft_model::geometry::mac_line_height_pt(normal) * (4.0 / 3.0);
-    }
+    select_geometry(&mut cx, &wb);
     read_shared_strings(&mut cx, &wb_rels)?;
 
     if let Some(r) = find_rel(&wb_rels, "person").cloned()
