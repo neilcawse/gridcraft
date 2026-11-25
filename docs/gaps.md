@@ -34,7 +34,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 - **Estimate:** 25–40 h. [target-app-parity.md](target-app-parity.md#performance), [hardware-parity.md](hardware-parity.md)
 
 ### 3. Some unmodelled XLSX content is dropped on save (FF)
-- **Missing:** table and OLAP slicers and their caches (PivotTable slicers are read and written),
+- **Missing:** OLAP slicers and their caches (PivotTable and table slicers are read and written),
   timelines, unmodelled `extLst` entries, and some chart details. Pass-through uses a deny-list:
   it keeps unmodelled relationship chains such as document tasks, external links, custom XML,
   the Power Pivot data model, table query parts, custom views, and unmodelled document properties.
@@ -202,6 +202,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-25 | minor | §3: table slicers are written to XLSX (they were dropped on save); OLAP slicers remain |
 | 2026-11-02 | minor | §17: equations (Insert › Equation, LaTeX source, gallery, editor) |
 | 2026-11-02 | minor | §13: Solver Sensitivity report: shadow prices, reduced costs and allowable ranges for Simplex LP; Lagrange multipliers and reduced gradients for GRG Nonlinear |
 | 2026-11-02 | minor | §4: charts, like every floating object, move and resize from eight handles (#190), so resizing is no longer listed as missing; the evidence is one paragraph again, without the stale "PRs #158, #161 open" |

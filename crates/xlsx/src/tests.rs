@@ -36,6 +36,7 @@ mod sheet_data_pin;
 mod sheet_names;
 mod smooth_roundtrip;
 mod table_collisions;
+mod table_slicers;
 mod trendline_roundtrip;
 mod xls_dv_tests;
 mod xls_style_tests;

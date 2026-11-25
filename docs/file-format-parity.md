@@ -143,7 +143,7 @@ refresh. Counted under features (Get & Transform, ~10% ready), not here.
 | Work | Hours |
 |---|---|
 | Real-world XLSX corpus run, and confirm Excel opens our output with no repair prompt (owner runs Excel) | 15–25 |
-| Preserve the rest of the unmodelled XLSX content (table slicers, timelines, data model, table query tables, `extLst` entries); pass-through landed for the rest (#330) | 6–10 |
+| Preserve the rest of the unmodelled XLSX content (OLAP slicers, timelines, data model, table query tables, `extLst` entries); pass-through landed for the rest (#330) | 6–10 |
 | Streaming XLSX reader for very large files (#175), part-size limits that degrade instead of failing | 10–15 |
 | Legacy `.xls` (BIFF8): exact theme colours (XFExt), comments, CF, validation, pictures and charts on import; corpus run; then write | 10–15 |
 | Encrypted workbooks: save with password (#11) | 4–6 |
@@ -155,6 +155,7 @@ refresh. Counted under features (Get & Transform, ~10% ready), not here.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-25 | minor | XLSX: table slicers (Excel 2013 `x15:tableSlicerCache`) are written: a slicer cache naming the table and column by the ids they are written with, a slicer part listed by the sheet's `x15` slicer list, the workbook's `x15` `slicerCaches` and a `sle15` drawing frame with a fallback shape. They were dropped on save. Table and PivotTable slicers share one set of slicer and cache names, and an imported cache keeps its name, its `#N/A` marker and its item options (`sortOrder`, `customListSort`, `crossFilter`). A slicer follows a table rename, in Table Name and in the save-time name repair; one whose table or column is no longer saved is dropped with a save warning. Reading joins table slicers in the one slicer reader (slicer parts and caches found through their relationships), so a table slicer keeps its name, style and button height, and an unresolved one warns instead of vanishing |
 | 2026-11-13 | minor | PDF of a right-to-left sheet keeps explicit Left and Right alignment on the side the grid shows them |
 | 2026-11-12 | minor | `.xls` files open with their data validation (drop-down lists, input messages, error alerts and the rules), read by craft-xls and mapped as the `.xlsx` reader maps the same rules. A rule Excel would refuse, or one past 65,536 in a workbook, is skipped with a warning (#3634, from #3636) |
 | 2026-11-12 | minor | .xls import reads the file with craft-xls (storytold/craft-libs), the reader that moved there from this repository; GridCraft keeps the mapping onto its model. The workbook now opens on the sheet it was saved on (WINDOW1 `itabCur`), falling back to the first visible sheet as before (from #3551), and cells saved as RString records (text with formatting runs) are read as text instead of skipped |

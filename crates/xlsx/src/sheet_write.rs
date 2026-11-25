@@ -34,7 +34,7 @@ mod parts;
 mod rules;
 
 pub(crate) use parts::password_attrs;
-use parts::{autofilter_xml, comments_xml, protected_ranges_xml, table_columns, table_xml, thread_ids, threaded_xml, vml_xml};
+use parts::{autofilter_xml, comments_xml, protected_ranges_xml, table_column_id, table_columns, table_xml, thread_ids, threaded_xml, vml_xml};
 use rules::{cf_rule_xml, solid_bar_x14, validation_xml, x14_cf_rule_xml};
 
 fn sqref(ranges: &[RangeRef]) -> String {
@@ -119,8 +119,9 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, table_names: &[Opti
         _ => sheet.tables.clone(),
     };
     let mut overrides: BTreeMap<CellRef, String> = BTreeMap::new();
-    let tables: Vec<_> = folded.iter().zip(table_names).filter_map(|(t, name)| Some((t, table_columns(t), name.as_deref()?))).collect();
-    for (t, cols, _) in &tables {
+    let tables: Vec<_> =
+        folded.iter().zip(table_names).enumerate().filter_map(|(ti, (t, name))| Some((ti, t, table_columns(t), name.as_deref()?))).collect();
+    for (_, t, cols, _) in &tables {
         if t.header_row {
             for (i, name) in cols.iter().enumerate() {
                 overrides.insert(CellRef::new(t.range.start.row, t.range.start.col + i as u32), name.clone());
@@ -211,12 +212,13 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, table_names: &[Opti
     part.features.legacy_drawing = legacy_rid;
 
     if !tables.is_empty() {
-        for (t, cols, name) in &tables {
+        for (ti, t, cols, name) in &tables {
             out.tables += 1;
             out.table_id += 1;
             let n = out.tables;
             let bound = kept.table_binding(t.id, cols);
             let xml = table_xml(t, cols, name, out.table_id, bound.as_ref(), out);
+            out.slicers.table_written((si, *ti), out.table_id, cols, |i| table_column_id(bound.as_ref(), i));
             let path = format!("xl/tables/table{n}.xml");
             out.part(&path, Some(CT_TABLE), xml.into_bytes());
             if let Some(b) = &bound {
@@ -373,7 +375,8 @@ fn named_reading(wb: &Workbook, sheet: &Sheet, at: CellRef, cell: Option<&Cell>)
 }
 
 fn write_sheet_extensions(s: &mut String, sheet: &Sheet, x14_cf: &str, slicers: &[crate::slicer::SheetSlicer], out: &mut Out, rels: &mut Rels) {
-    // Excel 2010 extensions: conditional formats, sparklines and PivotTable slicers.
+    // Excel 2010 extensions: conditional formats, sparklines and PivotTable slicers, then Excel
+    // 2013's table slicers.
     let slicer_ext = crate::slicer::SlicerWriter::sheet_part(sheet, slicers, out, rels);
     if !x14_cf.is_empty() || !sheet.sparklines.is_empty() || !slicer_ext.is_empty() {
         s.push_str("<extLst>");

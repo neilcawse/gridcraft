@@ -1163,7 +1163,8 @@ pub struct Slicer {
     /// Button height in pixels; `None` uses the default.
     #[serde(default)]
     pub row_height: Option<f32>,
-    /// XLSX cache provenance used only to preserve the cache's name on save.
+    /// XLSX cache provenance used only to preserve the cache's name (and a table slicer's item
+    /// options) on save.
     #[serde(skip)]
     pub imported_cache: SlicerCacheOrigin,
 }
@@ -1174,6 +1175,18 @@ pub struct Slicer {
 pub struct SlicerCacheOrigin {
     pub name: String,
     pub marker: Option<crate::DefinitionUid>,
+    /// A table slicer cache's item options as read; `None` writes the format's defaults.
+    pub table_items: Option<TableSlicerItems>,
+}
+
+/// How a table slicer's cache orders and marks its items (`x15:tableSlicerCache` `sortOrder`,
+/// `customListSort` and `crossFilter`, [MS-XLSX] 2.6.97). GridCraft lists a table slicer's tiles in
+/// first-seen order and doesn't edit these: they are kept from the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TableSlicerItems {
+    pub descending: bool,
+    pub custom_list_sort: bool,
+    pub cross_filter: SlicerCrossFilter,
 }
 
 impl PartialEq for SlicerCacheOrigin {

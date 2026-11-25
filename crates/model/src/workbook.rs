@@ -736,7 +736,7 @@ impl Workbook {
         None
     }
     /// Renames the `ti`th table of the `si`th sheet to `name` (Table Design > Table Name).
-    /// Bound PivotTables and cell references to the table follow the rename.
+    /// Bound PivotTables, slicers and cell references to the table follow the rename.
     pub fn rename_table(&mut self, si: usize, ti: usize, name: &str) {
         let Some(t) = self.sheets.get(si).and_then(|s| s.tables.get(ti)) else { return };
         let (old, uid) = (t.name.clone(), t.uid);
@@ -745,6 +745,16 @@ impl Workbook {
         self.follow_renamed_definition(uid);
         if !found_by_name {
             return;
+        }
+        let names_old = |s: &crate::Slicer| matches!(&s.source, crate::SlicerSource::Table { table, .. } if table.eq_ignore_ascii_case(&old));
+        for sheet in self.sheets.iter_mut().filter(|sh| sh.slicers.iter().any(names_old)) {
+            for sl in Arc::make_mut(sheet).slicers.iter_mut() {
+                if let crate::SlicerSource::Table { table, .. } = &mut sl.source
+                    && table.eq_ignore_ascii_case(&old)
+                {
+                    *table = name.to_string();
+                }
+            }
         }
         for i in 0..self.sheets.len() {
             let rename = TableRename { wb: self, old: &old, new: name };
@@ -936,10 +946,34 @@ mod tests {
             });
             sh.set_cell(at, crate::Cell::formula(Formula { array: Some(range("C1:D1")), ..Formula::new("TRANSPOSE(Items[V])") }));
         }
+        // Table slicers on any sheet follow the rename; one naming another table doesn't.
+        let slicer = |table: &str| crate::Slicer {
+            id: 0,
+            source: crate::SlicerSource::Table { table: table.into(), column: "V".into(), selected: Some(vec!["1".into()]) },
+            caption: String::new(),
+            anchor: crate::Anchor::default(),
+            columns: 1,
+            name: String::new(),
+            style: String::new(),
+            row_height: None,
+            imported_cache: Default::default(),
+        };
+        let mut other = crate::Sheet::new("Other");
+        other.slicers = vec![slicer("ITEMS"), slicer("Elsewhere")];
+        wb.sheets.push(Arc::new(other));
         wb.rename_table(0, 0, "Renamed");
         let f = wb.sheet(0).and_then(|sh| sh.cell(at)).and_then(|c| c.formula.clone());
         assert_eq!(f.as_deref().map(|f| f.text.as_str()), Some("TRANSPOSE(Renamed[V])"));
         assert_eq!(f.and_then(|f| f.array), Some(range("C1:D1")));
+        let tables: Vec<&str> = wb.sheets[1]
+            .slicers
+            .iter()
+            .filter_map(|s| match &s.source {
+                crate::SlicerSource::Table { table, .. } => Some(table.as_str()),
+                crate::SlicerSource::Pivot { .. } => None,
+            })
+            .collect();
+        assert_eq!(tables, ["Renamed", "Elsewhere"]);
     }
 
     #[test]
