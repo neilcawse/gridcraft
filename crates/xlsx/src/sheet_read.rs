@@ -271,6 +271,10 @@ pub fn read_sheet(cx: &mut Ctx<'_>, part: &str, name: &str) -> Result<(Sheet, cr
     Ok((sheet, read_controls))
 }
 
+fn triggers_mac_row_fit(sheet: &Sheet, row: u32, info: &LineInfo) -> bool {
+    info.saved_size.is_some() && sheet.row_has_content(row)
+}
+
 fn apply_craft_sheet_part(
     cx: &mut Ctx<'_>,
     sp: &CraftSheetPart,
@@ -296,6 +300,10 @@ fn apply_craft_sheet_part(
             _ => {}
         }
     }
+    let fit_populated_rows = sheet.geometry != gridcraft_model::Geometry::Legacy
+        && custom == Some(true)
+        && height.is_some()
+        && sheet.rows.iter().any(|(&row, info)| triggers_mac_row_fit(sheet, row, info));
     sheet.saved_geometry = Some(gridcraft_model::SavedSheetGeometry {
         has_format: format.is_some(),
         base_col_width: base,
@@ -304,6 +312,7 @@ fn apply_craft_sheet_part(
         custom_height: custom,
         original_width_px: sheet.default_col_width,
         original_height_px: sheet.default_row_height,
+        fit_populated_rows,
     });
     let cols_blocks = sp.root.children.iter().filter(|n| matches!(n, craft_xml::Node::El(e) if e.name == "cols")).count();
     if cols_blocks > 1 {

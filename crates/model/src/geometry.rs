@@ -21,6 +21,9 @@ pub struct SavedSheetGeometry {
     pub custom_height: Option<bool>,
     pub original_width_px: f32,
     pub original_height_px: f32,
+    /// A saved height on a populated row turns on font-based fitting despite a custom sheet default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fit_populated_rows: bool,
 }
 
 impl Geometry {
@@ -34,15 +37,18 @@ impl Geometry {
     }
 
     pub fn mac(font: &Font) -> Self {
-        const MEASURED: &[(&str, f32, u8)] = &[
-            ("Calibri", 11.0, 6),
-            ("Aptos Narrow", 11.0, 6),
-            ("Arial", 10.0, 6),
-            ("Arial", 12.0, 7),
-            ("Times New Roman", 12.0, 6),
-            ("MS PGothic", 11.0, 6),
-        ];
-        let digit_pt = MEASURED.iter().find_map(|&(name, size, digit)| (font.size == size && font.name.eq_ignore_ascii_case(name)).then_some(digit));
+        let measured: &[(u8, u8)] = if font.name.eq_ignore_ascii_case("Calibri") {
+            &[(6, 3), (10, 5), (11, 6), (12, 6), (14, 7), (18, 9), (24, 12), (26, 13), (34, 17)]
+        } else if font.name.eq_ignore_ascii_case("Arial") {
+            &[(6, 3), (8, 4), (10, 6), (11, 6), (12, 7), (14, 8), (16, 9), (18, 10), (20, 11), (24, 13), (32, 18)]
+        } else if font.name.eq_ignore_ascii_case("Times New Roman") {
+            &[(10, 5), (12, 6)]
+        } else if font.name.eq_ignore_ascii_case("Aptos Narrow") || font.name.eq_ignore_ascii_case("MS PGothic") {
+            &[(11, 6), (12, 6)]
+        } else {
+            &[]
+        };
+        let digit_pt = measured.iter().find_map(|&(size, digit)| (font.size == f32::from(size)).then_some(digit));
         Self::Mac {
             digit_pt: digit_pt.unwrap_or_else(|| {
                 // Unmeasured families and sizes use an estimate, not a measured glyph advance.
@@ -76,7 +82,10 @@ impl Geometry {
                 }
             }
             Self::Mac { digit_pt } => width.map_or_else(
-                || ((f64::from(base.unwrap_or(if has_format { 8 } else { 10 }).min(255)) * f64::from(digit_pt.max(1)) + 5.0) * (4.0 / 3.0)) as f32,
+                || {
+                    let (d, p) = mac_digit_and_padding(digit_pt);
+                    ((f64::from(base.unwrap_or(if has_format { 8 } else { 10 }).min(255)) * d + p) * (4.0 / 3.0)) as f32
+                },
                 |w| self.stored_width_px(w),
             ),
         }
@@ -86,10 +95,16 @@ impl Geometry {
         match self {
             Self::Legacy => points_to_chars(px),
             Self::Mac { digit_pt } => {
-                let pt = px * 0.75;
-                let d = f64::from(digit_pt.max(1));
-                let chars = if pt < d + 5.0 { pt / (d + 5.0) } else { (pt - 5.0) / d };
-                (chars * 100.0).round() / 100.0
+                let mut pt = px * 0.75;
+                let whole = pt.round();
+                // Imported whole-point dimensions pass through f32 layout pixels. Undo that
+                // representation error, without snapping fractional editor-supplied widths.
+                if f64::from((whole * (4.0 / 3.0)) as f32) == px {
+                    pt = whole;
+                }
+                let (d, p) = mac_digit_and_padding(digit_pt);
+                let hundredths = if pt < d + p { pt * 100.0 / (d + p) } else { (pt - p) * 100.0 / d };
+                hundredths.round() / 100.0
             }
         }
     }
@@ -97,7 +112,10 @@ impl Geometry {
     pub fn digit_and_padding_px(self) -> (f64, f64) {
         match self {
             Self::Legacy => (7.0, 5.0),
-            Self::Mac { digit_pt } => (f64::from(digit_pt.max(1)) * 4.0 / 3.0, 20.0 / 3.0),
+            Self::Mac { digit_pt } => {
+                let (d, p) = mac_digit_and_padding(digit_pt);
+                (d * (4.0 / 3.0), p * (4.0 / 3.0))
+            }
         }
     }
 
@@ -111,27 +129,55 @@ impl Geometry {
     }
 }
 
+fn mac_digit_and_padding(digit_pt: u8) -> (f64, f64) {
+    let d = digit_pt.max(1);
+    (f64::from(d), f64::from(2 * d.div_ceil(4) + 1))
+}
+
 /// Measured automatic height in points, interpolated between measured sizes. Outside the
 /// measured family/size range this is an estimate, not a font-rendering metric.
 pub fn mac_line_height_pt(font: &Font) -> f32 {
-    const CALIBRI: &[(f32, f32)] = &[(11., 15.), (12., 16.), (14., 19.), (18., 24.), (24., 31.), (30., 39.), (36., 47.)];
-    const APTOS_NARROW: &[(f32, f32)] = &[(11., 15.), (12., 16.), (14., 19.), (18., 24.), (24., 32.), (30., 39.), (36., 47.)];
-    const ARIAL: &[(f32, f32)] = &[(10., 13.), (11., 14.), (12., 16.), (14., 18.), (18., 23.), (24., 30.), (30., 37.), (36., 45.)];
-    const PGOTHIC: &[(f32, f32)] = &[(11., 14.), (12., 15.), (14., 17.), (18., 22.), (24., 28.), (30., 35.), (36., 42.)];
+    // Each table lists exact readings only: the dense runs cover integer sizes up to 40,
+    // with additional samples above 40 and some exact small or fractional sizes.
+    const CALIBRI: &[u8] = &[15, 16, 17, 19, 20, 21, 23, 24, 25, 26, 28, 29, 30, 31, 33, 34, 35, 37, 38, 39, 40, 42, 43, 44, 45, 47, 48, 49, 50, 52];
+    const APTOS_NARROW: &[u8] =
+        &[15, 16, 18, 19, 20, 22, 23, 24, 25, 27, 28, 29, 30, 32, 33, 34, 36, 37, 38, 39, 41, 42, 43, 45, 46, 47, 48, 50, 51, 52];
+    const ARIAL: &[u8] = &[14, 16, 17, 18, 19, 20, 22, 23, 24, 25, 26, 28, 29, 30, 31, 33, 34, 35, 36, 37, 39, 40, 41, 42, 43, 45, 46, 47, 48, 49];
+    const TIMES: &[u8] = &[14, 16, 17, 18, 19, 20, 22, 23, 24, 25, 27, 28, 29, 30, 31, 33, 34, 35, 36, 37, 39, 40, 41, 42, 44, 45, 46, 47, 48, 50];
+    const PGOTHIC: &[u8] = &[14, 15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 26, 27, 28, 30, 31, 32, 33, 34, 35, 36, 38, 39, 40, 41, 42, 43, 44, 45, 47];
     let name = &font.name;
-    let table = if name.eq_ignore_ascii_case("Arial") || name.eq_ignore_ascii_case("Times New Roman") {
-        ARIAL
+    let (low, dense, high): (&[(f32, u8)], &[u8], [u8; 3]) = if name.eq_ignore_ascii_case("Arial") {
+        (&[(6., 10), (8., 11), (9., 12), (10., 13), (10.5, 14), (11., 14), (11.5, 16), (12., 16)], ARIAL, [59, 74, 88])
+    } else if name.eq_ignore_ascii_case("Times New Roman") {
+        (&[(10., 13), (10.5, 14), (11., 14), (11.5, 16), (12., 16)], TIMES, [59, 74, 89])
     } else if name.eq_ignore_ascii_case("Aptos Narrow") {
-        APTOS_NARROW
+        (&[(11., 15), (12., 16)], APTOS_NARROW, [63, 78, 93])
     } else if name.eq_ignore_ascii_case("MS PGothic") {
-        PGOTHIC
+        (&[(11., 14), (12., 15)], PGOTHIC, [56, 69, 83])
     } else {
-        CALIBRI
+        (&[(6., 9), (8., 11), (9., 12), (10., 14), (10.5, 15), (11., 15), (11.5, 16), (12., 16)], CALIBRI, [62, 77, 92])
     };
-    let i = table.partition_point(|&(size, _)| size < font.size).clamp(1, table.len() - 1);
-    let (a, h) = table[i - 1];
-    let (b, k) = table[i];
-    (h + (font.size - a) * (k - h) / (b - a)).round().clamp(1.0, 409.0)
+    let size = font.size;
+    if (12.0..40.0).contains(&size) {
+        let i = size as usize - 11;
+        let h = f32::from(dense[i]);
+        return (h + size.fract() * (f32::from(dense[i + 1]) - h)).round();
+    }
+    let (a, h, b, k) = if size < 12.0 {
+        let i = low.partition_point(|&(s, _)| s < size).max(1);
+        let (a, h) = low[i - 1];
+        let (b, k) = low[i];
+        (a, h, b, k)
+    } else if size <= 40.0 {
+        (39., dense[28], 40., dense[29])
+    } else if size <= 48.0 {
+        (40., dense[29], 48., high[0])
+    } else if size <= 60.0 {
+        (48., high[0], 60., high[1])
+    } else {
+        (60., high[1], 72., high[2])
+    };
+    (f32::from(h) + (size - a) * (f32::from(k) - f32::from(h)) / (b - a)).round().clamp(1.0, 409.0)
 }
 
 #[cfg(test)]
@@ -176,6 +222,20 @@ mod tests {
     }
 
     #[test]
+    fn padding_steps_and_character_ties_follow_excel_mac() {
+        for (digit_pt, padding) in [(4, 3), (5, 5), (12, 7), (13, 9), (16, 9), (17, 11), (18, 11)] {
+            let g = Geometry::Mac { digit_pt };
+            let points = f64::from(8 * u16::from(digit_pt) + padding);
+            assert_eq!(g.inherited_width_px(true, None, None), (points * (4.0 / 3.0)) as f32);
+            assert_eq!(g.digit_and_padding_px().1, f64::from(padding) * (4.0 / 3.0));
+            assert_eq!(g.width_chars(f64::from(g.inherited_width_px(true, None, None))), 8.0);
+        }
+        let g = Geometry::Mac { digit_pt: 8 };
+        assert_eq!(g.width_chars(f64::from(g.stored_width_px(8.25))), 7.63);
+        assert_eq!(g.width_chars((66.0 - 0.001) * (4.0 / 3.0)), 7.62);
+    }
+
+    #[test]
     fn row_height_uses_profile_and_calibrated_family() {
         // H1, H3, H7: custom-height flooring, Normal baselines and measured font metrics.
         let g = Geometry::Mac { digit_pt: 6 };
@@ -190,6 +250,20 @@ mod tests {
             ("Arial", 12., 7, 16.),
             ("Times New Roman", 12., 6, 16.),
             ("MS PGothic", 11., 6, 14.),
+            ("Calibri", 6., 3, 9.),
+            ("Calibri", 26., 13, 34.),
+            ("Calibri", 34., 17, 44.),
+            ("Arial", 6., 3, 10.),
+            ("Arial", 8., 4, 11.),
+            ("Arial", 14., 8, 18.),
+            ("Arial", 32., 18, 40.),
+            ("Times New Roman", 10., 5, 13.),
+            ("Times New Roman", 21., 11, 27.),
+            ("Times New Roman", 35., 18, 44.),
+            ("Times New Roman", 40., 20, 50.),
+            ("Times New Roman", 72., 36, 89.),
+            ("Aptos Narrow", 16., 9, 22.),
+            ("MS PGothic", 32., 18, 38.),
         ] {
             let font = Font { name: name.into(), size, ..Font::default() };
             assert_eq!(Geometry::mac(&font), Geometry::Mac { digit_pt });

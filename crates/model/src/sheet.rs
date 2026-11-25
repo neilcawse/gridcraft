@@ -572,6 +572,12 @@ impl Sheet {
     pub fn is_col_hidden(&self, col: u32) -> bool {
         self.cols.get(&col).is_some_and(|line| line.hidden || (self.geometry != crate::Geometry::Legacy && line.size == Some(0.0)))
     }
+    /// Whether the row holds a value, formula, Python cell or static cell picture.
+    pub fn row_has_content(&self, row: u32) -> bool {
+        self.cells.row(row, 0, gridcraft_core::MAX_COLS - 1).any(|(_, cell)| cell.has_content())
+            || self.cell_pictures.range(CellRef::new(row, 0)..=CellRef::new(row, gridcraft_core::MAX_COLS - 1)).next().is_some()
+    }
+
     /// Y offset (points) of the top of `row`.
     pub fn row_top(&self, row: u32) -> f64 {
         let mut y = row as f64 * self.default_row_height as f64;

@@ -910,6 +910,10 @@ impl MergeSweep {
     }
 }
 
+fn mac_fits_populated_row(sh: &gridcraft_model::Sheet, row: u32) -> bool {
+    sh.saved_geometry.is_some_and(|g| g.fit_populated_rows) && sh.row_has_content(row)
+}
+
 /// [`auto_row_height`] with the sheet's merges taken from `sweep`.
 pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut MergeSweep) {
     // Out of budget: the row keeps the height it has.
@@ -921,32 +925,35 @@ pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut
         return;
     }
     let mac = sh.geometry != gridcraft_model::Geometry::Legacy;
-    if mac && sh.saved_geometry.is_some_and(|g| g.custom_height == Some(true) && g.default_row_height.is_some()) {
-        return;
-    }
+    let custom_sheet_height = mac && sh.saved_geometry.is_some_and(|g| g.custom_height == Some(true) && g.default_row_height.is_some());
     let edges = sh.rows.get(&row).map_or(0, |i| u8::from(i.thick_edges.0) + u8::from(i.thick_edges.1));
     let default = sh.default_row_height;
-    // Fast path: rows of default-size, unwrapped content keep the default height.
-    let plain = !mac
-        && sh.cells.row(row, 0, gridcraft_core::MAX_COLS - 1).all(|(_, cell)| {
+    // Rows that inherit the sheet height must also discard any previous fit.
+    let plain = if custom_sheet_height {
+        !mac_fits_populated_row(sh, row)
+    } else {
+        !mac && sh.cells.row(row, 0, gridcraft_core::MAX_COLS - 1).all(|(_, cell)| {
             let st = wb.styles.get(cell.style);
             st.font.size <= gridcraft_model::DEFAULT_FONT_SIZE && !st.align.wrap
-        });
+        })
+    };
     if plain {
         if sh.rows.get(&row).is_some_and(|i| i.size.is_some())
             && let Some(shm) = wb.sheet_mut(si)
             && let Some(e) = shm.rows.get_mut(&row)
         {
-            {
-                e.size = None;
-                if *e == gridcraft_model::LineInfo::default() {
-                    shm.rows.remove(&row);
-                }
+            e.size = None;
+            if *e == gridcraft_model::LineInfo::default() {
+                shm.rows.remove(&row);
             }
         }
         return;
     }
-    let mut need: f32 = default;
+    let mut need = if custom_sheet_height {
+        gridcraft_model::geometry::mac_line_height_pt(&wb.styles.get(gridcraft_model::StyleId::DEFAULT).font) * (4.0 / 3.0)
+    } else {
+        default
+    };
     // The cell loop must not rescan every merge per cell: the merges touching this row are
     // picked out once, and per cell the candidates are re-checked (normally none or a couple;
     // a sheet with many merges and many saved columns would otherwise scan all of them per
@@ -961,6 +968,9 @@ pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut
         }
         // Merged cells never auto-fit their rows, like Excel (column autofit skips them too).
         if row_merges.iter().any(|m| m.contains(CellRef::new(row, c))) {
+            continue;
+        }
+        if mac && !cell.has_content() && !sh.cell_pictures.contains_key(&CellRef::new(row, c)) {
             continue;
         }
         let st = wb.styles.get(cell.style);

@@ -1,5 +1,35 @@
 use super::*;
 
+#[test]
+fn mac_imported_custom_default_fits_only_populated_automatic_rows() {
+    use gridcraft_core::Value;
+    use gridcraft_model::{Geometry, LineInfo, SavedSheetGeometry, StyleId};
+
+    let mut wb = Workbook::new();
+    let large = wb.styles.derive(StyleId::DEFAULT, |s| s.font.size = 36.0);
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.geometry = Geometry::Mac { digit_pt: 6 };
+    sh.default_row_height = 28.0;
+    sh.saved_geometry =
+        Some(SavedSheetGeometry { custom_height: Some(true), default_row_height: Some(21.75), fit_populated_rows: true, ..Default::default() });
+    sh.set_value(CellRef::new(0, 0), Value::number(1.));
+    sh.set_style(CellRef::new(1, 0), large);
+    sh.rows.insert(1, LineInfo { saved_size: Some(31.25), thick_edges: (true, true), ..Default::default() });
+    sh.set_value(CellRef::new(3, 0), Value::number(2.));
+    sh.set_style(CellRef::new(3, 0), large);
+    sh.set_value(CellRef::new(4, 0), Value::number(3.));
+    sh.rows.insert(4, LineInfo { custom: true, size: Some(16.), saved_size: Some(12.75), ..Default::default() });
+    fit_imported_rows(&mut wb);
+    let sh = wb.sheet(0).unwrap();
+    assert_eq!([0, 1, 2, 3, 4].map(|r| sh.row_height(r)), [20., 28., 28., 47. * (4.0 / 3.0), 16.]);
+    assert_eq!(sh.rows[&1].saved_size, Some(31.25));
+    assert_eq!(sh.rows[&4].saved_size, Some(12.75));
+
+    wb.sheet_mut(0).unwrap().set_value(CellRef::new(3, 0), Value::Empty);
+    crate::cmd::auto_row_height(&mut wb, 0, 3);
+    assert_eq!(wb.sheet(0).unwrap().row_height(3), 28.);
+}
+
 fn book(rtl: bool, cells: &[(&str, gridcraft_core::Value, gridcraft_model::HAlign)]) -> Workbook {
     let mut wb = Workbook::new();
     let ids: Vec<_> = cells.iter().map(|(_, _, h)| wb.styles.derive(gridcraft_model::StyleId::DEFAULT, |st| st.align.h = *h)).collect();

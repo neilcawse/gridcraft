@@ -312,6 +312,9 @@ pub struct Workbook {
     pub custom_lists: Vec<Vec<String>>,
     /// Named cell styles (Cell Styles gallery): name → style.
     pub cell_styles: Vec<(String, crate::style::Style)>,
+    /// XLSX font-table entry zero when it differs from the default cell format's font.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xlsx_width_font: Option<crate::Font>,
     /// Phonetic (furigana) data of shared strings (`xl/sharedStrings.xml`), one entry per distinct
     /// reading of a text, so that an open + save keeps a Japanese workbook's readings. A text cell
     /// takes the first entry with its text, unless its sheet names another one (or none) for it
@@ -451,6 +454,7 @@ impl Workbook {
             structure_password: None,
             custom_lists: vec![],
             cell_styles: vec![],
+            xlsx_width_font: None,
             phonetics: vec![],
             vba_project: None,
             csv_delimiter: None,

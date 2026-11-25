@@ -257,11 +257,10 @@ fn read_shared_strings(cx: &mut Ctx<'_>, wb_rels: &[Rel]) -> Result<(), IoError>
 }
 
 fn select_geometry(cx: &mut Ctx<'_>, wb: &Workbook, profile: fn(&gridcraft_model::Font) -> gridcraft_model::Geometry) {
-    let normal =
-        &wb.cell_styles.iter().find(|(name, _)| name.eq_ignore_ascii_case("Normal")).map_or(cx.styles.get(StyleId::DEFAULT), |(_, s)| s).font;
-    cx.geometry = profile(normal);
+    let default_font = &cx.styles.get(StyleId::DEFAULT).font;
+    cx.geometry = profile(wb.xlsx_width_font.as_ref().unwrap_or(default_font));
     if cx.geometry != gridcraft_model::Geometry::Legacy {
-        cx.normal_row_height_px = gridcraft_model::geometry::mac_line_height_pt(normal) * (4.0 / 3.0);
+        cx.normal_row_height_px = gridcraft_model::geometry::mac_line_height_pt(default_font) * (4.0 / 3.0);
     }
 }
 
@@ -281,7 +280,7 @@ fn read_workbook_styles(cx: &mut Ctx<'_>, wb: &mut Workbook, wb_rels: &[Rel]) ->
     }
     if let Some(r) = find_rel(wb_rels, "styles").cloned() {
         if let Some(x) = cx.optional_xml(&r.target)? {
-            let StylesIn { xfs, dxfs, palette, named, num_fmts } = read_styles(&x, &checkboxes, &wb.theme.minor_font);
+            let StylesIn { width_font, xfs, dxfs, palette, named, num_fmts } = read_styles(&x, &checkboxes, &wb.theme.minor_font);
             cx.num_fmts = num_fmts;
             // Cell format 0 is the Normal cell format: everything on it (font, number format,
             // fill, borders, alignment, protection) is what a cell without its own format shows
@@ -289,6 +288,7 @@ fn read_workbook_styles(cx: &mut Ctx<'_>, wb: &mut Workbook, wb_rels: &[Rel]) ->
             if let Some(normal) = xfs.first() {
                 cx.styles = StyleTable::with_default(normal.clone());
             }
+            wb.xlsx_width_font = width_font.filter(|font| *font != cx.styles.get(StyleId::DEFAULT).font);
             cx.xf_map = xfs.into_iter().enumerate().map(|(i, s)| if i == 0 { StyleId::DEFAULT } else { cx.styles.intern(s) }).collect();
             cx.dxfs = dxfs;
             cx.palette = palette;

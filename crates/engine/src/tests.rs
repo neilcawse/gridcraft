@@ -5613,9 +5613,11 @@ fn structural_edit_drops_fixed_group_placement_when_only_a_member_moves() {
     group_objects(&mut s, vec![DrawingRef::Image(first), DrawingRef::Image(second)]);
     let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
     let sh = wb.sheet_mut(0).unwrap();
-    sh.rows.insert(4, LineInfo { size: Some(50.0), ..LineInfo::default() });
+    // Keep the tall line on import: Mac ignores an automatic row's saved height.
+    sh.rows.insert(4, LineInfo { size: Some(48.0), custom: true, ..LineInfo::default() });
     let (mut imported, _) = gridcraft_xlsx::read_xlsx(&gridcraft_xlsx::write_xlsx(wb).unwrap()).unwrap();
     let sh = imported.sheet_mut(0).unwrap();
+    assert_eq!(sh.row_height(4), 48.0);
     let group = &sh.groups[0];
     assert!(sh.source_group(group).is_some());
     let anchor = group.anchor;

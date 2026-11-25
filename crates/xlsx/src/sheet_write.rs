@@ -179,13 +179,7 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> (
 
     let max_row_outline = sheet.rows.values().map(|r| r.outline).max().unwrap_or(0);
     let max_col_outline = sheet.cols.values().map(|r| r.outline).max().unwrap_or(0);
-    let normal = &wb
-        .cell_styles
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("Normal"))
-        .map_or(wb.styles.get(gridcraft_model::StyleId::DEFAULT), |(_, s)| s)
-        .font;
-    let geometry = gridcraft_model::Geometry::host(normal);
+    let geometry = gridcraft_model::Geometry::host(wb.xlsx_width_font.as_ref().unwrap_or(&wb.styles.get(gridcraft_model::StyleId::DEFAULT).font));
     let saved = sheet.saved_geometry;
     let width_unchanged = saved.is_some_and(|g| g.original_width_px == sheet.default_col_width);
     let height_unchanged = saved.is_some_and(|g| g.original_height_px == sheet.default_row_height);

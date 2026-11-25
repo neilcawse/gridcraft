@@ -855,6 +855,55 @@ fn xlsx_geometry_attributes_survive_layout_conversion() {
 }
 
 #[test]
+fn mac_width_font_and_default_cell_font_survive_save_and_reopen() {
+    let styles_rel =
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>"#;
+    for (first, named, default, digit_pt, row_pt, with_format, without_format) in
+        [(("Arial", 14), ("Arial", 8), ("Calibri", 11), 8, 15., 69., 85.), (("Arial", 8), ("Calibri", 11), ("Arial", 14), 4, 18., 35., 43.)]
+    {
+        let (f0, sz0) = first;
+        let (f1, sz1) = named;
+        let (f2, sz2) = default;
+        let styles = format!(
+            r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+          <fonts count="3"><font><sz val="{sz0}"/><name val="{f0}"/></font><font><sz val="{sz1}"/><name val="{f1}"/></font><font><sz val="{sz2}"/><name val="{f2}"/></font></fonts>
+          <cellStyleXfs count="1"><xf fontId="1"/></cellStyleXfs><cellXfs count="1"><xf fontId="2" xfId="0" applyFont="1"/></cellXfs>
+          <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>"#
+        );
+        for (format, col_pt) in [("", without_format), (r#"<sheetFormatPr defaultRowHeight="28.75"/>"#, with_format)] {
+            let body = format!(r#"{format}<sheetData><row r="1"/><row r="3"><c r="A3"><v>1</v></c></row></sheetData>"#);
+            let bytes = super::minimal(&body, &[("xl/styles.xml", &styles)], styles_rel, "");
+            let read = |bytes: &[u8]| crate::read::read_xlsx(bytes, crate::ReadOptions::default(), Geometry::mac).unwrap().0;
+            let wb = read(&bytes);
+            let saved = write_xlsx(&wb).unwrap();
+            let reopened = read(&saved);
+            for book in [&wb, &reopened] {
+                let sh = &book.sheets[0];
+                assert_eq!(sh.geometry, Geometry::Mac { digit_pt });
+                assert_eq!(sh.col_width(0), (col_pt * (4.0 / 3.0)) as f32);
+                for row in [0, 1, 2] {
+                    assert_eq!(sh.row_height(row), row_pt * (4.0 / 3.0));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn mac_custom_sheet_height_switch_requires_saved_height_on_a_populated_row() {
+    for (attrs, switches) in [("", false), (r#" ht="30.75""#, true), (r#" customHeight="0""#, false), (r#" ht="30.75" customHeight="0""#, true)] {
+        let body = format!(
+            r#"<sheetFormatPr defaultRowHeight="21.75" customHeight="1"/>
+          <sheetData><row r="1"{attrs}><c r="A1"><f>1</f></c></row><row r="3" ht="31.25" thickBot="1"/></sheetData>"#
+        );
+        let bytes = super::minimal(&body, &[], "", "");
+        let wb = crate::read::read_xlsx(&bytes, crate::ReadOptions::default(), Geometry::mac).unwrap().0;
+        let saved = &wb.sheets[0].saved_geometry.unwrap();
+        assert_eq!(saved.fit_populated_rows, switches, "{attrs}");
+    }
+}
+
+#[test]
 fn cell_text_carriage_returns_survive_xlsx_roundtrip() {
     let mut wb = Workbook::new();
     let values = [("A1", "Line 1\r\nLine 2"), ("A2", "Part A\rPart B"), ("A3", "Item 3\nItem 4"), ("A4", "literal _x000D_ marker")];
