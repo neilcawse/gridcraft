@@ -347,10 +347,16 @@ pub fn interact(app: &mut SheetApp, ctx: &egui::Context, resp: &egui::Response, 
             }
             return true;
         }
-        // Released: a button runs when the pointer is still on it.
+        // Released: a button runs when the pointer is still on it, and a drop-down opens its list
+        // (or closes it). Toggling on the release, as the in-cell list's arrow does, keeps the
+        // release from counting as a click outside the list that has just opened.
         app.grid.control = None;
-        if g.part == Part::Button && pos.is_some_and(|p| r.contains(p)) {
-            app.press_button(c.id);
+        if pos.is_some_and(|p| r.contains(p)) {
+            match g.part {
+                Part::Button => app.press_button(c.id),
+                Part::Drop => app.grid.drop_open = if app.grid.drop_open == Some(c.id) { None } else { Some(c.id) },
+                _ => {}
+            }
         }
         resp.request_focus();
         return true;
@@ -381,10 +387,6 @@ pub fn interact(app: &mut SheetApp, ctx: &egui::Context, resp: &egui::Response, 
     let Some(part) = part_at(r, &c, geo.z, p) else { return false };
     app.selected_object = None;
     app.grid.focused_control = Some(c.id);
-    if part == Part::Drop {
-        // A click opens the list, and a click on the control while it is open closes it.
-        app.grid.drop_open = if app.grid.drop_open == Some(c.id) { None } else { Some(c.id) };
-    }
     let undo_start = app.session.active().map_or(0, |d| d.undo.len());
     let grab = if part == Part::Thumb {
         let (_, thumb) = slider_parts(r, &c, geo.z);
