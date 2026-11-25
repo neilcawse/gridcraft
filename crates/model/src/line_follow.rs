@@ -114,13 +114,8 @@ fn follow(old: &Sheet, new: &Sheet, a: &Anchor) -> Option<Anchor> {
 /// size it had before.
 fn keep_visibility(lines: &mut BTreeMap<u32, LineInfo>, before: &BTreeMap<u32, LineInfo>) {
     let hidden = |m: &BTreeMap<u32, LineInfo>, k: u32| m.get(&k).is_some_and(|i| i.hidden);
-    let toggled: Vec<u32> = before
-        .iter()
-        .chain(lines.iter())
-        .filter(|(_, i)| i.hidden)
-        .map(|(&k, _)| k)
-        .filter(|&k| hidden(before, k) != hidden(lines, k))
-        .collect();
+    let toggled: Vec<u32> =
+        before.iter().chain(lines.iter()).filter(|(_, i)| i.hidden).map(|(&k, _)| k).filter(|&k| hidden(before, k) != hidden(lines, k)).collect();
     for k in toggled {
         match before.get(&k) {
             Some(info) => lines.insert(k, *info),

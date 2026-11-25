@@ -34,7 +34,8 @@ impl DrawingPlacement {
         let px = |emu: i64| (emu as f64 / EMU_PER_PX).clamp(-1e7, 1e7);
         // Legacy layout positions in whole f32 pixels, as the Legacy grid draws them.
         let layout = |v: f64| if sheet.geometry == Geometry::Legacy { f64::from(v as f32) } else { v };
-        let marker = |m: &DrawingMarker| (CellRef::new(m.row.min(MAX_ROWS - 1), m.col.min(MAX_COLS - 1)), px(m.col_off).max(0.0), px(m.row_off).max(0.0));
+        let marker =
+            |m: &DrawingMarker| (CellRef::new(m.row.min(MAX_ROWS - 1), m.col.min(MAX_COLS - 1)), px(m.col_off).max(0.0), px(m.row_off).max(0.0));
         match self {
             Self::TwoCell { from, to, edit_as } => {
                 let (cell, dx, dy) = marker(from);
@@ -52,7 +53,14 @@ impl DrawingPlacement {
             }
             Self::OneCell { from, ext: (cx, cy) } => {
                 let (cell, dx, dy) = marker(from);
-                Anchor { cell, dx: dx as f32, dy: dy as f32, width: px(*cx).max(0.0) as f32, height: px(*cy).max(0.0) as f32, mode: AnchorMode::MoveOnly }
+                Anchor {
+                    cell,
+                    dx: dx as f32,
+                    dy: dy as f32,
+                    width: px(*cx).max(0.0) as f32,
+                    height: px(*cy).max(0.0) as f32,
+                    mode: AnchorMode::MoveOnly,
+                }
             }
             Self::Absolute { pos: (x, y), ext: (cx, cy) } => {
                 let x = layout(px(*x).max(0.0));

@@ -295,7 +295,9 @@ fn open_places_drawings_over_the_rows_it_fits_on_both_profiles() {
 /// file transform still describes it.
 #[test]
 fn open_places_a_group_over_the_rows_it_fits() {
-    use gridcraft_model::{AnchorMode, DrawingFile, DrawingGroup, DrawingMarker, DrawingPlacement, DrawingRef, Geometry, GroupFile, GroupFileMember, Image};
+    use gridcraft_model::{
+        AnchorMode, DrawingFile, DrawingGroup, DrawingMarker, DrawingPlacement, DrawingRef, Geometry, GroupFile, GroupFileMember, Image,
+    };
     let emu = |px: i64| px * 9525;
     let from = DrawingMarker { col: 1, row: 1, col_off: 0, row_off: 0 };
     let to = DrawingMarker { col: 4, row: 6, col_off: 0, row_off: 0 };
