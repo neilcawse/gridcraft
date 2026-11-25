@@ -41,10 +41,11 @@ pub(crate) fn read(cx: &mut Ctx<'_>, wb_xml: &El, wb_rels: &[Rel]) -> Result<Vec
 
 /// Whether a formula is saved as the legacy formula it was read as, whatever it calculates to: it
 /// was read from a file without dynamic-array metadata (and isn't a Ctrl+Shift+Enter array, which
-/// keeps its range), and reads a linked workbook (`[1]Data!B:B`, `[1]!Rates`). Excel reads such a
-/// cell with implicit intersection; writing it as a dynamic array, because a linked range in it
-/// spills here, would change what Excel shows. Formulas typed over a linked workbook are saved
-/// like any other.
+/// keeps its range), reads a linked workbook (`[1]Data!B:B`, `[1]!Rates`), and reading it needed
+/// no `@` (a formula the reader rewrote with `@` is saved without them, like any legacy formula).
+/// Excel reads such a cell with implicit intersection; writing it as a dynamic array, because a
+/// linked range in it spills here, would change what Excel shows. Formulas typed over a linked
+/// workbook are saved like any other.
 pub(crate) fn saved_as_read(formula: &gridcraft_model::Formula) -> bool {
     use gridcraft_formula::{Expr, SheetSel};
     let Some(expr) = formula.expr_arc().filter(|_| formula.legacy && formula.array.is_none()) else { return false };

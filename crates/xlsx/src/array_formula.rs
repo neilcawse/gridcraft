@@ -163,9 +163,11 @@ pub(crate) fn apply_legacy(wb: &mut Workbook, cells: Vec<(usize, Vec<CellRef>)>,
     }
 }
 
-/// The dynamic-array reading of a legacy formula, when it differs.
+/// The dynamic-array reading of a legacy formula, when it differs. A formula over a linked
+/// workbook is read like any other: Excel intersects a linked range where one value is expected
+/// (`='[1]Totals'!$B$1:$P$1` in column C shows `'[1]Totals'!C1`).
 fn legacy(wb: &Workbook, sheet: usize, at: CellRef, formula: &Formula, functions: FunctionInfo, names: &mut NameCache) -> Option<Formula> {
-    if formula.array.is_some() || crate::external::saved_as_read(formula) {
+    if formula.array.is_some() {
         return None;
     }
     let expr = formula.expr_arc()?;
