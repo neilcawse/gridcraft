@@ -671,7 +671,8 @@ impl<'h> Evaluator<'h> {
         let [num_area] = num_areas.as_slice() else { return None };
         let num_area = *num_area;
         let (nh, nw) = (num_area.range.height(), num_area.range.width());
-        if nh > 1 && nw > 1 {
+        // One cell gives the general path a scalar, which `skip_errors` keeps: leave it to that path.
+        if (nh > 1 && nw > 1) || (nh == 1 && nw == 1) {
             return None;
         }
         let match_cond = |this: &Self, e: &Expr| -> Option<Area> {
@@ -690,8 +691,11 @@ impl<'h> Evaluator<'h> {
         if matches!(key, Value::Array(_)) {
             return None;
         }
+        // The general path gives an array of errors here, which `skip_errors` drops; a lone error
+        // would not be dropped.
+        let all_failed = |e: CellError| Value::from(Array::column(vec![Value::Error(e)]));
         if let Value::Error(err) = key {
-            return Some(Value::Error(err));
+            return Some(all_failed(err));
         }
         let transition = self.transition;
         let eval_cmp = |v: &Value| -> bool {
@@ -714,16 +718,16 @@ impl<'h> Evaluator<'h> {
         }
         let vertical = nw == 1;
         let Some(u) = self.host.used_range(cond_area.sheet) else {
-            return Some(Value::Error(CellError::Div0));
+            return Some(all_failed(CellError::Div0));
         };
         let cond_max = if vertical {
             if u.end.col < cond_area.range.start.col || u.start.col > cond_area.range.start.col || u.end.row < cond_area.range.start.row {
-                return Some(Value::Error(CellError::Div0));
+                return Some(all_failed(CellError::Div0));
             }
             u.end.row.min(cond_area.range.end.row) - cond_area.range.start.row
         } else {
             if u.end.row < cond_area.range.start.row || u.start.row > cond_area.range.start.row || u.end.col < cond_area.range.start.col {
-                return Some(Value::Error(CellError::Div0));
+                return Some(all_failed(CellError::Div0));
             }
             u.end.col.min(cond_area.range.end.col) - cond_area.range.start.col
         };
@@ -776,7 +780,7 @@ impl<'h> Evaluator<'h> {
                     matched.push(Value::number(n));
                 }
             }
-            return if matched.is_empty() { Some(Value::Error(CellError::Div0)) } else { Some(Value::from(Array::column(matched))) };
+            return Some(if matched.is_empty() { all_failed(CellError::Div0) } else { Value::from(Array::column(matched)) });
         }
         if !self.spend(u64::from(len) * 2) {
             return Some(Value::Error(CellError::Calc));
@@ -803,7 +807,7 @@ impl<'h> Evaluator<'h> {
                 }
             }
         }
-        if matched.is_empty() { Some(Value::Error(CellError::Div0)) } else { Some(Value::from(Array::column(matched))) }
+        Some(if matched.is_empty() { all_failed(CellError::Div0) } else { Value::from(Array::column(matched)) })
     }
 }
 

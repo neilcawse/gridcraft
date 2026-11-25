@@ -153,6 +153,46 @@ fn transition_arithmetic_applies_to_aggregate_filtered_division() {
     assert_eq!((t.num("C3"), t.num("C4")), (63.0, 63.0));
 }
 
+/// The AGGREGATE filtered-division shortcut gives what the general path gives (the same formula
+/// wrapped in `*1`, which the shortcut does not take), on ordinary and transition sheets: text,
+/// errors, blanks, empty text and spaces on both sides, trailing blanks past the used range,
+/// predicates that match nothing, and an error key.
+#[test]
+fn aggregate_filtered_division_shortcut_matches_the_general_path() {
+    for transition in [false, true] {
+        let mut t = T::new();
+        t.wb.sheet_mut(0).unwrap().transition_evaluation = transition;
+        let nums = ["5", "text", "=1/0", "TRUE", "", "=\"\"", "3", "=\"4\"", "2"];
+        let conds = ["y", " ", "", "=\"\"", "0", "=1/0", "Y", "=\" \"", "1", "FALSE"];
+        for r in 1..=70 {
+            for (col, input) in [("A", nums[r % nums.len()]), ("B", conds[r * 7 / 3 % conds.len()])] {
+                if !input.is_empty() {
+                    t.set(&format!("{col}{r}"), input);
+                }
+            }
+        }
+        let mut mismatches = Vec::new();
+        let mut row = 1;
+        for key in ["\"y\"", "\" \"", "\"\"", "0", "1", "FALSE", "#N/A"] {
+            for op in ["=", "<>", "<", ">", "<=", ">="] {
+                for (f, k) in [(2, ""), (9, ""), (14, ",1")] {
+                    for end in [3, 70, 100] {
+                        let body = format!("A1:A{end}/(B1:B{end}{op}{key})");
+                        t.set(&format!("D{row}"), &format!("=AGGREGATE({f},6,{body}{k})"));
+                        t.set(&format!("E{row}"), &format!("=AGGREGATE({f},6,({body})*1{k})"));
+                        let (fast, general) = (t.get(&format!("D{row}")), t.get(&format!("E{row}")));
+                        if fast != general {
+                            mismatches.push(format!("AGGREGATE({f},6,{body}{k}): {fast:?} vs {general:?}"));
+                        }
+                        row += 1;
+                    }
+                }
+            }
+        }
+        assert!(mismatches.is_empty(), "transition={transition}: {mismatches:#?}");
+    }
+}
+
 #[test]
 fn spill_range_operator() {
     let mut t = T::new();
