@@ -413,19 +413,23 @@ fn hyperlink_to_another_file_stays_external() {
 /// model's flag only, so neither kind turns into the other through a save and reopen.
 #[test]
 fn hyperlink_kind_follows_the_file_structure_not_the_text() {
-    let body = r##"<sheetData/><hyperlinks><hyperlink ref="C1" location="http://a.example"/><hyperlink ref="C2" location="#http://a.example"/>
+    let body = r###"<sheetData/><hyperlinks><hyperlink ref="C1" location="http://a.example"/><hyperlink ref="C2" location="#http://a.example"/>
       <hyperlink ref="C3" r:id="rId1"/><hyperlink ref="C4" r:id="rId2" location="Sheet1!A2"/><hyperlink ref="C5" r:id="rId3"/>
-      <hyperlink ref="C6" location="Data!B2"/><hyperlink ref="C7" location="mailto:me@a.example"/></hyperlinks>"##;
+      <hyperlink ref="C6" location="Data!B2"/><hyperlink ref="C7" location="mailto:me@a.example"/>
+      <hyperlink ref="C9" location="file:report.xlsx"/><hyperlink ref="C10" location="##"/><hyperlink ref="C11" location="#'#Data'!A1"/>
+      <hyperlink ref="C12" location="##NAME?"/><hyperlink ref="C13" r:id="rId4"/><hyperlink ref="C14" r:id="missing" location="Data!B2"/>
+      <hyperlink ref="C15" r:id="missing"/></hyperlinks>"###;
     let rel = |id: &str, target: &str| {
         format!(
             r#"<Relationship Id="{id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="{target}" TargetMode="External"/>"#
         )
     };
     let sheet_rels = format!(
-        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{}{}{}</Relationships>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{}{}{}{}</Relationships>"#,
         rel("rId1", "https://a.example/x"),
         rel("rId2", "https://a.example/book.xlsx"),
         rel("rId3", "mailto:me@a.example"),
+        rel("rId4", "https://a.example/path#first#second"),
     );
     let mut wb = read_xlsx(&minimal(body, &[("xl/worksheets/_rels/sheet1.xml.rels", &sheet_rels)], "", "")).unwrap().0;
     // Built in the model too: an internal target that reads like a URL keeps its one marker.
@@ -440,6 +444,12 @@ fn hyperlink_kind_follows_the_file_structure_not_the_text() {
         ("C6", "Data!B2", false),
         ("C7", "#mailto:me@a.example", false),
         ("C8", "#http://a.example", false),
+        ("C9", "#file:report.xlsx", false),
+        ("C10", "##", false),
+        ("C11", "'#Data'!A1", false),
+        ("C12", "#NAME?", false),
+        ("C13", "https://a.example/path#first#second", true),
+        ("C14", "Data!B2", false),
     ];
     let some = |s: &str| Some(s.to_string());
     let written = vec![
@@ -451,15 +461,39 @@ fn hyperlink_kind_follows_the_file_structure_not_the_text() {
         ("C6".into(), None, some("Data!B2")),
         ("C7".into(), None, some("mailto:me@a.example")),
         ("C8".into(), None, some("http://a.example")),
+        ("C9".into(), None, some("file:report.xlsx")),
+        ("C10".into(), None, some("##")),
+        ("C11".into(), None, some("'#Data'!A1")),
+        ("C12".into(), None, some("#NAME?")),
+        ("C13".into(), some("https://a.example/path"), some("first#second")),
+        ("C14".into(), None, some("Data!B2")),
     ];
     for cycle in 0..2 {
         let links = &wb.sheet(0).unwrap().hyperlinks;
+        assert_eq!(links.len(), model.len());
         for (cell, target, external) in model {
             let h = &links[&at(cell)];
             assert_eq!((h.target.as_str(), h.external), (target, external), "{cell}, cycle {cycle}");
         }
         let saved = crate::write_xlsx(&wb).unwrap();
         assert_eq!(written_links(&saved), written, "cycle {cycle}");
+        wb = read_xlsx(&saved).unwrap().0;
+    }
+}
+
+/// MS-OI29500 §18.3.1.47 allows zero-length locations. An empty location is not the
+/// same as no destination attributes, even though neither can be followed to a cell.
+#[test]
+fn an_empty_hyperlink_location_survives_xlsx_round_trips() {
+    let sheet = r#"<sheetData/><hyperlinks><hyperlink ref="C1" location="" tooltip="Empty"/><hyperlink ref="C2"/></hyperlinks>"#;
+    let mut wb = read_xlsx(&minimal(sheet, &[], "", "")).unwrap().0;
+    for _ in 0..2 {
+        let links = &wb.sheet(0).unwrap().hyperlinks;
+        assert_eq!(links.len(), 1);
+        let link = &links[&at("C1")];
+        assert_eq!((link.target.as_str(), link.external, link.tooltip.as_deref()), ("", false, Some("Empty")));
+        let saved = crate::write_xlsx(&wb).unwrap();
+        assert_eq!(written_links(&saved), [("C1".into(), None, Some(String::new()))]);
         wb = read_xlsx(&saved).unwrap().0;
     }
 }

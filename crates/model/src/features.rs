@@ -391,6 +391,7 @@ pub struct NoteCorner {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(from = "SavedHyperlink")]
 pub struct Hyperlink {
     /// URL, `mailto:`, a file path (`Book.xlsx`, `Book.xlsx#Sheet1!A2`), or an in-workbook location
     /// like `Sheet2!A1`.
@@ -398,8 +399,32 @@ pub struct Hyperlink {
     pub tooltip: Option<String>,
     /// The target is outside this workbook (Excel's "Existing File or Web Page"): a relationship in
     /// the file, not a `location`. A bare file name can't be told from a defined name by its text.
-    #[serde(default)]
     pub external: bool,
+}
+
+#[derive(Deserialize)]
+struct SavedHyperlink {
+    target: String,
+    tooltip: Option<String>,
+    #[serde(default, deserialize_with = "present_link_kind")]
+    external: Option<bool>,
+}
+
+fn present_link_kind<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<bool>, D::Error> {
+    bool::deserialize(d).map(Some)
+}
+
+impl From<SavedHyperlink> for Hyperlink {
+    fn from(saved: SavedHyperlink) -> Self {
+        let external = saved.external.unwrap_or_else(|| {
+            // Flagless JSON relied on the old XLSX writer to recognize these targets.
+            let target = saved.target.trim();
+            target.contains("://")
+                || target.starts_with("\\\\")
+                || target.split_once(':').is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("mailto") || scheme.eq_ignore_ascii_case("file"))
+        });
+        Self { target: saved.target, tooltip: saved.tooltip, external }
+    }
 }
 
 // ---------------------------------------------------------------- drawing objects

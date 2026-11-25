@@ -624,8 +624,8 @@ pub(crate) fn internal_link_location(target: &str) -> String {
 }
 
 /// Model target of a link read from `location` alone. The text is [`internal_link_location`],
-/// with a `#` marker in front only when the bare text would be followed out of the workbook
-/// (`http://a.example` → `#http://a.example`), so following and saving keep it internal.
+/// with a `#` marker when scheme or network-path text would otherwise be opened externally or
+/// refused by navigation (`http://a.example` → `#http://a.example`).
 fn internal_model_target(location: &str) -> String {
     let target = internal_link_location(location);
     let bare = target.trim();
@@ -638,25 +638,23 @@ fn internal_model_target(location: &str) -> String {
 
 fn push_hyperlink(cx: &mut Ctx<'_>, name: &str, h: RawHyperlink<'_>, rels: &HashMap<&str, &Rel>, sheet: &mut Sheet, budget: &mut LinkBudget) -> bool {
     let rel_target = h.rel_id.and_then(|id| rels.get(id)).map(|r| r.target.as_str()).unwrap_or("");
-    let location = h.location.filter(|l| !l.is_empty());
-    if rel_target.len().saturating_add(location.map_or(0, str::len)) > MAX_HYPERLINK_TARGET {
+    if rel_target.len().saturating_add(h.location.map_or(0, str::len)) > MAX_HYPERLINK_TARGET {
         cx.warn(format!("sheet \"{name}\": hyperlinks longer than {MAX_HYPERLINK_TARGET} characters were dropped"));
         return true;
     }
     // The structure decides the kind: a relationship is outside the workbook, a `location` alone
     // is a place in it, whatever either text looks like.
-    let mut target = rel_target.to_string();
-    let external = !target.is_empty();
-    if let Some(loc) = location {
-        if external {
-            target = format!("{target}#{loc}");
-        } else {
-            target = internal_model_target(loc);
+    let external = !rel_target.is_empty();
+    let target = if external {
+        match h.location.filter(|loc| !loc.is_empty()) {
+            Some(loc) => format!("{rel_target}#{loc}"),
+            None => rel_target.to_owned(),
         }
-    }
-    if target.is_empty() {
+    } else if let Some(loc) = h.location {
+        internal_model_target(loc)
+    } else {
         return true;
-    }
+    };
     let tooltip = h.tooltip.map(|t| truncate_chars(t, MAX_TOOLTIP_CHARS));
     let link_bytes = (target.len() + tooltip.as_ref().map_or(0, String::len)) as u64;
     let link = Hyperlink { target, tooltip, external };

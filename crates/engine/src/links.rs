@@ -184,12 +184,53 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn legacy_json_preserves_link_kinds_on_xlsx_export() -> Result<()> {
+        // Use the native workbook envelope, with just the hyperlink map shaped like older files.
+        let cases = [
+            ("  HTTPS://a.example/doc#section#part  ", None, "HTTPS://a.example/doc#section#part", true),
+            ("MailTo:me@a.example", None, "MailTo:me@a.example", true),
+            ("FILE:report.xlsx", None, "FILE:report.xlsx", true),
+            (r"\\host\share", None, r"\\host\share", true),
+            ("//host/share", None, "#//host/share", false),
+            (r"C:\report.xlsx", None, r"#C:\report.xlsx", false),
+            ("Data!B2", None, "Data!B2", false),
+            ("https://a.example/internal", Some(false), "#https://a.example/internal", false),
+            ("report.xlsx", Some(true), "report.xlsx", true),
+        ];
+        let json_bytes = crate::io::save_bytes(&gridcraft_model::Workbook::new(), "book.json")?;
+        let mut file: Json = serde_json::from_slice(&json_bytes).unwrap();
+        let mut links = serde_json::Map::new();
+        for (row, (target, flag, _, _)) in (0u32..).zip(cases) {
+            let mut link = json!({"target": target, "tooltip": "go"});
+            if let Some(flag) = flag {
+                link["external"] = json!(flag);
+            }
+            links.insert(gridcraft_core::CellRef::new(row, 0).a1(), link);
+        }
+        file["sheets"][0]["hyperlinks"] = Json::Object(links);
+        let (wb, _) = crate::io::open_bytes("book.json", file.to_string().as_bytes())?;
+        for (row, (original, _, _, external)) in (0u32..).zip(cases) {
+            let link = &wb.sheets[0].hyperlinks[&gridcraft_core::CellRef::new(row, 0)];
+            assert_eq!((link.target.as_str(), link.external), (original, external), "native link at {original}");
+        }
+        let saved = crate::io::save_bytes(&wb, "book.xlsx")?;
+        let (back, _) = crate::io::open_bytes("book.xlsx", &saved)?;
+        for (row, (original, _, target, external)) in (0u32..).zip(cases) {
+            let link = &back.sheets[0].hyperlinks[&gridcraft_core::CellRef::new(row, 0)];
+            assert_eq!((link.target.as_str(), link.external, link.tooltip.as_deref()), (target, external, Some("go")), "{original}");
+        }
+        file["sheets"][0]["hyperlinks"]["A1"]["external"] = Json::Null;
+        assert!(crate::io::open_bytes("book.json", file.to_string().as_bytes()).is_err());
+        Ok(())
+    }
+
     /// An internal link whose place reads like a URL stays internal through an XLSX save and
     /// reopen, so following it never hands the text to the system; a web link stays external.
     #[test]
     fn url_like_internal_links_stay_internal_through_xlsx() -> Result<()> {
         let mut wb = gridcraft_model::Workbook::new();
-        let links = [("#http://a.example", false), ("https://a.example/x", true), ("mailto:me@a.example", true)];
+        let links = [("#http://a.example", false), ("https://a.example/x", true), ("mailto:me@a.example", true), ("#file:report.xlsx", false)];
         let sheet = wb.sheet_mut(0).ok_or(EngineError::Other("missing sheet".into()))?;
         for (row, (target, external)) in (0u32..).zip(links) {
             sheet

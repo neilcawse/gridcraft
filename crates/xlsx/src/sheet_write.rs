@@ -674,7 +674,7 @@ fn build_sheet_rules(sheet: &Sheet, features: &mut CraftFeatures, rels: &mut Rel
     }
     for (c, h) in &sheet.hyperlinks {
         let t = h.target.trim();
-        if t.is_empty() {
+        if h.external && t.is_empty() {
             continue;
         }
         // The model's flag alone picks a relationship or a `location`; the text never does.
