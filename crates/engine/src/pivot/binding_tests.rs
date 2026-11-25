@@ -814,12 +814,20 @@ fn table_rename_follows_a_pivot_rebound_to_the_table_that_took_its_place() {
     pt.binding = binding;
     // The bound table is gone; another of the same name took its place.
     Arc::make_mut(&mut wb.sheets[1]).tables[0].uid = gridcraft_model::DefinitionUid::fresh();
-    assert!(wb.pivot_source(&wb.sheets[REPORT].pivots[0], REPORT).is_ok_and(|found| found.rebound.is_some()));
     let check = |wb: &Workbook, table: &str| {
-        assert_eq!(wb.sheets[REPORT].pivots[0].source, table);
+        let pt = &wb.sheets[REPORT].pivots[0];
+        assert_eq!(pt.source, table);
         assert_eq!(total(&mut wb.clone()), Ok(FROM_DATA));
+        let found = wb.pivot_source(pt, REPORT).unwrap();
+        assert_eq!(found.rebound, Some(("table \"Sales\"".into(), format!("table \"{table}\""))));
     };
-    check_table_rename(rename_session(wb), check);
+    let wb = check_table_rename(rename_session(wb), check);
+    let saved = save(&wb);
+    assert_eq!(saved.warnings.len(), 1, "{:?}", saved.warnings);
+    assert!(saved.warnings[0].contains("table \"Sales\" was deleted, and table \"Renamed\" took its place"), "{:?}", saved.warnings);
+    let mut reopened = saved.back;
+    assert_eq!(reopened.sheets[REPORT].pivots[0].source, "Renamed");
+    assert_eq!(total(&mut reopened), Ok(FROM_DATA));
 }
 
 #[test]

@@ -161,7 +161,7 @@ impl TableRefRewrite for Rewrite<'_> {
         })
     }
 
-    fn pivot(&self, p: &PivotTable, si: usize) -> Option<(String, &str)> {
+    fn pivot(&self, p: &PivotTable, si: usize) -> Option<(String, Option<&str>)> {
         let (at, qualified) = match self.original.pivot_source(p, si).ok()?.source {
             PivotSource::Table { sheet, table } => ((sheet, table), split_sheet(&p.source).0.is_some()),
             PivotSource::Text(t) if !p.binding.unresolved(t) && !t.trim_start().starts_with('[') => {
@@ -171,7 +171,7 @@ impl TableRefRewrite for Rewrite<'_> {
         };
         let new = self.renamed(at)?;
         let source = if qualified { format!("{}!{new}", quote_sheet(&self.original.sheets[at.0].name)) } else { new.to_string() };
-        Some((source, new))
+        Some((source, Some(new)))
     }
 }
 

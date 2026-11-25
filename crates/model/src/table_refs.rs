@@ -79,16 +79,17 @@ impl TableRefRewrite for TableRename<'_> {
         })
     }
 
-    fn pivot(&self, pivot: &PivotTable, sheet: usize) -> Option<(String, &str)> {
+    fn pivot(&self, pivot: &PivotTable, sheet: usize) -> Option<(String, Option<&str>)> {
         // What the PivotTable reads: its bound table, the same-kind one that took a gone binding's
         // place, or for unbound text the table that the text names first.
-        let qualified = match self.wb.pivot_source(pivot, sheet).ok()?.source {
+        let found = self.wb.pivot_source(pivot, sheet).ok()?;
+        let qualified = match found.source {
             PivotSource::Table { sheet, table } if (sheet, table) == self.at => split_sheet(&pivot.source).0,
             PivotSource::Text(text) if !pivot.binding.unresolved(text) && self.might_change(text.trim().trim_start_matches('=').trim(), None) => None,
             _ => return None,
         };
         let source = qualified.map_or_else(|| self.new.into(), |sheet| format!("{}!{}", quote_sheet(&sheet), self.new));
-        Some((source, self.new))
+        Some((source, found.rebound.is_none().then_some(self.new)))
     }
 
     fn respell(&self, expr: Expr) -> Expr {
@@ -116,26 +117,30 @@ pub trait TableRefRewrite {
     /// Cheap prefilter to avoid cloning unaffected cell expressions.
     fn might_change(&self, name: &str, owner: Option<TablePosition>) -> bool;
     fn replacement(&self, name: &str, structured: bool, sheet: usize, owner: Option<TablePosition>, binders: &[String]) -> Option<Expr>;
-    /// The new source text for a pivot and the name of the table it refers to.
-    fn pivot(&self, pivot: &PivotTable, sheet: usize) -> Option<(String, &str)>;
+    /// The new source text and, if the binding's last-seen table name should change, its new name.
+    fn pivot(&self, pivot: &PivotTable, sheet: usize) -> Option<(String, Option<&str>)>;
     /// Preserve the optional hash marker for interactive edits; file repair keeps its previous
     /// canonicalization to a bare location.
     fn keep_link_marker(&self) -> bool {
         false
     }
-    /// Respell user function calls, which the parser upper-cases (`Double(…)`), in an expression
-    /// this rewrite changed. File repair leaves that to the reader's later pass over every formula.
+    /// Restore user function call spelling after a changed expression is reparsed from text.
+    /// File repair leaves that to the reader's later pass over every formula.
     fn respell(&self, expr: Expr) -> Expr {
         expr
     }
 }
 
 pub fn expression(rewrite: &impl TableRefRewrite, expr: &mut Expr, sheet: usize, owner: Option<TablePosition>) -> bool {
-    let changed = rewrite_table_tokens(expr, &|name, structured, env| rewrite.replacement(name, structured, sheet, owner, env));
+    let changed = replace_tokens(rewrite, expr, sheet, owner);
     if changed {
         *expr = rewrite.respell(std::mem::replace(expr, Expr::Missing));
     }
     changed
+}
+
+fn replace_tokens(rewrite: &impl TableRefRewrite, expr: &mut Expr, sheet: usize, owner: Option<TablePosition>) -> bool {
+    rewrite_table_tokens(expr, &|name, structured, env| rewrite.replacement(name, structured, sheet, owner, env))
 }
 
 fn rewritten_text(rewrite: &impl TableRefRewrite, text: &str, sheet: usize, owner: Option<TablePosition>) -> Option<String> {
@@ -177,7 +182,7 @@ pub fn apply(rewrite: &impl TableRefRewrite, wb: &mut Workbook, formula_objects:
                         return None;
                     }
                     let mut expr = expr.clone();
-                    expression(rewrite, &mut expr, si, owner).then(|| (c, Formula { array: f.array, ..f.rewritten(expr) }))
+                    replace_tokens(rewrite, &mut expr, si, owner).then(|| (c, Formula { array: f.array, ..f.rewritten(expr) }))
                 })?
             })
             .collect();
@@ -224,7 +229,9 @@ pub fn apply(rewrite: &impl TableRefRewrite, wb: &mut Workbook, formula_objects:
                     && binding.text == p.source
                 {
                     binding.text.clone_from(&source);
-                    binding.was = format!("table \"{name}\"");
+                    if let Some(name) = name {
+                        binding.was = format!("table \"{name}\"");
+                    }
                 }
                 p.source = source;
             }
@@ -431,6 +438,19 @@ mod tests {
         for (i, (before, after)) in cases.iter().enumerate() {
             assert_eq!(wb.names[i + 1].formula, *after, "{before}");
         }
+    }
+
+    #[test]
+    fn rename_keeps_existing_cell_call_spelling() {
+        let mut wb = book();
+        let at = CellRef::new(5, 5);
+        let formula = Formula::new("LET(double,LAMBDA(x,x+1),DOUBLE(SUM(Sales[V])))");
+        wb.sheet_mut(0).unwrap().set_cell(at, Cell::formula(formula));
+        // Defining a global Double later does not change the cell's existing local call.
+        wb.names.push(name("Double", "LAMBDA(x,x*2)"));
+        wb.rename_table(0, 0, "Renamed");
+        let text = &wb.sheets[0].cell(at).unwrap().formula.as_ref().unwrap().text;
+        assert_eq!(text, "LET(double,LAMBDA(x,x+1),DOUBLE(SUM(Renamed[V])))");
     }
 
     /// The interim X22 gate: interactive rename leaves formula objects as they are until Excel
