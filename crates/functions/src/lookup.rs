@@ -69,8 +69,8 @@ fn find_exact_in_array(x: &Value, arr: &Array, wild: bool, reverse: bool) -> Opt
 /// Legacy approximate lookup in ascending data, or descending for `MATCH(...,-1)`. Excel's
 /// documentation requires sorted input and does not specify the result of unsorted lookups.
 /// This uses bisection and skips other types: prefer the first compatible key at or after the
-/// midpoint (preserving a mixed-key VLOOKUP corpus case), then fall back to a compatible key
-/// before it. On equality, use the end of the contiguous run of equal keys.
+/// midpoint (Excel finds a text key that follows numbers and blanks this way), then fall back to
+/// a compatible key before it. On equality, use the end of the contiguous run of equal keys.
 fn bsearch_last(x: &Value, hay: &[Value], desc: bool) -> Option<usize> {
     let mut hi = hay.len().checked_sub(1)?;
     let mut lo = 0usize;
@@ -185,7 +185,7 @@ fn range_lookup_arg(v: &Value, from_ref: bool) -> R<bool> {
 /// The 0-based column (VLOOKUP) or row (HLOOKUP) of the index argument in a table `len` wide.
 /// Excel resolves it only once the key is found: a lookup that finds nothing is `#N/A` whatever
 /// the index (Excel 2013: `HLOOKUP(x, E45:AB49, 43, 0)` without x in the first row is `#N/A`).
-/// An error or non-integral text read from a cell is `#REF!` (public LookupFunctionsTestCaseData.xls).
+/// An error or non-integral text read from a cell is `#REF!` (Excel 16: cell text "0.9" or "abc").
 /// A computed index keeps normal numeric coercion, including propagation of a computed error.
 /// Below 1 (a blank, FALSE) it is `#VALUE!`; past the table `#REF!`.
 fn lookup_index(v: &Value, from_ref: bool, len: usize) -> R<usize> {
@@ -327,8 +327,8 @@ fn match_fn(args: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     let arr = as_array(av);
     let hay = vector(&arr).ok_or(CellError::NA)?;
     let mt = opt_num(args, 2, 1.0)?;
-    // Public MatchFunctionTestCaseData.xls has wildcard hits in approximate modes too.
-    // Use the same pattern search as exact mode; the cache does not establish every tie case.
+    // Excel 16 also matches wildcard needles as patterns in the approximate modes.
+    // Use the same pattern search as exact mode; tie cases are not established.
     let wild = matches!(&x, Value::Text(t) if has_wildcards(t));
     let pos = if mt == 0.0 || wild {
         find_exact_in_array(&x, &arr, true, false)
@@ -877,7 +877,7 @@ mod tests {
         close(ev("MATCH", vec![t("c"), av(s.clone())]), 2.0);
         is_err(ev("MATCH", vec![n(1.0), rf(table())]), CellError::NA);
         close(ev("MATCH", vec![b(true), av(arr(vec![vec![nv(1.0), Value::Bool(true)]])), n(0.0)]), 2.0);
-        // Approximate modes also match wildcard needles in MatchFunctionTestCaseData.xls.
+        // Approximate modes also match wildcard needles (Excel 16).
         let names = arr(["Alpha", "Delta", "Eta", "Kappa", "Mu", "Chi"].iter().map(|s| vec![tv(s)]).collect());
         for mt in [1.0, -1.0, 0.0] {
             close(ev("MATCH", vec![t("et*"), rf(names.clone()), n(mt)]), 3.0);
