@@ -706,10 +706,65 @@ impl KeptReader {
         if vml_objects || self.custom_views || rels.iter().any(|r| is_kind(r, SHEET_ELEMENT_KINDS)) {
             self.sheet_elements(cx, part, name, &rels, &mut p, &mut seen, controls);
         }
+        if let Some(drawing) = &controls.drawing {
+            self.control_proxies(cx, name, drawing, &mut p, &mut seen);
+        }
         if rels.iter().any(|r| is_kind(r, &["comments"])) {
             self.note_fills(cx, name, &rels, &mut p, &mut seen);
         }
         (!p.is_empty()).then(|| Arc::new(p))
+    }
+
+    fn control_proxies(
+        &mut self,
+        cx: &mut Ctx<'_>,
+        sheet: &str,
+        drawing: &crate::drawing::KeptProxies,
+        p: &mut Preserved,
+        seen: &mut HashSet<String>,
+    ) {
+        let rels = match raw_rels(cx, &drawing.part) {
+            Ok(r) => r,
+            Err(e) => {
+                cx.warn(format!("sheet {sheet:?}: control stand-ins were dropped: {e}"));
+                return;
+            }
+        };
+        let mut kept = PreservedControlProxies::default();
+        for anchor in &drawing.anchors {
+            let result = (|| {
+                if anchor.len() > self.budget {
+                    return Err("they are too large".into());
+                }
+                let mut ids = HashSet::new();
+                map_rel_ids(anchor, &mut |id| {
+                    ids.insert(id.to_string());
+                    Some(id.to_string())
+                })
+                .ok_or("their XML is damaged")?;
+                let roots: Vec<_> = rels.iter().filter(|r| ids.contains(&r.id)).cloned().collect();
+                if roots.len() != ids.len() {
+                    return Err("they refer to a missing relationship".into());
+                }
+                self.budget -= anchor.len();
+                let mut parts = Preserved::default();
+                self.keep(cx, &mut parts, &roots, seen)?;
+                p.parts.extend(parts.parts);
+                for r in parts.rels {
+                    if !kept.rels.iter().any(|x| x.id == r.id) {
+                        kept.rels.push(r);
+                    }
+                }
+                kept.anchors.push(self.kept_xml(anchor.clone()));
+                Ok::<(), String>(())
+            })();
+            if let Err(why) = result {
+                cx.warn(format!("sheet {sheet:?}: control stand-ins were dropped: {why}"));
+            }
+        }
+        if !kept.anchors.is_empty() {
+            p.control_proxies = Some(kept);
+        }
     }
 
     /// The pictures that fill the boxes of the sheet's notes, with the images they show. GridCraft
@@ -1232,6 +1287,43 @@ fn with_decls(frag: &str, decls: &[(String, String)]) -> String {
         }
     }
     format!("{}{add}{}", frag.get(..name_end).unwrap_or(""), frag.get(name_end..).unwrap_or(""))
+}
+
+/// Original top-level drawing elements. Retain inherited prefixes, including ones named only
+/// in a compatibility choice's `Requires` attribute.
+pub fn drawing_fragments(bytes: &[u8], selected: &HashSet<usize>) -> Vec<String> {
+    let data = xml::to_utf8(bytes);
+    let Ok(text) = std::str::from_utf8(&data) else { return Vec::new() };
+    let mut reader = Reader::from_str(text);
+    let mut decls = None;
+    let mut index = 0;
+    let mut out = Vec::with_capacity(selected.len());
+    loop {
+        let start = reader.buffer_position() as usize;
+        match reader.read_event() {
+            Ok(Event::Start(e)) if decls.is_none() => {
+                decls = Some(namespace_decls(&e, ""));
+                continue;
+            }
+            Ok(Event::Start(e)) => {
+                if reader.read_to_end(e.name()).is_err() {
+                    break;
+                }
+            }
+            Ok(Event::Empty(_)) if decls.is_some() => {}
+            Ok(Event::Eof | Event::End(_)) | Err(_) => break,
+            _ => continue,
+        }
+        let end = reader.buffer_position() as usize;
+        if selected.contains(&index)
+            && end.saturating_sub(start) <= MAX_FRAGMENT
+            && let (Some(xml), Some(decls)) = (text.get(start..end), decls.as_ref())
+        {
+            out.push(with_decls(xml, decls));
+        }
+        index += 1;
+    }
+    out
 }
 
 /// Byte ranges of the `<v:shape …>…</v:shape>` (or self-closed) elements in VML text.

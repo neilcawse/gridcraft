@@ -65,6 +65,10 @@ fn vml(object_type: &str, sel: &str) -> String {
 /// listed in a `<controls>` nested in two `mc:AlternateContent`s. `parts` replace the default
 /// properties part, VML and drawing (`None` leaves that part out of the package).
 fn hanson_with(sel: u32, prop: Option<&str>, vml: Option<&str>, drawing: Option<&str>) -> Vec<u8> {
+    drop_package(sel, prop, vml, drawing, &[])
+}
+
+fn drop_package(sel: u32, prop: Option<&str>, vml: Option<&str>, drawing: Option<&str>, extra: &[(&str, &str)]) -> Vec<u8> {
     let mut rows = format!(r#"<row r="5"><c r="AJ5"><v>{sel}</v></c></row>"#);
     for (i, item) in ITEMS.iter().enumerate() {
         let r = i + 6;
@@ -83,6 +87,7 @@ fn hanson_with(sel: u32, prop: Option<&str>, vml: Option<&str>, drawing: Option<
             parts.push((name, p));
         }
     }
+    parts.extend_from_slice(extra);
     minimal(&body, &parts, "", "")
 }
 
@@ -135,21 +140,91 @@ fn a_stand_in_is_known_by_its_spid_or_hidden_id_and_other_shapes_stay() {
     }
 }
 
-/// A control kind GridCraft doesn't model (a list box) stays with pass-through, and its stand-in
-/// is read as it was before drop-downs were modelled.
+fn mixed_drop_drawing() -> String {
+    drawing("_x0000_s1026", true)
+        .replace("</mc:Choice></mc:AlternateContent>", "")
+        .replace("</xdr:wsDr>", "</mc:Choice></mc:AlternateContent></xdr:wsDr>")
+}
+
 #[test]
-fn a_pass_through_controls_stand_in_is_read_as_before() {
+fn mixed_alternate_drawing_warns_and_keeps_artwork_and_legacy_control() {
+    let prop = ctrl_prop("widthMin=\"35\"");
+    let input = hanson_with(2, Some(&prop), Some(&vml("Drop", "2")), Some(&mixed_drop_drawing()));
+    let (wb, report) = read_xlsx(&input).unwrap();
+    assert!(report.warnings.iter().any(|w| w.contains("mixed alternate drawing")), "{:?}", report.warnings);
+    let sheet = wb.sheet(0).unwrap();
+    assert!(sheet.controls.is_empty());
+    assert_eq!(sheet.shapes.len(), 1);
+    assert_eq!(sheet.shapes[0].text, "Note");
+
+    let bytes = write_xlsx(&wb).unwrap();
+    let mut pkg = Package::open(&bytes).unwrap();
+    let sh = "xl/worksheets/sheet1.xml";
+    let rels = pkg.rels(sh).unwrap();
+    let part = |kind| rels.iter().find(|r| r.kind == kind).unwrap().target.as_str();
+    let draw = text(&mut pkg, part("drawing"));
+    assert_eq!(draw.matches("<a:t>Note</a:t>").count(), 1);
+    assert!(!draw.contains("compatExt"));
+    let sh = text(&mut pkg, sh);
+    assert_eq!(sh.matches("shapeId=\"1026\"").count(), 1);
+    assert!(sh.contains(&format!("r:id=\"{}\"", rels.iter().find(|r| r.kind == "ctrlProp").unwrap().id)));
+    let vml = text(&mut pkg, part("vmlDrawing"));
+    assert_eq!(vml.matches("id=\"_x0000_s1026\"").count(), 1);
+    assert!(text(&mut pkg, part("ctrlProp")).contains("widthMin=\"35\""));
+
+    let (reopened, report) = read_xlsx(&bytes).unwrap();
+    assert!(report.warnings.iter().all(|w| w.contains("form controls are not shown")), "{:?}", report.warnings);
+    let sheet = reopened.sheet(0).unwrap();
+    assert!(sheet.controls.is_empty());
+    assert_eq!(sheet.shapes.len(), 1);
+    assert_eq!(sheet.shapes[0].text, "Note");
+}
+
+/// A control kind GridCraft doesn't model stays with pass-through, including its hidden anchor.
+#[test]
+fn a_pass_through_controls_stand_in_keeps_its_original_id_and_extension() {
     let prop = r#"<?xml version="1.0"?><formControlPr xmlns="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" objectType="List" fmlaRange="$AJ$6:$AJ$12" sel="2"/>"#;
     let (wb, _) = read_xlsx(&hanson_with(2, Some(prop), Some(&vml("List", "2")), Some(&drawing("_x0000_s1026", false)))).unwrap();
     let sh = wb.sheet(0).unwrap();
     assert!(sh.controls.is_empty());
-    assert_eq!(sh.shapes.len(), 1, "the list box's stand-in is still read");
+    let saved = write_xlsx(&wb).unwrap();
+    let mut pkg = Package::open(&saved).unwrap();
+    let draw = text(&mut pkg, "xl/drawings/drawing1.xml");
+    assert!(draw.contains("id=\"1026\"") && draw.contains("spid=\"_x0000_s1026\""), "{draw}");
+    assert!(sh.shapes.is_empty());
     let kept = sh.preserved.as_ref().and_then(|k| k.elements.iter().find(|e| e.slot == "controls")).map(|e| e.xml.clone()).unwrap_or_default();
     assert!(kept.contains("shapeId=\"1026\""), "the list box is kept: {kept}");
 }
 
+#[test]
+fn direct_opaque_proxy_keeps_drawing_relationships_separate_from_sheet_relationships() {
+    let wrapped = drawing("_x0000_s1026", false);
+    let (head, wrapper) = wrapped.split_once("<mc:AlternateContent").unwrap();
+    let (_, anchor) = wrapper.split_once("<xdr:twoCellAnchor").unwrap();
+    let anchor = anchor
+        .replace("</mc:Choice></mc:AlternateContent>", "")
+        .replace("<xdr:cNvPr id=", "<xdr:cNvPr xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" id=")
+        .replace("<a:extLst>", "<a:hlinkClick r:id=\"rId8\"/><a:extLst>");
+    let d = format!("{head}<!-- direct anchor --><xdr:twoCellAnchor xmlns:a14=\"http://schemas.microsoft.com/office/drawing/2010/main\"{anchor}");
+    let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId8" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.invalid/" TargetMode="External"/></Relationships>"#;
+    let v = vml("Drop", "2");
+    let prop = ctrl_prop("widthMin=\"35\"");
+    let bytes = drop_package(2, Some(&prop), Some(&v), Some(&d), &[("xl/drawings/_rels/drawing1.xml.rels", rels)]);
+    let (wb, _) = read_xlsx(&bytes).unwrap();
+    let saved = write_xlsx(&wb).unwrap();
+    let mut pkg = Package::open(&saved).unwrap();
+    let part = "xl/drawings/drawing1.xml";
+    let rels = pkg.rels(part).unwrap();
+    let rel = rels.iter().find(|r| r.kind == "hyperlink").unwrap();
+    assert!(rel.external);
+    assert_eq!(rel.target, "https://example.invalid/");
+    let draw = text(&mut pkg, part);
+    assert!(!draw.contains("AlternateContent"));
+    assert!(draw.contains(&format!("<a:hlinkClick r:id=\"{}\"/>", rel.id)), "{draw}");
+}
+
 /// A drop-down with its own item list (`itemLst`, VML `ListItem`) or a macro holds more than the
-/// model does: it stays with pass-through, unchanged, and its stand-in is read as before.
+/// model does: it stays with pass-through, including its stand-in.
 #[test]
 fn a_drop_down_with_its_own_items_or_a_macro_is_kept_unchanged() {
     let items = r#"<?xml version="1.0"?><formControlPr xmlns="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" objectType="Drop" fmlaLink="$AJ$5" sel="2"><itemLst><item val="One"/><item val="Two"/></itemLst></formControlPr>"#.to_string();
@@ -163,16 +238,130 @@ fn a_drop_down_with_its_own_items_or_a_macro_is_kept_unchanged() {
         let (wb, _) = read_xlsx(&hanson_with(2, Some(prop), Some(v), Some(&drawing("_x0000_s1026", false)))).unwrap();
         let sh = wb.sheet(0).unwrap();
         assert!(sh.controls.is_empty(), "case {i}: {:?}", sh.controls);
-        assert_eq!(sh.shapes.len(), 1, "case {i}: the stand-in is read as before");
+        assert!(sh.shapes.is_empty(), "case {i}: the stand-in is not an editable shape");
         let kept = sh.preserved.as_ref().and_then(|k| k.elements.iter().find(|e| e.slot == "controls")).map(|e| e.xml.clone()).unwrap_or_default();
         assert!(kept.contains("shapeId=\"1026\""), "case {i}: {kept}");
         // Saved and read back, it is still kept, not modelled.
         let (back, _) = read_xlsx(&write_xlsx(&wb).unwrap()).unwrap();
         let bs = back.sheet(0).unwrap();
         assert!(bs.controls.is_empty(), "case {i}: {:?}", bs.controls);
+        assert!(bs.shapes.is_empty(), "case {i}: the stand-in is still not editable");
         let kept = bs.preserved.as_ref().and_then(|k| k.elements.iter().find(|e| e.slot == "controls")).map(|e| e.xml.clone()).unwrap_or_default();
         assert!(kept.contains("shapeId=\"1026\""), "case {i} back: {kept}");
     }
+}
+
+#[test]
+fn drop_display_settings_keep_values_and_omissions_in_each_part() {
+    let base = vml("Drop", "2").replace("<x:Dx>22</x:Dx>", "").replace("<x:Val>0</x:Val>", "");
+    let vml_settings = "<x:NoThreeD>False</x:NoThreeD><x:NoThreeD2/><x:Dx>47</x:Dx><x:Val>3</x:Val>";
+    let props = ["noThreeD=\"1\"", "noThreeD2=\"0\"", "dx=\"35\"", "val=\"2\""];
+    for (xml, vml) in [(false, false), (true, false), (false, true), (true, true)] {
+        let input_props = if xml { props.join(" ") } else { String::new() };
+        let input_vml = if vml { base.replace("<x:Min>", &format!("{vml_settings}<x:Min>")) } else { base.clone() };
+        let mut bytes = hanson_with(2, Some(&ctrl_prop(&input_props)), Some(&input_vml), None);
+        for _ in 0..2 {
+            let (mut wb, _) = read_xlsx(&bytes).unwrap();
+            let sh = wb.sheet_mut(0).unwrap();
+            assert_eq!(sh.controls.len(), 1);
+            sh.controls[0].name = "Renamed drop".into();
+            bytes = write_xlsx(&wb).unwrap();
+            let mut pkg = Package::open(&bytes).unwrap();
+            let rels = pkg.rels("xl/worksheets/sheet1.xml").unwrap();
+            let part = |kind| rels.iter().find(|r| r.kind == kind).unwrap().target.as_str();
+            let p = text(&mut pkg, part("ctrlProp"));
+            for (attr, value) in props.iter().map(|setting| setting.split_once('=').unwrap()) {
+                assert_eq!(p.contains(&format!(" {attr}=")), xml, "{p}");
+                if xml {
+                    assert!(p.contains(&format!(" {attr}={value}")), "{p}");
+                }
+            }
+            let d = text(&mut pkg, part("vmlDrawing"));
+            for (tag, element) in [
+                ("NoThreeD", "<x:NoThreeD>False</x:NoThreeD>"),
+                ("NoThreeD2", "<x:NoThreeD2/>"),
+                ("Dx", "<x:Dx>47</x:Dx>"),
+                ("Val", "<x:Val>3</x:Val>"),
+            ] {
+                assert_eq!(d.contains(&format!("<x:{tag}>")) || d.contains(&format!("<x:{tag}/>")), vml, "{d}");
+                if vml {
+                    assert!(d.contains(element), "{d}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn unsupported_drop_metadata_and_its_proxy_survive_repeated_saves() {
+    let plain = ctrl_prop(r#"sel="2""#);
+    let vml_base = vml("Drop", "2");
+    let vml_flag = vml_base.replace("<x:DropStyle>", "<x:RecalcAlways/><x:DropStyle>");
+    let vml_color = vml_base.replace("stroked=\"f\"", "fillcolor=\"red\"");
+    // The original VML id is 1026 but its DrawingML id is 2049, the first free new VML id.
+    // Retaining that drawing id must not duplicate it when a new modeled control is added.
+    let proxy = drawing("_x0000_s1026", true).replace("id=\"1026\" name=", "id=\"2049\" name=");
+    for (prop, vml, marker) in [
+        (ctrl_prop(r#"fmlaMacro="[0]!Custom""#), &vml_base, "fmlaMacro"),
+        (ctrl_prop(r#"widthMin="35""#), &vml_base, "widthMin=\"35\""),
+        (ctrl_prop(r#"dropStyle="OtherStyle""#), &vml_base, "dropStyle=\"OtherStyle\""),
+        (plain.clone(), &vml_base.replace(">Combo</x:DropStyle>", ">OtherStyle</x:DropStyle>"), ">OtherStyle</x:DropStyle>"),
+        (plain.clone(), &vml_flag, "RecalcAlways"),
+        (plain.clone(), &vml_color, "fillcolor=\"red\""),
+        (plain.clone(), &vml_base.replace("<x:SelType>Single", "<x:SelType>Multi"), "<x:SelType>Multi"),
+    ] {
+        let mut bytes = hanson_with(2, Some(&prop), Some(vml), Some(&proxy));
+        for save in 0..2 {
+            let (mut wb, _) = read_xlsx(&bytes).unwrap();
+            let sheet = wb.sheet_mut(0).unwrap();
+            assert!(sheet.controls.iter().all(|c| c.name != "Drop Down 2"), "lost {marker}");
+            assert_eq!(sheet.shapes.len(), 1, "only the actual drawing shape should be editable");
+            assert_eq!(sheet.shapes[0].text, "Note");
+            // A new control must share the drawing without claiming the kept control's id.
+            if save == 0 {
+                assert!(sheet.controls.is_empty());
+                sheet.controls.push(FormControl { id: 3000, kind: ControlKind::Drop, name: "Modeled drop".into(), ..Default::default() });
+            } else {
+                assert_eq!(sheet.controls.len(), 1);
+                assert_eq!(sheet.controls[0].name, "Modeled drop");
+            }
+            bytes = write_xlsx(&wb).unwrap();
+            let mut pkg = Package::open(&bytes).unwrap();
+            let draw = text(&mut pkg, "xl/drawings/drawing1.xml");
+            assert_eq!(draw.matches("id=\"2049\"").count(), 1, "{draw}");
+            assert!(draw.contains("id=\"2049\" name=\"Drop Down 2\""));
+            assert!(draw.contains("spid=\"_x0000_s1026\"") && draw.contains("<a:t>Note</a:t>"), "{draw}");
+            let rels = pkg.rels("xl/worksheets/sheet1.xml").unwrap();
+            assert_eq!(rels.iter().filter(|r| r.kind == "drawing").count(), 1);
+            let worksheet = text(&mut pkg, "xl/worksheets/sheet1.xml");
+            assert_eq!(worksheet.matches("shapeId=\"1026\"").count(), 1, "{worksheet}");
+            let vml = text(&mut pkg, &rels.iter().find(|r| r.kind == "vmlDrawing").unwrap().target);
+            assert_eq!(vml.matches("id=\"_x0000_s1026\"").count(), 1, "{vml}");
+            assert!(rels.iter().filter(|r| matches!(r.kind.as_str(), "ctrlProp" | "vmlDrawing")).any(|r| text(&mut pkg, &r.target).contains(marker)));
+        }
+    }
+}
+
+#[test]
+fn missing_ctrl_prop_fields_fall_back_individually_to_vml() {
+    let prop = ctrl_prop("");
+    let vml = vml("Drop", "4");
+    let (wb, _) = read_xlsx(&hanson_with(4, Some(&prop), Some(&vml), Some(&drawing("_x0000_s1026", false)))).unwrap();
+    let c = only_control(&wb);
+    assert_eq!((c.link.as_deref(), c.list_range.as_deref(), c.selected, c.drop_lines), (Some("$AJ$5"), Some("$AJ$6:$AJ$12"), 4, 7));
+}
+
+#[test]
+fn hidden_unrelated_drawing_is_not_a_control_proxy_by_id_alone() {
+    let d = drawing("_x0000_s1026", true)
+        .replace("id=\"3\" name=\"Note box\"", "id=\"1026\" hidden=\"1\" name=\"Note box\"")
+        .replace("id=\"1026\" name=\"Drop Down 2\"", "id=\"8\" name=\"Drop Down 2\"");
+    let prop = ctrl_prop("sel=\"2\"");
+    let (wb, _) = read_xlsx(&hanson_with(2, Some(&prop), Some(&vml("Drop", "2")), Some(&d))).unwrap();
+    let sh = wb.sheet(0).unwrap();
+    assert_eq!(sh.controls.len(), 1);
+    assert_eq!(sh.shapes.len(), 1);
+    assert!(sh.shapes[0].text.contains("Note"));
 }
 
 /// Saved without an edit: the properties part, the VML shape, the `<controls>` entry and their

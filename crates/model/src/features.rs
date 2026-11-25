@@ -897,6 +897,29 @@ pub enum MacroInput {
     Fixed(String),
 }
 
+/// Drop-down display settings from one file representation. Presence is significant: the
+/// worksheet control properties and its legacy VML fallback need not specify the same settings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DropDisplay {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_three_d: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_three_d2: Option<bool>,
+    /// Scroll bar width in pixels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scroll_width: Option<u32>,
+    /// Number of top list entries hidden by scrolling (not the selected row).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scroll_offset: Option<u32>,
+}
+
+impl DropDisplay {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// A form control (button, slider, spin button, drop-down) floating over the sheet.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -936,6 +959,10 @@ pub struct FormControl {
     pub drop_lines: u32,
     /// How a drop-down is drawn (`dropStyle`), kept for saving.
     pub drop_style: DropStyle,
+    #[serde(skip_serializing_if = "DropDisplay::is_empty")]
+    pub drop_display: DropDisplay,
+    #[serde(skip_serializing_if = "DropDisplay::is_empty")]
+    pub drop_vml_display: DropDisplay,
 }
 
 impl Default for FormControl {
@@ -960,6 +987,8 @@ impl Default for FormControl {
             selected: 0,
             drop_lines: DROP_LINES_DEFAULT,
             drop_style: DropStyle::Combo,
+            drop_display: DropDisplay::default(),
+            drop_vml_display: DropDisplay::default(),
         }
     }
 }

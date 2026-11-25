@@ -26,7 +26,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use gridcraft_core::CellRef;
-use gridcraft_model::{Anchor, AnchorMode, CONTROL_MAX, ControlAction, ControlKind, DROP_LINES_DEFAULT, DropStyle, FormControl, MacroInput, Sheet};
+use gridcraft_model::{
+    Anchor, AnchorMode, CONTROL_MAX, ControlAction, ControlKind, DROP_LINES_DEFAULT, DropDisplay, DropStyle, FormControl, MacroInput, Sheet,
+};
 
 use crate::package::Rel;
 use crate::read::Ctx;
@@ -210,7 +212,7 @@ fn ctrl_prop(c: &FormControl) -> String {
             let _ = write!(s, " val=\"{}\"", c.value);
         }
         ControlKind::Drop => {
-            let _ = write!(s, " dropLines=\"{}\" dropStyle=\"{}\" dx=\"22\"", c.drop_lines, drop_style_names(c.drop_style).0);
+            let _ = write!(s, " dropLines=\"{}\" dropStyle=\"{}\"", c.drop_lines, drop_style_names(c.drop_style).0);
             if let Some(l) = &c.link {
                 let _ = write!(s, " fmlaLink=\"{}\"", esc_attr(l));
             }
@@ -220,7 +222,17 @@ fn ctrl_prop(c: &FormControl) -> String {
             if c.selected > 0 {
                 let _ = write!(s, " sel=\"{}\"", c.selected);
             }
-            s.push_str(" val=\"0\"");
+            let d = c.drop_display;
+            for (name, value) in [("noThreeD", d.no_three_d), ("noThreeD2", d.no_three_d2)] {
+                if let Some(value) = value {
+                    let _ = write!(s, " {name}=\"{}\"", u8::from(value));
+                }
+            }
+            for (name, value) in [("dx", d.scroll_width), ("val", d.scroll_offset)] {
+                if let Some(value) = value {
+                    let _ = write!(s, " {name}=\"{value}\"");
+                }
+            }
         }
     }
     s.push_str("/>");
@@ -280,7 +292,25 @@ fn vml_shape(sheet: &Sheet, c: &FormControl, id: u64, z: usize) -> String {
             if let Some(l) = &c.link {
                 let _ = write!(data, "<x:FmlaLink>{}</x:FmlaLink>", esc(l));
             }
-            let _ = write!(data, "<x:Val>0</x:Val><x:Min>0</x:Min><x:Max>0</x:Max><x:Inc>1</x:Inc><x:Page>{}</x:Page><x:Dx>22</x:Dx>", c.drop_lines);
+            let d = c.drop_vml_display;
+            if let Some(val) = d.scroll_offset {
+                let _ = write!(data, "<x:Val>{val}</x:Val>");
+            }
+            let _ = write!(data, "<x:Min>0</x:Min><x:Max>0</x:Max><x:Inc>1</x:Inc><x:Page>{}</x:Page>", c.drop_lines);
+            if let Some(dx) = d.scroll_width {
+                let _ = write!(data, "<x:Dx>{dx}</x:Dx>");
+            }
+            for (name, value) in [("NoThreeD", d.no_three_d), ("NoThreeD2", d.no_three_d2)] {
+                match value {
+                    Some(true) => {
+                        let _ = write!(data, "<x:{name}/>");
+                    }
+                    Some(false) => {
+                        let _ = write!(data, "<x:{name}>False</x:{name}>");
+                    }
+                    None => {}
+                }
+            }
             if let Some(r) = &c.list_range {
                 let _ = write!(data, "<x:FmlaRange>{}</x:FmlaRange>", esc(r));
             }
@@ -337,18 +367,23 @@ struct Props {
     sel: Option<i64>,
     drop_lines: Option<i64>,
     drop_style: Option<DropStyle>,
-    /// A drop-down lists items of its own (`itemLst`, VML `ListItem`) instead of a source range.
-    items: bool,
+    display: DropDisplay,
+    vml_display: DropDisplay,
+    /// Payload that the drop-down model cannot faithfully rewrite.
+    opaque_drop: bool,
 }
 
-/// Whether a control of `kind` with properties `p` holds more than the model does, so it is left
-/// to pass-through, which keeps it unchanged: a drop-down with its own item list or a macro.
+/// Leave a drop-down with unsupported payload intact rather than rewriting it from the model.
 fn beyond_model(p: &Props, kind: ControlKind) -> bool {
-    kind == ControlKind::Drop && (p.items || p.macro_.as_deref().is_some_and(|m| !m.trim().is_empty()))
+    kind == ControlKind::Drop
+        && (p.opaque_drop
+            || p.macro_.as_deref().is_some_and(|m| !m.trim().is_empty())
+            || [p.range.as_deref(), p.link.as_deref()].into_iter().flatten().any(|r| r.chars().count() > 300))
 }
 
 fn props_from_ctrl_prop(e: &El) -> Props {
     let int = |k: &str| e.attr_f64(k).map(|v| v.round() as i64);
+    let uint = |k: &str| e.attr(k).and_then(|v| v.trim().parse::<u32>().ok());
     Props {
         kind: e.attr("objectType").and_then(kind_of),
         link: e.attr("fmlaLink").map(str::to_string),
@@ -366,7 +401,27 @@ fn props_from_ctrl_prop(e: &El) -> Props {
         sel: int("sel"),
         drop_lines: int("dropLines"),
         drop_style: e.attr("dropStyle").and_then(drop_style_of),
-        items: e.child("itemLst").is_some_and(|l| l.kids("item").next().is_some()),
+        display: DropDisplay {
+            no_three_d: e.attr_bool("noThreeD"),
+            no_three_d2: e.attr_bool("noThreeD2"),
+            scroll_width: uint("dx"),
+            scroll_offset: uint("val"),
+        },
+        vml_display: DropDisplay::default(),
+        opaque_drop: e.children.iter().any(|c| c.name != "itemLst" || !c.children.is_empty())
+            || e.attrs.iter().any(|(k, v)| match k.as_str() {
+                "objectType" | "fmlaLink" | "fmlaRange" | "sel" | "dropLines" => false,
+                "dropStyle" => drop_style_of(v).is_none(),
+                "dx" | "val" => uint(k).is_none(),
+                "min" => int(k) != Some(0),
+                "inc" => int(k) != Some(1),
+                "noThreeD" | "noThreeD2" => e.attr_bool(k).is_none(),
+                "colored" | "justLastX" => e.attr_bool(k) != Some(false),
+                "seltype" => !v.eq_ignore_ascii_case("single"),
+                "textHAlign" => !v.eq_ignore_ascii_case("left"),
+                "textVAlign" => !v.eq_ignore_ascii_case("top"),
+                _ => true,
+            }),
     }
 }
 
@@ -377,6 +432,7 @@ fn props_from_vml(shape: &El) -> Option<Props> {
     let int = |n: &str| text_of(n).and_then(|t| t.parse::<f64>().ok()).filter(|v| v.is_finite()).map(|v| v.round() as i64);
     let truth = |n: &str| text_of(n).map(|t| !t.eq_ignore_ascii_case("false"));
     let text = shape.child("textbox").map(|t| all_text(t, 0)).unwrap_or_default().trim().to_string();
+    let opaque_drop = kind == ControlKind::Drop && (drop_vml_payload(shape, data) || !text.is_empty());
     Some(Props {
         kind: Some(kind),
         link: text_of("FmlaLink").filter(|t| !t.is_empty()),
@@ -394,8 +450,59 @@ fn props_from_vml(shape: &El) -> Option<Props> {
         sel: int("Sel"),
         drop_lines: int("DropLines"),
         drop_style: text_of("DropStyle").as_deref().and_then(drop_style_of),
-        items: data.child("ListItem").is_some(),
+        display: DropDisplay::default(),
+        vml_display: DropDisplay {
+            no_three_d: data.child("NoThreeD").and_then(vml_drop_bool),
+            no_three_d2: data.child("NoThreeD2").and_then(vml_drop_bool),
+            scroll_width: data.child("Dx").and_then(vml_drop_uint),
+            scroll_offset: data.child("Val").and_then(vml_drop_uint),
+        },
+        opaque_drop,
     })
+}
+
+fn vml_drop_bool(e: &El) -> Option<bool> {
+    let text = e.text.trim();
+    if text.is_empty() || text.eq_ignore_ascii_case("true") || text == "1" || text.eq_ignore_ascii_case("t") {
+        Some(true)
+    } else if text.eq_ignore_ascii_case("false") || text == "0" || text.eq_ignore_ascii_case("f") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn vml_drop_uint(e: &El) -> Option<u32> {
+    e.text.trim().parse().ok()
+}
+
+fn drop_vml_payload(shape: &El, data: &El) -> bool {
+    shape.attrs.iter().any(|(k, v)| match k.as_str() {
+        "id" | "spid" | "style" | "stroked" | "filled" | "insetmode" => false,
+        "type" => v != "#_x0000_t201",
+        "strokecolor" => !matches!(v.as_str(), "black [0]" | "black [64]" | "windowText [64]" | "windowText"),
+        "fillcolor" => v != "windowText [64]",
+        "strokeweight" => v != "3e-5mm",
+        _ => true,
+    }) || shape.children.iter().any(|c| match c.name.as_str() {
+        "ClientData" => false,
+        "lock" => c.attrs.iter().any(|(k, v)| !matches!((k.as_str(), v.as_str()), ("ext", "edit") | ("rotation" | "text", "t"))),
+        "fill" => c.attrs.iter().any(|(k, v)| !matches!((k.as_str(), v.as_str()), ("color2", "window [65]"))),
+        _ => true,
+    }) || data.attrs.iter().any(|(k, _)| k != "ObjectType")
+        || data.children.iter().any(|c| match c.name.as_str() {
+            "Anchor" | "MoveWithCells" | "SizeWithCells" | "FmlaLink" | "FmlaRange" | "DropLines" | "Sel" | "Locked" | "PrintObject"
+            | "FmlaMacro" | "Max" | "Page" => false,
+            "DropStyle" => drop_style_of(&c.text).is_none(),
+            "AutoFill" | "AutoLine" => !c.text.trim().eq_ignore_ascii_case("false"),
+            "Val" | "Dx" => vml_drop_uint(c).is_none(),
+            "NoThreeD" | "NoThreeD2" => vml_drop_bool(c).is_none(),
+            "Min" => c.text.trim() != "0",
+            "Inc" => c.text.trim() != "1",
+            "SelType" => !c.text.trim().eq_ignore_ascii_case("single"),
+            "LCT" => !c.text.trim().eq_ignore_ascii_case("normal"),
+            _ => true,
+        })
 }
 
 /// The text inside `e` and its descendants (a VML text box holds `<div>` and `<font>`), up to a
@@ -441,6 +548,8 @@ fn build(p: Props, kind: ControlKind, anchor: Anchor, name: Option<&str>, id: u3
         c.selected = clamp(p.sel, 0);
         c.drop_lines = clamp(p.drop_lines, DROP_LINES_DEFAULT).max(1);
         c.drop_style = p.drop_style.unwrap_or_default();
+        c.drop_display = p.display;
+        c.drop_vml_display = p.vml_display;
     }
     c.text = p.text.chars().take(1_024).collect();
     if let Some(n) = name {
@@ -503,6 +612,9 @@ pub struct ReadControls {
     /// The VML shape numbers of the controls read into the model: GridCraft writes those, so they
     /// are left out of the kept content.
     pub modelled: HashSet<u64>,
+    /// Sheet controls, not necessarily modeled. The name confirms proxies without compatExt.
+    pub known: HashMap<u64, Option<String>>,
+    pub drawing: Option<crate::drawing::KeptProxies>,
 }
 
 /// Whether a VML shape's client data is a note's: its `ObjectType` is `Note` in any case and with
@@ -543,9 +655,11 @@ pub fn read(cx: &mut Ctx<'_>, controls: Option<&El>, vml_rid: Option<&str>, rels
     let mut props_by_part: HashMap<&str, Option<Props>> = HashMap::new();
     // Every shape the sheet lists, read here or not.
     let mut listed: HashSet<u64> = HashSet::new();
+    let mut known = HashMap::new();
     for ctl in controls.map(controls_in).unwrap_or_default() {
         let Some(n) = ctl.attr("shapeId").and_then(shape_number) else { continue };
         listed.insert(n);
+        known.insert(n, ctl.attr("name").map(str::to_string));
         if sheet.controls.len() >= MAX_CONTROLS {
             continue;
         }
@@ -567,9 +681,18 @@ pub fn read(cx: &mut Ctx<'_>, controls: Option<&El>, vml_rid: Option<&str>, rels
                     f.text = v.text;
                     f.print = f.print.or(v.print);
                     f.locked = f.locked.or(v.locked);
-                    f.macro_ = v.macro_;
+                    f.macro_ = f.macro_.or(v.macro_);
                     f.range = f.range.or(v.range);
-                    f.items |= v.items;
+                    if f.kind.or(v.kind) == Some(ControlKind::Drop) {
+                        f.kind = f.kind.or(v.kind);
+                        f.link = f.link.or(v.link);
+                        f.sel = f.sel.or(v.sel);
+                        f.drop_lines = f.drop_lines.or(v.drop_lines);
+                        f.drop_style = f.drop_style.or(v.drop_style);
+                        f.vml_display = v.vml_display;
+                        f.opaque_drop |= f.kind != v.kind;
+                    }
+                    f.opaque_drop |= v.opaque_drop;
                 }
                 f
             }
@@ -582,6 +705,12 @@ pub fn read(cx: &mut Ctx<'_>, controls: Option<&El>, vml_rid: Option<&str>, rels
             }
             p.print = pr.attr_bool("print").or(p.print);
             p.locked = pr.attr_bool("locked").or(p.locked);
+            p.opaque_drop |= pr.children.iter().any(|c| c.name != "anchor")
+                || pr.attrs.iter().any(|(k, _)| match k.as_str() {
+                    "macro" | "print" | "locked" => false,
+                    "defaultSize" | "autoFill" | "autoLine" | "autoPict" | "disabled" => pr.attr_bool(k) != Some(false),
+                    _ => true,
+                });
         }
         // Other kinds (a check box, a list box), and drop-downs the model can't hold, stay with
         // pass-through.
@@ -600,17 +729,21 @@ pub fn read(cx: &mut Ctx<'_>, controls: Option<&El>, vml_rid: Option<&str>, rels
         if n.is_some_and(|n| listed.contains(&n)) {
             continue;
         }
+        if let Some(n) = n.filter(|_| s.child("ClientData").and_then(|d| d.attr("ObjectType")).and_then(kind_of) == Some(ControlKind::Drop)) {
+            known.insert(n, None);
+        }
         let _ = n.filter(|_| sheet.controls.len() < MAX_CONTROLS).and_then(|n| {
             let p = props_from_vml(s)?;
             let kind = p.kind.filter(|&k| !beyond_model(&p, k))?;
             let anchor = vml_anchor(s, sheet)?;
             let id = cx.next_object_id();
             sheet.controls.push(build(p, kind, anchor, None, id));
+            known.entry(n).or_insert(None);
             read.insert(n);
             Some(())
         });
     }
-    ReadControls { modelled: read }
+    ReadControls { modelled: read, known, drawing: None }
 }
 
 fn anchor_from_markers(a: &El, sheet: &Sheet) -> Option<Anchor> {

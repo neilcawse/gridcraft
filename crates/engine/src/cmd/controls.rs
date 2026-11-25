@@ -507,8 +507,16 @@ fn format(s: &mut Session, p: &Json) -> Result<Json> {
         c.link = link;
     }
     if c.kind == ControlKind::Drop {
-        if let Some(r) = list_range_param(CMD, &s.doc()?.wb, sheet, p)? {
+        if let Some(r) = list_range_param(CMD, &s.doc()?.wb, sheet, p)?
+            && r != c.list_range
+        {
             c.list_range = r;
+            let last = drop_len(&s.doc()?.wb, sheet, &c).saturating_sub(1);
+            for display in [&mut c.drop_display, &mut c.drop_vml_display] {
+                if let Some(offset) = &mut display.scroll_offset {
+                    *offset = (*offset).min(last);
+                }
+            }
         }
         if let Some(n) = drop_lines_param(CMD, p)? {
             c.drop_lines = n;

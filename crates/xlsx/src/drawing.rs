@@ -279,10 +279,15 @@ fn drawing_objects(children: &[El]) -> Vec<&El> {
         .collect()
 }
 
-/// Reads a sheet's drawing part. `control_shapes` are the VML shape numbers of the form controls
-/// read into the model: their DrawingML stand-ins (see [`control_proxy`]) are skipped, as GridCraft
-/// writes those controls itself. The stand-ins of controls left to pass-through are read as shapes.
-pub fn read_drawing(cx: &mut Ctx<'_>, part: &str, control_shapes: &HashSet<u64>, sheet: &mut Sheet) -> Result<(), IoError> {
+/// The original XML of a drawing's opaque control stand-ins, not editable GridCraft shapes.
+#[derive(Debug)]
+pub struct KeptProxies {
+    pub part: String,
+    pub anchors: Vec<String>,
+}
+
+/// Reads the drawing, separating modeled objects from their legacy control stand-ins.
+pub fn read_drawing(cx: &mut Ctx<'_>, part: &str, controls: &mut crate::controls::ReadControls, sheet: &mut Sheet) -> Result<(), IoError> {
     let Some(bytes) = cx.pkg.read(part)? else {
         cx.warn(format!("missing part {part}"));
         return Ok(());
@@ -301,50 +306,95 @@ pub fn read_drawing(cx: &mut Ctx<'_>, part: &str, control_shapes: &HashSet<u64>,
             return Ok(());
         }
     };
-    let dr = CraftDrawing::read(&root);
+    let mut retained = HashSet::new();
     let rels = cx.pkg.rels(part)?;
-    let mut anchors: Vec<&CraftAnchor> = Vec::new();
+    let mut anchors: Vec<CraftAnchor> = Vec::new();
     let mut alt_anchors: Vec<CraftAnchor> = Vec::new();
-    for item in &dr.items {
+    for (i, item) in CraftDrawing::read(&root).items.into_iter().enumerate() {
         match item {
-            CraftItem::Anchor(a) => anchors.push(a),
+            CraftItem::Anchor(a) => match proxy_number(&a, controls) {
+                Some(n) if !controls.modelled.contains(&n) => {
+                    retained.insert(i);
+                }
+                Some(_) => {}
+                None => anchors.push(a),
+            },
             CraftItem::Other(e) if e.name == "mc:AlternateContent" => {
-                alt_anchors.extend(CraftDrawing::alternate_anchors(e));
+                let mut choices = CraftDrawing::alternate_anchors(&e);
+                let mut opaque = 0;
+                let count = choices.len();
+                choices.retain(|a| match proxy_number(a, controls) {
+                    Some(n) => {
+                        opaque += usize::from(!controls.modelled.contains(&n));
+                        false
+                    }
+                    None => true,
+                });
+                if opaque != 0 {
+                    if opaque == count {
+                        retained.insert(i);
+                    } else {
+                        cx.warn(format!("a mixed alternate drawing in {part} contains form control stand-ins that could not be kept"));
+                    }
+                }
+                alt_anchors.extend(choices);
             }
             CraftItem::Other(_) => {}
         }
     }
-    for (n, craft_a) in anchors.into_iter().chain(alt_anchors.iter()).enumerate() {
+    if !retained.is_empty() {
+        let fragments = crate::passthrough::drawing_fragments(&bytes, &retained);
+        if fragments.len() != retained.len() {
+            cx.warn(format!("some form control stand-ins in {part} could not be kept"));
+        }
+        controls.drawing = Some(KeptProxies { part: part.into(), anchors: fragments });
+    }
+    for (n, craft_a) in anchors.iter().chain(alt_anchors.iter()).enumerate() {
         let anchor = placement_to_anchor(&craft_a.placement, sheet);
         let n = n + 1;
         let px = 1.0 / EMU_PER_PX;
         let place = Place { anchor, rect: sheet.anchor_rect(&anchor), scale: (px, px), flip: (false, false) };
         let obj_el = from_craft_el(&craft_a.object);
         for obj in drawing_objects(std::slice::from_ref(&obj_el)) {
-            read_object(cx, (part, n, control_shapes), &rels, sheet, obj, place, 0)?;
+            read_object(cx, (part, n), &rels, sheet, obj, place, 0)?;
         }
     }
     Ok(())
 }
 
-/// Whether shape `obj` is the DrawingML stand-in Excel writes for a form control in
-/// `control_shapes`: its `a14:compatExt spid` names the control's VML shape (`_x0000_s1026`), or,
-/// without one, the shape is hidden and its `cNvPr id` is the control's shape number.
-fn control_proxy(obj: &El, control_shapes: &HashSet<u64>) -> bool {
-    if control_shapes.is_empty() {
-        return false;
+/// `compatExt` is authoritative. Without it, require the hidden shape's id and name both to
+/// match the worksheet entry: ordinary DrawingML ids and VML ids can otherwise overlap.
+fn proxy_number(a: &CraftAnchor, controls: &crate::controls::ReadControls) -> Option<u64> {
+    if controls.known.is_empty() || a.object.name != "xdr:sp" {
+        return None;
     }
-    let Some(pr) = obj.path(&["nvSpPr", "cNvPr"]) else { return false };
-    let spid = pr
-        .child("extLst")
-        .into_iter()
-        .flat_map(|l| l.kids("ext"))
-        .find_map(|e| e.child("compatExt").and_then(|c| c.attr("spid")))
-        .and_then(crate::controls::shape_number);
-    match spid {
-        Some(n) => control_shapes.contains(&n),
-        None => pr.flag("hidden", false) && pr.attr("id").and_then(crate::controls::shape_number).is_some_and(|n| control_shapes.contains(&n)),
+    let pr = a.props()?;
+    let compat = pr.child("a:extLst").into_iter().flat_map(|l| l.elements()).find_map(|e| e.child("a14:compatExt"));
+    if let Some(compat) = compat {
+        return compat.attr("spid").and_then(crate::controls::shape_number).filter(|n| controls.known.contains_key(n));
     }
+    let id = pr.attr("id").and_then(crate::controls::shape_number)?;
+    let name = controls.known.get(&id)?.as_deref()?;
+    (matches!(pr.attr("hidden"), Some("1" | "true")) && a.name() == Some(name)).then_some(id)
+}
+
+pub fn preserved_ids(xml: &str) -> impl Iterator<Item = usize> + '_ {
+    let mut reader = quick_xml::Reader::from_str(xml);
+    std::iter::from_fn(move || {
+        loop {
+            match reader.read_event().ok()? {
+                quick_xml::events::Event::Start(e) | quick_xml::events::Event::Empty(e) if e.local_name().as_ref() == b"cNvPr" => {
+                    if let Some(id) =
+                        e.attributes().flatten().find(|a| a.key.as_ref() == b"id").and_then(|a| std::str::from_utf8(&a.value).ok()?.parse().ok())
+                    {
+                        return Some(id);
+                    }
+                }
+                quick_xml::events::Event::Eof => return None,
+                _ => {}
+            }
+        }
+    })
 }
 
 /// Imports one drawing object at `place`, returning what it became. A group's children are laid
@@ -353,7 +403,7 @@ fn control_proxy(obj: &El, control_shapes: &HashSet<u64>) -> bool {
 /// supported are dropped with their own warning. A form control's proxy shape is skipped.
 fn read_object(
     cx: &mut Ctx<'_>,
-    (part, n, control_shapes): (&str, usize, &HashSet<u64>),
+    (part, n): (&str, usize),
     rels: &[Rel],
     sheet: &mut Sheet,
     obj: &El,
@@ -439,9 +489,6 @@ fn read_object(
             Ok(None)
         }
         "sp" | "cxnSp" => {
-            if control_proxy(obj, control_shapes) {
-                return Ok(None);
-            }
             let Some(s) = read_shape(obj, anchor, depth > 0) else { return Ok(None) };
             let id = cx.next_object_id();
             sheet.shapes.push(Shape { id, ..s });
@@ -473,7 +520,7 @@ fn read_object(
                 let rot = if child.name == "grpSp" { 0 } else { xfrm_rot(cxf) };
                 let rect = map.child(cxf, quarter_turn(rot));
                 let place = Place { anchor: sheet.rect_anchor(rect, anchor.mode), rect, scale: map.scale, flip: map.flip };
-                let Some(m) = read_object(cx, (part, n, control_shapes), rels, sheet, child, place, depth + 1)? else {
+                let Some(m) = read_object(cx, (part, n), rels, sheet, child, place, depth + 1)? else {
                     file_complete = false;
                     continue;
                 };
@@ -1219,7 +1266,7 @@ impl DrawingOut<'_> {
 /// goes out with its outermost group: one anchor holding the `grpSp`, written where the group's
 /// first object comes in `objs`. `stand_ins` are the sheet's form controls with their VML shape
 /// numbers: each gets the hidden shape Excel writes for applications that don't know controls.
-pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>], stand_ins: &[(&FormControl, u64)]) -> String {
+pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>], stand_ins: &[(&FormControl, u64)], proxies: &[String]) -> String {
     let mut index = HashMap::new();
     for (i, o) in objs.iter().enumerate() {
         if let Some(r) = o.drawing_ref() {
@@ -1232,6 +1279,7 @@ pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>], stand_ins: 
             member_parent.entry(*member).or_insert(g.id);
         }
     }
+    let opaque_ids: HashSet<_> = proxies.iter().flat_map(|a| preserved_ids(a)).collect();
     let mut out = DrawingOut {
         s: String::from(
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<xdr:wsDr xmlns:xdr=\"http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\">",
@@ -1244,7 +1292,7 @@ pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>], stand_ins: 
         done: vec![false; objs.len()],
         groups_done: HashSet::new(),
         next_id: 2,
-        reserved: stand_ins.iter().filter_map(|&(_, n)| usize::try_from(n).ok()).collect(),
+        reserved: opaque_ids.iter().copied().chain(stand_ins.iter().filter_map(|&(_, n)| usize::try_from(n).ok())).collect(),
     };
     for (i, o) in objs.iter().enumerate() {
         if let Some(dref) = o.drawing_ref()
@@ -1278,21 +1326,24 @@ pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>], stand_ins: 
         out.s.push_str(close);
     }
     for &(c, n) in stand_ins {
-        write_stand_in(&mut out.s, sheet, c, n);
+        let id = if opaque_ids.contains(&(n as usize)) { out.take_id() as u64 } else { n };
+        write_stand_in(&mut out.s, sheet, c, id, n);
+    }
+    for proxy in proxies {
+        out.s.push_str(proxy);
     }
     out.s.push_str("</xdr:wsDr>");
     out.s
 }
 
 /// Control `c`'s DrawingML stand-in, as Excel writes it: a hidden, unfilled rectangle at the
-/// control's anchor whose `cNvPr id` is the control's VML shape number `n` and whose
-/// `a14:compatExt spid` names that shape. It needs the 2010 drawing extensions, so it sits in
-/// `mc:AlternateContent` with nothing for other readers.
-fn write_stand_in(s: &mut String, sheet: &Sheet, c: &FormControl, n: u64) {
+/// control's anchor. The VML shape number `n` is normally also the DrawingML id, unless a kept
+/// anchor already owns that id. `compatExt` always links the two, regardless of the drawing id.
+fn write_stand_in(s: &mut String, sheet: &Sheet, c: &FormControl, id: u64, n: u64) {
     let (open, close) = anchor_open(sheet, &c.anchor);
     let _ = write!(
         s,
-        "<mc:AlternateContent xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\"><mc:Choice xmlns:a14=\"http://schemas.microsoft.com/office/drawing/2010/main\" Requires=\"a14\">{open}<xdr:sp macro=\"\" textlink=\"\"><xdr:nvSpPr><xdr:cNvPr id=\"{n}\" name=\"{}\" hidden=\"1\"><a:extLst><a:ext uri=\"{{63B3BB69-23CF-44E3-9099-C40C66FF867C}}\"><a14:compatExt spid=\"_x0000_s{n}\"/></a:ext></a:extLst></xdr:cNvPr><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr bwMode=\"auto\"><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></xdr:spPr></xdr:sp><xdr:clientData fPrintsWithSheet=\"{}\"/>{close}</mc:Choice><mc:Fallback/></mc:AlternateContent>",
+        "<mc:AlternateContent xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\"><mc:Choice xmlns:a14=\"http://schemas.microsoft.com/office/drawing/2010/main\" Requires=\"a14\">{open}<xdr:sp macro=\"\" textlink=\"\"><xdr:nvSpPr><xdr:cNvPr id=\"{id}\" name=\"{}\" hidden=\"1\"><a:extLst><a:ext uri=\"{{63B3BB69-23CF-44E3-9099-C40C66FF867C}}\"><a14:compatExt spid=\"_x0000_s{n}\"/></a:ext></a:extLst></xdr:cNvPr><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr bwMode=\"auto\"><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></xdr:spPr></xdr:sp><xdr:clientData fPrintsWithSheet=\"{}\"/>{close}</mc:Choice><mc:Fallback/></mc:AlternateContent>",
         esc_attr(&c.display_name()),
         u8::from(c.print),
     );

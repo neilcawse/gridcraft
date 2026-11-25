@@ -354,7 +354,7 @@ pub fn interact(app: &mut SheetApp, ctx: &egui::Context, resp: &egui::Response, 
         if pos.is_some_and(|p| r.contains(p)) {
             match g.part {
                 Part::Button => app.press_button(c.id),
-                Part::Drop => app.grid.drop_open = if app.grid.drop_open == Some(c.id) { None } else { Some(c.id) },
+                Part::Drop => toggle_drop(app, c.id),
                 _ => {}
             }
         }
@@ -369,7 +369,27 @@ pub fn interact(app: &mut SheetApp, ctx: &egui::Context, resp: &egui::Response, 
         }
         return false;
     }
-    let Some(p) = pointer.press_origin().map(|p| geo.mirror_pos(p)).or(pos) else { return false };
+    let batched = !pointer.primary_down();
+    // egui clears press_origin on release, even when both events arrived in this frame.
+    let click = batched
+        .then(|| {
+            ctx.input(|i| {
+                let mut press = None;
+                let mut click = None;
+                for event in &i.events {
+                    if let egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, .. } = event {
+                        if *pressed {
+                            press = Some(*pos);
+                        } else if let Some(start) = press.take() {
+                            click = Some((geo.mirror_pos(start), geo.mirror_pos(*pos)));
+                        }
+                    }
+                }
+                click
+            })
+        })
+        .flatten();
+    let Some(p) = click.map(|(start, _)| start).or_else(|| pointer.press_origin().map(|p| geo.mirror_pos(p))).or(pos) else { return false };
     // The selected object's handles reach past its frame and win over a control beneath them.
     if let Some(r) = app.selected_object.and_then(|o| crate::chartview::object_rect(geo, sh, o))
         && crate::objects::handle_at(r, p).is_some()
@@ -394,12 +414,23 @@ pub fn interact(app: &mut SheetApp, ctx: &egui::Context, resp: &egui::Response, 
     } else {
         0.0
     };
+    if part == Part::Drop && batched {
+        if click.is_some_and(|(_, end)| r.contains(end)) {
+            toggle_drop(app, c.id);
+        }
+        resp.request_focus();
+        return true;
+    }
     app.grid.control = Some(Gesture { id: c.id, part, grab, undo_start, next_repeat: time + REPEAT_DELAY });
     if !matches!(part, Part::Button | Part::Thumb | Part::Drop) {
         step_part(app, &c, part);
     }
     resp.request_focus();
     true
+}
+
+fn toggle_drop(app: &mut SheetApp, id: u32) {
+    app.grid.drop_open = if app.grid.drop_open == Some(id) { None } else { Some(id) };
 }
 
 /// One click on an arrow or the track.
@@ -490,7 +521,7 @@ const DROP_ROW_H: f32 = 18.0;
 /// only the rows in view are read from the source range. A click chooses an item through
 /// `control.setValue` (one undo step, which writes the linked cell) and closes the list, as do
 /// Escape and a click elsewhere. `was_open`: the list was open last frame too.
-pub fn drop_picker(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_open: bool) {
+pub fn drop_picker(app: &mut SheetApp, ui: &mut egui::Ui, grid: &egui::Response, geo: &Geo, was_open: bool) {
     use gridcraft_engine::cmd::controls::{drop_items, drop_len};
     let Some(id) = app.grid.drop_open else { return };
     let Some(d) = app.session.active() else { return };
@@ -509,7 +540,7 @@ pub fn drop_picker(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_open: b
     let above = r.bottom() + height + 8.0 > screen.bottom() && r.top() - height - 8.0 >= screen.top();
     let (at, pivot) = if above { (r.left_top(), egui::Align2::LEFT_BOTTOM) } else { (r.left_bottom(), egui::Align2::LEFT_TOP) };
     let width = r.width().max(60.0);
-    let wb = d.wb.clone();
+    let wb = &d.wb;
     let mut chosen = None;
     let response =
         egui::Area::new(egui::Id::unique(("drop_list", id))).fixed_pos(at).pivot(pivot).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
@@ -523,7 +554,7 @@ pub fn drop_picker(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_open: b
                 area.show_rows(ui, DROP_ROW_H, len, |ui, range| {
                     let start = u32::try_from(range.start).unwrap_or(u32::MAX);
                     let count = u32::try_from(range.len()).unwrap_or(0);
-                    for (i, text) in (start..).zip(drop_items(&wb, host, &c, start, count)) {
+                    for (i, text) in (start..).zip(drop_items(wb, host, &c, start, count)) {
                         let item = i.saturating_add(1);
                         if ui.add(egui::Button::selectable(item == c.selected, text).min_size(vec2(width, DROP_ROW_H))).clicked() {
                             chosen = Some(item);
@@ -535,6 +566,8 @@ pub fn drop_picker(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_open: b
     if let Some(item) = chosen {
         app.grid.drop_open = None;
         app.control_set(id, item as f64);
+        app.grid.focused_control = Some(id);
+        grid.request_focus();
     } else if crate::grid::popup_dismissed(&response.response, was_open) {
         app.grid.drop_open = None;
     }

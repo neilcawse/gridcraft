@@ -203,7 +203,7 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> (
     push_fragment_kids(&mut part.root, &kept.custom_properties());
     build_sheet_printing(sheet, &mut part.features.print, &kept);
     let legacy = legacy_ids(sheet, &kept, out);
-    part.features.drawing = write_sheet_drawing_rel(wb, si, sheet, legacy.as_ref(), &mut rels, out);
+    part.features.drawing = write_sheet_drawing_rel(wb, si, &kept, legacy.as_ref(), &mut rels, out);
     let (legacy_rid, notes_frag) = write_sheet_notes_frag(sheet, si, &kept, legacy, &mut rels, out);
     part.features.legacy_drawing = legacy_rid;
 
@@ -478,18 +478,33 @@ fn write_sheet_notes_frag(
 
 /// The sheet's drawing part: its pictures, charts, shapes and slicers, and a hidden stand-in for
 /// each form control (`legacy` numbers their VML shapes), as Excel writes them.
-fn write_sheet_drawing_rel(wb: &Workbook, si: usize, sheet: &Sheet, legacy: Option<&LegacyIds>, rels: &mut Rels, out: &mut Out) -> Option<String> {
+fn write_sheet_drawing_rel(
+    wb: &Workbook,
+    si: usize,
+    kept: &crate::passthrough::SheetKept<'_>,
+    legacy: Option<&LegacyIds>,
+    rels: &mut Rels,
+    out: &mut Out,
+) -> Option<String> {
+    let sheet = wb.sheet(si)?;
     let slicers = out.slicers.on_sheet(si);
     let stand_ins: Vec<(&FormControl, u64)> = match legacy {
         Some(ids) => sheet.controls.iter().enumerate().map(|(i, c)| (c, ids.control(sheet, i))).collect(),
         None => Vec::new(),
     };
-    if sheet.images.is_empty() && sheet.charts.is_empty() && sheet.shapes.is_empty() && slicers.is_empty() && stand_ins.is_empty() {
+    let mut drels = Rels::default();
+    let proxies = kept.control_proxies(&mut drels);
+    if sheet.images.is_empty()
+        && sheet.charts.is_empty()
+        && sheet.shapes.is_empty()
+        && slicers.is_empty()
+        && stand_ins.is_empty()
+        && proxies.is_empty()
+    {
         return None;
     }
     out.drawings += 1;
     let dn = out.drawings;
-    let mut drels = Rels::default();
     let mut objs: Vec<Obj<'_>> = vec![];
     for img in &sheet.images {
         if img.data.is_empty() {
@@ -532,7 +547,7 @@ fn write_sheet_drawing_rel(wb: &Workbook, si: usize, sheet: &Sheet, legacy: Opti
     out.part(
         &format!("xl/drawings/drawing{dn}.xml"),
         Some(CT_DRAWING),
-        crate::drawing::write_drawing(sheet, &wb.theme, &objs, &stand_ins).into_bytes(),
+        crate::drawing::write_drawing(sheet, &wb.theme, &objs, &stand_ins, &proxies).into_bytes(),
     );
     if !drels.is_empty() {
         out.part(&format!("xl/drawings/_rels/drawing{dn}.xml.rels"), None, drels.xml().into_bytes());

@@ -70,9 +70,9 @@ use std::sync::Arc;
 
 use gridcraft_core::{CellRef, MAX_COLS, MAX_ROWS};
 use gridcraft_model::{
-    Cell, Preserved, PreservedCellMeta, PreservedIndex, PreservedIndexed, PreservedMetadata, PreservedName, PreservedNoteFill, PreservedNoteFills,
-    PreservedPart, PreservedRel, PreservedSheet, PreservedSheetKind, PreservedTable, PreservedTableColumn, PreservedTheme, PreservedXml, Sheet,
-    Table, Visibility, Workbook,
+    Cell, Preserved, PreservedCellMeta, PreservedControlProxies, PreservedIndex, PreservedIndexed, PreservedMetadata, PreservedName,
+    PreservedNoteFill, PreservedNoteFills, PreservedPart, PreservedRel, PreservedSheet, PreservedSheetKind, PreservedTable, PreservedTableColumn,
+    PreservedTheme, PreservedXml, Sheet, Table, Visibility, Workbook,
 };
 use quick_xml::events::attributes::Attribute;
 use quick_xml::events::{BytesStart, Event};
@@ -92,7 +92,7 @@ pub(crate) mod strict;
 mod write;
 
 pub use names::rewrite_kept_names;
-pub use read::{KeptReader, seal_cell_meta};
+pub use read::{KeptReader, drawing_fragments, seal_cell_meta};
 pub use rebase::{SheetKept, TableBinding, rebase_links};
 #[cfg(test)]
 pub(crate) use write::sheet_names_in;

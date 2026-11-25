@@ -87,6 +87,11 @@ fn choosing_from_the_open_list_writes_the_linked_cell_as_one_undo_step() {
     assert_eq!(open(&h), None, "choosing closes the list");
     assert_eq!((control(&h, id).selected, cell(&h, "K1"), cell(&h, "L1")), (3, Value::Number(3.0), Value::Number(30.0)));
     assert_eq!(undo_len(&h), before + 1, "one undo step");
+    assert_eq!(h.state().grid.focused_control, Some(id), "picking an item returns focus to the drop-down");
+    key(&mut h, Key::ArrowUp);
+    assert_eq!(control(&h, id).selected, 2, "keyboard focus works immediately after a pointer pick");
+    h.state_mut().run("edit.undo", json!({})).unwrap();
+    h.run_steps(2);
     h.state_mut().run("edit.undo", json!({})).unwrap();
     h.run_steps(2);
     assert_eq!((control(&h, id).selected, cell(&h, "K1")), (0, Value::Empty));
@@ -125,4 +130,36 @@ fn the_keyboard_chooses_items_and_escape_closes_the_list_first() {
     key(&mut h, Key::Escape);
     assert_eq!((open(&h), h.state().grid.focused_control), (None, None));
     assert_eq!(h.state().session.doc().unwrap().selection.active.a1(), "A20", "the cell cursor didn't move meanwhile");
+}
+
+#[test]
+fn a_click_batched_in_one_frame_opens_the_list_immediately() {
+    let (mut h, id) = fixture();
+    let p = rect(&h, id).center();
+    h.run_steps(30);
+    h.input_mut().events.push(Event::PointerMoved(p));
+    for pressed in [true, false] {
+        h.input_mut().events.push(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+    }
+    h.step();
+    assert_eq!(open(&h), Some(id));
+    h.input_mut().events.push(Event::PointerMoved(Pos2::new(p.x + 300.0, p.y)));
+    h.step();
+    assert_eq!(open(&h), Some(id), "the completed click does not start a second gesture");
+}
+
+#[test]
+fn a_batched_release_over_a_drop_down_does_not_open_it_after_an_outside_press() {
+    let (mut h, id) = fixture();
+    let r = rect(&h, id);
+    let outside = Pos2::new(r.right() + 1.0, r.center().y);
+    let inside = Pos2::new(r.right() - 1.0, r.center().y);
+    h.run_steps(30);
+    h.input_mut().events.push(Event::PointerMoved(inside));
+    for (pos, pressed) in [(outside, true), (inside, false)] {
+        h.input_mut().events.push(Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+    }
+    h.step();
+    assert_eq!(open(&h), None);
+    assert_eq!(h.state().grid.focused_control, None);
 }

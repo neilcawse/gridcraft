@@ -264,14 +264,13 @@ pub fn read_sheet(cx: &mut Ctx<'_>, part: &str, name: &str) -> Result<(Sheet, cr
 
     apply_craft_sheet_part(cx, &sheet_part, &rels, name, too_many_merges, &mut sheet)?;
     let root = from_craft_el(&sheet_part.root);
-    // The controls are read before the drawing, so the DrawingML stand-ins of the ones read
-    // (`ReadControls::modelled`) are not also read as shapes.
-    let read_controls = read_form_controls(cx, &root, &rels, &mut sheet);
+    // Read the controls first to separate their stand-ins from editable DrawingML shapes.
+    let mut read_controls = read_form_controls(cx, &root, &rels, &mut sheet);
     if let Some(id) = &sheet_part.features.drawing
         && let Some(rel) = rels.iter().find(|r| r.id == *id)
     {
         let target = rel.target.clone();
-        crate::drawing::read_drawing(cx, &target, &read_controls.modelled, &mut sheet)?;
+        crate::drawing::read_drawing(cx, &target, &mut read_controls, &mut sheet)?;
     }
     read_sheet_notes_and_tables(cx, &sheet_part, &rels, &mut sheet)?;
     Ok((sheet, read_controls))

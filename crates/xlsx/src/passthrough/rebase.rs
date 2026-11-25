@@ -18,6 +18,13 @@ impl<'a> SheetKept<'a> {
         SheetKept { p: Some(p), names, ids }
     }
 
+    /// Drawing relationships have their own id space, separate from the worksheet's.
+    pub fn control_proxies(&self, rels: &mut Rels) -> Vec<String> {
+        let Some(proxies) = self.p.and_then(|p| p.control_proxies.as_ref()) else { return Vec::new() };
+        let ids = attach(rels, &proxies.rels, &self.names);
+        proxies.anchors.iter().filter_map(|a| remap(a, &ids)).collect()
+    }
+
     /// The table `id` (in the model) with the parts that hang off its table part, when
     /// its columns `cols` are still those of the file: a column that showed a query field must
     /// still be there, or the query table would point at nothing and the table is written without

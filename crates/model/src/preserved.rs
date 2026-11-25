@@ -229,6 +229,13 @@ pub struct PreservedNoteFills {
     pub parts: Vec<PreservedPart>,
 }
 
+/// Original DrawingML anchors of opaque controls and the drawing relationships they use.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PreservedControlProxies {
+    pub anchors: Vec<String>,
+    pub rels: Vec<PreservedRel>,
+}
+
 /// Unmodelled content kept for one owner (the workbook, which also holds package-root content,
 /// or one sheet).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -244,6 +251,7 @@ pub struct Preserved {
     /// The sheet's legacy VML drawing when kept elements need its shapes (form controls, OLE
     /// objects). Its own relationships point into `parts`.
     pub vml: Option<PreservedPart>,
+    pub control_proxies: Option<PreservedControlProxies>,
     /// Kept sheets (chart, dialog, macro), in file order (workbook owner only).
     pub sheets: Vec<PreservedSheet>,
     /// Tables with kept relationships of their own (sheet owner only).
@@ -265,6 +273,7 @@ impl Preserved {
             && self.parts.is_empty()
             && self.elements.is_empty()
             && self.vml.is_none()
+            && self.control_proxies.is_none()
             && self.sheets.is_empty()
             && self.tables.is_empty()
             && self.theme.is_none()
@@ -280,7 +289,8 @@ impl Preserved {
         let fills = self.note_fills.iter().flat_map(|n| &n.parts);
         let held = self.parts.iter().chain(self.vml.iter()).chain(tables).chain(theme).chain(metadata).chain(fills);
         let theme_bytes = self.theme.as_ref().map_or(0, |t| t.data.len());
-        held.fold(theme_bytes, |n, p| n.saturating_add(p.data.len()))
+        let anchors = self.control_proxies.iter().flat_map(|d| &d.anchors);
+        anchors.fold(held.fold(theme_bytes, |n, p| n.saturating_add(p.data.len())), |n, a| n.saturating_add(a.len()))
     }
     /// Whether an Excel 4.0 macro sheet is kept: such a workbook has to be written as a
     /// macro-enabled one.

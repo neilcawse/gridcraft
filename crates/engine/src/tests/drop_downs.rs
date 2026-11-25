@@ -118,6 +118,43 @@ fn format_changes_the_list_and_rows() {
 }
 
 #[test]
+fn changing_the_input_range_clamps_only_present_scroll_offsets() {
+    let mut s = s();
+    let mut wb = Workbook::new();
+    let display = gridcraft_model::DropDisplay { no_three_d: Some(true), no_three_d2: Some(false), scroll_width: Some(35), scroll_offset: Some(4) };
+    let vml = gridcraft_model::DropDisplay { no_three_d: Some(false), no_three_d2: Some(true), scroll_width: Some(45), scroll_offset: Some(3) };
+    let sh = wb.sheet_mut(0).unwrap();
+    for (id, drop_display, drop_vml_display) in [(1, display, vml), (2, Default::default(), Default::default())] {
+        sh.controls.push(FormControl {
+            id,
+            kind: ControlKind::Drop,
+            list_range: Some("$A$1:$A$5".into()),
+            drop_display,
+            drop_vml_display,
+            ..Default::default()
+        });
+    }
+    s.add_document(crate::DocState::new(wb, None, "Drop settings".into(), Trust::FromFile));
+    reopen(&mut s);
+    let settings = |s: &Session, id| {
+        let c = control(s, id);
+        (c.drop_display, c.drop_vml_display)
+    };
+    s.execute("control.format", json!({"id": 1, "name": "Renamed", "listRange": "A1:A5"})).unwrap();
+    assert_eq!(settings(&s, 1), (display, vml));
+    s.execute("control.format", json!({"id": 1, "listRange": "A1:A4"})).unwrap();
+    assert_eq!(settings(&s, 1), (gridcraft_model::DropDisplay { scroll_offset: Some(3), ..display }, vml));
+    s.execute("control.format", json!({"id": 1, "listRange": ""})).unwrap();
+    s.execute("control.format", json!({"id": 2, "listRange": "A1:A2"})).unwrap();
+    reopen(&mut s);
+    assert_eq!(
+        settings(&s, 1),
+        (gridcraft_model::DropDisplay { scroll_offset: Some(0), ..display }, gridcraft_model::DropDisplay { scroll_offset: Some(0), ..vml },)
+    );
+    assert_eq!(settings(&s, 2), (Default::default(), Default::default()));
+}
+
+#[test]
 fn references_follow_structural_edits_and_renames() {
     let mut s = s();
     s.execute("home.insertSheet", json!({"name": "Lists"})).unwrap();
