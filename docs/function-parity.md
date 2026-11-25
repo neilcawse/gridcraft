@@ -186,6 +186,9 @@ references, a sheet or name rename) and when different text is entered.
 Other names starting with `_xl` (`_xlBudget`) and table column labels containing an escaped
 `'#This Row` are not file-only tokens and keep their imported spelling; the compatibility
 prefixes and items above are matched in any letter case.
+Only `_xlfn._TRO_*` calls are read as trim references; bare `_TRO_*` calls resolve as ordinary
+names and keep their imported spelling in FORMULATEXT. The writer still uses `_xlfn.TRIMRANGE`
+for trim references.
 
 ## Revision history
 

@@ -100,6 +100,34 @@ fn imported_formulatext_distinguishes_file_tokens_from_user_spellings() -> Resul
 }
 
 #[test]
+fn trim_file_tokens_and_defined_name_calls_stay_distinct_on_write() -> Result<(), Box<dyn std::error::Error>> {
+    let body = r#"<sheetData>
+        <row r="1"><c r="G1" cm="1"><f>_xlfn._TRO_ALL(A1:E10)</f><v>0</v></c></row>
+        <row r="2"><c r="G2" cm="1"><f>_XlFn._tro_all(A1:E10)</f><v>0</v></c></row>
+        <row r="3"><c r="G3" cm="1"><f>_Tro_All( 41 )</f><v>42</v></c></row>
+        <row r="4"><c r="G4" cm="1"><f>_xlfn._xlws._Tro_All( 41 )</f><v>42</v></c></row>
+    </sheetData>"#;
+    let names = r#"<definedNames><definedName name="_TRO_ALL">_xlfn.LAMBDA(_xlpm.x,_xlpm.x+1)</definedName></definedNames>"#;
+    let (wb, _) = crate::read_xlsx(&super::minimal(body, &[], "", names))?;
+    fn formula(book: &gridcraft_model::Workbook, row: u32) -> Result<&gridcraft_model::Formula, &'static str> {
+        book.sheet(0).and_then(|s| s.cell(CellRef::new(row, 6))).and_then(|c| c.formula.as_deref()).ok_or("missing imported formula")
+    }
+    let (saved, _) = crate::read_xlsx(&crate::write_xlsx(&wb)?)?;
+    for row in [0, 1] {
+        let trim = formula(&wb, row)?;
+        assert_eq!(trim.text, "A1.:.E10");
+        assert_eq!(trim.display_text, None);
+        assert_eq!(formula(&saved, row)?.text, "TRIMRANGE(A1:E10,3,3)");
+    }
+    for row in [2, 3] {
+        let user_call = formula(&wb, row)?;
+        assert_eq!(user_call.display_text.as_deref().unwrap_or(&user_call.text), "_Tro_All( 41 )");
+        assert_eq!(formula(&saved, row)?.text, "_TRO_ALL(41)");
+    }
+    Ok(())
+}
+
+#[test]
 fn imported_base_column_width_is_distinct_from_geometry() {
     for (attrs, expected) in [("", Some(10)), (r#" defaultColWidth="12""#, None)] {
         let body = format!(r#"<sheetFormatPr baseColWidth="10"{attrs}/><sheetData/>"#);

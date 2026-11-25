@@ -2345,6 +2345,41 @@ fn trim_references() {
 }
 
 #[test]
+fn bare_trim_name_calls_a_workbook_lambda() {
+    let mut t = T::new();
+    t.wb.names.push(gridcraft_model::DefinedName {
+        name: "_TRO_ALL".into(),
+        scope: None,
+        formula: "LAMBDA(x,x+1)".into(),
+        comment: String::new(),
+        hidden: false,
+    });
+    t.calc.rebuild(&t.wb);
+    t.set("A1", "=_TRO_ALL(41)");
+    t.set("A2", "=FORMULATEXT(A1)");
+    assert_eq!((t.get("A1"), t.get("A2")), (Value::number(42.0), Value::text("=_TRO_ALL(41)")));
+}
+
+#[test]
+fn bare_trim_name_calls_a_let_lambda() {
+    let mut t = T::new();
+    t.set("A1", "=LET(_TRO_ALL,LAMBDA(x,x+1),_TRO_ALL(41))");
+    assert_eq!(t.get("A1"), Value::number(42.0));
+}
+
+#[test]
+fn bare_trim_name_is_unknown_and_prefixed_trim_still_evaluates() {
+    let mut t = T::new();
+    t.set("C3", "1");
+    t.set("D5", "2");
+    t.set("J1", "=ROWS(_xlfn._TRO_ALL(A1:E10))");
+    t.set("J2", "=COLUMNS(_XlFn._tro_all(A1:E10))");
+    t.set("J3", "=_TRO_ALL(41)");
+    assert_eq!((t.num("J1"), t.num("J2")), (3.0, 2.0));
+    assert_eq!(t.get("J3"), Value::Error(CellError::Name));
+}
+
+#[test]
 fn lookup_of_an_empty_cell_stays_blank() {
     // #374: B1 (the value for key "k") is empty.
     let mut t = T::new();
