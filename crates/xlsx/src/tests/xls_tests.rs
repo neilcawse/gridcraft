@@ -615,9 +615,9 @@ fn formulas_using_a_skipped_name_keep_their_saved_results() {
 #[test]
 fn trim_reference_calls_keep_their_meaning_without_the_xlfn_prefix() {
     // craft-xls gives a newer function called by name (PtgFuncVar iftab 255 over a PtgName,
-    // [MS-XLS] 2.5.198.63) without its `_xlfn.` prefix. Lbl 1 is the hidden future-function
-    // name `_xlfn._TRO_ALL` (fFutureFunction, no formula), Lbl 2 a workbook name `_TRO_LEADING`,
-    // Lbl 3 `Trimmed` = `_xlfn._TRO_ALL(Sheet1!$A$1:$E$10)`.
+    // [MS-XLS] 2.5.198.63) without its `_xlfn.` prefix. Lbl 1 is a synthetic hidden name
+    // `_xlfn._TRO_ALL` with no formula, Lbl 2 is a workbook name `_TRO_LEADING`, and Lbl 3
+    // is `Trimmed` = `_xlfn._TRO_ALL(Sheet1!$A$1:$E$10)`.
     let lbl = |flags: u16, name: &str, rgce: &[u8]| {
         rec(0x0018, &cat(&[&u16s(&[flags]), &[0, name.len() as u8], &u16s(&[rgce.len() as u16, 0, 0]), &[0; 4], &[0], name.as_bytes(), rgce]))
     };
@@ -630,23 +630,31 @@ fn trim_reference_calls_keep_their_meaning_without_the_xlfn_prefix() {
             &boundsheet(pos),
             &rec(0x01AE, &u16s(&[1, 0x0401])),
             &rec(0x0017, &cat(&[&u16s(&[1]), &u16s(&[0, 0, 0])])),
-            &lbl(0x1001, "_xlfn._TRO_ALL", &[]),
+            &lbl(1, "_xlfn._TRO_ALL", &[]),
             &lbl(0, "_TRO_LEADING", &ptg_int(5)),
             &lbl(0, "Trimmed", &call(1, &area3d)),
             &eof(),
         ])
     };
     let area = cat(&[&[0x25], &u16s(&[0, 9, 0, 4])]);
+    let trim = call(1, &area);
+    let text = [0x17, 1, 1, 0xE9, 0]; // PtgStr: the single UTF-16 character é.
+    let dv = cat(&[&3u32.to_le_bytes(), &[1, 0, 0, 0].repeat(4), &u16s(&[trim.len() as u16, 0]), &trim, &u16s(&[0, 0, 1, 0, 0, 6, 6])]);
     let sheet = cat(&[
         &bof(0x0010),
-        &formula(0, 6, num(3.0), &cat(&[&call(1, &area), &[0x41], &76u16.to_le_bytes()])),
+        &formula(0, 6, num(3.0), &cat(&[&trim, &[0x41], &76u16.to_le_bytes()])),
         &formula(1, 6, num(5.0), &call(2, &ptg_int(41))),
+        &formula(2, 6, special(0x03, 0), &cat(&[&text, &trim, &[0x41], &76u16.to_le_bytes(), &[0x08]])),
+        &rec(0x01B2, &cat(&[&[0; 14], &1u32.to_le_bytes()])),
+        &rec(0x01BE, &dv),
         &eof(),
     ]);
     let pos = globals(0).len() as u32;
     let (wb, _) = read_xls(&compound("Workbook", &cat(&[&globals(pos), &sheet]))).unwrap();
     assert_eq!(ftext(&wb, "G1").as_deref(), Some("ROWS($A$1.:.$E$10)"));
     assert_eq!(ftext(&wb, "G2").as_deref(), Some("_TRO_LEADING(41)"));
+    assert_eq!(ftext(&wb, "G3").as_deref(), Some("\"é\"&ROWS($A$1.:.$E$10)"));
+    assert_eq!(wb.sheets[0].validations[0].f1, "=$A$1.:.$E$10");
     let trimmed = wb.names.iter().find(|n| n.name == "Trimmed").map(|n| n.formula.as_str());
     assert_eq!(trimmed, Some("Sheet1!$A$1.:.$E$10"));
 }
