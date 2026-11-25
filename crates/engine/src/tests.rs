@@ -5476,6 +5476,67 @@ fn source_drawing_placement_drops_when_its_lines_are_resized_or_hidden() {
     }
 }
 
+#[test]
+fn disjoint_height_changes_keep_the_untouched_drawing_placement() {
+    use gridcraft_model::{AnchorMode, DrawingFile, DrawingMarker, DrawingPlacement, DrawingRef};
+    let mut s = s();
+    let r = DrawingRef::Image(add_image(&mut s, "B5", AnchorMode::MoveOnly));
+    let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+    let from = DrawingMarker { col: 1, row: 4, col_off: 0, row_off: 0 };
+    sh.drawing_files.insert(r, DrawingFile { anchor: sh.images[0].anchor, placement: DrawingPlacement::OneCell { from, ext: (381_000, 381_000) } });
+    s.execute("home.rowHeight", json!({"rows": "2:2,12:12", "height": 50})).unwrap();
+    assert!(s.doc().unwrap().wb.sheet(0).unwrap().drawing_files.contains_key(&r));
+}
+
+#[test]
+fn line_resize_checks_the_named_marker_as_well_as_its_physical_position() {
+    use gridcraft_model::{AnchorMode, DrawingFile, DrawingMarker, DrawingPlacement, DrawingRef};
+    let mut s = s();
+    let r = DrawingRef::Image(add_image(&mut s, "B5", AnchorMode::MoveAndSize));
+    let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+    let from = DrawingMarker { col: 1, row: 4, col_off: 0, row_off: 0 };
+    let row_off = ((sh.row_top(4) - sh.row_top(10) + 40.0) * 9525.0).round() as i64;
+    let to = DrawingMarker { row: 10, row_off, ..from };
+    sh.drawing_files.insert(r, DrawingFile { anchor: sh.images[0].anchor, placement: DrawingPlacement::TwoCell { from, to, edit_as: None } });
+    s.execute("home.rowHeight", json!({"rows": "9:9", "height": 50})).unwrap();
+    assert!(!s.doc().unwrap().wb.sheet(0).unwrap().drawing_files.contains_key(&r));
+}
+
+#[test]
+fn row_fit_after_line_deletion_checks_remapped_drawing_placement() {
+    use gridcraft_model::{AnchorMode, DrawingFile, DrawingMarker, DrawingPlacement, DrawingRef, LineInfo};
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "A6", "input": "=A1"})).unwrap();
+    let r = DrawingRef::Image(add_image(&mut s, "B6", AnchorMode::MoveOnly));
+    let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+    sh.rows.insert(5, LineInfo { size: Some(50.0), ..LineInfo::default() });
+    let from = DrawingMarker { col: 1, row: 5, col_off: 0, row_off: 0 };
+    sh.drawing_files.insert(r, DrawingFile { anchor: sh.images[0].anchor, placement: DrawingPlacement::OneCell { from, ext: (381_000, 381_000) } });
+    s.execute("home.deleteRows", json!({"rows": "1:1"})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert_eq!(sh.images[0].anchor.cell.row, 4);
+    assert_eq!(sh.row_height(4), sh.default_row_height);
+    assert!(!sh.drawing_files.contains_key(&r));
+}
+
+#[test]
+fn line_changes_follow_sheet_identity_through_rename_in_the_same_commit() {
+    use gridcraft_model::{AnchorMode, DrawingFile, DrawingMarker, DrawingPlacement, DrawingRef, LineInfo};
+    let mut s = s();
+    let r = DrawingRef::Image(add_image(&mut s, "B5", AnchorMode::MoveOnly));
+    let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+    let from = DrawingMarker { col: 1, row: 4, col_off: 0, row_off: 0 };
+    sh.drawing_files.insert(r, DrawingFile { anchor: sh.images[0].anchor, placement: DrawingPlacement::OneCell { from, ext: (381_000, 381_000) } });
+    crate::cmd::edit(&mut s, |cx| {
+        let sh = cx.sheet_mut(0)?;
+        sh.name = "Renamed".into();
+        sh.rows.insert(4, LineInfo { size: Some(50.0), ..LineInfo::default() });
+        Ok(())
+    })
+    .unwrap();
+    assert!(!s.doc().unwrap().wb.sheet(0).unwrap().drawing_files.contains_key(&r));
+}
+
 /// Bring Forward / Send Backward and moving a chart change the stacking order the user sees;
 /// the imported order must not undo that on save.
 #[test]
@@ -5502,6 +5563,15 @@ fn stacking_edits_override_the_source_drawing_order() {
     set_order(&mut session, &[(DrawingRef::Image(first), 1), (DrawingRef::Image(second), 2)]);
     session.execute("arrange.bringForward", json!({"kind": "image", "id": first})).unwrap();
     assert_eq!(saved_names(&session), ["Object 2", "Object 1"], "the image brought forward is saved in front");
+
+    let mut session = s();
+    let first = add_image(&mut session, "B2", AnchorMode::MoveAndSize);
+    let second = add_image(&mut session, "D2", AnchorMode::MoveAndSize);
+    session.execute("insert.shape", json!({"kind": "rectangle", "at": "F2"})).unwrap();
+    let shape = session.doc().unwrap().wb.sheet(0).unwrap().shapes[0].id;
+    set_order(&mut session, &[(DrawingRef::Image(first), 1), (DrawingRef::Shape(shape), 2), (DrawingRef::Image(second), 3)]);
+    session.execute("arrange.bringForward", json!({"kind": "image", "id": first})).unwrap();
+    assert_eq!(saved_names(&session), ["Object 3", "Object 2", "Object 1"], "the shape keeps its independent stacking slot");
 
     let mut session = s();
     session.execute("cell.set", json!({"cell": "A1", "input": "1"})).unwrap();

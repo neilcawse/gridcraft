@@ -77,10 +77,15 @@ Other edits that change row heights, column widths or line visibility after open
 and column width, standard width, hide/unhide, filters, outlines, sorted row heights, automatic
 row fits after an edit) drop the placement of any object over a changed line, and of a fixed
 (`absolute`) object after an earlier changed line, because the object the user sees no longer
-matches the stored markers. Imported objects keep their source stacking order and nonvisual
-IDs and names; a name is kept even when its ID is the placeholder `0`, which is renumbered.
-Bring Forward, Send Backward and moving a chart write the edited stacking order instead. A
-slicer inside a group is read as a separate slicer, as before.
+matches the stored markers. The span includes both a marker's named cell and the cell reached
+by its signed offset. Disjoint line changes do not affect objects in the gap, and an automatic
+row fit after a structural edit is checked against the remapped placement.
+
+Imported objects keep their source stacking order and nonvisual IDs and names; a name is kept
+even when its ID is the placeholder `0`, which is renumbered. Bring Forward and Send Backward
+reorder the affected objects' stacking slots without clearing the ranks of unrelated objects.
+Moving a chart writes it above earlier drawings. A slicer inside a group is read as a separate
+slicer, as before.
 
 Dynamic-array formulas keep their mark on save. A formula read with dynamic-array cell metadata
 (`cm`, the `XLDAPR` record in `xl/metadata.xml`) is written back with it, together with the

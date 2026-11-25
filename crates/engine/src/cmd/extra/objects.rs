@@ -58,24 +58,24 @@ pub(super) fn arrange(s: &mut Session, p: &Json, forward: bool) -> Result<Json> 
     let extreme = bool_param(p, "toFront").or(bool_param(p, "toBack")).unwrap_or(false);
     let si = s.doc()?.wb.active_sheet();
     crate::cmd::controls::check_objects_unlocked(s, si, kind, &[id])?;
-    fn reorder<T>(v: &mut Vec<T>, i: usize, forward: bool, extreme: bool) {
-        if i >= v.len() {
-            return;
-        }
-        let item = v.remove(i);
+    fn reorder<T>(v: &mut Vec<T>, i: usize, forward: bool, extreme: bool) -> (usize, usize) {
         let j = match (forward, extreme) {
-            (true, true) => v.len(),
+            (true, true) => v.len() - 1,
             (false, true) => 0,
-            (true, false) => (i + 1).min(v.len()),
+            (true, false) => (i + 1).min(v.len() - 1),
             (false, false) => i.saturating_sub(1),
         };
-        v.insert(j, item);
+        if i != j {
+            let item = v.remove(i);
+            v.insert(j, item);
+        }
+        (i.min(j), i.max(j))
     }
     edit(s, |cx| {
         let sh = cx.sheet_mut(si)?;
         // An id that is not an object of this kind is an error, so a stale id, or a shape's id
         // given as an equation, never reorders something else or succeeds silently.
-        let found = match kind {
+        let affected = match kind {
             ObjKind::Chart => sh.charts.iter().position(|c| c.id == id).map(|i| reorder(&mut sh.charts, i, forward, extreme)),
             ObjKind::Image => sh.images.iter().position(|c| c.id == id).map(|i| reorder(&mut sh.images, i, forward, extreme)),
             ObjKind::Slicer => sh.slicers.iter().position(|c| c.id == id).map(|i| reorder(&mut sh.slicers, i, forward, extreme)),
@@ -85,9 +85,26 @@ pub(super) fn arrange(s: &mut Session, p: &Json, forward: bool) -> Result<Json> 
             ObjKind::Group => None,
             ObjKind::Control => sh.controls.iter().position(|c| c.id == id).map(|i| reorder(&mut sh.controls, i, forward, extreme)),
         };
-        found.ok_or_else(|| bad("arrange", "no such object"))?;
-        // The source stacking order would undo the reorder on save: write the edited one.
-        sh.drawing_order.clear();
+        let (lo, hi) = affected.ok_or_else(|| bad("arrange", "no such object"))?;
+        if lo != hi && !sh.drawing_order.is_empty() && kind != ObjKind::Control {
+            let refs: Vec<_> = (lo..=hi)
+                .filter_map(|i| {
+                    let r = match kind {
+                        ObjKind::Chart => DrawingRef::Chart(sh.charts[i].id),
+                        ObjKind::Image => DrawingRef::Image(sh.images[i].id),
+                        ObjKind::Slicer => DrawingRef::Slicer(sh.slicers[i].id),
+                        ObjKind::Shape | ObjKind::Equation => DrawingRef::Shape(sh.shapes[i].id),
+                        _ => return None,
+                    };
+                    sh.parent_group(r).is_none().then_some(r)
+                })
+                .collect();
+            // Only the edited kind's existing slots change hands. Unranked objects occupy
+            // the writer's implicit trailing slots; groups and other kinds keep their ranks.
+            let mut slots: Vec<_> = refs.iter().map(|r| sh.drawing_order.remove(r)).collect();
+            slots.sort_unstable_by_key(|slot| slot.unwrap_or(usize::MAX));
+            sh.drawing_order.extend(refs.into_iter().zip(slots).filter_map(|(r, slot)| slot.map(|n| (r, n))));
+        }
         Ok(Json::Null)
     })
 }

@@ -72,8 +72,8 @@ impl Sheet {
 }
 
 impl DrawingPlacement {
-    /// Include the physical position of both cell markers, even when their signed offsets
-    /// point outside their own cells. `line_at` uses the pre-edit sheet geometry.
+    /// Include the named cell and physical position of both markers: a signed offset may
+    /// reach across lines, any of which can change the relationship between the two.
     pub fn physical_span(&self, rows: bool, span: (u32, u32), mut line_at: impl FnMut(u32, i64) -> u32) -> (u32, u32) {
         let (from, to) = match self {
             Self::Absolute { .. } => return span,
@@ -82,8 +82,10 @@ impl DrawingPlacement {
         };
         let mut span = (span.0.min(span.1), span.0.max(span.1));
         for m in std::iter::once(from).chain(to) {
-            let line = if rows { line_at(m.row, m.row_off) } else { line_at(m.col, m.col_off) };
-            span = (span.0.min(line), span.1.max(line));
+            let (named, offset, limit) = if rows { (m.row, m.row_off, MAX_ROWS) } else { (m.col, m.col_off, MAX_COLS) };
+            let named = named.min(limit - 1);
+            let physical = line_at(named, offset);
+            span = (span.0.min(named.min(physical)), span.1.max(named.max(physical)));
         }
         span
     }

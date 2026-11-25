@@ -287,29 +287,97 @@ fn shift_sheet_features(sh: &mut Sheet, axis: Axis, at: u32, count: u32, insert:
     sh.unimported_pivots = std::mem::take(&mut sh.unimported_pivots).into_iter().filter_map(map_range).collect();
 }
 
-/// The first and last line whose drawn size differs between `before` and `after`; every line
-/// when the default size changed.
+/// Sorted changed line indices, coalesced into inclusive runs. The maps have a cheap equal
+/// path; when they differ, merge their keys rather than doing two tree lookups per key.
 fn changed_lines(
     before: &std::collections::BTreeMap<u32, gridcraft_model::LineInfo>,
     after: &std::collections::BTreeMap<u32, gridcraft_model::LineInfo>,
     (default_before, default_after): (f32, f32),
     limit: u32,
-) -> Option<(u32, u32)> {
-    if default_before != default_after {
-        return Some((0, limit - 1));
+) -> Vec<(u32, u32)> {
+    if default_before == default_after && before == after {
+        return Vec::new();
     }
-    if before == after {
-        return None;
-    }
-    let size = |lines: &std::collections::BTreeMap<u32, gridcraft_model::LineInfo>, k: u32| {
-        lines.get(&k).map_or(default_after, |i| if i.hidden { 0.0 } else { i.size.unwrap_or(default_after) })
+    let mut a = before.iter().peekable();
+    let mut b = after.iter().peekable();
+    let size = |info: Option<&gridcraft_model::LineInfo>, default| info.map_or(default, |i| if i.hidden { 0.0 } else { i.size.unwrap_or(default) });
+    let mut runs = Vec::<(u32, u32)>::new();
+    let mut push = |lo, hi| match runs.last_mut() {
+        Some(last) if last.1 + 1 == lo => last.1 = hi,
+        _ => runs.push((lo, hi)),
     };
-    before
-        .keys()
-        .chain(after.keys())
-        .copied()
-        .filter(|&k| size(before, k) != size(after, k))
-        .fold(None, |span, k| Some(span.map_or((k, k), |(lo, hi): (u32, u32)| (lo.min(k), hi.max(k)))))
+    let mut next = 0;
+    while let Some(k) = a.peek().map(|&(k, _)| *k).into_iter().chain(b.peek().map(|&(k, _)| *k)).min().filter(|&k| k < limit) {
+        if next < k && default_before != default_after {
+            push(next, k - 1);
+        }
+        let x = a.next_if(|&(i, _)| *i == k).map(|(_, v)| v);
+        let y = b.next_if(|&(i, _)| *i == k).map(|(_, v)| v);
+        if size(x, default_before) != size(y, default_after) {
+            push(k, k);
+        }
+        next = k + 1;
+    }
+    if next < limit && default_before != default_after {
+        push(next, limit - 1);
+    }
+    runs
+}
+
+fn drawing_line_dependency(sh: &Sheet, r: gridcraft_model::DrawingRef, file: &gridcraft_model::DrawingFile, rows: bool) -> (u32, u32) {
+    sh.drawing_file_span(r, file, rows).map_or((0, u32::MAX), |(near, far)| (if file.is_fixed() { 0 } else { near }, far))
+}
+
+fn discard_placements(sh: &mut Sheet, stale: impl IntoIterator<Item = gridcraft_model::DrawingRef>) {
+    use gridcraft_model::DrawingRef;
+    let mut nested = std::collections::HashSet::new();
+    for r in stale {
+        sh.invalidate_drawing_file(r);
+        if let DrawingRef::Group(id) = r {
+            nested.extend(sh.group_contents(id).into_iter().filter(|r| matches!(r, DrawingRef::Group(_))));
+        }
+    }
+    if !nested.is_empty() {
+        for g in sh.groups.iter_mut().filter(|g| nested.contains(&DrawingRef::Group(g.id))) {
+            if let Some(file) = &mut g.file {
+                file.edited = true;
+            }
+        }
+    }
+}
+
+/// Auto-fit runs after structural marker remapping. Measure the retained placements against
+/// the remapped grid before fitting, then check only the rows whose drawn height changed.
+#[derive(Default)]
+pub(super) struct ShiftedDrawingFit {
+    spans: Vec<(gridcraft_model::DrawingRef, (u32, u32))>,
+    rows: Vec<u32>,
+}
+
+impl ShiftedDrawingFit {
+    pub(super) fn new(sh: &Sheet) -> Self {
+        let spans = sh.drawing_files.iter().map(|(&r, file)| (r, drawing_line_dependency(sh, r, file, true))).collect();
+        Self { spans, rows: Vec::new() }
+    }
+
+    pub(super) fn note(&mut self, row: u32, before: f32, after: f32) {
+        if before != after {
+            self.rows.push(row);
+        }
+    }
+
+    pub(super) fn finish(self, wb: &mut gridcraft_model::Workbook, si: usize) {
+        if !self.rows.is_empty()
+            && let Some(sh) = wb.sheet_mut(si)
+        {
+            discard_placements(
+                sh,
+                self.spans
+                    .into_iter()
+                    .filter_map(|(r, (near, far))| self.rows.get(self.rows.partition_point(|&row| row < near)).filter(|&&row| row <= far).map(|_| r)),
+            );
+        }
+    }
 }
 
 /// Row heights, column widths and line visibility that change without a structural shift
@@ -317,28 +385,36 @@ fn changed_lines(
 /// resize what the user sees without touching object anchors. A stored source placement over a
 /// changed line, or a fixed one after an earlier changed line, no longer describes that object,
 /// so it is dropped with its group transforms and regenerated from the editable geometry.
-/// Sheets in `shifted` had rows or columns inserted or deleted, which shift stored markers
-/// themselves.
-pub(crate) fn discard_placement_after_line_changes(old: &gridcraft_model::Workbook, wb: &mut gridcraft_model::Workbook, shifted: &[String]) {
-    use gridcraft_model::DrawingRef;
+/// Structurally shifted sheets have already remapped their markers; their subsequent auto-fit
+/// is checked separately against the remapped grid.
+pub(crate) fn discard_placement_after_line_changes(old: &gridcraft_model::Workbook, wb: &mut gridcraft_model::Workbook, shifted: &[u64]) {
     for si in 0..wb.sheets.len() {
         let Some(after) = wb.sheets.get(si).filter(|sh| !sh.drawing_files.is_empty()) else { continue };
-        let Some(before) = old.sheet_index(&after.name).and_then(|i| old.sheets.get(i)) else { continue };
-        if Arc::ptr_eq(before, after) || shifted.iter().any(|s| s.eq_ignore_ascii_case(&after.name)) {
+        let uid = after.uid.get();
+        if shifted.contains(&uid) {
+            continue;
+        }
+        let Some(before) = old.sheets.get(si).filter(|sh| sh.uid.get() == uid).or_else(|| old.sheets.iter().find(|sh| sh.uid.get() == uid)) else {
+            continue;
+        };
+        if Arc::ptr_eq(before, after) {
             continue;
         }
         let rows = changed_lines(&before.rows, &after.rows, (before.default_row_height, after.default_row_height), MAX_ROWS);
         let cols = changed_lines(&before.cols, &after.cols, (before.default_col_width, after.default_col_width), MAX_COLS);
-        if rows.is_none() && cols.is_none() {
+        if rows.is_empty() && cols.is_empty() {
             continue;
         }
-        let stale: Vec<DrawingRef> = after
+        let stale: Vec<_> = after
             .drawing_files
             .iter()
             .filter(|&(&r, file)| {
-                [(true, rows), (false, cols)].into_iter().any(|(axis, changed)| {
-                    let Some((lo, hi)) = changed else { return false };
-                    before.drawing_file_span(r, file, axis).is_none_or(|(near, far)| lo <= far && (hi >= near || file.is_fixed()))
+                [(true, &rows), (false, &cols)].into_iter().any(|(axis, changed)| {
+                    if changed.is_empty() {
+                        return false;
+                    }
+                    let (near, far) = drawing_line_dependency(before, r, file, axis);
+                    changed.get(changed.partition_point(|&(_, hi)| hi < near)).is_some_and(|&(lo, _)| lo <= far)
                 })
             })
             .map(|(&r, _)| r)
@@ -347,16 +423,7 @@ pub(crate) fn discard_placement_after_line_changes(old: &gridcraft_model::Workbo
             continue;
         }
         let Some(sh) = wb.sheet_mut(si) else { continue };
-        for r in stale {
-            sh.invalidate_drawing_file(r);
-            let DrawingRef::Group(id) = r else { continue };
-            let nested = sh.group_contents(id);
-            for g in sh.groups.iter_mut().filter(|g| nested.contains(&DrawingRef::Group(g.id))) {
-                if let Some(file) = &mut g.file {
-                    file.edited = true;
-                }
-            }
-        }
+        discard_placements(sh, stale);
     }
 }
 
