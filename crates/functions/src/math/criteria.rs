@@ -51,8 +51,37 @@ fn criteria_positions<'a>(pairs: &'a [(std::borrow::Cow<'a, Array>, Criterion)],
     MatchedPositions::Mask(mask)
 }
 
-/// Parses `(range, criteria)` argument pairs starting at `first_pair` and validates shape `(rows, cols)`.
-fn parse_criteria_pairs<'a>(a: &'a [Arg], first_pair: usize, rows: usize, cols: usize) -> R<Vec<(std::borrow::Cow<'a, Array>, Criterion)>> {
+/// `arr` padded with blanks to `rows` × `cols` (borrowed when it has that shape already).
+fn padded(arr: std::borrow::Cow<'_, Array>, rows: usize, cols: usize) -> std::borrow::Cow<'_, Array> {
+    if arr.rows == rows && arr.cols == cols {
+        return arr;
+    }
+    let data = (0..rows).flat_map(|r| (0..cols).map(move |c| (r, c))).map(|(r, c)| arr.get(r, c).cloned().unwrap_or(Value::Empty)).collect();
+    match Array::new(rows, cols, data) {
+        Some(a) => std::borrow::Cow::Owned(a),
+        None => arr,
+    }
+}
+
+/// The block every range of a criteria call is read over: the largest read part among `ranges`.
+/// A whole-column range is read inside its sheet's used range only, so ranges on different sheets
+/// can come back cut to different sizes; past its own part each is blank.
+fn read_block(ranges: &[&Arg]) -> (usize, usize) {
+    ranges.iter().fold((0, 0), |(r, c), a| match &a.value {
+        Value::Array(x) => (r.max(x.rows), c.max(x.cols)),
+        _ => (r.max(1), c.max(1)),
+    })
+}
+
+/// Parses `(range, criteria)` argument pairs starting at `first_pair`, checks that every range
+/// has the written shape `shape`, and reads each over the `rows` × `cols` block.
+fn parse_criteria_pairs<'a>(
+    a: &'a [Arg],
+    first_pair: usize,
+    shape: (usize, usize),
+    rows: usize,
+    cols: usize,
+) -> R<Vec<(std::borrow::Cow<'a, Array>, Criterion)>> {
     let rest = a.get(first_pair..).unwrap_or(&[]);
     if rest.is_empty() || rest.len() % 2 != 0 {
         return Err(CellError::Value);
@@ -63,15 +92,22 @@ fn parse_criteria_pairs<'a>(a: &'a [Arg], first_pair: usize, rows: usize, cols: 
     let mut pairs = Vec::with_capacity(rest.len() / 2);
     for pair in rest.chunks(2) {
         let (Some(range), Some(crit)) = (pair.first(), pair.get(1)) else { return Err(CellError::Value) };
-        let r = as_array(&range.value);
-        if r.rows != rows || r.cols != cols {
+        if range.shape() != shape {
             return Err(CellError::Value);
         }
+        let r = padded(as_array(&range.value), rows, cols);
         let scalar = crit.value.scalar();
         let c = if single_pair { Criterion::parse_arg(&scalar)? } else { Criterion::parse_arg_truncated(&scalar) };
         pairs.push((r, c));
     }
     Ok(pairs)
+}
+
+/// The range arguments of an *IFS call: the target (when `first_pair` is 1) and every pair's range.
+fn ifs_ranges(a: &[Arg], first_pair: usize) -> Vec<&Arg> {
+    let mut out: Vec<&Arg> = a.get(..first_pair).unwrap_or(&[]).iter().collect();
+    out.extend(a.get(first_pair..).unwrap_or(&[]).iter().step_by(2));
+    out
 }
 
 /// Numbers in `target` at matched positions (errors at matched positions propagate).
@@ -104,20 +140,29 @@ fn masked_numbers(target: &Array, matched: MatchedPositions<'_>) -> R<Vec<f64>> 
 }
 
 pub(super) fn countifs(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    let first = as_array(&crate::util::arg(a, 0)?.value);
-    let pairs = parse_criteria_pairs(a, 0, first.rows, first.cols)?;
-    let count = match criteria_positions(&pairs, first.rows, first.cols) {
+    let shape = crate::util::arg(a, 0)?.shape();
+    let ranges = ifs_ranges(a, 0);
+    let (rows, cols) = read_block(&ranges);
+    let pairs = parse_criteria_pairs(a, 0, shape, rows, cols)?;
+    let count = match criteria_positions(&pairs, rows, cols) {
         MatchedPositions::Indexed(pos) => pos.len(),
         MatchedPositions::Mask(mask) => mask.iter().filter(|m| **m).count(),
     };
-    num_val(count as f64)
+    // Cells of whole-column ranges past every range's used part are blank in all of them.
+    let cut = shape.0.saturating_mul(shape.1).saturating_sub(rows.saturating_mul(cols));
+    let cut_matches = if cut > 0 && pairs.iter().all(|(_, c)| c.matches(&Value::Empty)) { cut } else { 0 };
+    num_val(count.saturating_add(cut_matches) as f64)
 }
 
-/// The values of the `*IFS` target range with the mask from its pairs.
+/// The values of the `*IFS` target range with the mask from its pairs. Blank cells add nothing,
+/// so the cells a whole-column reference leaves out past the used range don't matter here.
 fn ifs_numbers(a: &[Arg]) -> R<Vec<f64>> {
-    let target = as_array(&crate::util::arg(a, 0)?.value);
-    let pairs = parse_criteria_pairs(a, 1, target.rows, target.cols)?;
-    let matched = criteria_positions(&pairs, target.rows, target.cols);
+    let shape = crate::util::arg(a, 0)?.shape();
+    let ranges = ifs_ranges(a, 1);
+    let (rows, cols) = read_block(&ranges);
+    let target = padded(as_array(&crate::util::arg(a, 0)?.value), rows, cols);
+    let pairs = parse_criteria_pairs(a, 1, shape, rows, cols)?;
+    let matched = criteria_positions(&pairs, rows, cols);
     masked_numbers(&target, matched)
 }
 
@@ -144,14 +189,18 @@ pub(super) fn minifs(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
 }
 
 pub(super) fn countif(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    let range = as_array(&crate::util::arg(a, 0)?.value);
+    let range_arg = crate::util::arg(a, 0)?;
+    let range = as_array(&range_arg.value);
     let c = Criterion::parse_arg(&crate::util::arg(a, 1)?.value.scalar())?;
     if let Some(pat) = c.exact_text()
         && let Some(pos) = range.text_positions(pat)
     {
         return num_val(pos.len() as f64);
     }
-    num_val(range.iter().filter(|v| c.matches(v)).count() as f64)
+    // A whole-column reference is read inside the used range; the cells past it are blank.
+    let cut = range_arg.cut_blanks();
+    let cut_matches = if cut > 0 && c.matches(&Value::Empty) { cut } else { 0 };
+    num_val(range.iter().filter(|v| c.matches(v)).count().saturating_add(cut_matches) as f64)
 }
 
 /// SUMIF / AVERAGEIF: matched numbers from the sum range, read at the criteria range's positions.

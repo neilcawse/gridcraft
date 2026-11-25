@@ -1353,6 +1353,40 @@ fn indirect_r1c1_valid_references() {
     }
 }
 
+/// Excel 365: R1C1 offsets wrap around the sheet's edges, `R2`, `C2`, `C`, `R1:R2` are whole rows
+/// and columns, an empty a1 argument means R1C1, and a bad a1 argument is an error.
+#[test]
+fn indirect_r1c1_wraps_and_takes_whole_rows_and_columns() {
+    let mut t = T::new();
+    t.set("F1048576", "42");
+    t.set("B1", "2");
+    t.set("B2", "5");
+    t.set("C2", "11");
+    t.set("D3", "100");
+    t.set("F6", "=INDIRECT(\"R[-6]C\",FALSE)");
+    t.set("A1048576", "=INDIRECT(\"R[1]C[1]\",FALSE)");
+    t.set("H5", "=INDIRECT(\"R2C2\",)");
+    t.set("H6", "=SUM(INDIRECT(\"C2\",FALSE))");
+    t.set("H7", "=SUM(INDIRECT(\"R2\",FALSE))");
+    t.set("H8", "=SUM(INDIRECT(\"C2:C3\",FALSE))");
+    t.set("H9", "=SUM(INDIRECT(\"R1:R2\",FALSE))");
+    t.set("D10", "=COLUMN(INDIRECT(\"C\",FALSE))+ROWS(INDIRECT(\"C\",FALSE))");
+    t.set("A11", "=SUM(INDIRECT(\"C[1]\",FALSE))");
+    t.set("H12", "=INDIRECT(\"R1C1\",\"no\")");
+    t.set("H13", "=INDIRECT(\"R1C1\",1/0)");
+    assert_eq!(t.num("F6"), 42.0);
+    assert_eq!(t.num("A1048576"), 2.0);
+    assert_eq!(t.num("H5"), 5.0);
+    assert_eq!(t.num("H6"), 7.0);
+    assert_eq!(t.num("H7"), 16.0);
+    assert_eq!(t.num("H8"), 18.0);
+    assert_eq!(t.num("H9"), 18.0);
+    assert_eq!(t.num("D10"), 4.0 + 1_048_576.0);
+    assert_eq!(t.num("A11"), 7.0);
+    assert_eq!(t.get("H12"), Value::Error(CellError::Value));
+    assert_eq!(t.get("H13"), Value::Error(CellError::Div0));
+}
+
 #[test]
 fn relative_names() {
     let mut t = T::new();
@@ -4077,4 +4111,47 @@ fn computed_criterion_that_reenters_itself_is_not_met() {
     t.set("N47", "=DCOUNT($F$2:$G$7,\"age\",$N$46:$N$47)>0");
     t.set("B60", "=DCOUNT($F$2:$G$7,\"age\",N46:N47)");
     assert_eq!(t.num("B60"), 0.0);
+}
+
+/// A criteria range that computes an error (INDIRECT of text that names no range) is that error:
+/// the *IF(S) functions take a reference there, so Excel doesn't count the error as a cell.
+#[test]
+fn criteria_range_given_an_error_is_that_error() {
+    let mut t = T::new();
+    t.set("A1", "TableName[ColumnName]");
+    t.set("B1", "=COUNTIF(INDIRECT(A1),\">= \"&MIN(INDIRECT(A1)))");
+    t.set("B2", "=SUMIF(INDIRECT(A1),1)");
+    t.set("B3", "=COUNTIFS(A1:A2,\"x\",INDIRECT(A1),1)");
+    t.set("B4", "=SUMIFS(A1:A2,INDIRECT(A1),1)");
+    t.set("B5", "=COUNTIF(INDIRECT(\"A1\"),\"T*\")");
+    for at in ["B1", "B2", "B3", "B4"] {
+        assert_eq!(t.get(at), Value::Error(CellError::Ref), "{at}");
+    }
+    assert_eq!(t.num("B5"), 1.0);
+}
+
+/// A whole-column or whole-row criteria range covers every cell of it, blanks past the used range
+/// included: Excel 365 gives `COUNTIF($G:$G,"<>23")` = 1048575 over a column holding one 23, and
+/// `COUNTIF($Y:$Y,"")` counts the empty cells of the whole column.
+#[test]
+fn whole_column_criteria_ranges_count_the_blanks_past_the_used_range() {
+    let mut t = T::new();
+    t.set("A1", "23");
+    t.set("A2", "x");
+    t.set("B1", "1");
+    t.set("C5", "q");
+    t.set("D1", "=COUNTIF(A:A,\"<>23\")");
+    t.set("D2", "=COUNTIF(A:A,\"\")");
+    t.set("D3", "=COUNTIFS(A:A,\"<>x\",B:B,\"\")");
+    t.set("D4", "=COUNTBLANK(A:A)");
+    t.set("D5", "=COUNTIF(A:A,\">0\")");
+    t.set("D6", "=SUMIFS(B:B,A:A,\"<>x\")");
+    t.set("D7", "=COUNTIF(5:5,\"<>q\")");
+    assert_eq!(t.num("D1"), 1_048_575.0);
+    assert_eq!(t.num("D2"), 1_048_574.0);
+    assert_eq!(t.num("D3"), 1_048_574.0);
+    assert_eq!(t.num("D4"), 1_048_574.0);
+    assert_eq!(t.num("D5"), 1.0);
+    assert_eq!(t.num("D6"), 1.0);
+    assert_eq!(t.num("D7"), 16_383.0);
 }
