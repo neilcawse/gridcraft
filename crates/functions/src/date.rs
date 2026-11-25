@@ -250,6 +250,14 @@ fn parsed_text(a: &[Arg], c: &mut dyn Ctx) -> R<(f64, &'static str)> {
 }
 
 fn datevalue(a: &[Arg], c: &mut dyn Ctx) -> R<Value> {
+    if c.transition_evaluation() {
+        match &arg(a, 0)?.value {
+            Value::Number(n) => return num_val(*n),
+            Value::Bool(b) => return num_val(f64::from(*b)),
+            Value::Empty => return num_val(0.0),
+            _ => {}
+        }
+    }
     let (n, f) = parsed_text(a, c)?;
     if !f.contains(['d', 'y']) {
         return Err(CellError::Value);

@@ -822,14 +822,33 @@ impl<'h> Evaluator<'h> {
                 }
                 let sys = self.host.workbook().date_system;
                 let transition = self.transition;
-                let mut acc = self.value(left);
+                let mut acc = self.binary_operand(rest.last().map_or(op, |&(o, _)| o), left);
                 while let Some((o, r)) = rest.pop() {
-                    let y = self.value(r);
+                    let y = self.binary_operand(o, r);
                     acc = array::binary_values_in(o, &acc, &y, sys, transition);
                 }
                 Ev::V(acc)
             }
         }
+    }
+
+    fn binary_operand(&mut self, op: BinOp, expr: &Expr) -> Value {
+        let ev = self.eval(expr);
+        if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Pow)
+            && (matches!(&ev, Ev::R(areas) if areas.len() > 1) || matches!(ev, Ev::V(Value::Error(CellError::Value))))
+        {
+            let mut operand = expr;
+            // Legacy workbook import wraps scalar-context references in implicit intersection.
+            while let Expr::Paren(inner) | Expr::Unary(UnOp::At, inner) = operand {
+                operand = inner;
+            }
+            // A written 3-D span is not a single arithmetic operand. Keep reference unions
+            // and consumers that take references (such as SUM) on their existing paths.
+            if matches!(operand, Expr::Ref(r) if matches!(&r.sheet, SheetSel::Span(a, b) if !a.eq_ignore_ascii_case(b))) {
+                return Value::Error(CellError::Ref);
+            }
+        }
+        self.deref(ev)
     }
 
     // ------------------------------------------------------------------ calls

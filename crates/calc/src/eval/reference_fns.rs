@@ -602,9 +602,8 @@ impl<'h> Evaluator<'h> {
                         inputs.push(Input::Cells(a.sheet, range));
                     }
                 }
-                // Functions 1–13 accept references and scalar arguments, not computed arrays.
-                // Array constants were not measured and keep their previous treatment.
-                Ev::V(Value::Array(_)) if aggregate_reference_form && !self.is_array_constant(e) => return err(CellError::Value),
+                // Functions 1–13 accept references and scalars, not array values.
+                Ev::V(Value::Array(_)) if aggregate_reference_form => return err(CellError::Value),
                 Ev::V(v) => {
                     let n = match &v {
                         Value::Array(a) => u64::try_from(a.data.len()).unwrap_or(u64::MAX),
@@ -653,34 +652,6 @@ impl<'h> Evaluator<'h> {
             return Ev::V(gridcraft_functions::aggregate_values_k(func, &values, &k));
         }
         Ev::V(gridcraft_functions::aggregate_values(func, &values))
-    }
-
-    /// An array constant written in the formula (`{1,2,3}`), or a defined name whose definition is
-    /// one. Only reached on the path that would reject the argument.
-    fn is_array_constant(&self, e: &Expr) -> bool {
-        fn unparen(mut e: &Expr) -> &Expr {
-            while let Expr::Paren(inner) = e {
-                e = inner;
-            }
-            e
-        }
-        match unparen(e) {
-            Expr::Array(_) => true,
-            // A LET or LAMBDA binding of the same name is a computed value.
-            Expr::Name(n) if !self.env.iter().any(|(k, _)| gridcraft_formula::same_name(k, n)) => {
-                let wb = self.host.workbook();
-                let (sheet, bare) = match n.rsplit_once('!') {
-                    Some((s, b)) => match wb.sheet_index(s) {
-                        Some(i) => (i, b),
-                        None => return false,
-                    },
-                    None => (self.sheet, n.as_str()),
-                };
-                wb.name(bare, sheet)
-                    .is_some_and(|def| gridcraft_formula::parse_name(&def.formula).is_ok_and(|expr| matches!(unparen(&expr), Expr::Array(_))))
-            }
-            _ => false,
-        }
     }
 
     /// Evaluates `num / (cond_lhs <cmp> cond_rhs)` inside `AGGREGATE` with `skip_errors` when

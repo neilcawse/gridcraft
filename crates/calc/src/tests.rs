@@ -149,6 +149,12 @@ fn measured_transition_concat_blank() {
         for (formula, expected) in [
             ("=\"x\"&A1", blank.clone()),
             ("=IF(A1=\"\",\"x\"&A1,\"no\")", blank),
+            ("=A1&A1", if transition { Value::Error(CellError::Value) } else { Value::text("") }),
+            ("=1&A1", if transition { Value::Error(CellError::Value) } else { Value::text("1") }),
+            ("=\"\"&A1", if transition { Value::Error(CellError::Value) } else { Value::text("") }),
+            ("=A1&\"\"", if transition { Value::Error(CellError::Value) } else { Value::text("") }),
+            ("=INDEX(A1:A2,1)&\"x\"", if transition { Value::Error(CellError::Value) } else { Value::text("x") }),
+            ("=IF(TRUE,A1)&\"x\"", if transition { Value::Error(CellError::Value) } else { Value::text("x") }),
             // Not measured: empty text keeps the previous result.
             ("=\"x\"&A2", Value::text("x")),
             ("=\"x\"&#N/A", Value::Error(CellError::NA)),
@@ -169,11 +175,16 @@ fn measured_transition_average_text_literal() {
         t.set("A3", "text");
         t.set("B1", "=AVERAGE(A1:A3)");
         t.set("B2", "=AVERAGE(-1,\"1\")");
-        // Not measured: non-numeric text keeps the previous result.
         t.set("B3", "=AVERAGE(-1,\"abc\")");
+        t.set("B4", "=AVERAGE(-1,\"\")");
+        t.set("B5", "=AVERAGE(-1,A2)");
+        t.set("B6", "=AVERAGE(-1,A4)");
+        t.set("B7", "=AVERAGE(-1,TRUE)");
         assert_eq!(t.get("B1"), Value::number(-1.0));
         assert_eq!(t.get("B2"), Value::number(if transition { -0.5 } else { 0.0 }));
-        assert_eq!(t.get("B3"), Value::Error(CellError::Value));
+        let expected = if transition { Value::number(-0.5) } else { Value::Error(CellError::Value) };
+        assert_eq!([t.get("B3"), t.get("B4")], [expected.clone(), expected]);
+        assert_eq!([t.num("B5"), t.num("B6"), t.num("B7")], [-1.0, -1.0, 0.0]);
     }
 }
 
@@ -195,7 +206,7 @@ fn measured_transition_database_plain_text_criterion() {
 }
 
 #[test]
-fn measured_transition_datevalue_with_addition() {
+fn measured_transition_datevalue_non_text() {
     for transition in [false, true] {
         let mut t = T::new();
         set_transition(&mut t, transition);
@@ -203,11 +214,29 @@ fn measured_transition_datevalue_with_addition() {
         t.set("B1", "=DATEVALUE(A1+1)");
         t.set("B2", "=DATEVALUE(A1)");
         t.set("B3", "=DATEVALUE(A1)+1");
-        // Not measured: a numeric literal keeps the previous result.
-        t.set("B4", "=DATEVALUE(1)");
+        t.set("A3", "5");
         assert_eq!(t.get("B1"), if transition { Value::number(1.0) } else { Value::Error(CellError::Value) });
         assert!(t.num("B2") > 0.0);
         assert_eq!(t.num("B3"), t.num("B2") + 1.0);
+        for (formula, value) in [
+            ("=DATEVALUE(1)", 1.0),
+            ("=DATEVALUE(0)", 0.0),
+            ("=DATEVALUE(1.5)", 1.5),
+            ("=DATEVALUE(-5)", -5.0),
+            ("=DATEVALUE(TRUE)", 1.0),
+            ("=DATEVALUE(A2)", 0.0),
+            ("=DATEVALUE(A3)", 5.0),
+            ("=DATEVALUE(A1-1)", -1.0),
+            ("=DATEVALUE(A1*1)", 0.0),
+            ("=DATEVALUE(2958466)", 2_958_466.0),
+            ("=DATEVALUE(1E9)", 1e9),
+        ] {
+            t.set("B4", formula);
+            assert_eq!(t.get("B4"), if transition { Value::number(value) } else { Value::Error(CellError::Value) }, "{formula}");
+        }
+        t.set("B4", "=DATEVALUE(A1&\"\")");
+        assert_eq!(t.get("B4"), t.get("B2"));
+        t.set("B4", "=DATEVALUE(\"5\")");
         assert_eq!(t.get("B4"), Value::Error(CellError::Value));
     }
 }
@@ -229,48 +258,59 @@ fn measured_aggregate_reference_form_rejects_computed_arrays() {
     }
 }
 
-/// Only computed arrays were measured. Array constants, written or named, keep their previous
-/// treatment on both kinds of sheet.
 #[test]
-fn aggregate_reference_form_keeps_array_constants() {
+fn measured_aggregate_reference_form_rejects_array_constants() {
     for transition in [false, true] {
         let mut t = T::new();
         set_transition(&mut t, transition);
-        t.wb.names.push(gridcraft_model::DefinedName {
-            name: "Konst".into(),
-            scope: None,
-            formula: "{1,2,3}".into(),
-            comment: String::new(),
-            hidden: false,
-        });
-        t.set("A1", "4");
-        t.set("C1", "=AGGREGATE(9,6,{1,2,3})");
-        t.set("C2", "=AGGREGATE(9,6,({1,2,3}))");
-        t.set("C3", "=AGGREGATE(9,6,Konst)");
-        t.set("C4", "=AGGREGATE(9,6,A1,{1,2})");
-        t.set("C5", "=LET(Konst,{1,2,3}*1,AGGREGATE(9,6,Konst))");
-        assert_eq!([t.num("C1"), t.num("C2"), t.num("C3"), t.num("C4")], [6.0, 6.0, 6.0, 7.0], "transition={transition}");
-        assert_eq!(t.get("C5"), Value::Error(CellError::Value), "transition={transition}");
+        for (name, formula) in [("ArrConst", "={1,2,3}"), ("ArrExpr", "={1,2}*1")] {
+            t.wb.names.push(gridcraft_model::DefinedName {
+                name: name.into(),
+                scope: None,
+                formula: formula.into(),
+                comment: String::new(),
+                hidden: false,
+            });
+        }
+        for (at, input) in [("A1", "1"), ("A2", "2"), ("A3", "3")] {
+            t.set(at, input);
+        }
+        for code in 1..=13 {
+            t.set("B1", &format!("=AGGREGATE({code},6,{{1,2,3}})"));
+            assert_eq!(t.get("B1"), Value::Error(CellError::Value), "code={code}, transition={transition}");
+        }
+        for formula in [
+            "=AGGREGATE(9,6,ArrConst)",
+            "=AGGREGATE(9,6,A1:A3,{1,2})",
+            "=AGGREGATE(9,6,ArrExpr)",
+            "=AGGREGATE(9,6,LET(x,{1,2,3},x))",
+            "=AGGREGATE(9,6,(A1:A3)*1)",
+        ] {
+            t.set("B1", formula);
+            assert_eq!(t.get("B1"), Value::Error(CellError::Value), "{formula}");
+        }
+        t.set("B1", "=AGGREGATE(14,6,{1,2,3},1)");
+        assert_eq!(t.get("B1"), Value::number(3.0));
     }
 }
 
 #[test]
-fn aggregate_reference_form_classifies_the_resolved_name() {
-    let mut t = T::new();
-    t.wb.sheets.push(std::sync::Arc::new(gridcraft_model::Sheet::new("Other")));
-    for (name, scope, formula) in
-        [("Konst", None, "{1,2,3}"), ("Konst", Some(0), "={1,2}*1"), ("Konst", Some(1), "=(({4,5}))"), ("Computed", None, "={1,2}*1")]
-    {
-        t.wb.names.push(gridcraft_model::DefinedName { name: name.into(), scope, formula: formula.into(), comment: String::new(), hidden: false });
-    }
-    for (at, formula, expected) in [
-        ("A1", "=AGGREGATE(9,4,Konst)", Value::Error(CellError::Value)),
-        ("A2", "=AGGREGATE(9,4,Computed)", Value::Error(CellError::Value)),
-        ("A3", "=AGGREGATE(9,4,Missing!Konst)", Value::Error(CellError::Name)),
-        ("A4", "=AGGREGATE(9,4,Other!Konst)", Value::number(9.0)),
-    ] {
-        t.set(at, formula);
-        assert_eq!(t.get(at), expected, "{formula}");
+fn measured_multisheet_reference_in_arithmetic_and_sum() {
+    for transition in [false, true] {
+        let mut t = T::new();
+        set_transition(&mut t, transition);
+        for (name, value) in [("First", 2.0), ("Last", 3.0)] {
+            let mut sheet = gridcraft_model::Sheet::new(name);
+            sheet.set_value(c("A1"), Value::number(value));
+            t.wb.sheets.push(std::sync::Arc::new(sheet));
+        }
+        t.set("A1", "=First:Last!A1+0");
+        // The legacy workbook importer inserts implicit intersection in scalar context.
+        t.set("A3", "=@First:Last!A1+0");
+        t.set("A2", "=SUM(First:Last!A1)");
+        assert_eq!(t.get("A1"), Value::Error(CellError::Ref));
+        assert_eq!(t.get("A3"), Value::Error(CellError::Ref));
+        assert_eq!(t.get("A2"), Value::number(5.0));
     }
 }
 

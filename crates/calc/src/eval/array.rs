@@ -244,9 +244,7 @@ fn binary_scalar(op: BinOp, a: &Value, b: &Value, sys: gridcraft_core::DateSyste
                 Value::number(x.powf(y))
             }
         }),
-        BinOp::Concat if transition && matches!((a, b), (Value::Text(_), Value::Empty) | (Value::Empty, Value::Text(_))) => {
-            Value::Error(CellError::Value)
-        }
+        BinOp::Concat if transition && (matches!(a, Value::Empty) || matches!(b, Value::Empty)) => Value::Error(CellError::Value),
         BinOp::Concat => match (a.to_text(), b.to_text()) {
             (Ok(x), Ok(y)) => {
                 if x.len() + y.len() > 32767 * 4 {
