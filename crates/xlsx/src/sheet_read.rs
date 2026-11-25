@@ -609,6 +609,20 @@ struct RawHyperlink<'a> {
     tooltip: Option<&'a str>,
 }
 
+/// Canonical XLSX location and model target for an internal link. Quote literal hash sheet
+/// names so the leading hash cannot be mistaken for another marker when reading or following.
+/// Otherwise preserve an opaque doubled-marker target unless its location is an error token.
+pub(crate) fn internal_link_location(target: &str) -> String {
+    let location = gridcraft_core::link_location(target);
+    if let Some((sheet, body)) = gridcraft_core::addr::hash_sheet_location(location) {
+        format!("{}!{body}", gridcraft_core::quote_sheet(sheet))
+    } else if location.starts_with('#') && CellError::parse(location).is_none() {
+        target.to_owned()
+    } else {
+        location.to_owned()
+    }
+}
+
 fn push_hyperlink(cx: &mut Ctx<'_>, name: &str, h: RawHyperlink<'_>, rels: &HashMap<&str, &Rel>, sheet: &mut Sheet, budget: &mut LinkBudget) -> bool {
     let rel_target = h.rel_id.and_then(|id| rels.get(id)).map(|r| r.target.as_str()).unwrap_or("");
     let location = h.location.filter(|l| !l.is_empty());
@@ -620,7 +634,7 @@ fn push_hyperlink(cx: &mut Ctx<'_>, name: &str, h: RawHyperlink<'_>, rels: &Hash
     let external = !target.is_empty();
     if let Some(loc) = location {
         if target.is_empty() {
-            target = gridcraft_core::link_location(loc).to_string();
+            target = internal_link_location(loc);
         } else {
             target = format!("{target}#{loc}");
         }

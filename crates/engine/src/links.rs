@@ -76,6 +76,12 @@ pub fn classify(target: &str) -> LinkKind {
     if CellError::parse(place).is_some() {
         return LinkKind::Refused("Reference isn't valid.".into());
     }
+    if place.starts_with('#') {
+        return match gridcraft_core::addr::hash_sheet_location(place) {
+            Some((sheet, body)) => LinkKind::Internal(format!("{}!{body}", gridcraft_core::quote_sheet(sheet))),
+            None => LinkKind::Refused("Reference isn't valid.".into()),
+        };
+    }
     if RangeRef::parse(t).is_some() {
         return LinkKind::Internal(place.to_string());
     }
@@ -135,11 +141,26 @@ mod tests {
         for r in ["#NAME?", "#REF!", "#Name?", "##NAME?", "##REF!", " ##ref! "] {
             assert_eq!(classify(r), LinkKind::Refused("Reference isn't valid.".into()), "{r:?}");
         }
-        // One `#` marker goes; a second is part of the place named.
-        for (r, place) in [("#Sheet1!A1", "Sheet1!A1"), ("##Sheet1!A1", "#Sheet1!A1"), ("NAME?", "NAME?"), ("#http://a.example", "http://a.example")]
+        for (r, place) in
+            [("#Sheet1!A1", "Sheet1!A1"), ("##Sheet1!A1", "'#Sheet1'!A1"), ("NAME?", "NAME?"), ("#http://a.example", "http://a.example")]
         {
             assert_eq!(classify(r), LinkKind::Internal(place.into()), "{r:?}");
         }
+    }
+
+    #[test]
+    fn hash_locations_follow_only_a_literal_sheet_reference() -> Result<()> {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("sheet.rename", json!({"name": "Data"}))?;
+        assert!(s.execute("link.open", json!({"target": "##Data!A1"})).is_err());
+        s.execute("link.open", json!({"target": "#Data!A1"}))?;
+        s.execute("sheet.rename", json!({"name": "#Data"}))?;
+        let unquoted = s.execute("link.open", json!({"target": "##Data!A1"}))?;
+        assert_eq!(s.open_confirmed_link("#'#Data'!A1")?, unquoted);
+        assert!(s.take_ui_requests().is_empty());
+        assert_eq!(classify("##Something"), LinkKind::Refused("Reference isn't valid.".into()));
+        Ok(())
     }
 
     /// Through an XLSX save that repairs a table name and the reopen, a doubled marker before an

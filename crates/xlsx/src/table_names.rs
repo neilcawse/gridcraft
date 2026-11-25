@@ -273,6 +273,10 @@ impl Rewrite<'_> {
             }
             for link in sheet.hyperlinks.values_mut().filter(|l| !l.external) {
                 let target = gridcraft_core::link_location(link.target.trim());
+                if target.starts_with('#') {
+                    // An error or literal hash location cannot be a table or defined name.
+                    continue;
+                }
                 if let Some(new) = self.rewritten_text(target, si, None) {
                     link.target = new;
                 }

@@ -702,3 +702,42 @@ fn a_doubled_location_marker_keeps_the_error_token() -> Result<(), Box<dyn std::
     assert_eq!(targets(&back), read);
     Ok(())
 }
+
+#[test]
+fn hash_sheet_locations_keep_their_destinations_when_reopened() -> Result<(), Box<dyn std::error::Error>> {
+    use gridcraft_core::{link_location, split_sheet};
+
+    let mut wb = Workbook::new();
+    for name in ["Data", "#Data", "#O'Brien"] {
+        wb.sheets.push(Arc::new(Sheet::new(name)));
+    }
+    let input = ["##Data!A1", "#Data!A1", "##O'Brien!$B$2", "  #'#Data'!C3  ", "##Something", "##NAME?", " #N/A "];
+    let sh = wb.sheet_mut(0).ok_or("missing source sheet")?;
+    for (row, target) in (0..).zip(input) {
+        sh.hyperlinks.insert(CellRef::new(row, 0), Hyperlink { target: target.into(), tooltip: None, external: false });
+    }
+    sh.tables.push(table("Sale?", 1));
+    for _ in 0..2 {
+        let saved = write_xlsx(&wb)?;
+        let (back, _) = read_xlsx(&saved)?;
+        let sh = back.sheet(0).ok_or("missing reopened source sheet")?;
+        for (row, (expected, sheet, cell)) in (0..).zip([
+            ("'#Data'!A1", "#Data", "A1"),
+            ("Data!A1", "Data", "A1"),
+            ("'#O''Brien'!$B$2", "#O'Brien", "$B$2"),
+            ("'#Data'!C3", "#Data", "C3"),
+        ]) {
+            let link = &sh.hyperlinks[&CellRef::new(row, 0)];
+            assert!(!link.external);
+            assert_eq!(link.target, expected);
+            let (name, body) = split_sheet(link_location(&link.target));
+            assert_eq!(name.as_deref().and_then(|n| back.sheet_index(n)), back.sheet_index(sheet));
+            assert_eq!(CellRef::parse(body), CellRef::parse(cell));
+        }
+        assert_eq!(sh.hyperlinks[&CellRef::new(4, 0)].target, "##Something");
+        assert_eq!(sh.hyperlinks[&CellRef::new(5, 0)].target, "#NAME?");
+        assert_eq!(sh.hyperlinks[&CellRef::new(6, 0)].target, "#N/A");
+        wb = back;
+    }
+    Ok(())
+}

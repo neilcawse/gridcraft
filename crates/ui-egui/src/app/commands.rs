@@ -99,9 +99,11 @@ impl SheetApp {
         {
             self.deliver_pdf(r);
         }
-        // `file.saveBytes` only encodes: its caller shows the warnings once the bytes are handed over.
+        // A dialog request is not a write; its picker or host callback reports its own result.
+        // PDF and other exported copies also leave the workbook's save-warning record alone.
         if matches!(id, "file.save" | "file.saveAs")
             && let Ok(r) = &r
+            && r.get("path").and_then(Json::as_str).is_some_and(|p| self.session.active().is_some_and(|d| d.path.as_deref() == Some(p)))
         {
             self.show_save_warnings(r);
         }

@@ -560,6 +560,31 @@ mod lifecycle_tests {
     }
 
     #[test]
+    fn failed_host_save_keeps_the_last_shown_warnings() -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+
+        let mut app = app();
+        app.run("range.setValues", json!({"range": "A1:A2", "values": [["Header"], [1]]}))?;
+        app.run("insert.table", json!({"range": "A1:A2", "name": "DataRows"}))?;
+        let doc = app.session.active_mut().ok_or("missing workbook")?;
+        std::sync::Arc::make_mut(&mut doc.wb).sheet_mut(0).ok_or("missing sheet")?.tables[0].name = "Data?Rows".into();
+        app.services.host_save = Some(Box::new(|_, _, _| Ok(())));
+        app.run("file.saveAs", json!({}))?;
+        let notice = app.notice.take().ok_or("successful host save should show a warning")?;
+        assert!(notice.text.contains("Data_Rows"));
+        let shown = app.save_warnings_shown.clone();
+        let uid = app.session.active().ok_or("missing workbook")?.uid;
+        assert!(shown.get(&uid).is_some_and(|(_, warnings)| warnings.iter().any(|w| w.contains("Data_Rows"))));
+
+        app.services.host_save = Some(Box::new(|_, _, _| Err("host write failed".into())));
+        app.run("file.saveAs", json!({}))?;
+        assert!(app.message.as_ref().is_some_and(|(_, text)| text.contains("host write failed")));
+        assert!(app.notice.is_none());
+        assert_eq!(app.save_warnings_shown, shown);
+        Ok(())
+    }
+
+    #[test]
     /// The title is sent on the first tick and after a rename, but not on every unchanged frame.
     fn a_logic_only_tick_updates_the_title_once_per_change() {
         let ctx = egui::Context::default();

@@ -690,7 +690,7 @@ fn build_sheet_rules(sheet: &Sheet, features: &mut CraftFeatures, rels: &mut Rel
             let id = rels.add_external("hyperlink", u);
             (Some(id), loc, None, Some(u.to_string()))
         } else {
-            let loc = gridcraft_core::link_location(t).to_string();
+            let loc = crate::sheet_read::internal_link_location(t);
             (None, Some(loc.clone()), Some(loc), None)
         };
         features.hyperlinks.push(CraftHyperlink {

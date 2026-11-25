@@ -89,6 +89,17 @@ fn pdf_export_keeps_safe_links_on_their_printed_pages() {
 }
 
 #[test]
+fn pdf_keeps_single_marker_link_destination_rules() -> Result<()> {
+    let mut s = s();
+    s.execute("insert.link", json!({"cell": "A1", "target": " #Sheet1!A3 "}))?;
+    s.execute("insert.link", json!({"cell": "A2", "target": "# =A3"}))?;
+    s.execute("cell.set", json!({"cell": "A3", "input": "Destination"}))?;
+    let (pdf, _) = pdf_of(&mut s, json!({}));
+    assert_eq!(String::from_utf8_lossy(&pdf).matches("/Dest [").count(), 1);
+    Ok(())
+}
+
+#[test]
 fn pdf_export_rotates_a_shape_outline_and_its_text() {
     let make_page = |rotation| {
         let mut s = s();
