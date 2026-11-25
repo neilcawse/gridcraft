@@ -359,10 +359,16 @@ impl SlicerWriter {
         if planned.is_empty() {
             return Self::default();
         }
+        // A workbook-scoped marker owns its name unless another workbook-scoped name or a table
+        // shares it. Sheet-scoped names are separate definitions: they stop a cache from taking
+        // a free name, but not from keeping its own marker.
         let mut reserved = std::collections::HashMap::new();
-        for n in &wb.names {
+        for n in wb.names.iter().filter(|n| n.scope.is_none()) {
             let marker = is_cache_marker(n).then(|| n.uid.get());
             reserved.entry(n.name.to_ascii_lowercase()).and_modify(|uid| *uid = None).or_insert(marker);
+        }
+        for n in wb.names.iter().filter(|n| n.scope.is_some()) {
+            reserved.entry(n.name.to_ascii_lowercase()).or_insert(None);
         }
         for name in wb.sheets.iter().flat_map(|s| s.tables.iter().map(|t| &t.name)).chain(table_names.iter().flatten().flatten()) {
             reserved.insert(name.to_ascii_lowercase(), None);

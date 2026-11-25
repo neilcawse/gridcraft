@@ -1858,6 +1858,31 @@ fn reopen_bytes(s: &mut Session, bytes: &[u8]) {
     s.execute("sheet.activate", json!({"sheet": "Sheet2"})).unwrap();
     s.execute("data.refreshAll", json!({})).unwrap();
 }
+/// A copied sheet's slicers get caches of their own: the original keeps its imported cache name.
+#[test]
+fn a_copied_slicer_does_not_take_the_original_cache_name() {
+    let mut s = sales();
+    s.execute("insert.pivotTable", json!({})).unwrap();
+    s.execute("pivot.addField", json!({"field": "Region", "area": "rows"})).unwrap();
+    s.execute("pivot.addField", json!({"field": "Sales", "area": "values"})).unwrap();
+    add_pivot_slicer(&mut s, 1, "Region", &["PivotTable1"]);
+    let mut bytes = save(&s);
+    for part in ["xl/workbook.xml", "xl/slicerCaches/slicerCache1.xml", "xl/slicers/slicer1.xml"] {
+        bytes = edit_part(&bytes, part, |x| x.replace("Slicer_Region", "Slicer_Custom"));
+    }
+    reopen_bytes(&mut s, &bytes);
+    let original = s.doc().unwrap().wb.active_sheet();
+    assert_eq!(s.doc().unwrap().wb.sheets[original].slicers[0].imported_cache.name, "Slicer_Custom");
+    s.execute("sheet.move", json!({"sheet": original, "to": 0, "copy": true})).unwrap();
+    let bytes = save(&s);
+    reopen_bytes(&mut s, &bytes);
+    let wb = &s.doc().unwrap().wb;
+    let at = wb.sheet_index("Sheet2").unwrap();
+    assert_eq!(wb.sheets[at].slicers[0].imported_cache.name, "Slicer_Custom");
+    assert_eq!(wb.sheets[0].slicers.len(), 1);
+    assert_ne!(wb.sheets[0].slicers[0].imported_cache.name, "Slicer_Custom");
+}
+
 /// The active sheet's first slicer.
 fn first_slicer(s: &Session) -> u32 {
     s.doc().unwrap().wb.active().unwrap().slicers[0].id

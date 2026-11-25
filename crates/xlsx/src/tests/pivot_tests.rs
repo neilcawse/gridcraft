@@ -1446,3 +1446,27 @@ fn slicer_cache_names_preserve_imported_markers_and_respect_tables() {
     assert!(back.sheet(0).unwrap().tables.iter().any(|t| t.name == marker.name));
     assert_eq!(back.sheet(1).unwrap().slicers.len(), 1);
 }
+
+/// A sheet-scoped name spelled like an imported cache's marker is a separate definition: the
+/// cache keeps its name and marker, and both names are written once.
+#[test]
+fn an_imported_cache_keeps_its_marker_beside_a_sheet_scoped_namesake() {
+    let first = write_xlsx(&slicer_workbook()).unwrap();
+    let (mut wb, _) = read_xlsx(&first).unwrap();
+    let local = DefinedName {
+        name: "Slicer_Product".into(),
+        scope: Some(0),
+        formula: "42".into(),
+        comment: "Local".into(),
+        hidden: false,
+        uid: Default::default(),
+    };
+    wb.names.push(local.clone());
+    let saved = write_xlsx(&wb).unwrap();
+    let cache = String::from_utf8(unzip(&saved)["xl/slicerCaches/slicerCache1.xml"].clone()).unwrap();
+    assert!(cache.contains("name=\"Slicer_Product\""), "{cache}");
+    let (back, _) = read_xlsx(&saved).unwrap();
+    assert!(back.names.contains(&local));
+    assert_eq!(back.names.iter().filter(|n| n.name.starts_with("Slicer_Product") && n.scope.is_none()).count(), 1, "{:?}", back.names);
+    assert_eq!(back.sheet(1).unwrap().slicers[0].imported_cache.name, "Slicer_Product");
+}

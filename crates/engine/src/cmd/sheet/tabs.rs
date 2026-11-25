@@ -219,7 +219,11 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
             sh.charts.iter_mut().for_each(|o| o.id = fresh());
             sh.images.iter_mut().for_each(|o| o.id = fresh());
             sh.shapes.iter_mut().for_each(|o| o.id = fresh());
-            sh.slicers.iter_mut().for_each(|o| o.id = fresh());
+            // A copied slicer's cache is new: the imported cache name and marker stay the original's.
+            sh.slicers.iter_mut().for_each(|o| {
+                o.id = fresh();
+                o.imported_cache = Default::default();
+            });
             sh.controls.iter_mut().for_each(|o| o.id = fresh());
             let at = to.min(n);
             // The copy gets its own copies of the sheet's names, referring to the copy.
