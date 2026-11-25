@@ -7492,58 +7492,76 @@ fn validation_areas(s: &Session) -> Vec<String> {
 }
 
 #[test]
-fn whole_row_paste_copies_height_and_undoes_and_redoes_it() {
-    use gridcraft_model::LineInfo;
+fn whole_row_paste_copies_hidden_geometry_and_row_style() {
+    use gridcraft_model::{LineInfo, Style};
 
-    let mut s = s();
-    s.execute("cell.set", json!({"cell": "A3", "input": "source"})).unwrap();
-    let heights = [44., 62.];
-    let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
-    for (row, size) in [(2, heights[0]), (3, heights[1]), (7, 80.), (8, 90.)] {
-        sh.rows.insert(row, LineInfo { size: Some(size), custom: true, ..Default::default() });
-    }
-    let heights_at = |s: &Session, row| {
+    for (range, select_rows) in [("3:4", false), ("3:4", true), ("A3:XFD4", false), ("A3:XFD4", true)] {
+        let mut s = s();
+        s.execute("cell.set", json!({"cell": "A3", "input": "source"})).unwrap();
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let mut bold = Style::default();
+        bold.font.bold = true;
+        let bold = wb.styles.intern(bold);
+        let sh = wb.sheet_mut(0).unwrap();
+        for (row, size, hidden, style) in [(2, 44., true, Some(bold)), (3, 62., true, None), (7, 80., false, None), (8, 90., true, Some(bold))] {
+            sh.rows.insert(row, LineInfo { size: Some(size), custom: true, hidden, style, ..Default::default() });
+        }
+        let read = |s: &Session| {
+            let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+            ([sh.row_height(7), sh.row_height(8)], [sh.style_id(CellRef::new(7, 2)), sh.style_id(CellRef::new(8, 2))])
+        };
+        s.execute("edit.copy", json!({"range": range})).unwrap();
+        if select_rows {
+            s.execute("selection.set", json!({"range": "8:9"})).unwrap();
+        }
+        s.execute("edit.paste", if select_rows { json!({}) } else { json!({"at": "A8"}) }).unwrap();
+        assert_eq!(v(&s, "A8"), Value::from("source"));
+        assert_eq!(read(&s), ([0., 0.], [bold, Default::default()]));
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(read(&s), ([80., 0.], [Default::default(), bold]));
+        s.execute("edit.redo", json!({})).unwrap();
+        assert_eq!(read(&s), ([0., 0.], [bold, Default::default()]));
         let sh = s.doc().unwrap().wb.sheet(0).unwrap();
-        [sh.row_height(row), sh.row_height(row + 1)]
-    };
-    s.execute("edit.copy", json!({"range": "3:4"})).unwrap();
-    s.execute("selection.set", json!({"range": "8:9"})).unwrap();
-    s.execute("edit.paste", json!({})).unwrap();
-    assert_eq!(v(&s, "A8"), Value::from("source"));
-    assert_eq!(heights_at(&s, 7), heights, "the second row has no cells");
-    s.execute("edit.undo", json!({})).unwrap();
-    assert_eq!(heights_at(&s, 7), [80., 90.]);
-    s.execute("edit.redo", json!({})).unwrap();
-    assert_eq!(heights_at(&s, 7), heights);
-    s.execute("selection.set", json!({"range": "11:12"})).unwrap();
-    s.execute("edit.paste", json!({})).unwrap();
-    assert_eq!(heights_at(&s, 10), heights);
-    assert_eq!(heights_at(&s, 2), heights);
+        assert_eq!(sh.row_height(2), 0.);
+        assert_eq!(sh.style_id(CellRef::new(2, 2)), bold);
+    }
 }
 
 #[test]
-fn whole_column_paste_copies_width_and_format_to_another_sheet() {
+fn whole_column_paste_copies_hidden_geometry_and_cell_style_to_another_sheet() {
     use gridcraft_model::{LineInfo, Style};
 
-    let mut s = s();
-    s.execute("home.insertSheet", json!({"name": "Destination"})).unwrap();
-    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
-    let mut bold = Style::default();
-    bold.font.bold = true;
-    let style = wb.styles.intern(bold);
-    let source = wb.sheet_index("Sheet1").unwrap();
-    let target = wb.sheet_index("Destination").unwrap();
-    let sh = wb.sheet_mut(source).unwrap();
-    sh.cols.insert(2, LineInfo { size: Some(123.), style: Some(style), ..Default::default() });
-    sh.cols.insert(3, LineInfo { size: Some(234.), ..Default::default() });
-    s.execute("edit.copy", json!({"sheet": "Sheet1", "range": "C:D"})).unwrap();
-    s.execute("sheet.activate", json!({"sheet": "Destination"})).unwrap();
-    s.execute("edit.paste", json!({"at": "H1"})).unwrap();
-    let wb = &s.doc().unwrap().wb;
-    let sh = wb.sheet(target).unwrap();
-    assert_eq!([sh.col_width(7), sh.col_width(8)], [123., 234.]);
-    assert!(wb.styles.get(sh.style_id(CellRef::parse("H10").unwrap())).font.bold);
-    assert_eq!(wb.sheet(source).unwrap().col_width(2), 123.);
+    for (range, select_cols) in [("C:D", false), ("C:D", true), ("C1:D1048576", false), ("C1:D1048576", true)] {
+        let mut s = s();
+        s.execute("cell.set", json!({"cell": "C1", "input": "source"})).unwrap();
+        s.execute("home.insertSheet", json!({"name": "Destination"})).unwrap();
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let mut bold = Style::default();
+        bold.font.bold = true;
+        let bold = wb.styles.intern(bold);
+        let source = wb.sheet_index("Sheet1").unwrap();
+        let target = wb.sheet_index("Destination").unwrap();
+        let sh = wb.sheet_mut(source).unwrap();
+        sh.set_style(CellRef::new(0, 2), bold);
+        for (col, size) in [(2, 123.), (3, 234.)] {
+            sh.cols.insert(col, LineInfo { size: Some(size), hidden: true, ..Default::default() });
+        }
+        let sh = wb.sheet_mut(target).unwrap();
+        sh.cols.insert(7, LineInfo { size: Some(45.), ..Default::default() });
+        sh.cols.insert(8, LineInfo { size: Some(67.), hidden: true, ..Default::default() });
+        s.execute("edit.copy", json!({"sheet": "Sheet1", "range": range})).unwrap();
+        s.execute("sheet.activate", json!({"sheet": "Destination"})).unwrap();
+        if select_cols {
+            s.execute("selection.set", json!({"range": "H:I"})).unwrap();
+        }
+        s.execute("edit.paste", if select_cols { json!({}) } else { json!({"at": "H1"}) }).unwrap();
+        assert_eq!(v(&s, "H1"), Value::from("source"));
+        let wb = &s.doc().unwrap().wb;
+        let sh = wb.sheet(target).unwrap();
+        assert_eq!(sh.style_id(CellRef::new(0, 7)), bold);
+        assert_eq!([sh.col_width(7), sh.col_width(8)], [0., 0.]);
+        assert_eq!(wb.sheet(source).unwrap().col_width(2), 0.);
+    }
 }
 
 #[test]
@@ -7563,6 +7581,73 @@ fn ordinary_range_paste_keeps_destination_line_sizes() {
     let sh = s.doc().unwrap().wb.sheet(0).unwrap();
     assert_eq!(sh.row_height(7), 80.);
     assert_eq!(sh.col_width(7), 234.);
+}
+
+#[test]
+fn whole_line_paste_resets_custom_geometry_when_source_is_absent() {
+    use gridcraft_model::LineInfo;
+
+    for (is_row, from, to, old_cell) in [(true, "6:6", "8:8", "A8"), (false, "F:F", "H:H", "H1")] {
+        let mut s = s();
+        s.execute("cell.set", json!({"cell": old_cell, "input": "replace me"})).unwrap();
+        let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+        let lines = if is_row { &mut sh.rows } else { &mut sh.cols };
+        lines.insert(7, LineInfo { size: Some(100.), custom: true, ..Default::default() });
+        s.execute("edit.copy", json!({"range": from})).unwrap();
+        s.execute("selection.set", json!({"range": to})).unwrap();
+        s.execute("edit.paste", json!({})).unwrap();
+        assert_eq!(v(&s, old_cell), Value::Empty);
+        let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+        let (actual, default) = if is_row { (sh.row_height(7), sh.default_row_height) } else { (sh.col_width(7), sh.default_col_width) };
+        assert_eq!(actual, default, "{from} over {to}");
+    }
+}
+
+#[test]
+fn whole_line_cut_paste_restores_source_defaults() {
+    use gridcraft_model::LineInfo;
+
+    for (is_row, from, old_cell, new_cell) in [(true, "3:4", "A3", "A8"), (false, "C:D", "C1", "H1")] {
+        for cross_sheet in [false, true] {
+            let mut s = s();
+            s.execute("cell.set", json!({"cell": old_cell, "input": "move me"})).unwrap();
+            if cross_sheet {
+                s.execute("home.insertSheet", json!({"name": "Destination"})).unwrap();
+            }
+            let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+            let lines = if is_row { &mut sh.rows } else { &mut sh.cols };
+            for idx in [2, 3] {
+                lines.insert(idx, LineInfo { size: Some(100.), hidden: true, custom: true, ..Default::default() });
+            }
+            s.execute("edit.cut", json!({"range": from, "sheet": "Sheet1"})).unwrap();
+            s.execute("sheet.activate", json!({"sheet": if cross_sheet { "Destination" } else { "Sheet1" }})).unwrap();
+            s.execute("edit.paste", json!({"at": new_cell})).unwrap();
+            assert_eq!(v(&s, new_cell), Value::from("move me"));
+            let wb = &s.doc().unwrap().wb;
+            let src = wb.sheet(0).unwrap();
+            let dest = wb.active().unwrap();
+            assert_eq!(src.value(CellRef::parse(old_cell).unwrap()), Value::Empty);
+            let size = |sh: &gridcraft_model::Sheet, i| if is_row { sh.row_height(i) } else { sh.col_width(i) };
+            let default = if is_row { src.default_row_height } else { src.default_col_width };
+            assert_eq!([size(src, 2), size(src, 3)], [default, default], "{from}: cross_sheet={cross_sheet}");
+            assert_eq!([size(dest, 7), size(dest, 8)], [0., 0.]);
+        }
+    }
+}
+
+#[test]
+fn paste_special_all_keeps_whole_line_sizes() {
+    use gridcraft_model::LineInfo;
+
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "A3", "input": "source"})).unwrap();
+    let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+    sh.rows.insert(2, LineInfo { hidden: true, ..Default::default() });
+    sh.rows.insert(7, LineInfo { size: Some(80.), custom: true, ..Default::default() });
+    s.execute("edit.copy", json!({"range": "3:3"})).unwrap();
+    s.execute("edit.pasteSpecial", json!({"what": "all", "at": "A8"})).unwrap();
+    assert_eq!(v(&s, "A8"), Value::from("source"));
+    assert_eq!(s.doc().unwrap().wb.active().unwrap().row_height(7), 80.);
 }
 
 /// ft-3ir.10.16: pasting whole columns walked every one of their 1,048,576 rows and added one

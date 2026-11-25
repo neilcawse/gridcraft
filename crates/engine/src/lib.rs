@@ -145,6 +145,8 @@ pub struct Clipboard {
     /// A multi-area copy: the areas as selected (for the marquee). `wb` then holds them slid
     /// together into one block at `range`. Empty for a single-range copy.
     pub areas: Vec<RangeRef>,
+    /// Copy encountered rows hidden by an applied filter, even if only one visible run remained.
+    pub(crate) filtered: bool,
     /// Trust of the source document: pasting content from a file someone else made carries it.
     pub trust: Trust,
 }

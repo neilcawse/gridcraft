@@ -26,6 +26,7 @@ fn copy_impl(s: &mut Session, p: &Json, cut: bool) -> Result<Json> {
             range
         }
     };
+    let mut filtered = false;
     let (wb, range, areas) = if ranges.len() > 1 {
         let areas: Vec<RangeRef> = ranges.iter().map(|r| trim(*r)).collect();
         let (wb, block) = slide_together(&d.wb, sheet, &areas).ok_or_else(multiple)?;
@@ -36,6 +37,7 @@ fn copy_impl(s: &mut Session, p: &Json, cut: bool) -> Result<Json> {
         // like a multi-area selection stacked top to bottom (formulas as values), as in Excel.
         // A cut still takes every row.
         let hidden = if cut { Default::default() } else { super::filtered_rows(sh, range) };
+        filtered = !hidden.is_empty();
         let visible = if hidden.is_empty() { Vec::new() } else { visible_row_runs(range, &hidden) };
         let any_visible = !visible.is_empty();
         let packed = match visible.as_slice() {
@@ -57,7 +59,7 @@ fn copy_impl(s: &mut Session, p: &Json, cut: bool) -> Result<Json> {
     // The HTML rendering is for the host clipboard (UI); it can reach 4 MB, so agents and
     // scripts get it only when they ask for it.
     let html = if p.get("html").and_then(Json::as_bool) == Some(true) { crate::io::range_html(&wb, sheet, range, &text) } else { None };
-    let clip = Clipboard { wb, sheet, range, cut, doc_uid: d.uid, text: text.clone(), areas, selected, trust: d.trust };
+    let clip = Clipboard { wb, sheet, range, cut, doc_uid: d.uid, text: text.clone(), areas, selected, filtered, trust: d.trust };
     s.clipboard = Some(clip);
     let mut result = json!({"range": range.a1(), "text": text});
     if let Some(html) = html {
@@ -266,7 +268,7 @@ pub(super) fn paste(s: &mut Session, p: &Json) -> Result<Json> {
     if s.clipboard.is_none() {
         return Err(EngineError::Other("Nothing to paste.".into()));
     }
-    paste_special(s, &json!({"what": "all", "at": p.get("at").cloned().unwrap_or(Json::Null)}))
+    super::paste_special::paste_internal(s, &json!({"what": "all", "at": p.get("at").cloned().unwrap_or(Json::Null)}), true)
 }
 
 /// Drag and drop (dragging the selection's border): moves `range` so its top-left cell lands on

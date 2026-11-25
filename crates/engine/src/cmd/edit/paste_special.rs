@@ -1,11 +1,21 @@
+use std::collections::BTreeMap;
+
+use gridcraft_model::{LineInfo, Sheet, Workbook};
+
+use crate::cmd::Ctx;
+
 use super::clipboard::What;
 use super::{
     Cell, CellRef, EngineError, Formula, Json, RangeRef, Result, Session, StyleId, Value, bad, bool_param, cell_param_on, drop_linked_books, edit,
     json, shared_links, str_param, target_sheet,
 };
 
-#[allow(clippy::cognitive_complexity)] // The command applies the selected paste mode in one atomic edit.
 pub(super) fn paste_special(s: &mut Session, p: &Json) -> Result<Json> {
+    paste_internal(s, p, false)
+}
+
+#[allow(clippy::cognitive_complexity)] // The command applies the selected paste mode in one atomic edit.
+pub(super) fn paste_internal(s: &mut Session, p: &Json, transfer_lines: bool) -> Result<Json> {
     let Some(clip) = s.clipboard.clone() else { return Err(EngineError::Other("Nothing to paste.".into())) };
     let what = match str_param(p, "what").unwrap_or("all") {
         "all" => What::All,
@@ -81,6 +91,17 @@ pub(super) fn paste_special(s: &mut Session, p: &Json) -> Result<Json> {
     let Some(src_sheet) = src_wb.sheet(clip.sheet) else { return Err(EngineError::Other("The copied sheet no longer exists.".into())) };
     let src_sheet_name = src_sheet.name.clone();
     let shared = if same_doc { vec![] } else { shared_links(&src_wb, &s.doc()?.wb) };
+    // A geometric full-width or full-height source counts regardless of how it was selected.
+    // Packed/filtered, tiled and full-sheet copies are outside the contiguous line case.
+    let line_axis = if transfer_lines && whole && !clip.filtered && !tile {
+        match (src.is_full_rows(), src.is_full_cols()) {
+            (true, false) => Some(PasteLineAxis::Rows),
+            (false, true) => Some(PasteLineAxis::Columns),
+            _ => None,
+        }
+    } else {
+        None
+    };
     edit(s, |cx| {
         // Styles from another workbook must be re-interned.
         let dest_name = cx.wb.sheet(dest_sheet).map(|sh| sh.name.clone()).unwrap_or_default();
@@ -91,6 +112,14 @@ pub(super) fn paste_special(s: &mut Session, p: &Json) -> Result<Json> {
             }
             *style_map.entry(id).or_insert_with(|| wb.styles.intern(src_wb.styles.get(id).clone()))
         };
+        if let Some(axis) = line_axis {
+            let (first, last) = (axis.index(src.start), axis.index(src.end));
+            let dest = axis.index(at);
+            if cut_move && (clip.sheet != dest_sheet || first != dest) {
+                axis.replace(cx, clip.sheet, first, last, None, &mut map_style)?;
+            }
+            axis.replace(cx, dest_sheet, dest, dest + last - first, Some((src_sheet, first)), &mut map_style)?;
+        }
         let mut moved_formulas = std::collections::BTreeMap::new();
         let mut moved_pictures = std::collections::BTreeMap::new();
         if cut_move {
@@ -414,6 +443,103 @@ pub(super) fn paste_special(s: &mut Session, p: &Json) -> Result<Json> {
         s.clipboard = None;
     }
     Ok(json!({"pasted": s.doc()?.selection.a1()}))
+}
+
+#[derive(Clone, Copy)]
+enum PasteLineAxis {
+    Rows,
+    Columns,
+}
+
+impl PasteLineAxis {
+    fn index(self, c: CellRef) -> u32 {
+        match self {
+            Self::Rows => c.row,
+            Self::Columns => c.col,
+        }
+    }
+
+    fn lines(self, sheet: &Sheet) -> &BTreeMap<u32, LineInfo> {
+        match self {
+            Self::Rows => &sheet.rows,
+            Self::Columns => &sheet.cols,
+        }
+    }
+
+    fn replace(
+        self,
+        cx: &mut Ctx,
+        sheet: usize,
+        first: u32,
+        last: u32,
+        source: Option<(&Sheet, u32)>,
+        map_style: &mut impl FnMut(StyleId, &mut Workbook) -> StyleId,
+    ) -> Result<()> {
+        let target = cx.wb.sheets.get(sheet).ok_or(EngineError::NoDocument)?;
+        let lines = self.lines(target);
+        let mut incoming = source
+            .into_iter()
+            .flat_map(|(src, start)| self.lines(src).range(start..=start + last - first).map(move |(&i, info)| (first + i - start, *info)))
+            .peekable();
+        // Take the union of recorded source and destination lines, not the entire axis.
+        let mut existing = lines.range(first..=last).map(|(&i, &info)| (i, info)).peekable();
+        let mut changes = Vec::new();
+        while let Some(i) = existing.peek().map(|x| x.0).into_iter().chain(incoming.peek().map(|x| x.0)).min() {
+            let old = existing.next_if(|x| x.0 == i).map(|x| x.1).unwrap_or_default();
+            let new = incoming.next_if(|x| x.0 == i).map(|x| x.1).unwrap_or_default();
+            // Properties not measured by Range.Copy/Cut remain attached to their original lines.
+            let info = LineInfo {
+                size: new.size,
+                hidden: new.hidden,
+                custom: new.custom,
+                saved_size: new.saved_size,
+                saved_col_flags: new.saved_col_flags,
+                style: match self {
+                    Self::Rows => new.style,
+                    Self::Columns => old.style,
+                },
+                ..old
+            };
+            if info != old || (matches!(self, Self::Rows) && info.style.is_some()) {
+                changes.push((i, old, info));
+            }
+        }
+        changes.retain_mut(|(_, old, info)| {
+            if matches!(self, Self::Rows) {
+                info.style = info.style.map(|id| map_style(id, &mut cx.wb));
+            }
+            *info != *old
+        });
+        if changes.is_empty() {
+            return Ok(());
+        }
+        if let Some(protection) = cx.wb.sheet(sheet).and_then(|sh| sh.protection.as_ref()) {
+            let denied = match self {
+                Self::Rows if !protection.format_rows => Some("Formatting rows"),
+                Self::Columns if !protection.format_columns => Some("Formatting columns"),
+                _ => None,
+            };
+            if let Some(what) = denied {
+                return Err(EngineError::Other(format!("{what} isn't allowed on this protected sheet (Review › Unprotect Sheet).")));
+            }
+        }
+        if matches!(self, Self::Rows) {
+            cx.recalc_all |= changes.iter().any(|(_, old, info)| old.hidden != info.hidden);
+        }
+        let target = cx.sheet_mut(sheet)?;
+        let lines = match self {
+            Self::Rows => &mut target.rows,
+            Self::Columns => &mut target.cols,
+        };
+        for (i, _, info) in changes {
+            if info == LineInfo::default() {
+                lines.remove(&i);
+            } else {
+                lines.insert(i, info);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Whether a structural edit made a formula read other cells than it did, not the same cells
