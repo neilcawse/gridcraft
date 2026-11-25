@@ -5519,6 +5519,33 @@ fn row_fit_after_line_deletion_checks_remapped_drawing_placement() {
     assert!(!sh.drawing_files.contains_key(&r));
 }
 
+/// An absolute object keeps its model cell through an insert or delete, so lines of a different
+/// size moving in above it move what the user sees; its fixed source placement then no longer
+/// matches. Lines of the same size moving past it leave both in place.
+#[test]
+fn structural_edit_drops_fixed_placement_only_when_its_drawn_position_moves() {
+    use gridcraft_model::{AnchorMode, DrawingFile, DrawingPlacement, DrawingRef, LineInfo};
+    for (edit, params, kept) in [
+        ("home.deleteRows", json!({"rows": "3:3"}), true),
+        ("home.deleteRows", json!({"rows": "2:2"}), false),
+        ("home.insertRows", json!({"rows": "3:3"}), false),
+        ("home.insertColumns", json!({"cols": "A:A"}), true),
+    ] {
+        let mut s = s();
+        let r = DrawingRef::Image(add_image(&mut s, "B10", AnchorMode::Absolute));
+        let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+        sh.rows.insert(1, LineInfo { size: Some(50.0), ..LineInfo::default() });
+        let before = sh.anchor_rect(&sh.images[0].anchor);
+        let placement = DrawingPlacement::Absolute { pos: (609_600, (before.y * 9525.0) as i64), ext: (381_000, 381_000) };
+        sh.drawing_files.insert(r, DrawingFile { anchor: sh.images[0].anchor, placement });
+        s.execute(edit, params).unwrap();
+        let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+        let moved = sh.anchor_rect(&sh.images[0].anchor) != before;
+        assert_eq!(moved, !kept, "{edit}: the drawn position");
+        assert_eq!(sh.drawing_files.contains_key(&r), kept, "{edit}: the stored placement");
+    }
+}
+
 #[test]
 fn line_changes_follow_sheet_identity_through_rename_in_the_same_commit() {
     use gridcraft_model::{AnchorMode, DrawingFile, DrawingMarker, DrawingPlacement, DrawingRef, LineInfo};

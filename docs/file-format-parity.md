@@ -79,7 +79,9 @@ row fits after an edit) drop the placement of any object over a changed line, an
 (`absolute`) object after an earlier changed line, because the object the user sees no longer
 matches the stored markers. The span includes both a marker's named cell and the cell reached
 by its signed offset. Disjoint line changes do not affect objects in the gap, and an automatic
-row fit after a structural edit is checked against the remapped placement.
+row fit after a structural edit is checked against the remapped placement. A fixed object keeps
+its cell through an insert or delete, so its placement is also dropped when lines of another
+size moving in above it move the object the user sees.
 
 Imported objects keep their source stacking order and nonvisual IDs and names; a name is kept
 even when its ID is the placeholder `0`, which is renumbered. Bring Forward and Send Backward

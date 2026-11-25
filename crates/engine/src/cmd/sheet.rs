@@ -385,19 +385,28 @@ impl ShiftedDrawingFit {
 /// resize what the user sees without touching object anchors. A stored source placement over a
 /// changed line, or a fixed one after an earlier changed line, no longer describes that object,
 /// so it is dropped with its group transforms and regenerated from the editable geometry.
-/// Structurally shifted sheets have already remapped their markers; their subsequent auto-fit
-/// is checked separately against the remapped grid.
+/// Structurally shifted sheets have already remapped their markers, and their subsequent
+/// auto-fit is checked separately against the remapped grid. A fixed object there keeps its
+/// model cell while lines of another size move in above it, so its placement is dropped when the
+/// box the user sees has moved.
 pub(crate) fn discard_placement_after_line_changes(old: &gridcraft_model::Workbook, wb: &mut gridcraft_model::Workbook, shifted: &[u64]) {
     for si in 0..wb.sheets.len() {
         let Some(after) = wb.sheets.get(si).filter(|sh| !sh.drawing_files.is_empty()) else { continue };
         let uid = after.uid.get();
-        if shifted.contains(&uid) {
-            continue;
-        }
         let Some(before) = old.sheets.get(si).filter(|sh| sh.uid.get() == uid).or_else(|| old.sheets.iter().find(|sh| sh.uid.get() == uid)) else {
             continue;
         };
         if Arc::ptr_eq(before, after) {
+            continue;
+        }
+        if shifted.contains(&uid) {
+            let stale: Vec<_> =
+                after.drawing_files.iter().filter(|(r, file)| file.is_fixed() && drawn_box_moved(before, after, **r)).map(|(&r, _)| r).collect();
+            if !stale.is_empty()
+                && let Some(sh) = wb.sheet_mut(si)
+            {
+                discard_placements(sh, stale);
+            }
             continue;
         }
         let rows = changed_lines(&before.rows, &after.rows, (before.default_row_height, after.default_row_height), MAX_ROWS);
@@ -425,6 +434,16 @@ pub(crate) fn discard_placement_after_line_changes(old: &gridcraft_model::Workbo
         let Some(sh) = wb.sheet_mut(si) else { continue };
         discard_placements(sh, stale);
     }
+}
+
+/// Whether `r`, or any object grouped under it, is drawn at a different box on `after`.
+fn drawn_box_moved(before: &Sheet, after: &Sheet, r: gridcraft_model::DrawingRef) -> bool {
+    let rect = |sh: &Sheet, m| sh.raw_drawing_anchor(m).map(|a| sh.anchor_rect(&a));
+    let members = match r {
+        gridcraft_model::DrawingRef::Group(id) => after.group_contents(id),
+        _ => Vec::new(),
+    };
+    std::iter::once(r).chain(members).any(|m| rect(before, m) != rect(after, m))
 }
 
 /// Whether a formula's 3-D references cover a different set of sheets after a structural edit.
