@@ -45,11 +45,11 @@ fn ext_px(e: Option<&El>) -> (f32, f32) {
     }
 }
 
-fn emu_to_px(v: i64) -> f32 {
-    (v as f64 / EMU_PER_PX).clamp(-1e7, 1e7) as f32
+fn emu_to_px(v: i64) -> f64 {
+    (v as f64 / EMU_PER_PX).clamp(-1e7, 1e7)
 }
 
-fn craft_marker(m: CraftMarker) -> (CellRef, f32, f32) {
+fn craft_marker(m: CraftMarker) -> (CellRef, f64, f64) {
     let col = m.col.min(MAX_COLS - 1);
     let row = m.row.min(MAX_ROWS - 1);
     (CellRef::new(row, col), emu_to_px(m.col_off).max(0.0), emu_to_px(m.row_off).max(0.0))
@@ -60,32 +60,32 @@ fn placement_to_anchor(p: &CraftPlacement, sheet: &Sheet) -> Anchor {
         CraftPlacement::TwoCell { from, to, edit_as } => {
             let (cell, dx, dy) = craft_marker(*from);
             let (to, tdx, tdy) = craft_marker(*to);
-            let x1 = sheet.col_left(cell.col) + dx as f64;
-            let y1 = sheet.row_top(cell.row) + dy as f64;
-            let x2 = sheet.col_left(to.col) + tdx as f64;
-            let y2 = sheet.row_top(to.row) + tdy as f64;
+            let x1 = sheet.col_left(cell.col) + dx;
+            let y1 = sheet.row_top(cell.row) + dy;
+            let x2 = sheet.col_left(to.col) + tdx;
+            let y2 = sheet.row_top(to.row) + tdy;
             let mode = match edit_as.as_deref() {
                 Some("absolute") => AnchorMode::Absolute,
                 Some("oneCell") => AnchorMode::MoveOnly,
                 _ => AnchorMode::MoveAndSize,
             };
-            Anchor { cell, dx, dy, width: (x2 - x1).max(0.0) as f32, height: (y2 - y1).max(0.0) as f32, mode }
+            Anchor { cell, dx: dx as f32, dy: dy as f32, width: (x2 - x1).max(0.0) as f32, height: (y2 - y1).max(0.0) as f32, mode }
         }
         CraftPlacement::OneCell { from, cx, cy } => {
             let (cell, dx, dy) = craft_marker(*from);
-            Anchor { cell, dx, dy, width: emu_to_px(*cx).max(0.0), height: emu_to_px(*cy).max(0.0), mode: AnchorMode::MoveOnly }
+            Anchor { cell, dx: dx as f32, dy: dy as f32, width: emu_to_px(*cx).max(0.0) as f32, height: emu_to_px(*cy).max(0.0) as f32, mode: AnchorMode::MoveOnly }
         }
         CraftPlacement::Absolute { x, y, cx, cy } => {
-            let x = emu_to_px(*x).max(0.0) as f64;
-            let y = emu_to_px(*y).max(0.0) as f64;
+            let x = emu_to_px(*x).max(0.0);
+            let y = emu_to_px(*y).max(0.0);
             let col = sheet.col_at(x);
             let row = sheet.row_at(y);
             Anchor {
                 cell: CellRef::new(row, col),
                 dx: (x - sheet.col_left(col)).max(0.0) as f32,
                 dy: (y - sheet.row_top(row)).max(0.0) as f32,
-                width: emu_to_px(*cx).max(0.0),
-                height: emu_to_px(*cy).max(0.0),
+                width: emu_to_px(*cx).max(0.0) as f32,
+                height: emu_to_px(*cy).max(0.0) as f32,
                 mode: AnchorMode::Absolute,
             }
         }
@@ -885,6 +885,18 @@ fn holds_written_text(tb: &El, src: &str) -> bool {
     crate::xml::parse(written.as_bytes()).is_ok_and(|w| body_text(&w) == body_text(tb))
 }
 
+/// Carry an offset at a cell edge, allowing for the precision of the model's f32 extents.
+fn marker_edge(line: u32, offset: f64, span: f64, limit: u32, error: f64) -> (u32, f64) {
+    let tolerance = 0.5 / EMU_PER_PX + error * f64::from(f32::EPSILON) / 2.0;
+    if span > 0.0 && line + 1 < limit && (offset - span).abs() <= tolerance {
+        (line + 1, 0.0)
+    } else if offset.abs() <= tolerance {
+        (line, 0.0)
+    } else {
+        (line, offset)
+    }
+}
+
 /// The opening `<xdr:twoCellAnchor>` for a model anchor, carrying Excel's `editAs` when the mode
 /// is not the default: omitted for "Move and size with cells", `editAs="oneCell"` for "Move but
 /// don't size", `editAs="absolute"` for "Don't move or size". (Excel writes pictures this way;
@@ -896,10 +908,18 @@ fn anchor_open(sheet: &Sheet, a: &Anchor) -> (String, &'static str) {
     let y1 = sheet.row_top(a.cell.row) + a.dy as f64;
     let x2 = x1 + a.width.max(0.0) as f64;
     let y2 = y1 + a.height.max(0.0) as f64;
-    let tc = sheet.col_at(x2);
-    let tr = sheet.row_at(y2);
-    let tdx = x2 - sheet.col_left(tc);
-    let tdy = y2 - sheet.row_top(tr);
+    let (mut fc, mut fr) = (a.cell.col, a.cell.row);
+    let (mut fdx, mut fdy) = (f64::from(a.dx), f64::from(a.dy));
+    let mut tc = sheet.col_at(x2);
+    let mut tr = sheet.row_at(y2);
+    let mut tdx = x2 - sheet.col_left(tc);
+    let mut tdy = y2 - sheet.row_top(tr);
+    if sheet.geometry != gridcraft_model::Geometry::Legacy {
+        (tc, tdx) = marker_edge(tc, tdx, f64::from(sheet.col_width(tc)), MAX_COLS, fdx.abs() + f64::from(a.width.abs()));
+        (tr, tdy) = marker_edge(tr, tdy, f64::from(sheet.row_height(tr)), MAX_ROWS, fdy.abs() + f64::from(a.height.abs()));
+        (fc, fdx) = marker_edge(fc, fdx, f64::from(sheet.col_width(fc)), MAX_COLS, fdx.abs());
+        (fr, fdy) = marker_edge(fr, fdy, f64::from(sheet.row_height(fr)), MAX_ROWS, fdy.abs());
+    }
     let edit = match a.mode {
         AnchorMode::MoveAndSize => "",
         AnchorMode::MoveOnly => " editAs=\"oneCell\"",
@@ -907,10 +927,10 @@ fn anchor_open(sheet: &Sheet, a: &Anchor) -> (String, &'static str) {
     };
     let open = format!(
         "<xdr:twoCellAnchor{edit}><xdr:from><xdr:col>{}</xdr:col><xdr:colOff>{}</xdr:colOff><xdr:row>{}</xdr:row><xdr:rowOff>{}</xdr:rowOff></xdr:from><xdr:to><xdr:col>{tc}</xdr:col><xdr:colOff>{}</xdr:colOff><xdr:row>{tr}</xdr:row><xdr:rowOff>{}</xdr:rowOff></xdr:to>",
-        a.cell.col,
-        px(a.dx as f64),
-        a.cell.row,
-        px(a.dy as f64),
+        fc,
+        px(fdx),
+        fr,
+        px(fdy),
         px(tdx),
         px(tdy)
     );
