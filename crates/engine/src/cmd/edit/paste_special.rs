@@ -95,8 +95,8 @@ pub(super) fn paste_internal(s: &mut Session, p: &Json, transfer_lines: bool) ->
     // Packed/filtered, tiled and full-sheet copies are outside the contiguous line case.
     let line_axis = if transfer_lines && whole && !clip.filtered && !tile {
         match (src.is_full_rows(), src.is_full_cols()) {
-            (true, false) => Some(PasteLineAxis::Rows),
-            (false, true) => Some(PasteLineAxis::Columns),
+            (true, false) => Some(LineAxis::Rows),
+            (false, true) => Some(LineAxis::Columns),
             _ => None,
         }
     } else {
@@ -457,28 +457,31 @@ pub(super) fn paste_internal(s: &mut Session, p: &Json, transfer_lines: bool) ->
     Ok(json!({"pasted": s.doc()?.selection.a1()}))
 }
 
+/// The axis of a whole-line transfer: Paste All of entire rows or columns, and AutoFill of them.
 #[derive(Clone, Copy)]
-enum PasteLineAxis {
+pub(super) enum LineAxis {
     Rows,
     Columns,
 }
 
-impl PasteLineAxis {
-    fn index(self, c: CellRef) -> u32 {
+impl LineAxis {
+    pub(super) fn index(self, c: CellRef) -> u32 {
         match self {
             Self::Rows => c.row,
             Self::Columns => c.col,
         }
     }
 
-    fn lines(self, sheet: &Sheet) -> &BTreeMap<u32, LineInfo> {
+    pub(super) fn lines(self, sheet: &Sheet) -> &BTreeMap<u32, LineInfo> {
         match self {
             Self::Rows => &sheet.rows,
             Self::Columns => &sheet.cols,
         }
     }
 
-    fn replace(
+    /// Replaces the line formatting of `first..=last` on `sheet` with `incoming` (ascending
+    /// `(index, line)` pairs inside that span; a missing index resets to the default line).
+    pub(super) fn replace(
         self,
         cx: &mut Ctx,
         sheet: usize,
@@ -496,7 +499,7 @@ impl PasteLineAxis {
         while let Some(i) = existing.peek().map(|x| x.0).into_iter().chain(incoming.peek().map(|x| x.0)).min() {
             let old = existing.next_if(|x| x.0 == i).map(|x| x.1).unwrap_or_default();
             let new = incoming.next_if(|x| x.0 == i).map(|x| x.1).unwrap_or_default();
-            // Properties not measured by Range.Copy/Cut remain attached to their original lines.
+            // Properties not measured by Range.Copy/Cut/AutoFill remain attached to their original lines.
             let info = LineInfo {
                 size: new.size,
                 hidden: new.hidden,

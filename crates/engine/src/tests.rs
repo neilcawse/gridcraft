@@ -7875,6 +7875,128 @@ fn whole_row_paste_needs_row_formatting_on_a_protected_sheet() {
     }
 }
 
+/// The `x25-autofill-whole-rows` workbook: rows 3, 4 and 8 carry a custom height and a row style
+/// (red bold, blue bold, green) that their cells share; column A counts and column B doubles it.
+fn whole_row_autofill_fixture(s: &mut Session) -> [gridcraft_model::StyleId; 3] {
+    use gridcraft_model::{Color, Fill, LineInfo, Style};
+
+    for (row, n) in [(3, 1), (4, 2), (8, 6)] {
+        s.execute("cell.set", json!({"cell": format!("A{row}"), "input": n.to_string()})).unwrap();
+        s.execute("cell.set", json!({"cell": format!("B{row}"), "input": format!("=A{row}*2")})).unwrap();
+    }
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let mut style = |rgb, bold| {
+        let mut st = Style { fill: Fill::solid(Color::Rgb(rgb)), ..Default::default() };
+        st.font.bold = bold;
+        wb.styles.intern(st)
+    };
+    let styles = [style(0xFF0000, true), style(0x0000FF, true), style(0x00B050, false)];
+    let sh = wb.sheet_mut(0).unwrap();
+    for (row, points, style) in [(2, 30., styles[0]), (3, 38., styles[1]), (7, 22., styles[2])] {
+        sh.rows.insert(row, LineInfo { size: Some(points * 4. / 3.), custom: true, style: Some(style), ..Default::default() });
+        for col in 0..2 {
+            sh.set_style(CellRef::new(row, col), style);
+        }
+    }
+    styles
+}
+
+/// X31, measured in Excel for Mac 16.115.2 (`Range("3:4").AutoFill Range("3:9")`, default fill;
+/// case `x25-autofill-whole-rows`): rows 5 to 9 take the heights 30, 38, 30, 38, 30 pt and the row
+/// styles of rows 3:4 in turn, so row 8's green is replaced; the cells continue the series and
+/// shift the formula. Undo and redo carry the row formatting with the cells.
+#[test]
+fn whole_row_autofill_repeats_source_row_formatting_and_undoes_it() {
+    let mut s = s();
+    let [red, blue, green] = whole_row_autofill_fixture(&mut s);
+    let before = s.doc().unwrap().wb.sheet(0).unwrap().rows.clone();
+    let filled = |s: &mut Session| {
+        for a1 in 5..=9 {
+            assert_eq!(s.execute("cell.get", json!({"cell": format!("B{a1}")})).unwrap()["formula"], format!("=A{a1}*2"));
+            assert_eq!(v(s, &format!("A{a1}")), Value::Number(f64::from(a1) - 2.));
+            assert_eq!(v(s, &format!("B{a1}")), Value::Number(2. * (f64::from(a1) - 2.)));
+        }
+        let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+        for (row, (points, style)) in (4..=8).zip([(30., red), (38., blue), (30., red), (38., blue), (30., red)]) {
+            let line = sh.rows.get(&row).copied().unwrap_or_default();
+            assert_eq!((line.size, line.custom, line.style, line.hidden), (Some(points * 4. / 3.), true, Some(style), false), "row {}", row + 1);
+            // A and B were written by the fill; C has no cell and inherits the row style.
+            for col in 0..3 {
+                assert_eq!(sh.style_id(CellRef::new(row, col)), style, "row {} col {col}", row + 1);
+            }
+        }
+        let others = |rows: &std::collections::BTreeMap<u32, gridcraft_model::LineInfo>| {
+            rows.iter().filter(|(r, _)| !(4..=8).contains(*r)).map(|(r, l)| (*r, *l)).collect::<Vec<_>>()
+        };
+        assert_eq!(others(&sh.rows), others(&before), "rows 2, 3, 4 and 10 keep their formatting");
+    };
+    s.execute("edit.autoFill", json!({"source": "3:4", "target": "3:9"})).unwrap();
+    filled(&mut s);
+    s.execute("edit.undo", json!({})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert_eq!(sh.rows, before);
+    assert_eq!(sh.style_id(CellRef::parse("C8").unwrap()), green);
+    assert_eq!(v(&s, "A5"), Value::Empty);
+    assert_eq!(v(&s, "A8"), Value::Number(6.));
+    s.execute("edit.redo", json!({})).unwrap();
+    filled(&mut s);
+}
+
+/// AutoFill of a cell range in the same rows writes cells only: the rows keep their height and style.
+#[test]
+fn partial_row_autofill_keeps_destination_row_formatting() {
+    let mut s = s();
+    let [red, blue, green] = whole_row_autofill_fixture(&mut s);
+    let before = s.doc().unwrap().wb.sheet(0).unwrap().rows.clone();
+    s.execute("edit.autoFill", json!({"source": "A3:B4", "target": "A3:B9"})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert_eq!(sh.rows, before);
+    assert_eq!([sh.style_id(CellRef::parse("A5").unwrap()), sh.style_id(CellRef::parse("B8").unwrap())], [red, blue]);
+    assert_eq!([sh.style_id(CellRef::parse("C5").unwrap()), sh.style_id(CellRef::parse("C8").unwrap())], [Default::default(), green]);
+    assert_eq!(v(&s, "A9"), Value::Number(7.));
+}
+
+/// Not measured: upward fills line the rows up as the cell fill does (the row above the source
+/// takes its last row), and Fill Without Formatting leaves the rows alone.
+#[test]
+fn whole_row_autofill_upward_and_without_formatting() {
+    let mut s = s();
+    let [red, blue, _] = whole_row_autofill_fixture(&mut s);
+    let before = s.doc().unwrap().wb.sheet(0).unwrap().rows.clone();
+    s.execute("edit.autoFill", json!({"source": "3:4", "target": "3:9", "mode": "values"})).unwrap();
+    assert_eq!(s.doc().unwrap().wb.sheet(0).unwrap().rows, before);
+    s.execute("edit.autoFill", json!({"source": "3:4", "target": "1:4"})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert_eq!([0, 1].map(|r| sh.rows.get(&r).and_then(|l| l.style)), [Some(red), Some(blue)]);
+    assert_eq!([0, 1].map(|r| sh.style_id(CellRef::new(r, 0))), [red, blue]);
+    assert_eq!([sh.row_height(0), sh.row_height(1)], [40., 38. * 4. / 3.]);
+}
+
+/// Not measured: whole columns follow the rows by symmetry (width and column style repeat).
+#[test]
+fn whole_column_autofill_repeats_source_column_formatting() {
+    use gridcraft_model::{LineInfo, Style};
+
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "B1", "input": "1"})).unwrap();
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let mut bold = Style::default();
+    bold.font.bold = true;
+    let bold = wb.styles.intern(bold);
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.cols.insert(1, LineInfo { size: Some(123.), style: Some(bold), ..Default::default() });
+    sh.cols.insert(3, LineInfo { size: Some(45.), ..Default::default() });
+    s.execute("edit.autoFill", json!({"source": "B:C", "target": "B:E"})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert_eq!([sh.col_width(3), sh.col_width(4)], [123., sh.default_col_width]);
+    assert_eq!([sh.cols.get(&3).and_then(|l| l.style), sh.cols.get(&4).and_then(|l| l.style)], [Some(bold), None]);
+    assert_eq!(sh.style_id(CellRef::parse("D10").unwrap()), bold);
+    s.execute("edit.undo", json!({})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert_eq!(sh.col_width(3), 45.);
+    assert_eq!(sh.cols.get(&3).and_then(|l| l.style), None);
+}
+
 /// ft-3ir.10.16: pasting whole columns walked every one of their 1,048,576 rows and added one
 /// single-cell validation rule per pasted cell, re-cutting every rule each time (the fuzz run
 /// aborted on a 34 GB allocation). Validation now pastes as ranges and only cells that hold

@@ -79,3 +79,45 @@ or `ShowDetail` values, nor did they save XML. Outline/collapse, thickness and b
 on their existing lines. Paste Special (including All), the system clipboard, drag-and-drop,
 Insert Copied Cells, filtered and packed copies, and tiled pastes remain unmeasured and retain
 their previous behavior.
+
+## X31 — Whole-row AutoFill carries row formatting
+
+Measured in Excel for Mac 16.115.2 by the synthetic action probe `x25-autofill-whole-rows`
+(`Range("3:4").AutoFill Range("3:9")` with the default fill type, not a fill-handle drag). Sheet
+`S` stores rows 3, 4 and 8 with a row style, `customFormat` and a custom height: red bold 30 pt,
+blue bold 38 pt and green 22 pt. Column A holds 1, 2 and 6 and column B holds `=A<n>*2`.
+
+| Readback | Rows 5–9 after the fill |
+|---|---|
+| Height (`RowHeight`, pt) | 30, 38, 30, 38, 30: the source rows in turn |
+| Row style, fill, bold | GC Red Bold, GC Blue Bold, GC Red Bold, GC Blue Bold, GC Red Bold; row 8 loses its green |
+| Cells A and B | A continues the series 3–7 (row 8's stored 6 is replaced by the series value, also 6); B holds `=A5*2` … `=A9*2` with values 6–14; each cell takes its source row's style |
+| Rows 2, 3, 4, 10 | Unchanged |
+| `Hidden`, `OutlineLevel`, `ShowDetail` | Not returned by Excel (unmeasured) |
+
+The probe did not read UsedRange or Last Cell for this case, did not save the workbook (so no
+`customHeight`/`customFormat` XML), and sampled only columns A and B.
+
+GridCraft `edit.autoFill` now gives each line the target adds to an entire-row source the height,
+custom-height flag, saved size and row style of the source row it lines up with, counting in
+source-sized steps from the source's first row; cells fill as before. It reuses X25's
+`LineAxis::replace`, so line and cell edits share one undo entry and outline/collapse, thickness
+and bare-row markers stay on their lines.
+
+Inferred, not measured:
+
+- **Hidden** transfers with the other line fields, as in X25 paste; this probe recovered no hidden state.
+- **A source row with no record** resets the target row to the default height and no row style,
+  as in X25 paste; both measured source rows had a record.
+- **Protected sheets** need row-formatting (or column-formatting) permission, as in X25 paste.
+- **Upward fills** (target above the source) line rows up as the cell fill does: the row just
+  above the source takes its last row.
+- **Fill modes other than the default.** Copy, Formats, Series, Alternate, Extend and the date
+  modes transfer row formatting with the cells; Fill Without Formatting (`values`) leaves the
+  lines unchanged, since it keeps the target cells' formats.
+- **Whole columns** are handled symmetrically: width, saved width flags, hidden state and
+  column style repeat across the target. Whole-column AutoFill was not measured. Its reach is
+  limited, as before, by the 5,000,000-cell fill cap (at most four 1,048,576-row columns).
+
+Partial-range AutoFill (any source that is not entire rows or entire columns) and Fill
+Down/Right/Up/Left keep their previous behaviour and leave line formatting alone.
