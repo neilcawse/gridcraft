@@ -118,3 +118,30 @@ fn cell_width_uses_imported_base_until_a_width_is_set() {
     session.execute("formulas.calculateNow", json!({})).unwrap();
     assert_eq!(v(&session, "A1"), Value::Number(10.0));
 }
+
+#[test]
+fn cell_prefix_distinguishes_typed_text_from_spills_and_undone_formulas() -> Result<(), Box<dyn std::error::Error>> {
+    use gridcraft_core::CellError;
+
+    let mut session = s();
+    session.execute("cell.set", json!({"cell": "B2", "input": "typed"}))?;
+    session.execute("cell.set", json!({"cell": "D1", "input": "=CELL(\"prefix\",B2)"}))?;
+    session.execute("cell.set", json!({"cell": "B1", "input": "={\"top\";\"bottom\"}"}))?;
+    assert_eq!(v(&session, "B1"), Value::Error(CellError::Spill));
+    assert_eq!(v(&session, "D1"), Value::text("'"));
+
+    session.execute("edit.clearContents", json!({"range": "B2"}))?;
+    assert_eq!(v(&session, "B2"), Value::text("bottom"));
+    assert_eq!(v(&session, "D1"), Value::text(""));
+    session.execute("edit.undo", json!({}))?;
+    assert_eq!(v(&session, "B2"), Value::text("typed"));
+    assert_eq!(v(&session, "D1"), Value::text("'"));
+
+    session.execute("cell.set", json!({"cell": "B2", "input": "=\"result\""}))?;
+    assert_eq!(v(&session, "B2"), Value::text("result"));
+    assert_eq!(v(&session, "D1"), Value::text(""));
+    session.execute("edit.undo", json!({}))?;
+    assert_eq!(v(&session, "B2"), Value::text("typed"));
+    assert_eq!(v(&session, "D1"), Value::text("'"));
+    Ok(())
+}
