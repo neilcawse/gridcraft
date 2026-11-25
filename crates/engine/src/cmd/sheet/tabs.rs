@@ -52,6 +52,9 @@ pub(super) fn delete_sheet(s: &mut Session, p: &Json) -> Result<Json> {
     let order: Vec<String> = d.wb.sheets.iter().map(|s| s.name.clone()).collect();
     let d = s.doc_mut()?;
     edit_doc(d, |cx| {
+        // Rewrite chart and control references while a deleted drop-down source still resolves
+        // to its old length. References to the deleted sheet become #REF!, like formulas.
+        crate::cmd::edit::rewrite_cell_links(&mut cx.wb, |_, e| gridcraft_formula::adjust::delete_sheet(e, &name, &order));
         cx.wb.sheets.remove(i);
         let new_order: Vec<String> = cx.wb.sheets.iter().map(|s| s.name.clone()).collect();
         for si in 0..cx.wb.sheets.len() {
@@ -81,8 +84,6 @@ pub(super) fn delete_sheet(s: &mut Session, p: &Json) -> Result<Json> {
             }
         }
         crate::cmd::edit::rewrite_python_refs(&mut cx.wb, &|_, e| gridcraft_formula::adjust::delete_sheet(e, &name, &order))?;
-        // Chart series into the deleted sheet become #REF!, like formulas.
-        crate::cmd::edit::rewrite_cell_links(&mut cx.wb, |_, e| gridcraft_formula::adjust::delete_sheet(e, &name, &order));
         cx.wb.names.retain(|n| n.scope != Some(i));
         for n in cx.wb.names.iter_mut() {
             if let Some(sc) = n.scope.as_mut()

@@ -165,7 +165,7 @@ fn structural_edits_clamp_scroll_offsets_only_of_shortened_lists() {
     wb.sheets.push(std::sync::Arc::new(gridcraft_model::Sheet::new("Lists")));
     let offset = |n| DropDisplay { scroll_offset: Some(n), scroll_width: Some(35), ..Default::default() };
     let sh = wb.sheet_mut(0).unwrap();
-    for (id, list_range, at) in [(1, "$A$1:$A$9", 8), (2, "$C$1:$C$3", 7), (3, "Lists!$A$1:$A$9", 8)] {
+    for (id, list_range, at) in [(1, "$A$1:$A$9", 8), (2, "$C$1:$C$3", 7), (3, "Lists!$A$1:$A$9", 8), (4, "=Missing!$A$1:$A$9", 6)] {
         sh.controls.push(FormControl {
             id,
             kind: ControlKind::Drop,
@@ -183,6 +183,8 @@ fn structural_edits_clamp_scroll_offsets_only_of_shortened_lists() {
     // A row inserted above every list, and a rename: no list is shorter, so nothing is clamped
     // (control 2 was saved past the end of its three items and stays so).
     s.execute("home.insertRows", json!({"rows": "1:1", "sheet": 0})).unwrap();
+    assert_eq!(control(&s, 4).list_range.as_deref(), Some("Missing!$A$1:$A$9"));
+    assert_eq!(offsets(&s, 4), (Some(6), Some(6), Some(35)));
     s.execute("sheet.rename", json!({"sheet": 1, "name": "Other"})).unwrap();
     assert_eq!(
         (offsets(&s, 1), offsets(&s, 2), offsets(&s, 3)),
@@ -198,6 +200,7 @@ fn structural_edits_clamp_scroll_offsets_only_of_shortened_lists() {
     // Saved and read back, the clamped offsets are what the file holds.
     reopen(&mut s);
     assert_eq!((offsets(&s, 1), offsets(&s, 3)), ((Some(4), Some(4), Some(35)), (Some(0), Some(0), Some(35))));
+    assert_eq!(offsets(&s, 4), (Some(6), Some(6), Some(35)));
 }
 
 #[test]
