@@ -225,6 +225,11 @@ fn external_names_resolve_on_sheets_with_literal_exclamation_marks() {
         t.set(at, text);
         assert_eq!(t.get(at), Value::Number(value), "{text}");
     }
+    // An index too large for any link names no linked workbook, like `[2]` here.
+    for (at, text) in [("F2", "=[2]!Rates"), ("G2", "=[18446744073709551616]!Rates")] {
+        t.set(at, text);
+        assert_eq!(t.get(at), Value::Error(CellError::Ref), "{text}");
+    }
 }
 
 #[test]

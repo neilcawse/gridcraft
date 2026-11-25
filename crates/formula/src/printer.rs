@@ -153,15 +153,6 @@ pub fn split_qualified_name(n: &str) -> Option<(&str, &str)> {
     if let Some((_, _, name)) = crate::ast::split_external_name(n) {
         return Some((&n[..n.len() - name.len() - 1], name));
     }
-    // The lexer also accepts all-digit indexes too large for usize. A quoted DDE item
-    // on such an unavailable link must still print without treating its `!` as a delimiter.
-    if let Some((book, item)) = n.split_once('!')
-        && crate::lexer::book_prefix_only(book)
-        && item.starts_with('\'')
-        && item.ends_with('\'')
-    {
-        return Some((book, item));
-    }
     let mut depth = 0usize;
     let mut escaped = false;
     let mut at = None;

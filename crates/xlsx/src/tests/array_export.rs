@@ -537,8 +537,9 @@ fn legacy_external_range_names_intersect_only_in_value_positions() {
 
 #[test]
 fn unreadable_external_name_ignores_same_named_host_range() {
-    let body = r#"<sheetData><row r="2"><c r="B2"><f>[1]!Rates</f><v>17</v></c><c r="C2"><f>Rates</f><v>0</v></c></row></sheetData>"#;
-    // The link contains a definition but no saved sheet data. The host range is unrelated.
+    let body = r#"<sheetData><row r="2"><c r="B2"><f>[1]!Rates</f><v>17</v></c><c r="C2"><f>Rates</f><v>0</v></c><c r="D2"><f>[18446744073709551616]!Rates</f><v>0</v></c></row></sheetData>"#;
+    // The link contains a definition but no saved sheet data. The host range is unrelated, also
+    // to an index too large for any link.
     let link = r#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><externalBook><sheetNames><sheetName val="Remote"/></sheetNames><definedNames><definedName name="Rates" refersTo="Remote!$A$1:$A$3"/></definedNames></externalBook></externalLink>"#;
     let bytes = super::minimal(
         body,
@@ -552,6 +553,7 @@ fn unreadable_external_name_ignores_same_named_host_range() {
     assert_eq!(linked.formula.as_ref().unwrap().text, "[1]!Rates");
     assert_eq!(linked.value, Value::Number(17.0));
     assert_eq!(sheet.cell(at("C2")).unwrap().formula.as_ref().unwrap().text, "@Rates");
+    assert_eq!(sheet.cell(at("D2")).unwrap().formula.as_ref().unwrap().text, "[18446744073709551616]!Rates");
 }
 
 /// How `export` saved a formula, as comparable text.
