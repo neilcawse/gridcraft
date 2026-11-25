@@ -8310,6 +8310,92 @@ fn whole_row_autofill_refusal_leaves_cells_lines_and_history_unchanged() {
     assert_line_edit_refused(&mut s, "edit.autoFill", json!({"source": "3:4", "target": "3:9"}), "trying to change is on a protected sheet");
 }
 
+/// A blank cell takes its row's style before its column's: a row style filled over a row
+/// relocks the blank cells of an unlocked column unless a filled cell keeps them unlocked.
+#[test]
+fn whole_row_autofill_protection_follows_row_over_column_precedence() {
+    use gridcraft_model::{LineInfo, SheetProtection, Style};
+
+    for (column_unlocked, source_cell_unlocked, allowed) in [(true, false, false), (true, true, true), (false, false, true)] {
+        let mut s = s();
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let mut unlocked = Style::default();
+        unlocked.protection.locked = false;
+        let unlocked = wb.styles.intern(unlocked);
+        let mut bold = Style::default();
+        bold.font.bold = true;
+        let bold = wb.styles.intern(bold);
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.rows.insert(2, LineInfo { style: Some(bold), ..Default::default() });
+        if column_unlocked {
+            sh.cols.insert(2, LineInfo { style: Some(unlocked), ..Default::default() });
+        }
+        if source_cell_unlocked {
+            sh.set_style(CellRef::parse("C3").unwrap(), unlocked);
+        }
+        sh.protection = Some(SheetProtection { format_rows: true, ..Default::default() });
+        let params = json!({"source": "3:3", "target": "3:4"});
+        if allowed {
+            s.execute("edit.autoFill", params).unwrap();
+            let sh = s.doc().unwrap().wb.active().unwrap();
+            assert_eq!(sh.rows[&3].style, Some(bold));
+            let c4 = sh.style_id(CellRef::parse("C4").unwrap());
+            assert_eq!(c4, if column_unlocked { unlocked } else { bold });
+        } else {
+            assert_line_edit_refused(&mut s, "edit.autoFill", params, "can't change cell protection");
+        }
+    }
+}
+
+/// Whole-column AutoFill checks the inherited flags of a million blank cells without visiting them.
+#[test]
+fn whole_column_autofill_refuses_inherited_protection_changes() {
+    use gridcraft_model::{LineInfo, SheetProtection, Style};
+
+    let mut s = s();
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let mut hidden = Style::default();
+    hidden.protection.hidden = true;
+    let hidden = wb.styles.intern(hidden);
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.cols.insert(1, LineInfo { size: Some(90.), style: Some(hidden), ..Default::default() });
+    sh.protection = Some(SheetProtection { format_columns: true, ..Default::default() });
+    assert_line_edit_refused(&mut s, "edit.autoFill", json!({"source": "B:B", "target": "B:C"}), "can't change cell protection");
+}
+
+/// A cut to another sheet resets its source lines: that reset alone may not change the source
+/// sheet's inherited protection flags.
+#[test]
+fn cross_sheet_whole_row_cut_refuses_a_source_reset_that_changes_protection() {
+    use gridcraft_model::{LineInfo, SheetProtection, Style};
+
+    for protect_source in [true, false] {
+        let mut s = s();
+        s.execute("home.insertSheet", json!({"name": "Destination"})).unwrap();
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let mut hidden = Style::default();
+        hidden.protection.hidden = true;
+        let hidden = wb.styles.intern(hidden);
+        let source = wb.sheet_index("Sheet1").unwrap();
+        let sh = wb.sheet_mut(source).unwrap();
+        sh.rows.insert(2, LineInfo { size: Some(40.), custom: true, style: Some(hidden), ..Default::default() });
+        if protect_source {
+            sh.protection = Some(SheetProtection { format_rows: true, ..Default::default() });
+        }
+        s.execute("edit.cut", json!({"sheet": "Sheet1", "range": "3:3"})).unwrap();
+        s.execute("sheet.activate", json!({"sheet": "Destination"})).unwrap();
+        if protect_source {
+            assert_line_edit_refused(&mut s, "edit.paste", json!({"at": "A5"}), "can't change cell protection");
+        } else {
+            s.execute("edit.paste", json!({"at": "A5"})).unwrap();
+            let wb = &s.doc().unwrap().wb;
+            assert!(!wb.sheet(source).unwrap().rows.contains_key(&2));
+            let dest = wb.sheet(wb.sheet_index("Destination").unwrap()).unwrap();
+            assert_eq!((dest.row_height(4), dest.rows[&4].style), (40., Some(hidden)));
+        }
+    }
+}
+
 /// ft-3ir.10.16: pasting whole columns walked every one of their 1,048,576 rows and added one
 /// single-cell validation rule per pasted cell, re-cutting every rule each time (the fuzz run
 /// aborted on a 34 GB allocation). Validation now pastes as ranges and only cells that hold
