@@ -254,6 +254,40 @@ fn host_save_sends_save_as_for_untitled_and_in_place_save_for_saved_xlsx() {
 }
 
 #[test]
+fn host_save_shows_a_table_rename_in_the_info_bar() -> Result<(), Box<dyn std::error::Error>> {
+    use gridcraft_ui_egui::{Notice, NoticeKind};
+    use serde_json::json;
+
+    let saves = Arc::new(Mutex::new(Vec::new()));
+    let capture = saves.clone();
+    let mut h = harness(Services {
+        host_save: Some(Box::new(move |_, bytes, _| {
+            capture.lock().map_err(|e| e.to_string())?.push(bytes.to_vec());
+            Ok(())
+        })),
+        ..Default::default()
+    });
+    let app = h.state_mut();
+    app.run("range.setValues", json!({"range": "A1:A2", "values": [["Header"], [1]]}))?;
+    app.run("insert.table", json!({"range": "A1:A2", "name": "DataRows"}))?;
+    app.notice = Some(Notice { text: "Another notice".into(), kind: NoticeKind::Info, action: None });
+    assert!(app.save_as_xlsx(true));
+    assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some("Another notice"));
+
+    let doc = app.session.active_mut().ok_or("missing workbook")?;
+    Arc::make_mut(&mut doc.wb).sheet_mut(0).ok_or("missing sheet")?.tables[0].name = "Data?Rows".into();
+    assert!(app.save_as_xlsx(false));
+    let notice = app.notice.as_ref().ok_or("missing save notice")?;
+    assert_eq!(notice.kind, NoticeKind::Info);
+    assert_eq!(notice.text, r#"Table "Data?Rows" on sheet "Sheet1" was renamed to "Data_Rows"."#);
+    let got = saves.lock().map_err(|e| e.to_string())?;
+    assert_eq!(got.len(), 2);
+    let (wb, _) = gridcraft_engine::io::open_bytes("Book.xlsx", &got[1])?;
+    assert_eq!(wb.table("Data_Rows"), Some((0, 0)));
+    Ok(())
+}
+
+#[test]
 fn host_save_saves_opened_xlsx_in_place_and_save_as_sends_save_as_flag() {
     let mut seed = Session::new();
     seed.new_workbook();

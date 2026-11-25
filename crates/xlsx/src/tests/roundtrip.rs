@@ -1656,7 +1656,14 @@ fn table_save_repairs_the_workbook_namespace() {
     assert_eq!(names(1), ["SALES_3"]);
     let g1 = back.sheet(0).unwrap().cell(at("G1")).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone());
     assert_eq!(g1.as_deref(), Some("SUM(sales_2[V])+SUM(Kept[V])"));
-    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert_eq!(
+        report.warnings,
+        [
+            r#"Table "sales" on sheet "Sheet1" was renamed to "sales_2"."#,
+            r#"Table "a b" on sheet "Sheet1" was renamed to "a_b"."#,
+            r#"Table "SALES" on sheet "Two" was renamed to "SALES_3"."#,
+        ]
+    );
     assert_eq!(wb.sheet(0).unwrap().tables[0].name, "sales", "the workbook saved is left as it is");
 }
 

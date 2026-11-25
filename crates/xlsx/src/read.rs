@@ -633,12 +633,11 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
         .child("definedNames")
         .into_iter()
         .flat_map(|dn| dn.kids("definedName"))
-        .filter(|d| d.attr("localSheetId").is_none())
         .filter_map(|d| d.attr("name"))
         .filter(|n| is_special_defined_name(&n.to_ascii_lowercase()))
         .map(str::to_owned);
     let mut owned = std::borrow::Cow::Owned(wb);
-    crate::table_names::repair(&mut owned, names);
+    crate::table_names::repair(&mut owned, names, &mut cx.report.warnings);
     wb = owned.into_owned();
     attach_pending_slicers(&mut cx, &mut wb);
     cx.release_shared_strings_unless_needed(false);

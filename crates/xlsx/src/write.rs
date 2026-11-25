@@ -295,12 +295,13 @@ type Written = (Vec<u8>, crate::WriteReport);
 /// PivotTable in Excel only when its link starts with the workbook in brackets.
 pub fn write_xlsx_named_with(wb: &Workbook, kind: XlsxKind, book_name: Option<&str>, functions: FunctionInfo) -> Result<Written, IoError> {
     let mut repaired = std::borrow::Cow::Borrowed(wb);
-    crate::table_names::repair(&mut repaired, crate::chartex::generated_names(wb));
+    let mut renames = Vec::new();
+    crate::table_names::repair(&mut repaired, crate::chartex::generated_names(wb), &mut renames);
     let wb = repaired.as_ref();
     // The workbook's kept cell and value metadata is written when it fits what GridCraft writes
     // with it. Its dynamic-array formulas are marked `cm="1"`, an entry the kept part may lack:
     // the workbook is then written again without the kept metadata.
-    let (bytes, report) = match write_package(wb, kind, book_name, functions, true)? {
+    let (bytes, mut report) = match write_package(wb, kind, book_name, functions, true)? {
         Some(written) => written,
         None => {
             let (bytes, mut report) =
@@ -311,6 +312,7 @@ pub fn write_xlsx_named_with(wb: &Workbook, kind: XlsxKind, book_name: Option<&s
             (bytes, report)
         }
     };
+    report.warnings.extend(renames);
     Ok((bytes, report))
 }
 

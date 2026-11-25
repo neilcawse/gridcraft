@@ -324,6 +324,10 @@ fn list_functions(_: &mut Session, p: &Json) -> Result<Json> {
     Ok(Json::Array(v))
 }
 
+fn table_uses_name(wb: &Workbook, name: &str) -> bool {
+    wb.sheets.iter().flat_map(|s| &s.tables).any(|t| gridcraft_formula::same_name(&t.name, name))
+}
+
 fn define_name(s: &mut Session, p: &Json) -> Result<Json> {
     let Some(name) = str_param(p, "name").map(str::to_string) else {
         s.ui_requests.push(crate::UiRequest::Dialog("defineName".into(), json!({})));
@@ -336,6 +340,9 @@ fn define_name(s: &mut Session, p: &Json) -> Result<Json> {
         refuse_stash_name(&s.doc()?.wb, p, n)?;
     }
     let d = s.doc()?;
+    if table_uses_name(&d.wb, &name) {
+        return Err(EngineError::Other(format!("A table already uses the name {name:?}. Enter a unique name.")));
+    }
     let scope = match str_param(p, "scope") {
         None | Some("Workbook") => None,
         Some(sh) => Some(d.wb.sheet_index(sh).ok_or_else(|| bad("formulas.defineName", "no such sheet"))?),
@@ -571,7 +578,7 @@ fn create_from_selection(s: &mut Session, p: &Json) -> Result<Json> {
     // (see `refuse_stash_name`).
     let force = bool_param(p, "force").unwrap_or(false);
     let ours = |n: &str| !force && holds_gridcraft_data(&d.wb, n);
-    let (made, skipped): (Vec<_>, Vec<_>) = made.into_iter().partition(|(n, _)| !ours(n) && (replace || !exists(n)));
+    let (made, skipped): (Vec<_>, Vec<_>) = made.into_iter().partition(|(n, _)| !ours(n) && !table_uses_name(&d.wb, n) && (replace || !exists(n)));
     let skipped: Vec<String> = skipped.into_iter().map(|(n, _)| n).collect();
     let n = made.len();
     edit(s, |cx| {
@@ -980,6 +987,44 @@ fn calc_options(s: &mut Session, p: &Json) -> Result<Json> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn define_and_rename_refuse_table_names_in_every_scope() -> Result<()> {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("range.setValues", json!({"range": "A1:A2", "values": [["Header"], [1]]}))?;
+        s.execute("insert.table", json!({"range": "A1:A2", "name": "DataRows"}))?;
+        s.execute("formulas.defineName", json!({"name": "Existing", "refersTo": "=1"}))?;
+        for scope in ["Workbook", "Sheet1"] {
+            for old in [None, Some("Existing")] {
+                let mut p = json!({"name": "DATAROWS", "scope": scope, "refersTo": "=2"});
+                if let Some(old) = old {
+                    p["oldName"] = json!(old);
+                }
+                assert!(matches!(s.execute("formulas.defineName", p), Err(e) if e.to_string().contains("A table already uses")));
+            }
+        }
+        let wb = &s.doc()?.wb;
+        assert_eq!(wb.names.len(), 1);
+        assert_eq!(wb.names[0].name, "Existing");
+        assert_eq!(wb.names[0].formula, "1");
+        Ok(())
+    }
+
+    #[test]
+    fn create_names_from_selection_skips_table_names_even_when_replacing() -> Result<()> {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("range.setValues", json!({"range": "A1:A2", "values": [["Header"], [1]]}))?;
+        s.execute("insert.table", json!({"range": "A1:A2", "name": "DataRows"}))?;
+        s.execute("range.setValues", json!({"range": "D1:E2", "values": [["datarows", "Allowed"], [2, 3]]}))?;
+        let result = s.execute("formulas.createFromSelection", json!({"range": "D1:E2", "replace": true}))?;
+        assert_eq!(result, json!({"created": 1, "skipped": ["datarows"]}));
+        let wb = &s.doc()?.wb;
+        assert_eq!(wb.names.len(), 1);
+        assert_eq!(wb.names[0].name, "Allowed");
+        Ok(())
+    }
 
     #[test]
     fn names_with_relative_references() {

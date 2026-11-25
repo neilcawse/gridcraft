@@ -99,6 +99,11 @@ impl SheetApp {
         {
             self.deliver_pdf(r);
         }
+        if matches!(id, "file.save" | "file.saveAs" | "file.saveBytes")
+            && let Ok(r) = &r
+        {
+            self.show_save_warnings(r);
+        }
         // The scan stopped at its cell allowance: say that some cells were not checked.
         if id == "data.circleInvalid"
             && let Ok(r) = &r

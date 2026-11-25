@@ -500,7 +500,7 @@ fn a_table_renamed_on_saving_never_takes_the_name_a_source_is_saved_as() {
         let (written, warnings, mut back) = save_package(&wb);
         let case = format!("rebuilt: {rebuilt}: {written:?} {warnings:?}");
         assert_eq!(written[0].source, r#"<worksheetSource name="r_Data"/>"#, "{case}");
-        assert!(warnings.is_empty(), "{case}");
+        assert_eq!(warnings, [r#"Table "r?Data" on sheet "Report" was renamed to "r_Data_2"."#], "{case}");
         assert_eq!(back.sheets[REPORT].tables[0].name, "r_Data_2");
         assert!(matches!(back.pivot_source(&back.sheets[REPORT].pivots[0], REPORT).map(|s| s.source),
             Ok(gridcraft_model::PivotSource::Name { name, .. }) if name.name == "r_Data" && name.formula == "Data!$A$1:$B$3"));

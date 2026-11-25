@@ -14,12 +14,18 @@ type Position = (usize, usize);
 /// names and defined names in the workbook, whatever their scope; GridCraft's own Insert Table
 /// and Rename Table refuse a name any defined name has. Sheet-scoped names, including those kept
 /// with chart, dialog and macro sheets, therefore reserve their spelling as well.
-pub(crate) fn repair(wb: &mut Cow<'_, Workbook>, extra_names: impl IntoIterator<Item = String>) {
+pub(crate) fn repair(wb: &mut Cow<'_, Workbook>, extra_names: impl IntoIterator<Item = String>, warnings: &mut Vec<String>) {
     if wb.sheets.iter().all(|sheet| sheet.tables.is_empty()) {
         return;
     }
     let mut used: HashSet<String> = extra_names.into_iter().map(|n| fold_name(&n)).collect();
     used.extend(wb.names.iter().filter(|n| !n.name.is_empty()).map(|n| fold_name(&n.name)));
+    if wb.sheets.iter().any(|s| s.print.print_area.is_some()) {
+        used.insert(fold_name("_xlnm.Print_Area"));
+    }
+    if wb.sheets.iter().any(|s| s.print.title_cols.is_some() || s.print.title_rows.is_some()) {
+        used.insert(fold_name("_xlnm.Print_Titles"));
+    }
     let kept = wb.preserved.iter().flat_map(|p| &p.sheets).flat_map(|s| &s.names);
     used.extend(kept.filter_map(|n| crate::xml::parse(format!("<n{}/>", n.attrs).as_bytes()).ok()?.attr("name").map(fold_name)));
     let mut pending = Vec::new();
@@ -54,6 +60,7 @@ pub(crate) fn repair(wb: &mut Cow<'_, Workbook>, extra_names: impl IntoIterator<
             let mut name: String = base.chars().take(255 - tail.len()).collect();
             name.push_str(&tail);
             if valid_table_name(&name) && used.insert(fold_name(&name)) {
+                warnings.push(format!("Table {old:?} on sheet {:?} was renamed to {name:?}.", wb.sheets[at.0].name));
                 renamed.insert(at, name);
                 break;
             }
@@ -94,6 +101,14 @@ struct Rewrite<'a> {
 impl Rewrite<'_> {
     fn table(&self, name: &str) -> Option<Position> {
         if name.bytes().any(|b| b.is_ascii_uppercase()) { self.first.get(&name.to_ascii_lowercase()).copied() } else { self.first.get(name).copied() }
+    }
+
+    fn cell_owner(&self, sheet: usize, cell: gridcraft_core::CellRef) -> Option<Position> {
+        let mut containing = self.original.sheets[sheet].tables.iter().enumerate().filter(|(_, t)| t.range.contains(cell));
+        let (ti, table) = containing.next()?;
+        // Headers aren't calculated-column cells. Overlap makes ownership ambiguous, so fall
+        // back to the original workbook lookup rather than guessing which table owns the cell.
+        (containing.next().is_none() && !table.header_range().is_some_and(|r| r.contains(cell))).then_some((sheet, ti))
     }
 
     /// The table an unqualified token names: the owner table when it is spelled like the owner,
@@ -160,14 +175,15 @@ impl Rewrite<'_> {
                 .iter()
                 .filter_map(|(c, cell)| {
                     let f = cell.formula.as_ref()?;
-                    // A formula in a table's own cells (its calculated column or totals row) is
-                    // read in that table's context, as the column formula is.
-                    let owner = self.original.sheets[si].tables.iter().position(|t| t.range.contains(c)).map(|ti| (si, ti));
+                    let owner = self.cell_owner(si, c);
                     f.with_expr(|e| {
                         let mut uses_table = false;
                         e.walk(&mut |e| {
                             uses_table |= match e {
-                                Expr::Name(n) => self.renames(n.rsplit('!').next().unwrap_or(n), owner),
+                                Expr::Name(n) => match n.rsplit_once('!') {
+                                    Some((_, bare)) => self.renames(bare, None),
+                                    None => self.renames(n, owner),
+                                },
                                 Expr::Struct(s) => self.renames(&s.table, owner),
                                 _ => false,
                             }
@@ -217,9 +233,16 @@ impl Rewrite<'_> {
                     series.categories.iter_mut().for_each(text);
                     series.bubble_sizes.iter_mut().for_each(text);
                     if let Some(n) = &mut series.name
-                        && matches!(gridcraft_formula::parse(n), Ok(Expr::Struct(_)))
+                        && let Ok(Expr::Struct(r)) = gridcraft_formula::parse(n)
+                        && !r.table.is_empty()
                     {
-                        text(n);
+                        if self.table(&r.table).is_some() {
+                            text(n);
+                        } else if self.renamed.values().any(|name| name.eq_ignore_ascii_case(&r.table)) {
+                            // An unbound lookalike must not become a reference just because a
+                            // repaired table takes its spelling (or increase ChartEx's alias count).
+                            *n = format!("\"{}\"", n.replace('"', "\"\""));
+                        }
                     }
                 }
             }

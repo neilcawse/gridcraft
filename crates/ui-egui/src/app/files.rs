@@ -31,20 +31,16 @@ impl SheetApp {
         // The opened workbook's window shows them, however it was opened (a script may have run
         // `file.open` on the session directly).
         self.follow_active_window();
-        let Some(list) = r.get("warnings").and_then(Json::as_array) else {
-            self.notice = None;
-            return;
-        };
-        let msgs: Vec<&str> = list.iter().filter_map(Json::as_str).collect();
+        let msgs = file_warnings(r);
         if msgs.is_empty() {
             // A clean open clears any notice left over from the previous document.
             self.notice = None;
             return;
         }
-        let vba: Vec<&str> = msgs.iter().copied().filter(|m| m.to_lowercase().contains("macro") || m.contains("VBA")).collect();
-        if !vba.is_empty() {
+        let mut vba = msgs.iter().copied().filter(|m| m.starts_with("macros (VBA project)"));
+        if let Some(first) = vba.next() {
             // The reader says "dropped" when the VBA project was missing or unreadable; never promise to keep it then.
-            let dropped = vba.iter().any(|m| m.contains("dropped"));
+            let dropped = first.contains("dropped") || vba.any(|m| m.contains("dropped"));
             let text = if dropped {
                 "This workbook's VBA macros could not be loaded and were dropped, so they will not be in the saved file. Keep the original file."
             } else {
@@ -52,12 +48,14 @@ impl SheetApp {
             };
             self.notice = Some(Notice { text: text.into(), kind: NoticeKind::Warning, action: Some(("What this means".into(), "macros".into())) });
         } else {
-            let text = if msgs.len() == 1 {
-                msgs[0].to_string()
-            } else {
-                format!("{} items in this file were handled differently. First: {}", msgs.len(), msgs[0])
-            };
-            self.notice = Some(Notice { text, kind: NoticeKind::Info, action: None });
+            self.notice = file_warning_notice(&msgs);
+        }
+    }
+
+    /// Unlike a clean open, a clean save leaves any existing info-bar notice alone.
+    pub(super) fn show_save_warnings(&mut self, r: &Json) {
+        if let Some(notice) = file_warning_notice(&file_warnings(r)) {
+            self.notice = Some(notice);
         }
     }
 
@@ -124,4 +122,15 @@ impl SheetApp {
     pub fn toggle_autosave(&mut self) {
         self.ui.autosave = !self.ui.autosave;
     }
+}
+
+fn file_warnings(r: &Json) -> Vec<&str> {
+    r.get("warnings").and_then(Json::as_array).into_iter().flatten().filter_map(Json::as_str).collect()
+}
+
+fn file_warning_notice(msgs: &[&str]) -> Option<Notice> {
+    let first = msgs.first()?;
+    let text =
+        if msgs.len() == 1 { (*first).to_string() } else { format!("{} items in this file were handled differently. First: {first}", msgs.len()) };
+    Some(Notice { text, kind: NoticeKind::Info, action: None })
 }

@@ -45,7 +45,12 @@ fn malformed_tables_keep_their_reference_identity_through_three_saves() -> Resul
         ("xl/tables/table1.xml", table(1, "Items").as_bytes()),
         ("xl/tables/table2.xml", table(2, "ITEMS").as_bytes()),
     ]);
-    let (mut wb, _) = read_xlsx(&malformed)?;
+    let (mut wb, report) = read_xlsx(&malformed)?;
+    let renames = |warnings: &[String]| warnings.iter().filter(|w| w.starts_with("Table ") && w.contains("was renamed")).cloned().collect::<Vec<_>>();
+    assert_eq!(
+        renames(&report.warnings),
+        [r#"Table "Items" on sheet "One" was renamed to "Items_2"."#, r#"Table "ITEMS" on sheet "Two" was renamed to "ITEMS_3"."#,]
+    );
     for cycle in 0..=3 {
         let a = &wb.sheets[0];
         let b = &wb.sheets[1];
@@ -67,10 +72,13 @@ fn malformed_tables_keep_their_reference_identity_through_three_saves() -> Resul
         }
         assert_eq!(a.cell(CellRef::new(3, 2)).and_then(|c| c.formula.as_ref()).and_then(|f| f.array), RangeRef::parse("C4:D4"));
         if cycle != 3 {
-            let saved = write_xlsx(&wb)?;
+            let (saved, report) = crate::write::write_xlsx_named_with(&wb, crate::XlsxKind::Workbook, None, Default::default())?;
+            assert!(renames(&report.warnings).is_empty());
             assert!(xml(&saved, "xl/tables/table1.xml")?.contains("name=\"Items_2\" displayName=\"Items_2\""));
             assert!(xml(&saved, "xl/tables/table2.xml")?.contains("name=\"ITEMS_3\" displayName=\"ITEMS_3\""));
-            (wb, _) = read_xlsx(&saved)?;
+            let (back, report) = read_xlsx(&saved)?;
+            assert!(renames(&report.warnings).is_empty());
+            wb = back;
         }
     }
     Ok(())
@@ -293,7 +301,7 @@ fn allocator_preserves_valid_spellings_and_bounds_generated_names() {
         sh.tables.push(table(name, 2 * i as u32));
     }
     let mut borrowed = Cow::Borrowed(&wb);
-    crate::table_names::repair(&mut borrowed, ["_XLCHART.V1.0".into()]);
+    crate::table_names::repair(&mut borrowed, ["_XLCHART.V1.0".into()], &mut Vec::new());
     let tables = &borrowed.sheets[0].tables;
     assert_eq!(tables[3].name, "_xlchart.v1.0_2");
     assert_eq!(tables[4].name, "KeepMe");
@@ -413,17 +421,31 @@ fn a_literal_series_title_spelling_a_structured_reference_stays_literal() -> Res
     let sh = Arc::make_mut(&mut wb.sheets[0]);
     sh.set_value(CellRef::new(0, 0), Value::Number(1.0));
     let series = Series { name: Some("Sales[2024]".into()), values: "Sheet1!$A$1:$A$1".into(), ..Default::default() };
+    // This spelling is free until repair creates the second sanitized table name. It must not
+    // turn a literal into a reference or increase the count of ChartEx alias names.
+    sh.tables.push(table("Sale?", 2));
+    sh.tables.push(table("Sale?", 5));
+    sh.tables.push(table("_xlchart.v1.2", 8));
+    let captured = Series { name: Some("Sale__2[Value]".into()), values: "Sheet1!$A$1:$A$1".into(), ..Default::default() };
     sh.charts.push(chart(1, ChartKind::ColumnClustered, series.clone()));
     sh.charts.push(chart(2, ChartKind::Waterfall, series));
+    sh.charts.push(chart(3, ChartKind::ColumnClustered, captured.clone()));
+    sh.charts.push(chart(4, ChartKind::Waterfall, captured));
     let saved = write_xlsx(&wb)?;
     let classic = xml(&saved, "xl/charts/chart1.xml")?;
     assert!(classic.contains("<c:tx><c:v>Sales[2024]</c:v></c:tx>"), "{classic}");
     let extended = xml(&saved, "xl/charts/chartEx2.xml")?;
     assert!(extended.contains("<cx:tx><cx:txData><cx:v>Sales[2024]</cx:v></cx:txData></cx:tx>"), "{extended}");
     let (back, _) = read_xlsx(&saved)?;
-    for chart in &back.sheets[0].charts {
-        assert_eq!(chart.series[0].name.as_deref(), Some("\"Sales[2024]\""), "read back as quoted text");
-    }
+    let captured_classic = xml(&saved, "xl/charts/chart3.xml")?;
+    assert!(captured_classic.contains("<c:tx><c:v>Sale__2[Value]</c:v></c:tx>"), "{captured_classic}");
+    let captured_extended = xml(&saved, "xl/charts/chartEx4.xml")?;
+    assert!(captured_extended.contains("<cx:tx><cx:txData><cx:v>Sale__2[Value]</cx:v></cx:txData></cx:tx>"), "{captured_extended}");
+    assert_eq!(back.sheets[0].charts.iter().filter(|ch| ch.series[0].name.as_deref() == Some("\"Sales[2024]\"")).count(), 2);
+    assert_eq!(back.sheets[0].charts.iter().filter(|ch| ch.series[0].name.as_deref() == Some("\"Sale__2[Value]\"")).count(), 2);
+    assert!(back.table("_xlchart.v1.2").is_some());
+    let workbook = xml(&saved, "xl/workbook.xml")?;
+    assert_eq!(workbook.matches("<definedName name=\"_xlchart.v1.").count(), 2);
     Ok(())
 }
 
@@ -447,26 +469,100 @@ fn sheet_scoped_names_reserve_table_names() -> Result<(), Box<dyn std::error::Er
         hidden: false,
         uid: Default::default(),
     });
+    wb.names.push(DefinedName {
+        name: "Summary".into(),
+        formula: "FOO+SUM(Foo[Value])".into(),
+        scope: None,
+        comment: String::new(),
+        hidden: false,
+        uid: Default::default(),
+    });
     wb.preserved = Some(Arc::new(Preserved {
         sheets: vec![PreservedSheet {
             name: "Module1".into(),
             kind: PreservedSheetKind::Module,
             before: 2,
             sheet_id: 3,
-            names: vec![PreservedName { attrs: r#" name="LOCALREF""#.into(), formula: "Sheet1!$H$2".into() }],
+            names: vec![PreservedName { attrs: r#" name="LOCAL&#82;EF" comment="A &amp; B""#.into(), formula: "Sheet1!$H$2".into() }],
             ..Default::default()
         }],
         ..Default::default()
     }));
     let mut back = wb;
     for cycle in 0..2 {
-        (back, _) = read_xlsx(&crate::write_xlsx_as(&back, crate::XlsxKind::MacroWorkbook)?)?;
+        let (saved, report) = crate::write::write_xlsx_named_with(&back, crate::XlsxKind::MacroWorkbook, None, Default::default())?;
+        assert_eq!(report.warnings.iter().filter(|w| w.contains("was renamed")).count(), if cycle == 0 { 2 } else { 0 });
+        let reopened = read_xlsx(&saved)?;
+        assert!(!reopened.1.warnings.iter().any(|w| w.contains("was renamed")));
+        back = reopened.0;
         let formula = |si: usize, at: CellRef| back.sheets[si].cell(at).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone());
         let names: Vec<_> = back.sheets[0].tables.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, ["Foo_2", "LocalRef_2"], "cycle {cycle}");
         assert_eq!(formula(0, CellRef::new(5, 0)).as_deref(), Some("FOO+SUM(Foo_2[Value])"), "cycle {cycle}");
         assert_eq!(formula(1, CellRef::new(0, 0)).as_deref(), Some("SUM(Foo_2[Value])+COUNT(Foo_2)"), "cycle {cycle}");
         assert_eq!(back.name("FOO", 0).map(|n| n.formula.as_str()), Some("Sheet1!$H$1"));
+        assert_eq!(back.name("Summary", 0).map(|n| n.formula.as_str()), Some("FOO+SUM(Foo_2[Value])"));
+        let kept = crate::xml::parse(xml(&saved, "xl/workbook.xml")?.as_bytes())?;
+        let local = kept
+            .child("definedNames")
+            .and_then(|dn| dn.kids("definedName").find(|n| n.attr("name") == Some("LOCALREF")))
+            .ok_or("missing kept definition")?;
+        assert_eq!(local.attr("comment"), Some("A & B"));
     }
     Ok(())
+}
+
+#[test]
+fn modeled_print_names_reserve_table_names_on_save() -> Result<(), Box<dyn std::error::Error>> {
+    let mut wb = Workbook::new();
+    let sh = Arc::make_mut(&mut wb.sheets[0]);
+    sh.print.print_area = RangeRef::parse("A1:C4");
+    sh.print.title_rows = Some((0, 0));
+    sh.tables.push(table("_xlnm.Print_Area", 0));
+    sh.tables.push(table("_xlnm.Print_Titles", 3));
+    let (saved, report) = crate::write::write_xlsx_named_with(&wb, crate::XlsxKind::Workbook, None, Default::default())?;
+    let (back, open) = read_xlsx(&saved)?;
+    assert!(open.warnings.is_empty(), "{:?}", open.warnings);
+    assert_eq!(
+        report.warnings,
+        [
+            r#"Table "_xlnm.Print_Area" on sheet "Sheet1" was renamed to "_xlnm.Print_Area_2"."#,
+            r#"Table "_xlnm.Print_Titles" on sheet "Sheet1" was renamed to "_xlnm.Print_Titles_2"."#,
+        ]
+    );
+    assert_eq!(back.table("_xlnm.Print_Area_2"), Some((0, 0)));
+    assert_eq!(back.table("_xlnm.Print_Titles_2"), Some((0, 1)));
+    assert_eq!(back.sheets[0].print.print_area, RangeRef::parse("A1:C4"));
+    assert_eq!(back.sheets[0].print.title_rows, Some((0, 0)));
+    Ok(())
+}
+
+#[test]
+fn headers_and_overlaps_do_not_claim_formula_ownership() {
+    let mut wb = Workbook::new();
+    let first = Arc::make_mut(&mut wb.sheets[0]);
+    first.tables.push(table("Items", 0));
+    first.tables.push(table("OtherRows", 3));
+    let mut second = Sheet::new("Second");
+    second.tables.push(table("ITEMS", 0));
+    second.tables.push(table("OTHERROWS", 1));
+    let cases = [
+        (CellRef::new(0, 0), "SUM(ITEMS[Value])", "SUM(ITEMS[Value])"),
+        (CellRef::new(1, 1), "SUM(ITEMS[Value])+SUM(OTHERROWS[Value])", "SUM(ITEMS[Value])+SUM(OTHERROWS[Value])"),
+        (
+            CellRef::new(1, 0),
+            "SUM(ITEMS[Value])+SUM(OTHERROWS[Value])+COUNT(Sheet1!ITEMS)",
+            "SUM(ITEMS_2[Value])+SUM(OTHERROWS[Value])+COUNT(Sheet1!ITEMS)",
+        ),
+    ];
+    for (at, formula, _) in cases {
+        second.set_cell(at, Cell::formula(Formula::new(formula)));
+    }
+    wb.sheets.push(Arc::new(second));
+    let mut repaired = std::borrow::Cow::Borrowed(&wb);
+    crate::table_names::repair(&mut repaired, [], &mut Vec::new());
+    for (at, _, expected) in cases {
+        let formula = repaired.sheets[1].cell(at).and_then(|c| c.formula.as_ref());
+        assert_eq!(formula.map(|f| f.text.as_str()), Some(expected), "{at:?}");
+    }
 }

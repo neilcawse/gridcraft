@@ -508,13 +508,17 @@ fn set_first_sheet_name(wb: &mut Workbook, stem: &str) {
 
 /// Encodes a workbook in the format chosen by `path`'s extension.
 pub fn save_bytes(wb: &Workbook, path: &str) -> Result<Vec<u8>> {
+    save_bytes_for_path_reported(wb, path).map(|(bytes, _)| bytes)
+}
+
+pub(crate) fn save_bytes_for_path_reported(wb: &Workbook, path: &str) -> Result<(Vec<u8>, Vec<String>)> {
     // An unknown or missing extension is refused rather than written as an XLSX under that name:
     // a typo like `.cvs` would otherwise produce a file no other app recognises.
     let Some(kind) = FileKind::from_path(path) else {
         let name = std::path::Path::new(path).file_name().and_then(std::ffi::OsStr::to_str).unwrap_or(path);
         return Err(EngineError::Other(format!("{name}: unknown file format. Save as .xlsx, .csv, .tsv, .json or .html.")));
     };
-    save_bytes_as(wb, path, kind)
+    save_bytes_reported(wb, path, kind)
 }
 
 /// Encodes a workbook as `kind`, whatever `path`'s extension says.
@@ -522,8 +526,7 @@ pub fn save_bytes_as(wb: &Workbook, path: &str, kind: FileKind) -> Result<Vec<u8
     save_bytes_reported(wb, path, kind).map(|(bytes, _)| bytes)
 }
 
-/// [`save_bytes_as`], with what the file was written without (an XLSX can leave out content kept
-/// from the file the workbook was read from, see `gridcraft_xlsx::WriteReport`).
+/// [`save_bytes_as`], with warnings about differences in the saved package (see `gridcraft_xlsx::WriteReport`).
 pub fn save_bytes_reported(wb: &Workbook, path: &str, kind: FileKind) -> Result<(Vec<u8>, Vec<String>)> {
     let sheet = wb.active_sheet();
     let bytes = match kind {
