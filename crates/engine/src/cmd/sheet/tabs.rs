@@ -197,17 +197,58 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
             // Object ids are unique across the workbook (selection and the `{kind, id}` commands
             // rely on it), so the copied objects get fresh ones (free ones, even when a file used
             // the largest id).
-            let count = sh.charts.len() + sh.images.len() + sh.shapes.len() + sh.slicers.len() + sh.controls.len();
+            let count = sh.charts.len() + sh.images.len() + sh.shapes.len() + sh.slicers.len() + sh.controls.len() + sh.groups.len();
             let ids = cx.wb.free_object_ids(count);
             if ids.len() < count {
                 return Err(bad("sheet.move", "no free object ids are left for the copied objects"));
             }
             let mut ids = ids.into_iter();
             let mut fresh = || ids.next().unwrap_or(u32::MAX);
-            sh.charts.iter_mut().for_each(|o| o.id = fresh());
-            sh.images.iter_mut().for_each(|o| o.id = fresh());
-            sh.shapes.iter_mut().for_each(|o| o.id = fresh());
-            sh.slicers.iter_mut().for_each(|o| o.id = fresh());
+            use gridcraft_model::DrawingRef;
+            let mut remap = std::collections::HashMap::new();
+            let mut reassign = |id: &mut u32, reference: fn(u32) -> DrawingRef| {
+                let old = reference(*id);
+                *id = fresh();
+                remap.insert(old, reference(*id));
+            };
+            sh.charts.iter_mut().for_each(|o| reassign(&mut o.id, DrawingRef::Chart));
+            sh.images.iter_mut().for_each(|o| reassign(&mut o.id, DrawingRef::Image));
+            sh.shapes.iter_mut().for_each(|o| reassign(&mut o.id, DrawingRef::Shape));
+            sh.groups.iter_mut().for_each(|g| reassign(&mut g.id, DrawingRef::Group));
+            for g in &mut sh.groups {
+                g.members.retain_mut(|r| {
+                    remap.get(r).is_some_and(|&new| {
+                        *r = new;
+                        true
+                    })
+                });
+                g.member_rotations.retain_mut(|(r, _)| {
+                    remap.get(r).is_some_and(|&new| {
+                        *r = new;
+                        true
+                    })
+                });
+                if let Some(file) = &mut g.file {
+                    for member in &mut file.members {
+                        if let Some(&new) = remap.get(&member.reference) {
+                            member.reference = new;
+                        }
+                    }
+                    for (r, _) in &mut file.member_rotations {
+                        if let Some(&new) = remap.get(r) {
+                            *r = new;
+                        }
+                    }
+                }
+            }
+            for slicer in &mut sh.slicers {
+                let old = slicer.id;
+                slicer.id = fresh();
+                remap.insert(DrawingRef::Slicer(old), DrawingRef::Slicer(slicer.id));
+            }
+            sh.drawing_files = sh.drawing_files.drain().filter_map(|(r, f)| remap.get(&r).map(|&new| (new, f))).collect();
+            sh.drawing_names = sh.drawing_names.drain().filter_map(|(r, name)| remap.get(&r).map(|&new| (new, name))).collect();
+            sh.drawing_order = sh.drawing_order.drain().filter_map(|(r, order)| remap.get(&r).map(|&new| (new, order))).collect();
             sh.controls.iter_mut().for_each(|o| o.id = fresh());
             let at = to.min(n);
             // The copy gets its own copies of the sheet's names, referring to the copy.

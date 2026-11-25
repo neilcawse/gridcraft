@@ -70,10 +70,10 @@ pub struct Ctx<'a> {
     pub slicer_caches: HashMap<String, (Option<u32>, Option<u32>, String)>,
     /// Current sheet's slicer definitions: slicer name → (cache name, caption, column count).
     pub sheet_slicer_defs: HashMap<String, (String, String, u32)>,
-    /// Current sheet's drawing slicer frames: (slicer name, anchor).
-    pub sheet_slicer_frames: Vec<(String, gridcraft_model::Anchor)>,
-    /// Slicers to attach after all sheets and tables are read: (sheet index, cache name, caption, anchor, columns).
-    pub pending_slicers: Vec<(usize, String, String, gridcraft_model::Anchor, u32)>,
+    /// Current sheet's drawing slicer frames: (slicer name, anchor, reserved object ID).
+    pub sheet_slicer_frames: Vec<(String, gridcraft_model::Anchor, u32)>,
+    /// Table slicers resolved after all sheets and tables are read.
+    pub pending_slicers: Vec<(usize, String, String, gridcraft_model::Anchor, u32, u32)>,
     /// Cell elements read so far, across every sheet (capped by `sheet_read::MAX_CELLS`).
     pub cells: u64,
 }
@@ -536,6 +536,7 @@ pub fn read_xlsx<'a>(
 
     wb.external_books = Arc::new(crate::external::read(&mut cx, &wb_xml, &wb_rels)?);
     crate::slicer::resolve(&mut cx, &wb_xml, &wb_rels, &sheet_els, &file_to_model, &pivot_caches, &mut wb);
+    discard_unresolved_slicer_placements(&mut wb);
 
     // Defined names. Chartex parts refer to their data through hidden `_xlchart.*` names.
     let mut chart_names: Vec<(String, String)> = vec![];
@@ -705,25 +706,40 @@ fn read_slicer_caches(cx: &mut Ctx<'_>, wb_rels: &[crate::package::Rel]) -> Resu
     Ok(())
 }
 
+/// Removes drawing metadata reserved for frames whose cache could not be resolved.
+fn discard_unresolved_slicer_placements(wb: &mut Workbook) {
+    for sh in &mut wb.sheets {
+        let sh = Arc::make_mut(sh);
+        let slicers = &sh.slicers;
+        let keep = |r: &gridcraft_model::DrawingRef| match r {
+            gridcraft_model::DrawingRef::Slicer(id) => slicers.iter().any(|s| s.id == *id),
+            _ => true,
+        };
+        sh.drawing_files.retain(|r, _| keep(r));
+        sh.drawing_names.retain(|r, _| keep(r));
+        sh.drawing_order.retain(|r, _| keep(r));
+    }
+}
+
 /// Matches drawing slicer graphicFrames on `sheet_idx` to worksheet slicer definitions and queues them for attachment.
 fn collect_sheet_slicers(cx: &mut Ctx<'_>, sheet_idx: usize) {
     let frames = std::mem::take(&mut cx.sheet_slicer_frames);
     let single_frame = frames.len() == 1;
-    for (sname, anchor) in frames {
+    for (sname, anchor, id) in frames {
         let def = cx
             .sheet_slicer_defs
             .get(&sname)
             .cloned()
             .or_else(|| (single_frame && cx.sheet_slicer_defs.len() == 1).then(|| cx.sheet_slicer_defs.values().next().cloned()).flatten());
         if let Some((cache_name, caption, columns)) = def {
-            cx.pending_slicers.push((sheet_idx, cache_name, caption, anchor, columns));
+            cx.pending_slicers.push((sheet_idx, cache_name, caption, anchor, columns, id));
         }
     }
 }
 
 /// Resolves queued slicers against loaded tables and attaches them to their target sheets.
 fn attach_pending_slicers(cx: &mut Ctx<'_>, wb: &mut Workbook) {
-    for (sheet_idx, cache_name, caption, anchor, columns) in std::mem::take(&mut cx.pending_slicers) {
+    for (sheet_idx, cache_name, caption, anchor, columns, id) in std::mem::take(&mut cx.pending_slicers) {
         let Some((table_id, col_id, source_name)) = cx.slicer_caches.get(&cache_name).cloned() else { continue };
         let resolved = table_id
             .and_then(|tid| cx.file_tables.get(&tid))
@@ -747,7 +763,6 @@ fn attach_pending_slicers(cx: &mut Ctx<'_>, wb: &mut Workbook) {
             let selected = saved_table_column_selection(wb, sheet_idx, &table, &column);
             let _ = sh;
             if let Some(sh) = wb.sheets.get_mut(sheet_idx) {
-                let id = cx.next_object_id();
                 let caption = if caption.is_empty() { column.clone() } else { caption };
                 Arc::make_mut(sh).slicers.push(gridcraft_model::Slicer {
                     id,

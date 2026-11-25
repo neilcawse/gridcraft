@@ -58,6 +58,41 @@ not interpreted as ink. This does not implement Office InkML or fix inserted ico
 Command and package tests cover repeated saves and unrelated cell edits; external Excel rendering
 and repair-free opening remain unverified.
 
+Untouched supported worksheet drawings in XLSX and XLSM keep their original `twoCellAnchor`,
+`oneCellAnchor`, or `absoluteAnchor` spelling and placement. This includes the presence of
+`editAs`, signed and out-of-cell marker offsets, exact EMU position and extent, and optional
+`off`, `ext`, `chOff`, and `chExt` in nested group transforms. Saved placement does not depend
+on the host's sheet metrics. This does not correct the in-app display position when automatic
+row heights change after drawing import.
+
+An explicit move, resize, anchor-mode change, or member edit discards the affected source
+placement and regenerates it from editable geometry. A whole-sheet copy keeps placement because
+it copies the same row and column geometry. For row and column insertion/deletion, genuine
+absolute coordinates are independent of the grid. Moving anchors keep their original marker
+offsets when the edit is wholly before their span; their marked lines shift. Edits after the
+span leave placement alone. Intersecting edits and earlier edits to cell-relative `absolute`
+placement regenerate it rather than assuming the old markers still describe the result.
+This conservative policy follows the distinction in ECMA-376 `ST_EditAs` between moving and
+sizing with cells, moving without sizing, and remaining fixed. It is not a claim about which
+anchor spelling Excel chooses after an edit. Separate chart `userShapes` annotations, VML,
+and unsupported drawing objects do not acquire worksheet placement from this path.
+
+Other edits that change row heights, column widths or line visibility after opening (row height
+and column width, standard width, hide/unhide, filters, outlines, sorted row heights, automatic
+row fits after an edit) drop the placement of any object over a changed line, and of a fixed
+(`absolute`) object after an earlier changed line, because the object the user sees no longer
+matches the stored markers. The span includes both a marker's named cell and the cell reached
+by its signed offset. Disjoint line changes do not affect objects in the gap, and an automatic
+row fit after a structural edit is checked against the remapped placement. A fixed object keeps
+its cell through an insert or delete, so its placement is also dropped when the rounded EMU
+box of the object or a grouped member changes.
+
+Imported objects keep their source stacking order and nonvisual IDs and names; a name is kept
+even when its ID is the placeholder `0`, which is renumbered. Bring Forward and Send Backward
+reorder the affected objects' stacking slots without clearing the ranks of unrelated objects.
+Moving a chart writes it above earlier drawings. A slicer inside a group is read as a separate
+slicer, as before.
+
 Dynamic-array formulas keep their mark on save. A formula read with dynamic-array cell metadata
 (`cm`, the `XLDAPR` record in `xl/metadata.xml`) is written back with it, together with the
 metadata part, even when it returns one value and GridCraft's own shape analysis would not need

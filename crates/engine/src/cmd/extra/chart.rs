@@ -273,11 +273,20 @@ pub(super) fn move_chart(s: &mut Session, p: &Json) -> Result<Json> {
     };
     let at = cell_param_on(s, p, "at", target.unwrap_or(si))?;
     edit(s, |cx| {
-        let mut chart = cx.sheet_mut(si)?.charts.remove(ci);
+        let sh = cx.sheet_mut(si)?;
+        let mut chart = sh.charts.remove(ci);
+        let dest = target.unwrap_or(si);
+        // The chart now stacks above the others. On another sheet its source placement and
+        // nonvisual name no longer apply, so the source sheet forgets them.
+        let r = gridcraft_model::DrawingRef::Chart(chart.id);
+        sh.drawing_order.remove(&r);
+        if dest != si {
+            sh.invalidate_drawing_file(r);
+            sh.drawing_names.remove(&r);
+        }
         if let Some(a) = at {
             chart.anchor.cell = a;
         }
-        let dest = target.unwrap_or(si);
         cx.sheet_mut(dest)?.charts.push(chart);
         Ok(Json::Null)
     })

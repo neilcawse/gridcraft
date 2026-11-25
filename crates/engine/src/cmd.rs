@@ -478,6 +478,11 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
         edits,
         ..
     } = ctx;
+    let shifted: Vec<u64> = edits
+        .iter()
+        .filter(|(_, e)| matches!(e, gridcraft_formula::adjust::Edit::Insert { .. } | gridcraft_formula::adjust::Edit::Delete { .. }))
+        .filter_map(|(s, _)| wb.sheet_index(s).and_then(|i| wb.sheet(i)).filter(|sh| !sh.drawing_files.is_empty()).map(|sh| sh.uid.get()))
+        .collect();
     if let Some(log) = d.edits.as_mut() {
         log.extend(edits);
     }
@@ -522,21 +527,38 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
     fit_rows.sort_unstable();
     fit_rows.dedup();
     let mut sweep: Option<(usize, MergeSweep)> = None;
+    let mut shifted_fit = None::<(usize, sheet::ShiftedDrawingFit)>;
     let mut left = MERGE_FIT_WORK;
     for (si, row) in fit_rows {
         if sweep.as_ref().is_none_or(|(at, _)| *at != si) {
+            if let Some((prev, fit)) = shifted_fit.take() {
+                fit.finish(&mut wb, prev);
+            }
+            if let Some(sh) = wb.sheet(si).filter(|sh| !shifted.is_empty() && shifted.contains(&sh.uid.get())) {
+                shifted_fit = Some((si, sheet::ShiftedDrawingFit::new(sh)));
+            }
             if let Some((_, old)) = &sweep {
                 left = old.left();
             }
             sweep = Some((si, MergeSweep::new(left)));
         }
         if let Some((_, sw)) = sweep.as_mut() {
+            let before = shifted_fit.as_ref().and_then(|_| wb.sheet(si)).map(|sh| sh.row_height(row));
             fit_row_height(&mut wb, si, row, sw);
+            if let Some((_, fit)) = shifted_fit.as_mut()
+                && let (Some(before), Some(sh)) = (before, wb.sheet(si))
+            {
+                fit.note(row, before, sh.row_height(row));
+            }
         }
+    }
+    if let Some((si, fit)) = shifted_fit {
+        fit.finish(&mut wb, si);
     }
     if let Some(t0) = t0 {
         eprintln!("commit: + rows {:?}", since(t0));
     }
+    sheet::discard_placement_after_line_changes(&d.wb, &mut wb, &shifted);
     d.wb = std::sync::Arc::new(wb);
     d.selection = sel;
     Ok(r)

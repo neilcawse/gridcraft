@@ -7,6 +7,7 @@
 mod b64;
 pub mod cell;
 mod cellmap;
+mod drawing_file;
 pub mod features;
 pub mod geometry;
 pub mod group;
@@ -21,6 +22,7 @@ pub mod style;
 pub mod workbook;
 
 pub use cell::{Cell, CellPicture, Formula};
+pub use drawing_file::{DrawingFile, DrawingMarker, DrawingPlacement};
 pub use features::*;
 pub use geometry::{Geometry, SavedSheetGeometry};
 pub use group::{DrawingGroup, DrawingRef, GroupFile, GroupFileMember, MAX_GROUP_DEPTH, ObjectRect, rotates};

@@ -23,6 +23,18 @@ pub enum Visibility {
     VeryHidden,
 }
 
+fn drawing_reference(o: ObjRef) -> Option<crate::DrawingRef> {
+    use crate::DrawingRef;
+    match o.kind {
+        ObjKind::Chart => Some(DrawingRef::Chart(o.id)),
+        ObjKind::Image => Some(DrawingRef::Image(o.id)),
+        ObjKind::Shape | ObjKind::Equation => Some(DrawingRef::Shape(o.id)),
+        ObjKind::Group => Some(DrawingRef::Group(o.id)),
+        ObjKind::Slicer => Some(DrawingRef::Slicer(o.id)),
+        ObjKind::Control => None,
+    }
+}
+
 /// How a sheet is displayed (View › Workbook Views; `<sheetView view="…">` in XLSX).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -155,6 +167,15 @@ pub struct Sheet {
     /// Groups of floating objects (members back to front; nested groups too).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<crate::DrawingGroup>,
+    /// Source DrawingML placements, keyed by the imported object's model identity.
+    #[serde(skip)]
+    pub drawing_files: std::collections::HashMap<crate::DrawingRef, crate::DrawingFile>,
+    /// DrawingML nonvisual IDs and names, independent of editable geometry.
+    #[serde(skip)]
+    pub drawing_names: std::collections::HashMap<crate::DrawingRef, (usize, String)>,
+    /// Imported top-level drawing order, independent of geometry edits and object IDs.
+    #[serde(skip)]
+    pub drawing_order: std::collections::HashMap<crate::DrawingRef, usize>,
     /// Form controls (buttons, sliders, spin buttons). They paint above every other object and
     /// take clicks first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -245,6 +266,9 @@ impl Sheet {
             sparklines: vec![],
             slicers: vec![],
             groups: vec![],
+            drawing_files: std::collections::HashMap::new(),
+            drawing_names: std::collections::HashMap::new(),
+            drawing_order: std::collections::HashMap::new(),
             controls: vec![],
             pivots: vec![],
             unimported_pivots: vec![],
@@ -344,6 +368,9 @@ impl Sheet {
     }
 
     pub fn object_anchor_mut(&mut self, o: ObjRef) -> Option<&mut Anchor> {
+        if let Some(reference) = drawing_reference(o) {
+            self.invalidate_drawing_file(reference);
+        }
         match o.kind {
             ObjKind::Chart => self.charts.iter_mut().find(|c| c.id == o.id).map(|c| &mut c.anchor),
             ObjKind::Image => self.images.iter_mut().find(|c| c.id == o.id).map(|c| &mut c.anchor),
@@ -361,6 +388,11 @@ impl Sheet {
             let n = v.len();
             v.retain(|x| !f(x));
             v.len() != n
+        }
+        if let Some(reference) = drawing_reference(o) {
+            self.invalidate_drawing_file(reference);
+            self.drawing_names.remove(&reference);
+            self.drawing_order.remove(&reference);
         }
         match o.kind {
             ObjKind::Chart => take(&mut self.charts, |c| c.id == o.id),

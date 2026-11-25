@@ -9,12 +9,12 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
-use craft_xlsx::{Anchor as CraftAnchor, Drawing as CraftDrawing, Item as CraftItem, Marker as CraftMarker, Placement as CraftPlacement};
+use craft_xlsx::{Drawing as CraftDrawing, Item as CraftItem, Marker as CraftMarker, Placement as CraftPlacement};
 
 use gridcraft_core::{CellRef, MAX_COLS, MAX_ROWS};
 use gridcraft_model::{
-    Anchor, AnchorMode, Color, DrawingGroup, DrawingRef, GroupFile, GroupFileMember, Image, MAX_GROUP_DEPTH, ObjectRect, Shape, ShapeFormat,
-    ShapeKind, ShapeTextAlign, ShapeTextAnchor, Sheet, Theme, rotates,
+    Anchor, AnchorMode, Color, DrawingFile, DrawingGroup, DrawingMarker, DrawingPlacement, DrawingRef, GroupFile, GroupFileMember, Image,
+    MAX_GROUP_DEPTH, ObjectRect, Shape, ShapeFormat, ShapeKind, ShapeTextAlign, ShapeTextAnchor, Sheet, Theme, rotates,
 };
 
 use crate::IoError;
@@ -102,6 +102,15 @@ fn placement_to_anchor(p: &CraftPlacement, sheet: &Sheet) -> Anchor {
     }
 }
 
+fn drawing_placement(p: &CraftPlacement) -> DrawingPlacement {
+    let marker = |m: CraftMarker| DrawingMarker { col: m.col, row: m.row, col_off: m.col_off, row_off: m.row_off };
+    match p {
+        CraftPlacement::TwoCell { from, to, edit_as } => DrawingPlacement::TwoCell { from: marker(*from), to: marker(*to), edit_as: edit_as.clone() },
+        CraftPlacement::OneCell { from, cx, cy } => DrawingPlacement::OneCell { from: marker(*from), ext: (*cx, *cy) },
+        CraftPlacement::Absolute { x, y, cx, cy } => DrawingPlacement::Absolute { pos: (*x, *y), ext: (*cx, *cy) },
+    }
+}
+
 fn from_craft_el(e: &craft_xml::El) -> El {
     let name = e.name.split_once(':').map_or(e.name.as_str(), |(_, local)| local).to_string();
     let attrs = e.attrs.iter().map(|(k, v)| (k.split_once(':').map_or(k.as_str(), |(_, local)| local).to_string(), v.clone())).collect();
@@ -185,8 +194,12 @@ fn obj_xfrm(obj: &El) -> Option<&El> {
 /// A point (`off`/`chOff`, attributes `x`/`y`) or size (`ext`/`chExt`, `cx`/`cy`) of an `a:xfrm`,
 /// in EMUs.
 fn xfrm_pair(xf: Option<&El>, name: &str, a: &str, b: &str) -> Option<(f64, f64)> {
+    xfrm_int_pair(xf, name, a, b).map(|(x, y)| (x as f64, y as f64))
+}
+
+fn xfrm_int_pair(xf: Option<&El>, name: &str, a: &str, b: &str) -> Option<(i64, i64)> {
     let e = xf?.child(name)?;
-    Some((e.attr_i64(a).unwrap_or(0) as f64, e.attr_i64(b).unwrap_or(0) as f64))
+    Some((e.attr_i64(a).unwrap_or(0), e.attr_i64(b).unwrap_or(0)))
 }
 
 /// The flips (`flipH`, `flipV`) of an `a:xfrm`.
@@ -310,35 +323,61 @@ pub fn read_drawing(cx: &mut Ctx<'_>, part: &str, sheet: &mut Sheet) -> Result<(
     };
     let dr = CraftDrawing::read(&root);
     let rels = cx.pkg.rels(part)?;
-    let mut anchors: Vec<&CraftAnchor> = Vec::new();
-    let mut alt_anchors: Vec<CraftAnchor> = Vec::new();
+    let mut n = 0;
     for item in &dr.items {
-        match item {
-            CraftItem::Anchor(a) => anchors.push(a),
+        let alternate;
+        let anchors = match item {
+            CraftItem::Anchor(a) => std::slice::from_ref(a),
             CraftItem::Other(e) if e.name == "mc:AlternateContent" => {
-                alt_anchors.extend(CraftDrawing::alternate_anchors(e));
+                alternate = CraftDrawing::alternate_anchors(e);
+                alternate.as_slice()
             }
-            CraftItem::Other(_) => {}
-        }
-    }
-    for (n, craft_a) in anchors.into_iter().chain(alt_anchors.iter()).enumerate() {
-        let anchor = placement_to_anchor(&craft_a.placement, sheet);
-        let n = n + 1;
-        let px = 1.0 / EMU_PER_PX;
-        let place = Place { anchor, rect: sheet.anchor_rect(&anchor), scale: (px, px), flip: (false, false) };
-        let obj_el = from_craft_el(&craft_a.object);
-        for obj in drawing_objects(std::slice::from_ref(&obj_el)) {
-            read_object(cx, (part, n), &rels, sheet, obj, place, 0)?;
+            CraftItem::Other(_) => continue,
+        };
+        for craft_a in anchors {
+            n += 1;
+            let anchor = placement_to_anchor(&craft_a.placement, sheet);
+            let px = 1.0 / EMU_PER_PX;
+            let place = Place { anchor, rect: sheet.anchor_rect(&anchor), scale: (px, px), flip: (false, false) };
+            let obj_el = from_craft_el(&craft_a.object);
+            for obj in drawing_objects(std::slice::from_ref(&obj_el)) {
+                if let Some(reference) = read_object(cx, (part, n), &rels, sheet, obj, place, 0)? {
+                    sheet.drawing_files.insert(reference, DrawingFile { anchor, placement: drawing_placement(&craft_a.placement) });
+                    sheet.drawing_order.insert(reference, n);
+                }
+            }
         }
     }
     Ok(())
+}
+
+fn read_object(
+    cx: &mut Ctx<'_>,
+    location: (&str, usize),
+    rels: &[Rel],
+    sheet: &mut Sheet,
+    obj: &El,
+    place: Place,
+    depth: usize,
+) -> Result<Option<DrawingRef>, IoError> {
+    let reference = read_object_inner(cx, location, rels, sheet, obj, place, depth)?;
+    // An object's name is kept even when its nonvisual ID is the placeholder 0: the writer then
+    // gives it a fresh ID, but macros and the Selection Pane still find it by name.
+    if let Some(r) = reference
+        && let Some(nv) = obj.children.iter().find_map(|e| e.child("cNvPr"))
+        && let (Some(id), Some(name)) = (nv.attr("id").and_then(|s| s.parse::<u32>().ok()), nv.attr("name"))
+        && (id != 0 || !name.is_empty())
+    {
+        sheet.drawing_names.insert(r, (id as usize, name.to_owned()));
+    }
+    Ok(reference)
 }
 
 /// Imports one drawing object at `place`, returning what it became. A group's children are laid
 /// out through the group's child coordinate space (nested groups compose), keep the outer
 /// anchor's mode and are listed, back to front, in a [`DrawingGroup`]; children that aren't
 /// supported are dropped with their own warning.
-fn read_object(
+fn read_object_inner(
     cx: &mut Ctx<'_>,
     (part, n): (&str, usize),
     rels: &[Rel],
@@ -402,24 +441,21 @@ fn read_object(
                 } else {
                     cx.warn(format!("chart {target} is missing from the package and was skipped ({part}, object {n})"));
                 }
-            } else if crate::slicer::read_frame(cx, &sheet.name, gd, anchor) {
+            } else if uri.contains("slicer") || gd.child("slicer").is_some() {
+                let id = cx.next_object_id();
+                crate::slicer::read_frame(cx, &sheet.name, gd, anchor, id);
                 let sname = gd
                     .child("slicer")
                     .and_then(|s| s.attr("name"))
                     .or_else(|| obj.path(&["nvGraphicFramePr", "cNvPr"]).and_then(|c| c.attr("name")))
                     .unwrap_or("")
                     .to_string();
-                cx.sheet_slicer_frames.push((sname, anchor));
+                cx.sheet_slicer_frames.push((sname, anchor, id));
+                // A grouped slicer is attached on its own, outside its group, as before: group
+                // members are written inside the group, and slicers are not.
+                return Ok((depth == 0).then_some(DrawingRef::Slicer(id)));
             } else if uri.contains("chartex") || uri.contains("chartEx") {
                 cx.warn(format!("a histogram, waterfall, treemap… chart without its chart part was skipped ({part}, object {n})"));
-            } else if uri.contains("slicer") || gd.child("slicer").is_some() {
-                let sname = gd
-                    .child("slicer")
-                    .and_then(|s| s.attr("name"))
-                    .or_else(|| obj.path(&["nvGraphicFramePr", "cNvPr"]).and_then(|c| c.attr("name")))
-                    .unwrap_or("")
-                    .to_string();
-                cx.sheet_slicer_frames.push((sname, anchor));
             } else {
                 cx.warn(format!("an embedded object (SmartArt, OLE…) was skipped ({part}, object {n})"));
             }
@@ -439,13 +475,12 @@ fn read_object(
             let id = cx.next_object_id();
             let xf = obj_xfrm(obj);
             let map = GroupMap::new(xf, place);
-            let to_i64 = |p: Option<(f64, f64)>| p.map(|(x, y)| (x.round() as i64, y.round() as i64));
-            let file_off = to_i64(xfrm_pair(xf, "off", "x", "y")).unwrap_or((0, 0));
-            let file_ext = to_i64(xfrm_pair(xf, "ext", "cx", "cy")).unwrap_or((0, 0));
-            let file_child_offset = to_i64(xfrm_pair(xf, "chOff", "x", "y"));
-            let file_child_extent = to_i64(xfrm_pair(xf, "chExt", "cx", "cy"));
+            let file_off = xfrm_int_pair(xf, "off", "x", "y");
+            let file_ext = xfrm_int_pair(xf, "ext", "cx", "cy");
+            let file_child_offset = xfrm_int_pair(xf, "chOff", "x", "y");
+            let file_child_extent = xfrm_int_pair(xf, "chExt", "cx", "cy");
             let mut file_members = Vec::new();
-            let mut file_complete = file_child_offset.is_some() && file_child_extent.is_some();
+            let mut file_complete = true;
             let mut member_rotations = Vec::new();
             let mut members = Vec::new();
             for child in drawing_objects(&obj.children) {
@@ -464,11 +499,10 @@ fn read_object(
                 if rot != 0 {
                     member_rotations.push((m, rot));
                 }
-                if let (Some(off), Some(ext)) = (to_i64(xfrm_pair(cxf, "off", "x", "y")), to_i64(xfrm_pair(cxf, "ext", "cx", "cy"))) {
-                    file_members.push(GroupFileMember { reference: m, anchor: place.anchor, off, ext });
-                } else {
-                    file_complete = false;
-                }
+                let off = xfrm_int_pair(cxf, "off", "x", "y");
+                let ext = xfrm_int_pair(cxf, "ext", "cx", "cy");
+                file_complete &= matches!(m, DrawingRef::Group(_)) || (off.is_some() && ext.is_some());
+                file_members.push(GroupFileMember { reference: m, anchor: place.anchor, off: off.unwrap_or_default(), ext: ext.unwrap_or_default() });
                 members.push(m);
             }
             if members.is_empty() {
@@ -489,10 +523,15 @@ fn read_object(
             }
             let file = GroupFile {
                 anchor,
-                off: file_off,
-                ext: file_ext,
+                off: file_off.unwrap_or_default(),
+                ext: file_ext.unwrap_or_default(),
                 child_offset: file_child_offset.unwrap_or(child_offset),
                 child_extent: file_child_extent.unwrap_or(child_extent),
+                model_child_offset: child_offset,
+                model_child_extent: child_extent,
+                fields: [file_off.is_some(), file_ext.is_some(), file_child_offset.is_some(), file_child_extent.is_some()],
+                has_transform: xf.is_some(),
+                edited: false,
                 complete: file_complete,
                 flip,
                 rotation,
@@ -774,7 +813,7 @@ const PLAIN_TEXT_PT: f32 = 11.0;
 
 /// An equation shape (inside the anchor): Office Math with a plain-text fallback when the source
 /// is in the subset OMML covers, else the plain-text box alone. Both carry the source.
-fn write_equation(s: &mut String, sh: &Shape, id: usize, theme: &Theme, off: (i64, i64), ext: (i64, i64), rot: i64) {
+fn write_equation(s: &mut String, sh: &Shape, (id, name): (usize, &str), theme: &Theme, off: (i64, i64), ext: (i64, i64), rot: i64) {
     // The font size the equation is drawn at (it scales with its frame), in points.
     let size_pt = sh
         .math
@@ -800,8 +839,7 @@ fn write_equation(s: &mut String, sh: &Shape, id: usize, theme: &Theme, off: (i6
     let marker = |tx: &str| crate::xml::parse(tx.as_bytes()).map(|e| crate::omml::body_marker(&e)).unwrap_or_else(|_| "0".repeat(16));
     let sp = |tx: &str, marker: &str| {
         format!(
-            "<xdr:sp macro=\"\" textlink=\"\"><xdr:nvSpPr><xdr:cNvPr id=\"{id}\" name=\"Equation {}\" descr=\"{}\"/><xdr:cNvSpPr txBox=\"1\"/></xdr:nvSpPr><xdr:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/></xdr:spPr>{tx}</xdr:sp>",
-            id - 1,
+            "<xdr:sp macro=\"\" textlink=\"\"><xdr:nvSpPr><xdr:cNvPr id=\"{id}\" name=\"{name}\" descr=\"{}\"/><xdr:cNvSpPr txBox=\"1\"/></xdr:nvSpPr><xdr:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/></xdr:spPr>{tx}</xdr:sp>",
             esc_attr(&format!("{LATEX_DESCR}{marker}:{}", sh.text)),
             xfrm("a:xfrm", off, ext, rot)
         )
@@ -937,8 +975,8 @@ fn drawing_rect(sheet: &Sheet, anchor: &Anchor) -> ObjectRect {
 
 /// The opening `<xdr:twoCellAnchor>` for a model anchor, carrying Excel's `editAs` when the mode
 /// is not the default: omitted for "Move and size with cells", `editAs="oneCell"` for "Move but
-/// don't size", `editAs="absolute"` for "Don't move or size". (Excel writes pictures this way;
-/// the standalone `oneCellAnchor`/`absoluteAnchor` elements are read on import but not written.)
+/// don't size", `editAs="absolute"` for "Don't move or size". Untouched imported objects
+/// instead use `source_anchor_open`.
 /// Returns the opening tag and the matching closing tag.
 fn anchor_open(sheet: &Sheet, a: &Anchor) -> (String, &'static str) {
     let px = |v: f64| ((v.max(0.0)) * EMU_PER_PX).round() as i64;
@@ -960,6 +998,37 @@ fn anchor_open(sheet: &Sheet, a: &Anchor) -> (String, &'static str) {
         px(tdy)
     );
     (open, "</xdr:twoCellAnchor>")
+}
+
+fn source_anchor_open(p: &DrawingPlacement) -> (String, &'static str) {
+    fn marker(s: &mut String, tag: &str, m: &DrawingMarker) {
+        let _ = write!(
+            s,
+            "<xdr:{tag}><xdr:col>{}</xdr:col><xdr:colOff>{}</xdr:colOff><xdr:row>{}</xdr:row><xdr:rowOff>{}</xdr:rowOff></xdr:{tag}>",
+            m.col, m.col_off, m.row, m.row_off
+        );
+    }
+    match p {
+        DrawingPlacement::TwoCell { from, to, edit_as } => {
+            let mut s = String::from("<xdr:twoCellAnchor");
+            if let Some(edit_as) = edit_as {
+                let _ = write!(s, " editAs=\"{}\"", esc_attr(edit_as));
+            }
+            s.push('>');
+            marker(&mut s, "from", from);
+            marker(&mut s, "to", to);
+            (s, "</xdr:twoCellAnchor>")
+        }
+        DrawingPlacement::OneCell { from, ext: (cx, cy) } => {
+            let mut s = String::from("<xdr:oneCellAnchor>");
+            marker(&mut s, "from", from);
+            let _ = write!(s, "<xdr:ext cx=\"{cx}\" cy=\"{cy}\"/>");
+            (s, "</xdr:oneCellAnchor>")
+        }
+        DrawingPlacement::Absolute { pos: (x, y), ext: (cx, cy) } => {
+            (format!("<xdr:absoluteAnchor><xdr:pos x=\"{x}\" y=\"{y}\"/><xdr:ext cx=\"{cx}\" cy=\"{cy}\"/>"), "</xdr:absoluteAnchor>")
+        }
+    }
 }
 
 /// EMUs for a length or position in pixels.
@@ -997,12 +1066,12 @@ impl Obj<'_> {
         }
     }
 
-    fn drawing_ref(&self) -> Option<DrawingRef> {
+    fn drawing_ref(&self) -> DrawingRef {
         match self {
-            Obj::Image(o, _) => Some(DrawingRef::Image(o.id)),
-            Obj::Chart(o, _) => Some(DrawingRef::Chart(o.id)),
-            Obj::Shape(o) => Some(DrawingRef::Shape(o.id)),
-            Obj::Slicer(_, _) => None,
+            Obj::Image(o, _) => DrawingRef::Image(o.id),
+            Obj::Chart(o, _) => DrawingRef::Chart(o.id),
+            Obj::Shape(o) => DrawingRef::Shape(o.id),
+            Obj::Slicer(o, _) => DrawingRef::Slicer(o.id),
         }
     }
 }
@@ -1070,6 +1139,8 @@ struct DrawingOut<'a> {
     done: Vec<bool>,
     groups_done: HashSet<u32>,
     next_id: usize,
+    used_ids: HashSet<usize>,
+    reserved_ids: HashSet<usize>,
 }
 
 impl DrawingOut<'_> {
@@ -1084,7 +1155,16 @@ impl DrawingOut<'_> {
         Some(cur)
     }
 
-    fn take_id(&mut self) -> usize {
+    fn take_id(&mut self, reference: DrawingRef) -> usize {
+        if let Some(&(id, _)) = self.sheet.drawing_names.get(&reference)
+            && id != 0
+            && self.used_ids.insert(id)
+        {
+            return id;
+        }
+        while self.reserved_ids.contains(&self.next_id) {
+            self.next_id += 1;
+        }
         let id = self.next_id;
         self.next_id += 1;
         id
@@ -1104,43 +1184,28 @@ impl DrawingOut<'_> {
             _ => members,
         }
     }
-    fn member_anchor(&self, r: DrawingRef) -> Option<Anchor> {
-        match r {
-            DrawingRef::Group(id) => self.sheet.drawing_group(id).map(|g| g.anchor),
-            _ => self.sheet.drawing_anchor(r),
-        }
-    }
 
-    /// The transform group `g` was read with, while nothing it depends on has been edited.
     fn source<'g>(&self, g: &'g DrawingGroup) -> Option<&'g GroupFile> {
-        let f = g.file.as_ref()?;
-        if !f.complete
-            || f.anchor != g.anchor
-            || f.child_offset != g.child_offset
-            || f.child_extent != g.child_extent
-            || f.flip != g.flip
-            || f.rotation != g.rotation
-            || f.member_rotations != g.member_rotations
-            || f.members.len() != g.members.len()
-        {
-            return None;
-        }
-        if f.members.iter().zip(&g.members).any(|(m, r)| m.reference != *r || self.member_anchor(*r) != Some(m.anchor)) {
-            return None;
-        }
-        Some(f)
+        self.sheet.source_group(g)
     }
 
     /// A `grpSp` for group `id` spanning `b`, at `off`/`ext` in its parent's space, with its
     /// members back to front in its own child space. `flip` is the axes enclosing groups flip.
-    fn group(&mut self, id: u32, b: ObjectRect, off: (i64, i64), ext: (i64, i64), flip: (bool, bool), depth: usize) {
+    fn group(
+        &mut self,
+        g: &DrawingGroup,
+        b: ObjectRect,
+        (off, ext): ((i64, i64), (i64, i64)),
+        (flip, source_parent): ((bool, bool), bool),
+        source: Option<&GroupFile>,
+        depth: usize,
+    ) {
         let sheet = self.sheet;
-        let Some(g) = sheet.drawing_group(id) else { return };
-        if depth >= MAX_GROUP_DEPTH || !self.groups_done.insert(id) {
+        if depth >= MAX_GROUP_DEPTH || !self.groups_done.insert(g.id) {
             return;
         }
         let flip = (flip.0 != g.flip.0, flip.1 != g.flip.1);
-        let source = self.source(g);
+        let exact_frame = source.is_some() && (depth == 0 || source_parent);
         let source_b = source.as_ref().map_or(b, |f| sheet.anchor_rect(&f.anchor));
         let space = ChildSpace::new(sheet, g, source_b, off, flip);
         let (group_off, group_ext, ch_off, ch_ext) = source.as_ref().map_or_else(
@@ -1153,7 +1218,7 @@ impl DrawingOut<'_> {
                 let scale =
                     |e: i64, ce: i64, ch: i64, fallback: i64| if ce > 0 { (ch as f64 * e as f64 / ce as f64).round() as i64 } else { fallback };
                 let ext = match &g.file {
-                    Some(f) if depth == 0 && f.child_extent == g.child_extent => {
+                    Some(f) if depth == 0 && f.fields[1] && f.model_child_extent == g.child_extent => {
                         (scale(f.ext.0, f.child_extent.0, ch_ext.0, ext.0), scale(f.ext.1, f.child_extent.1, ch_ext.1, ext.1))
                     }
                     _ => ext,
@@ -1162,10 +1227,11 @@ impl DrawingOut<'_> {
             },
             // A nested group is placed where its parent put it: from the source too when the
             // parent is unedited, or in the parent's recomputed child space when it isn't.
-            |f| if depth == 0 { (f.off, f.ext, f.child_offset, f.child_extent) } else { (off, ext, f.child_offset, f.child_extent) },
+            |f| if exact_frame { (f.off, f.ext, f.child_offset, f.child_extent) } else { (off, ext, f.child_offset, f.child_extent) },
         );
-        let cid = self.take_id();
-        let name = if g.name.is_empty() { format!("Group {}", cid - 1) } else { g.name.clone() };
+        let reference = DrawingRef::Group(g.id);
+        let cid = self.take_id(reference);
+        let name = if g.name.is_empty() && !sheet.drawing_names.contains_key(&reference) { format!("Group {}", cid - 1) } else { esc_attr(&g.name) };
         let mut attrs = String::new();
         if g.rotation != 0 {
             let _ = write!(attrs, " rot=\"{}\"", g.rotation);
@@ -1176,51 +1242,51 @@ impl DrawingOut<'_> {
         if g.flip.1 {
             attrs.push_str(" flipV=\"1\"");
         }
-        let _ = write!(
-            self.s,
-            "<xdr:grpSp><xdr:nvGrpSpPr><xdr:cNvPr id=\"{cid}\" name=\"{}\"/><xdr:cNvGrpSpPr/></xdr:nvGrpSpPr><xdr:grpSpPr><a:xfrm{attrs}><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/><a:chOff x=\"{}\" y=\"{}\"/><a:chExt cx=\"{}\" cy=\"{}\"/></a:xfrm></xdr:grpSpPr>",
-            esc_attr(&name),
-            group_off.0,
-            group_off.1,
-            group_ext.0.max(0),
-            group_ext.1.max(0),
-            ch_off.0,
-            ch_off.1,
-            ch_ext.0.max(0),
-            ch_ext.1.max(0)
-        );
-        for m in &g.members {
+        let _ = write!(self.s, "<xdr:grpSp><xdr:nvGrpSpPr><xdr:cNvPr id=\"{cid}\" name=\"{}\"/><xdr:cNvGrpSpPr/></xdr:nvGrpSpPr><xdr:grpSpPr>", name);
+        if !exact_frame || source.is_some_and(|f| f.has_transform) {
+            let fields = if exact_frame { source.map_or([true; 4], |f| f.fields) } else { [true; 4] };
+            let _ = write!(self.s, "<a:xfrm{attrs}>");
+            for (i, (tag, x, y, pair)) in
+                [("off", "x", "y", group_off), ("ext", "cx", "cy", group_ext), ("chOff", "x", "y", ch_off), ("chExt", "cx", "cy", ch_ext)]
+                    .into_iter()
+                    .enumerate()
+            {
+                if fields[i] {
+                    let recomputed = source.is_none() || (!exact_frame && i < 2);
+                    let (u, v) = if recomputed && i % 2 == 1 { (pair.0.max(0), pair.1.max(0)) } else { pair };
+                    let _ = write!(self.s, "<a:{tag} {x}=\"{u}\" {y}=\"{v}\"/>");
+                }
+            }
+            self.s.push_str("</a:xfrm>");
+        }
+        self.s.push_str("</xdr:grpSpPr>");
+        for (i, m) in g.members.iter().enumerate() {
             let Some(r) = self.rect(*m) else { continue };
             let rot = g.member_rotations.iter().find(|(o, _)| o == m).map_or(0, |&(_, rot)| rot);
-            // An edited nested group cannot retain its file box: its child box is recomputed
-            // from its remaining members, so place it in the enclosing child space instead.
-            let nested_unedited = match m {
-                DrawingRef::Group(n) => sheet.drawing_group(*n).is_some_and(|ng| self.source(ng).is_some()),
-                _ => true,
+            let child = match m {
+                DrawingRef::Group(id) => sheet.drawing_group(*id),
+                _ => None,
             };
-            let (moff, mext) = source
-                .as_ref()
-                .filter(|_| nested_unedited)
-                .and_then(|f| f.members.iter().find(|fm| fm.reference == *m).map(|fm| (fm.off, fm.ext)))
-                .unwrap_or_else(|| {
-                    // An unedited nested group keeps its own child space, which spans its source
-                    // box rather than its members' box: place that box.
-                    let r = match m {
-                        DrawingRef::Group(n) => sheet.drawing_group(*n).and_then(|ng| self.source(ng)).map_or(r, |f| sheet.anchor_rect(&f.anchor)),
-                        _ => r,
-                    };
-                    space.place(r, quarter_turn(rot))
-                });
+            let nested_source = child.and_then(|ng| if source.is_some() { ng.file.as_ref() } else { self.source(ng) });
+            let (moff, mext) = source.map(|f| (f.members[i].off, f.members[i].ext)).unwrap_or_else(|| {
+                let r = nested_source.map_or(r, |f| sheet.anchor_rect(&f.anchor));
+                space.place(r, quarter_turn(rot))
+            });
             match m {
-                DrawingRef::Group(n) => self.group(*n, r, moff, mext, flip, depth + 1),
+                DrawingRef::Group(_) => {
+                    if let Some(child) = child {
+                        self.group(child, r, (moff, mext), (flip, source.is_some()), nested_source, depth + 1);
+                    }
+                }
                 leaf => {
                     let Some(&i) = self.index.get(leaf) else { continue };
                     let (Some(o), Some(false)) = (self.objs.get(i), self.done.get(i).copied()) else { continue };
                     if let Some(d) = self.done.get_mut(i) {
                         *d = true;
                     }
-                    let oid = self.take_id();
-                    write_obj(&mut self.s, self.theme, o, oid, moff, mext, rot);
+                    let oid = self.take_id(*leaf);
+                    let name = sheet.drawing_names.get(leaf).map(|(_, name)| name.as_str());
+                    write_obj(&mut self.s, self.theme, o, oid, name, (moff, mext), rot);
                 }
             }
         }
@@ -1234,9 +1300,7 @@ impl DrawingOut<'_> {
 pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>]) -> String {
     let mut index = HashMap::new();
     for (i, o) in objs.iter().enumerate() {
-        if let Some(r) = o.drawing_ref() {
-            index.entry(r).or_insert(i);
-        }
+        index.entry(o.drawing_ref()).or_insert(i);
     }
     let mut member_parent = HashMap::new();
     for g in &sheet.groups {
@@ -1256,17 +1320,32 @@ pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>]) -> String {
         done: vec![false; objs.len()],
         groups_done: HashSet::new(),
         next_id: 2,
+        used_ids: HashSet::new(),
+        reserved_ids: sheet.drawing_names.values().map(|(id, _)| *id).collect(),
     };
-    for (i, o) in objs.iter().enumerate() {
-        if let Some(dref) = o.drawing_ref()
-            && let Some(gid) = out.outer_group(dref)
+    let mut order: Vec<_> = (0..objs.len()).collect();
+    if !sheet.drawing_order.is_empty() {
+        order.sort_by_cached_key(|&i| {
+            let r = objs[i].drawing_ref();
+            sheet.drawing_order.get(&out.outer_group(r).map_or(r, DrawingRef::Group)).copied().unwrap_or(usize::MAX)
+        });
+    }
+    for i in order {
+        let o = &objs[i];
+        let reference = o.drawing_ref();
+        if let Some(gid) = out.outer_group(reference)
             && !out.groups_done.contains(&gid)
             && let (Some(g), Some(b)) = (sheet.drawing_group(gid), out.rect(DrawingRef::Group(gid)))
         {
-            let anchor = out.source(g).map_or_else(|| sheet.rect_anchor(b, g.anchor.mode), |f| f.anchor);
-            let (open, close) = anchor_open(sheet, &anchor);
+            let source = out.source(g);
+            let anchor = source.map_or_else(|| sheet.rect_anchor(b, g.anchor.mode), |f| f.anchor);
+            let (open, close) = sheet
+                .drawing_files
+                .get(&DrawingRef::Group(gid))
+                .filter(|f| f.anchor == g.anchor && source.is_some())
+                .map_or_else(|| anchor_open(sheet, &anchor), |f| source_anchor_open(&f.placement));
             out.s.push_str(&open);
-            out.group(gid, b, (emu(b.x), emu(b.y)), (emu(b.w), emu(b.h)), (false, false), 0);
+            out.group(g, b, ((emu(b.x), emu(b.y)), (emu(b.w), emu(b.h))), ((false, false), false), source, 0);
             out.s.push_str("<xdr:clientData/>");
             out.s.push_str(close);
         }
@@ -1277,14 +1356,19 @@ pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>]) -> String {
             *d = true;
         }
         let a = o.anchor();
-        let (open, close) = anchor_open(sheet, a);
+        let (open, close) = sheet
+            .drawing_files
+            .get(&reference)
+            .filter(|f| f.anchor == *a)
+            .map_or_else(|| anchor_open(sheet, a), |f| source_anchor_open(&f.placement));
         out.s.push_str(&open);
-        let id = out.take_id();
+        let id = out.take_id(reference);
+        let name = sheet.drawing_names.get(&reference).map(|(_, name)| name.as_str());
         let rot = match o {
             Obj::Shape(sh) => (f64::from(sh.rotation.rem_euclid(360.0)) * 60000.0).round() as i64,
             _ => 0,
         };
-        write_obj(&mut out.s, theme, o, id, (0, 0), (emu(a.width.max(0.0) as f64), emu(a.height.max(0.0) as f64)), rot);
+        write_obj(&mut out.s, theme, o, id, name, ((0, 0), (emu(a.width.max(0.0) as f64), emu(a.height.max(0.0) as f64))), rot);
         out.s.push_str("<xdr:clientData/>");
         out.s.push_str(close);
     }
@@ -1294,13 +1378,17 @@ pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>]) -> String {
 
 /// One object's element, with `cNvPr` id `id` and its transform at `off`/`ext` (EMUs), rotated
 /// by `rot`.
-fn write_obj(s: &mut String, theme: &Theme, o: &Obj<'_>, id: usize, off: (i64, i64), ext: (i64, i64), rot: i64) {
+fn write_obj(s: &mut String, theme: &Theme, o: &Obj<'_>, id: usize, name: Option<&str>, (off, ext): ((i64, i64), (i64, i64)), rot: i64) {
+    let object_name = |prefix| match name {
+        Some(name) => esc_attr(name),
+        None => format!("{prefix} {}", id - 1),
+    };
     match o {
         Obj::Image(img, rid) => {
             let _ = write!(
                 s,
-                "<xdr:pic><xdr:nvPicPr><xdr:cNvPr id=\"{id}\" name=\"Picture {}\" descr=\"{}\"/><xdr:cNvPicPr><a:picLocks noChangeAspect=\"1\"/></xdr:cNvPicPr></xdr:nvPicPr><xdr:blipFill><a:blip r:embed=\"{rid}\"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic>",
-                id - 1,
+                "<xdr:pic><xdr:nvPicPr><xdr:cNvPr id=\"{id}\" name=\"{}\" descr=\"{}\"/><xdr:cNvPicPr><a:picLocks noChangeAspect=\"1\"/></xdr:cNvPicPr></xdr:nvPicPr><xdr:blipFill><a:blip r:embed=\"{rid}\"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic>",
+                object_name("Picture"),
                 esc_attr(&img.alt),
                 xfrm("a:xfrm", off, ext, rot)
             );
@@ -1310,28 +1398,28 @@ fn write_obj(s: &mut String, theme: &Theme, o: &Obj<'_>, id: usize, off: (i64, i
             let (prefix, ns) = crate::chartex::requires(ch.kind);
             let _ = write!(
                 s,
-                "<mc:AlternateContent xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\"><mc:Choice xmlns:{prefix}=\"{ns}\" Requires=\"{prefix}\"><xdr:graphicFrame macro=\"\"><xdr:nvGraphicFramePr><xdr:cNvPr id=\"{id}\" name=\"Chart {}\"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>{}<a:graphic><a:graphicData uri=\"http://schemas.microsoft.com/office/drawing/2014/chartex\"><cx:chart xmlns:cx=\"http://schemas.microsoft.com/office/drawing/2014/chartex\" r:id=\"{rid}\"/></a:graphicData></a:graphic></xdr:graphicFrame></mc:Choice><mc:Fallback><xdr:sp macro=\"\" textlink=\"\"><xdr:nvSpPr><xdr:cNvPr id=\"0\" name=\"\"/><xdr:cNvSpPr><a:spLocks noTextEdit=\"1\"/></xdr:cNvSpPr></xdr:nvSpPr><xdr:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang=\"en-US\"/><a:t>This chart type can't be shown by this application.</a:t></a:r></a:p></xdr:txBody></xdr:sp></mc:Fallback></mc:AlternateContent>",
-                id - 1,
+                "<mc:AlternateContent xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\"><mc:Choice xmlns:{prefix}=\"{ns}\" Requires=\"{prefix}\"><xdr:graphicFrame macro=\"\"><xdr:nvGraphicFramePr><xdr:cNvPr id=\"{id}\" name=\"{}\"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>{}<a:graphic><a:graphicData uri=\"http://schemas.microsoft.com/office/drawing/2014/chartex\"><cx:chart xmlns:cx=\"http://schemas.microsoft.com/office/drawing/2014/chartex\" r:id=\"{rid}\"/></a:graphicData></a:graphic></xdr:graphicFrame></mc:Choice><mc:Fallback><xdr:sp macro=\"\" textlink=\"\"><xdr:nvSpPr><xdr:cNvPr id=\"0\" name=\"\"/><xdr:cNvSpPr><a:spLocks noTextEdit=\"1\"/></xdr:cNvSpPr></xdr:nvSpPr><xdr:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang=\"en-US\"/><a:t>This chart type can't be shown by this application.</a:t></a:r></a:p></xdr:txBody></xdr:sp></mc:Fallback></mc:AlternateContent>",
+                object_name("Chart"),
                 xfrm("xdr:xfrm", off, ext, rot),
                 xfrm("a:xfrm", off, ext, rot)
             );
         }
-        Obj::Slicer(_, name) => {
-            s.push_str(&crate::slicer::frame_xml(id, name, &xfrm("xdr:xfrm", off, ext, rot), &xfrm("a:xfrm", off, ext, rot)));
+        Obj::Slicer(_, slicer_name) => {
+            s.push_str(&crate::slicer::frame_xml(id, slicer_name, name, &xfrm("xdr:xfrm", off, ext, rot), &xfrm("a:xfrm", off, ext, rot)));
         }
         Obj::Chart(_, rid) => {
             let _ = write!(
                 s,
-                "<xdr:graphicFrame macro=\"\"><xdr:nvGraphicFramePr><xdr:cNvPr id=\"{id}\" name=\"Chart {}\"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>{}<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/chart\"><c:chart r:id=\"{rid}\"/></a:graphicData></a:graphic></xdr:graphicFrame>",
-                id - 1,
+                "<xdr:graphicFrame macro=\"\"><xdr:nvGraphicFramePr><xdr:cNvPr id=\"{id}\" name=\"{}\"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>{}<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/chart\"><c:chart r:id=\"{rid}\"/></a:graphicData></a:graphic></xdr:graphicFrame>",
+                object_name("Chart"),
                 xfrm("xdr:xfrm", off, ext, rot)
             );
         }
         Obj::Shape(sh) if sh.kind == ShapeKind::Equation => {
-            write_equation(s, sh, id, theme, off, ext, rot);
+            write_equation(s, sh, (id, &object_name("Equation")), theme, off, ext, rot);
         }
         Obj::Shape(sh) => {
-            if let Some(xml) = ink::write(sh, theme, id, off, ext, rot) {
+            if let Some(xml) = ink::write(sh, theme, (id, name), off, ext, rot) {
                 s.push_str(&xml);
                 return;
             }
@@ -1347,8 +1435,8 @@ fn write_obj(s: &mut String, theme: &Theme, o: &Obj<'_>, id: usize, off: (i64, i
             };
             let _ = write!(
                 s,
-                "<xdr:sp macro=\"\" textlink=\"\"><xdr:nvSpPr><xdr:cNvPr id=\"{id}\" name=\"Shape {}\"/><xdr:cNvSpPr{}/></xdr:nvSpPr><xdr:spPr>{}<a:prstGeom prst=\"{prst}\"><a:avLst/></a:prstGeom>",
-                id - 1,
+                "<xdr:sp macro=\"\" textlink=\"\"><xdr:nvSpPr><xdr:cNvPr id=\"{id}\" name=\"{}\"/><xdr:cNvSpPr{}/></xdr:nvSpPr><xdr:spPr>{}<a:prstGeom prst=\"{prst}\"><a:avLst/></a:prstGeom>",
+                object_name("Shape"),
                 if tx { " txBox=\"1\"" } else { "" },
                 xfrm("a:xfrm", off, ext, rot)
             );

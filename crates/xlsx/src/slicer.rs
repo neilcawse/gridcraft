@@ -48,8 +48,8 @@ const MAX_SLICERS: usize = 4096;
 /// Slicer pieces found while reading sheets.
 #[derive(Default)]
 pub struct SlicersIn {
-    /// (sheet name, slicer name, anchor) of the `sle:slicer` drawing frames.
-    frames: Vec<(String, String, Anchor)>,
+    /// (sheet name, slicer name, anchor, reserved object ID) of each drawing frame.
+    frames: Vec<(String, String, Anchor, u32)>,
     /// (sheet name, slicer) of the slicers the sheets list.
     parts: Vec<(String, PartIn)>,
 }
@@ -83,16 +83,14 @@ struct Tabular {
     items: Vec<(u32, bool)>,
 }
 
-/// Records a drawing frame's slicer; returns false when `gd` is not a slicer frame.
-pub fn read_frame(cx: &mut Ctx<'_>, sheet: &str, gd: &El, anchor: Anchor) -> bool {
-    if gd.attr("uri") != Some(FRAME_URI) {
-        return false;
+/// Records a PivotTable slicer drawing frame for delayed attachment.
+pub fn read_frame(cx: &mut Ctx<'_>, sheet: &str, gd: &El, anchor: Anchor, id: u32) {
+    if gd.attr("uri") == Some(FRAME_URI)
+        && cx.slicers.frames.len() < MAX_SLICERS
+        && let Some(name) = gd.child("slicer").and_then(|s| s.attr("name"))
+    {
+        cx.slicers.frames.push((sheet.to_string(), name.to_string(), anchor, id));
     }
-    let Some(name) = gd.child("slicer").and_then(|s| s.attr("name")) else { return false };
-    if cx.slicers.frames.len() < MAX_SLICERS {
-        cx.slicers.frames.push((sheet.to_string(), name.to_string(), anchor));
-    }
-    true
 }
 
 /// Reads the slicer parts a worksheet's `extLst` lists (`x14:slicerList`).
@@ -183,7 +181,7 @@ pub fn resolve(
         let Some(si) = wb.sheet_index(&sheet_name) else { continue };
         // The part's frame is accounted for even when the slicer is skipped below with its own
         // warning.
-        let fi = found.frames.iter().position(|(s, n, _)| s.eq_ignore_ascii_case(&sheet_name) && n.eq_ignore_ascii_case(&part.name));
+        let fi = found.frames.iter().position(|(s, n, _, _)| s.eq_ignore_ascii_case(&sheet_name) && n.eq_ignore_ascii_case(&part.name));
         if let Some(u) = fi.and_then(|i| used.get_mut(i)) {
             *u = true;
         }
@@ -230,10 +228,13 @@ pub fn resolve(
             cx.warn(format!("slicer \"{}\": its PivotTable is missing or could not be read; skipped", part.name));
             continue;
         }
-        let Some(&(_, _, anchor)) = fi.and_then(|i| found.frames.get(i)) else {
+        let Some(&(_, _, anchor, id)) = fi.and_then(|i| found.frames.get(i)) else {
             cx.warn(format!("slicer \"{}\" has no drawing frame and was skipped", part.name));
             continue;
         };
+        if wb.sheet(si).is_some_and(|sh| sh.slicers.iter().any(|s| s.id == id)) {
+            continue;
+        }
         // The cache field's items and date grouping. A PivotTable without a filter on the field
         // takes the cache's selection; with everything selected it still keeps the field's
         // grouping (the cache field's, ECMA-376 §18.10.1.33) when no Rows/Columns field has it.
@@ -264,7 +265,6 @@ pub fn resolve(
                 Some(SlicerPivot { sheet: sh.name.clone(), name: sh.pivots.get(pi)?.name.clone() })
             })
             .collect();
-        let id = cx.next_object_id();
         let slicer = Slicer {
             id,
             source: SlicerSource::Pivot {
@@ -285,7 +285,7 @@ pub fn resolve(
             sh.slicers.push(slicer);
         }
     }
-    for ((_, name, _), u) in found.frames.iter().zip(used) {
+    for ((_, name, _, _), u) in found.frames.iter().zip(used) {
         if !u {
             cx.warn(format!("slicer \"{name}\" was skipped (only PivotTable slicers are supported)"));
         }
@@ -576,9 +576,11 @@ fn builtin_style(style: &str) -> Option<&str> {
 }
 
 /// The drawing XML of a slicer frame, with a fallback shape for readers without slicers.
-pub fn frame_xml(id: usize, name: &str, xfrm: &str, a_xfrm: &str) -> String {
+pub fn frame_xml(id: usize, name: &str, drawing_name: Option<&str>, xfrm: &str, a_xfrm: &str) -> String {
+    let n = esc_attr(name);
+    let nv = drawing_name.map(esc_attr);
+    let nv = nv.as_deref().unwrap_or(&n);
     format!(
-        "<mc:AlternateContent xmlns:mc=\"{NS_MC}\"><mc:Choice xmlns:a14=\"http://schemas.microsoft.com/office/drawing/2010/main\" Requires=\"a14\"><xdr:graphicFrame macro=\"\"><xdr:nvGraphicFramePr><xdr:cNvPr id=\"{id}\" name=\"{n}\"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>{xfrm}<a:graphic><a:graphicData uri=\"{FRAME_URI}\"><sle:slicer xmlns:sle=\"{FRAME_URI}\" name=\"{n}\"/></a:graphicData></a:graphic></xdr:graphicFrame></mc:Choice><mc:Fallback><xdr:sp macro=\"\" textlink=\"\"><xdr:nvSpPr><xdr:cNvPr id=\"0\" name=\"\"/><xdr:cNvSpPr><a:spLocks noTextEdit=\"1\"/></xdr:cNvSpPr></xdr:nvSpPr><xdr:spPr>{a_xfrm}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr><xdr:txBody><a:bodyPr vertOverflow=\"clip\" horzOverflow=\"clip\"/><a:lstStyle/><a:p><a:r><a:rPr lang=\"en-US\" sz=\"1100\"/><a:t>This is a PivotTable slicer. Slicers need Excel 2010 or later.</a:t></a:r></a:p></xdr:txBody></xdr:sp></mc:Fallback></mc:AlternateContent>",
-        n = esc_attr(name)
+        "<mc:AlternateContent xmlns:mc=\"{NS_MC}\"><mc:Choice xmlns:a14=\"http://schemas.microsoft.com/office/drawing/2010/main\" Requires=\"a14\"><xdr:graphicFrame macro=\"\"><xdr:nvGraphicFramePr><xdr:cNvPr id=\"{id}\" name=\"{nv}\"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>{xfrm}<a:graphic><a:graphicData uri=\"{FRAME_URI}\"><sle:slicer xmlns:sle=\"{FRAME_URI}\" name=\"{n}\"/></a:graphicData></a:graphic></xdr:graphicFrame></mc:Choice><mc:Fallback><xdr:sp macro=\"\" textlink=\"\"><xdr:nvSpPr><xdr:cNvPr id=\"0\" name=\"\"/><xdr:cNvSpPr><a:spLocks noTextEdit=\"1\"/></xdr:cNvSpPr></xdr:nvSpPr><xdr:spPr>{a_xfrm}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr><xdr:txBody><a:bodyPr vertOverflow=\"clip\" horzOverflow=\"clip\"/><a:lstStyle/><a:p><a:r><a:rPr lang=\"en-US\" sz=\"1100\"/><a:t>This is a PivotTable slicer. Slicers need Excel 2010 or later.</a:t></a:r></a:p></xdr:txBody></xdr:sp></mc:Fallback></mc:AlternateContent>",
     )
 }
