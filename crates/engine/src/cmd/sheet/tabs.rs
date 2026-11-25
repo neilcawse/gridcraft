@@ -206,12 +206,13 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
                 .find(|nm| cx.wb.sheet_index(nm).is_none())
                 .unwrap_or(base.clone());
             sh.name = name;
-            sh.tables.clear(); // table names must be unique
+            // The tables come along under names of their own (table names are unique).
+            let renames = copied_table_names(&cx.wb, &sh.tables);
             sh.preserved = None; // kept file content (form controls, OLE objects…) stays with the original
             // Object ids are unique across the workbook (selection and the `{kind, id}` commands
             // rely on it), so the copied objects get fresh ones (free ones, even when a file used
             // the largest id).
-            let count = sh.charts.len() + sh.images.len() + sh.shapes.len() + sh.slicers.len() + sh.controls.len();
+            let count = sh.charts.len() + sh.images.len() + sh.shapes.len() + sh.tables.len() + sh.slicers.len() + sh.controls.len();
             let ids = cx.wb.free_object_ids(count);
             if ids.len() < count {
                 return Err(bad("sheet.move", "no free object ids are left for the copied objects"));
@@ -221,6 +222,13 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
             sh.charts.iter_mut().for_each(|o| o.id = fresh());
             sh.images.iter_mut().for_each(|o| o.id = fresh());
             sh.shapes.iter_mut().for_each(|o| o.id = fresh());
+            // Tables of their own: nothing bound to the original's (a PivotTable's source) is bound to them.
+            let mut retargets = Vec::with_capacity(renames.len());
+            for (t, name) in sh.tables.iter_mut().zip(renames) {
+                t.id = fresh();
+                t.uid = Default::default();
+                retargets.push((std::mem::replace(&mut t.name, name), t.name.clone()));
+            }
             // A copied slicer's cache is new: the imported cache name and marker stay the original's.
             sh.slicers.iter_mut().for_each(|o| {
                 o.id = fresh();
@@ -252,6 +260,10 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
             cx.wb.names.extend(copies);
             cx.wb.sheets.insert(at, Arc::new(sh));
             cx.wb.set_active_sheet(at);
+            // The copy's own references, sheet-level names and slicers use its tables.
+            for (old, new) in &retargets {
+                cx.wb.retarget_table_on_sheet(at, old, new);
+            }
         } else {
             let sh = cx.wb.sheets.remove(i);
             let at = to.min(n - 1);
@@ -288,6 +300,44 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
         cx.structural = true;
         Ok(Json::Null)
     })
+}
+
+/// Names for the copies of `tables` (the tables of a sheet being copied), in order.
+///
+/// Excel names a copied table `<name><n>`. In Excel-saved public files, sheet copies turned
+/// `Table6` into `Table69` (table id 8) and `Table610` (id 9), and `Table3` into `Table38`
+/// (id 7): `n` is one more than the copy's table id, which is the workbook's next. GridCraft
+/// doesn't keep Excel's table ids and saves them as 1, 2… in sheet order, so in a workbook of
+/// `N` tables the `k`th copy (from 1) takes id `N + k` and the number `N + k + 1`. For a file
+/// whose ids have gaps (tables deleted before it was saved), Excel's numbers are larger.
+///
+/// Unmeasured (Excel probe pending): the numbers when one sheet holds several tables (taken
+/// here in the sheet's table order); the name when that one is taken (by a table or a defined
+/// name of any scope, X17's rule; the next free number is used here), or isn't a valid table
+/// name, as `R` + `12` reads as a cell (`R_12` here); and a name past 255 characters (the base
+/// is shortened to fit here).
+fn copied_table_names(wb: &gridcraft_model::Workbook, tables: &[gridcraft_model::Table]) -> Vec<String> {
+    use gridcraft_core::valid_table_name;
+    use gridcraft_formula::fold_name;
+    let mut taken: std::collections::HashSet<String> =
+        wb.sheets.iter().flat_map(|s| s.tables.iter().map(|t| fold_name(&t.name))).chain(wb.names.iter().map(|n| fold_name(&n.name))).collect();
+    let mut next = wb.sheets.iter().map(|s| s.tables.len()).sum::<usize>() + 1;
+    tables
+        .iter()
+        .map(|t| {
+            next += 1;
+            let base = if valid_table_name(&t.name) { t.name.as_str() } else { "Table" };
+            let fit = |tail: String| {
+                let mut name: String = base.chars().take(255 - tail.len()).collect();
+                name.push_str(&tail);
+                name
+            };
+            (next..)
+                .map(|n| Some(fit(n.to_string())).filter(|name| valid_table_name(name)).unwrap_or_else(|| fit(format!("_{n}"))))
+                .find(|name| taken.insert(fold_name(name)))
+                .unwrap_or_default()
+        })
+        .collect()
 }
 
 pub(super) fn tab_color(s: &mut Session, p: &Json) -> Result<Json> {
