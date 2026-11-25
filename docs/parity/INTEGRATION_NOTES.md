@@ -87,7 +87,7 @@ Baseline failures: `cross_sheet_table_slicer_imports_without_skipped_object_warn
 
 A table's name must be unique among table and defined names of any scope (ECMA-376 Part 1 §18.5.1.2), regardless of case ([Microsoft: rename an Excel table](https://support.microsoft.com/en-us/office/rename-an-excel-table-fbf49a4f-82a3-43eb-8ba2-44d21233b114)). Table Name checked other tables and `Workbook::names`, which holds workbook names and names scoped to worksheets. It missed names scoped to kept chart, dialog and macro sheets, which live only in `PreservedSheet::names`. A table could therefore be renamed to such a name, and X17 then renamed it on save without being asked. Insert Table's own `Table<n>` and Forecast Sheet's checked tables only.
 
-One check, `Workbook::table_name_taken(name, except)`, now decides for every way a table gets a name. Names given by the user are refused with "The name entered already exists. Enter a unique name."; generated names come from `Workbook::next_table_name`, the first free `Table<n>`.
+One check, `Workbook::table_name_taken(name, except)`, now decides for every editing command that gives a table a name. Names given by the user are refused with "The name entered already exists. Enter a unique name."; generated names come from `Workbook::next_table_name`, the first free `Table<n>`.
 
 | Entry point | Before | Now |
 | --- | --- | --- |
@@ -97,7 +97,7 @@ One check, `Workbook::table_name_taken(name, except)`, now decides for every way
 | `data.forecastSheet` | `Table<n>` free among tables | `next_table_name` |
 | `sheet.move` with `copy` | the copy's tables are dropped at this base, so no name is given | unchanged here. When X23 (`parity/X23-sheet-copy-tables`) merges, its copied-table allocator (`copied_table_names` in `cmd/sheet/tabs.rs`) should switch to `table_name_taken`, which already covers the kept-sheet definitions and marker-less slicer-cache names its review found missing |
 | Paste, duplicate | no path creates a table | unchanged |
-| XLSX import | X17's open-time repair already counts kept sheets' names | reads the stored name instead of re-parsing attributes; XLSB, ODS and CSV import create no tables |
+| XLSX import and save repair | X17 already counts kept sheets' names | reads the stored name instead of re-parsing attributes, and assigns the first free `Table<n>` instead of preserving or suffixing a reserved prefix; XLSB, ODS and CSV import create no tables |
 
 A name is taken by:
 
@@ -106,6 +106,8 @@ A name is taken by:
 - an imported slicer cache's name (`Slicer::imported_cache`): GridCraft's rule, from X09/X19. Save keeps that name and writes it as a workbook `#N/A` name when the file had no marker for it, so the name shares the defined-name scope. A marker read from the file is already in `Workbook::names`;
 - a name starting `_xlnm.`, in any case: spec-derived. ECMA-376 Part 1 §18.2.5 reserves the prefix for built-in names ("End users shall not use this string for custom names in the user interface"). Whether Excel refuses such a table name, and with which message, is unmeasured;
 - a name starting `_xlchart.`: GridCraft's rule. The XLSX writer makes these names for Excel 2016 charts at save time, and the reader takes them back as chart data, so they never reach `Workbook::names`. Excel's behaviour is unmeasured.
+
+X17's repair and the editing commands use the same reserved-prefix check. Cache priority is intentionally different at the XLSX boundary: if an imported table and a cache without its own defined-name marker conflict, keep the table spelling, which formulas may reference, and let the writer choose a different cache name. In an edit the user is choosing a new table name, so the existing cache name is taken.
 
 Names compare with `gridcraft_formula::same_name`: ASCII case-insensitive like `Workbook::table`, plus the Unicode case fold already used by Define Name's table check and by X17's repair. Without it, a `GRÖSSE` table beside a `Größe` name would still be renamed on save. How Excel folds non-ASCII table names is unmeasured. `same_name` now compares folded characters lazily, so the check allocates nothing.
 

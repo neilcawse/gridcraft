@@ -756,16 +756,7 @@ impl Workbook {
     /// The name Insert Table gives a new table: the first of `Table1`, `Table2`… that
     /// [`Self::table_name_taken`] leaves free.
     pub fn next_table_name(&self) -> String {
-        use std::fmt::Write;
-        let mut name = String::from("Table");
-        for n in 1u64.. {
-            name.truncate("Table".len());
-            let _ = write!(name, "{n}");
-            if !self.table_name_taken(&name, None) {
-                break;
-            }
-        }
-        name
+        next_table_name_with(&mut 1, |name| self.table_name_taken(name, None))
     }
     /// Renames the `ti`th table of the `si`th sheet to `name` (Table Design > Table Name).
     /// Bound PivotTables, slicers and cell references to the table follow the rename.
@@ -922,6 +913,23 @@ impl Workbook {
         }
         out.sort_unstable();
         out
+    }
+}
+
+/// Allocates the first free `Table<n>` at or after `next`, advancing the cursor so batch
+/// repair need not search occupied numbers again. `taken` receives the lowercase spelling.
+pub fn next_table_name_with(next: &mut u64, mut taken: impl FnMut(&str) -> bool) -> String {
+    use std::fmt::Write;
+
+    let mut name = String::from("table");
+    loop {
+        name.truncate("table".len());
+        let _ = write!(name, "{next}");
+        *next += 1;
+        if !taken(&name) {
+            name[..1].make_ascii_uppercase();
+            return name;
+        }
     }
 }
 
