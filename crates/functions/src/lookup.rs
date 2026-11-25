@@ -5,6 +5,7 @@
 
 use std::cmp::Ordering;
 
+use gridcraft_core::parse::parse_number_text;
 use gridcraft_core::{Array, CellError, Value, col_to_letters, compare};
 
 use crate::criteria::{has_wildcards, lookup_equal};
@@ -71,24 +72,31 @@ fn find_exact_in_array(x: &Value, arr: &Array, wild: bool, reverse: bool) -> Opt
 /// it answers what Excel answers rather than a linear "best" entry:
 /// - the probe is the middle entry of the remaining window; a probe whose type differs from the
 ///   needle (text vs number vs logical, blanks, errors) is replaced by the nearest entry of the
-///   needle's type below it in the window; when there is none the window moves up past it, so
-///   entries of other types are skipped (`LOOKUP(9.9E+307, range)` finds the last number);
+///   needle's type above it in the window, or when there is none by the nearest below it (and
+///   then nothing past it can be a later match), so entries of other types are skipped
+///   (`LOOKUP(9.9E+307, range)` finds the last number);
 /// - a probe equal to the needle ends the search at once (the run of equal entries that follows
 ///   it is taken, so sorted duplicates give the last one).
 ///
 /// Observed in Excel: `VLOOKUP(534, {"INTEGRAL";0;1;2;534;9999999999;-9999999999}, …)` finds 534,
 /// `HLOOKUP("STRING", {"INTEGRAL","DOUBLE","BLANK","STRING","REF","AREA (rows)",<blank>}, …)`
-/// finds "STRING" and `LOOKUP("DOUBLE", {"DOUBLE","BLANK","STRING","REF","AREA (rows)"}, …)`
-/// finds "DOUBLE". Work is linear in the vector length at worst.
+/// finds "STRING", `LOOKUP("DOUBLE", {"DOUBLE","BLANK","STRING","REF","AREA (rows)"}, …)`
+/// finds "DOUBLE", and `VLOOKUP("OJT", {"Period";1;…;8;<blank>;<blank>;"OJT";"Seminar"}, …)`
+/// finds "OJT" (the middle entry, a number, gives way to "OJT" above it, not "Period" below).
+/// Work is linear in the vector length at worst.
 fn bsearch_last(x: &Value, hay: &[Value], desc: bool) -> Option<usize> {
     let mut hi = hay.len().checked_sub(1)?;
     let mut lo = 0usize;
     let mut best = None;
+    let typed = |j: &usize| hay.get(*j).is_some_and(|v| same_type(x, v));
     while lo <= hi {
         let mid = lo + (hi - lo) / 2;
-        let Some(j) = (lo..=mid).rev().find(|&j| hay.get(j).is_some_and(|v| same_type(x, v))) else {
-            lo = mid + 1;
-            continue;
+        let (j, above) = match (mid..=hi).find(typed) {
+            Some(j) => (j, true),
+            None => match (lo..mid).rev().find(typed) {
+                Some(j) => (j, false),
+                None => break,
+            },
         };
         let v = hay.get(j)?;
         let o = lookup_order(v, x);
@@ -102,11 +110,16 @@ fn bsearch_last(x: &Value, hay: &[Value], desc: bool) -> Option<usize> {
         let before = if desc { o == Ordering::Greater } else { o == Ordering::Less };
         if before {
             best = Some(j);
-            lo = mid + 1;
-        } else if j == 0 {
-            break;
+            if !above {
+                // Everything from `mid` up is of other types.
+                break;
+            }
+            lo = j + 1;
         } else {
-            hi = j - 1;
+            // Below the probe; between `mid` and a probe above it there is nothing to find.
+            let next = if above { mid } else { j };
+            let Some(h) = next.checked_sub(1) else { break };
+            hi = h;
         }
     }
     best
@@ -156,14 +169,8 @@ fn row(a: &Array, r: usize) -> Vec<Value> {
 
 /// Resolves the 0-based `(row_or_col_pos, col_or_row_index)` of a `VLOOKUP` or `HLOOKUP` against a
 /// 1-D key array, without requiring the caller to materialize the rest of `table_array`.
-/// The index and `range_lookup` arguments come with whether each was read from a cell.
-pub fn vh_lookup_pos(
-    needle_val: &Value,
-    keys_val: &Value,
-    (idx_val, idx_from_ref): (&Value, bool),
-    approx: Option<(&Value, bool)>,
-    max_len: usize,
-) -> R<(usize, usize)> {
+/// The `range_lookup` argument comes with whether it was read from a cell.
+pub fn vh_lookup_pos(needle_val: &Value, keys_val: &Value, idx_val: &Value, approx: Option<(&Value, bool)>, max_len: usize) -> R<(usize, usize)> {
     let x = match needle_val.scalar() {
         Value::Error(e) => return Err(e),
         Value::Empty => Value::Number(0.0),
@@ -176,7 +183,7 @@ pub fn vh_lookup_pos(
     let keys = as_array(keys_val);
     let pos = if approx { bsearch_last(&x, &keys.data, false) } else { find_exact_in_array(&x, &keys, true, false) };
     let pos = pos.ok_or(CellError::NA)?;
-    Ok((pos, lookup_index(idx_val, idx_from_ref, max_len)?))
+    Ok((pos, lookup_index(idx_val, max_len)?))
 }
 
 /// The `range_lookup` of VLOOKUP / HLOOKUP. Text read from a cell is `#VALUE!`, even "TRUE"
@@ -191,14 +198,15 @@ fn range_lookup_arg(v: &Value, from_ref: bool) -> R<bool> {
 /// The 0-based column (VLOOKUP) or row (HLOOKUP) of the index argument in a table `len` wide.
 /// Excel resolves it only once the key is found: a lookup that finds nothing is `#N/A` whatever
 /// the index (Excel 2013: `HLOOKUP(x, E45:AB49, 43, 0)` without x in the first row is `#N/A`).
-/// An index that is no number is `#REF!`: an error, text in a cell (numeric text included, "0.9"
-/// is #REF! not #VALUE!) and literal text that reads as no number (Excel 16). Below 1 (a blank,
-/// FALSE, 0.9) it is `#VALUE!`; past the table `#REF!`.
-fn lookup_index(v: &Value, from_ref: bool, len: usize) -> R<usize> {
+/// An index that is no whole number is `#REF!`: an error, and text that doesn't read as a whole
+/// number (Excel 16: text "2" is column 2, but text "0.9", "29.9e-1" and "abc" are #REF!, while
+/// the number 0.9 is #VALUE! and 2.99 is column 2). Below 1 (a blank, FALSE) it is `#VALUE!`;
+/// past the table `#REF!`.
+fn lookup_index(v: &Value, len: usize) -> R<usize> {
     let idx = match v.scalar() {
         Value::Error(_) => return Err(CellError::Ref),
-        Value::Text(_) if from_ref => return Err(CellError::Ref),
-        v => v.to_number().map_err(|_| CellError::Ref)?,
+        Value::Text(t) => parse_number_text(&t).filter(|n| n.fract() == 0.0).ok_or(CellError::Ref)?,
+        v => v.to_number()?,
     };
     // NaN too: it would pass `idx < 1.0` and become index 0 (#2163).
     if idx.is_nan() || idx < 1.0 {
@@ -271,7 +279,7 @@ fn vh_lookup(args: &[Arg], vertical: bool) -> R<Value> {
         }
     };
     let pos = pos.ok_or(CellError::NA)?;
-    let idx = lookup_index(&idx_arg.value, idx_arg.from_ref, len)?;
+    let idx = lookup_index(&idx_arg.value, len)?;
     let v = if vertical { table.get(pos, idx) } else { table.get(idx, pos) };
     // An empty target stays blank, as in Excel: ISBLANK sees it as blank and `&` /
     // CONCATENATE treat it as ""; only a formula's final result displays 0 (#374).
@@ -748,13 +756,14 @@ mod tests {
         close(ev("VLOOKUP", vec![t("Bz"), rf(names()), n(2.0)]), 2.0);
         is_err(ev("VLOOKUP", vec![e(CellError::Div0), rf(names()), n(2.0)]), CellError::Div0);
         // The index is resolved once the key is found (Excel): a key not found is #N/A whatever
-        // the index; an index that is no number (an error, text in a cell) is #REF!.
+        // the index; an error or text that isn't a whole number there is #REF!.
         is_err(ev("VLOOKUP", vec![n(0.5), rf(table()), n(9.0), b(false)]), CellError::NA);
         is_err(ev("VLOOKUP", vec![n(0.5), rf(table()), n(0.0), b(false)]), CellError::NA);
         is_err(ev("HLOOKUP", vec![n(0.5), rf(table()), n(9.0), b(false)]), CellError::NA);
-        for idx in [rf(Value::Error(CellError::Div0)), rf(Value::Error(CellError::NA)), rf(tv("abc")), rf(tv("0.9")), rf(tv("2")), t("abc")] {
+        for idx in [rf(Value::Error(CellError::Div0)), rf(Value::Error(CellError::NA)), rf(tv("abc")), rf(tv("0.9")), rf(tv("29.9e-1")), t("abc")] {
             is_err(ev("VLOOKUP", vec![n(3.0), rf(table()), idx, b(false)]), CellError::Ref);
         }
+        is_text(ev("VLOOKUP", vec![n(3.0), rf(table()), rf(tv("2")), b(false)]), "three");
         close(ev("VLOOKUP", vec![n(3.0), rf(table()), t("3"), b(false)]), 30.0);
         close(ev("VLOOKUP", vec![n(1.0), rf(table()), b(true), b(false)]), 1.0);
         is_err(ev("VLOOKUP", vec![n(3.0), rf(table()), b(false), b(false)]), CellError::Value);
@@ -847,6 +856,16 @@ mod tests {
         let mut tall = vec![vec![nv(1.0)], vec![nv(2.0)], vec![nv(3.0)]];
         tall.extend((0..10_000).map(|_| vec![Value::Empty]));
         close(ev("MATCH", vec![n(9.0), rf(arr(tall))]), 3.0);
+        // A probe of another type gives way to the nearest entry of the needle's type above it.
+        let mut keys = vec![vec![tv("Period"), tv("Minutes")]];
+        keys.extend((1..=8).map(|p| vec![nv(p as f64), nv(50.0 + p as f64)]));
+        keys.extend([vec![Value::Empty, Value::Empty], vec![Value::Empty, Value::Empty]]);
+        keys.extend([vec![tv("OJT"), nv(60.0)], vec![tv("Seminar"), nv(3.0)]]);
+        let keys = arr(keys);
+        close(ev("VLOOKUP", vec![t("OJT"), rf(keys.clone()), n(2.0)]), 60.0);
+        close(ev("VLOOKUP", vec![t("Seminar"), rf(keys.clone()), n(2.0)]), 3.0);
+        close(ev("VLOOKUP", vec![n(5.0), rf(keys.clone()), n(2.0)]), 55.0);
+        close(ev("VLOOKUP", vec![n(99.0), rf(keys), n(2.0)]), 58.0);
     }
 
     #[test]

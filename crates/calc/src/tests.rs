@@ -1387,6 +1387,35 @@ fn indirect_r1c1_wraps_and_takes_whole_rows_and_columns() {
     assert_eq!(t.get("H13"), Value::Error(CellError::Div0));
 }
 
+/// Excel 365: an OFFSET height or width between 0 and 1 is one cell, larger fractions truncate.
+#[test]
+fn offset_fractional_sizes_below_one_are_one_cell() {
+    let mut t = T::new();
+    for (at, v) in [("B2", "1"), ("B3", "2"), ("C2", "10"), ("C3", "20")] {
+        t.set(at, v);
+    }
+    t.set("E1", "=SUM(OFFSET(A1,1,1,2,0.9))");
+    t.set("E2", "=SUM(OFFSET(A1,1,1,2,1.9))");
+    t.set("E3", "=SUM(OFFSET(A1,1,1,0.5,2))");
+    t.set("E4", "=SUM(OFFSET(A1,1,1,2,0))");
+    assert_eq!(t.num("E1"), 3.0);
+    assert_eq!(t.num("E2"), 3.0);
+    assert_eq!(t.num("E3"), 11.0);
+    assert_eq!(t.get("E4"), Value::Error(CellError::Ref));
+}
+
+/// An array is one area: INDEX of it with another area number is #REF! (Excel 365).
+#[test]
+fn index_of_an_array_takes_area_one_only() {
+    let mut t = T::new();
+    t.set("A1", "=INDEX({1,2,3},1,2,1)");
+    t.set("A2", "=INDEX({1,2,3},1,0,2)");
+    t.set("A3", "=INDEX(5,1,1,2)");
+    assert_eq!(t.num("A1"), 2.0);
+    assert_eq!(t.get("A2"), Value::Error(CellError::Ref));
+    assert_eq!(t.get("A3"), Value::Error(CellError::Ref));
+}
+
 #[test]
 fn relative_names() {
     let mut t = T::new();

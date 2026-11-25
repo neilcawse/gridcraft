@@ -309,9 +309,7 @@ impl<'h> Evaluator<'h> {
             {
                 let area = *area;
                 let v0 = self.deref(ev0);
-                let e2 = self.eval(&args[2]);
-                let r2 = matches!(e2, Ev::R(_));
-                let v2 = self.deref(e2);
+                let v2 = self.value(&args[2]);
                 let e3 = args.get(3).map(|e| self.eval(e));
                 let r3 = matches!(e3, Some(Ev::R(_)));
                 let v3 = e3.map(|e| self.deref(e));
@@ -336,7 +334,7 @@ impl<'h> Evaluator<'h> {
                 };
                 let lifted = matches!(v0, Value::Array(_)) || matches!(v2, Value::Array(_)) || matches!(v3, Some(Value::Array(_)));
                 if !lifted {
-                    return Ev::V(match gridcraft_functions::vh_lookup_pos(&v0, &keys_val, (&v2, r2), v3.as_ref().map(|v| (v, r3)), max_len) {
+                    return Ev::V(match gridcraft_functions::vh_lookup_pos(&v0, &keys_val, &v2, v3.as_ref().map(|v| (v, r3)), max_len) {
                         Ok((pos, idx)) => read_hit(self, pos, idx),
                         Err(e) => Value::Error(e),
                     });
@@ -363,7 +361,7 @@ impl<'h> Evaluator<'h> {
                         let n0 = a0.get_broadcast(r, c);
                         let n2 = a2.get_broadcast(r, c);
                         let n3 = a3.as_ref().map(|a| a.get_broadcast(r, c));
-                        let v = match gridcraft_functions::vh_lookup_pos(&n0, &keys_val, (&n2, r2), n3.as_ref().map(|v| (v, r3)), max_len) {
+                        let v = match gridcraft_functions::vh_lookup_pos(&n0, &keys_val, &n2, n3.as_ref().map(|v| (v, r3)), max_len) {
                             Ok((pos, idx)) => read_hit(self, pos, idx),
                             Err(e) => Value::Error(e),
                         };
