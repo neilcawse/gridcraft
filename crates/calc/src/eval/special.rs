@@ -84,21 +84,22 @@ pub(crate) fn used_range_of(wb: &Workbook, sheet: usize) -> Option<RangeRef> {
 
 /// Whether a linked workbook's name `def` (parsed as `expr`) can be calculated from the values
 /// saved with the link: no `#REF!` in it, and only the link's saved sheets and names. A sheet
-/// range, a sheetless reference in a workbook-level name and a table can't be read either.
+/// range, a sheetless reference in a workbook-level name, a table and a sheet the link saved no
+/// cells for can't be read either.
 pub(super) fn linked_definition_readable(b: &ExternalBook, def: &ExternalName, expr: &Expr) -> bool {
-    let scope = def.sheet.and_then(|i| b.sheets.get(i)).map(|s| s.name.as_str());
+    let scope = def.sheet.and_then(|i| b.sheets.get(i));
     let mut readable = true;
     expr.walk(&mut |e| {
         readable &= match e {
             Expr::Error(CellError::Ref) | Expr::Struct(_) | Expr::LinkedRefError(_) => false,
             Expr::Ref(r) => match &r.sheet {
-                SheetSel::Named(s) => b.sheet_index(s).is_some(),
-                SheetSel::Current => scope.is_some(),
+                SheetSel::Named(s) => b.sheet(s).is_some_and(|s| !s.missing),
+                SheetSel::Current => scope.is_some_and(|s| !s.missing),
                 SheetSel::Span(..) => false,
             },
             Expr::Name(n) => match n.split_once('!') {
                 Some((s, bare)) => b.name(bare, Some(s.trim_matches('\''))).is_some(),
-                None => b.name(n, scope).is_some(),
+                None => b.name(n, scope.map(|s| s.name.as_str())).is_some(),
             },
             _ => true,
         };
@@ -106,11 +107,11 @@ pub(super) fn linked_definition_readable(b: &ExternalBook, def: &ExternalName, e
     readable
 }
 
-/// A value read from a linked sheet's saved cells. When the last update of the link failed for
-/// the sheet (`refreshError`), Excel keeps the values it had and shows `#REF!` for anything it
-/// hadn't saved.
+/// A value read from a linked sheet's saved cells. A cell the link didn't save is blank, unless
+/// the last update failed for the sheet before any of its cells were saved: Excel shows `#REF!`
+/// for every cell of such a sheet (see [`ExternalSheet::unreadable`]).
 pub fn linked_value(s: &ExternalSheet, v: Value) -> Value {
-    if v.is_empty() && s.refresh_error { Value::Error(CellError::Ref) } else { v }
+    if v.is_empty() && s.unreadable() { Value::Error(CellError::Ref) } else { v }
 }
 
 /// Most expression nodes [`precedents`] visits before giving up and marking the formula dynamic.

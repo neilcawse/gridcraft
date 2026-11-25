@@ -360,7 +360,7 @@ fn typed_references_to_workbooks_that_are_not_linked_are_refused_on_entry() {
         sheets: vec![gridcraft_model::ExternalSheet {
             name: "S".into(),
             cells: vec![(CellRef::parse("A1").unwrap(), Value::Number(5.0))],
-            refresh_error: false,
+            ..Default::default()
         }],
         ..Default::default()
     };

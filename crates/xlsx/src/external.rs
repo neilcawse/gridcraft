@@ -95,16 +95,19 @@ fn dde_value(v: &El) -> Value {
 }
 
 fn book(x: &El) -> ExternalBook {
+    // A sheet the link saved no `sheetData` for stays missing: what references into it showed
+    // isn't known.
     let mut sheets: Vec<ExternalSheet> = x
         .child("sheetNames")
         .map(|n| {
             n.kids("sheetName")
-                .map(|s| ExternalSheet { name: s.attr("val").map(xml::decode_xstring).unwrap_or_default(), ..Default::default() })
+                .map(|s| ExternalSheet { name: s.attr("val").map(xml::decode_xstring).unwrap_or_default(), missing: true, ..Default::default() })
                 .collect()
         })
         .unwrap_or_default();
     for data in x.child("sheetDataSet").into_iter().flat_map(|d| d.kids("sheetData")) {
         let Some(sheet) = data.attr_u32("sheetId").and_then(|i| sheets.get_mut(i as usize)) else { continue };
+        sheet.missing = false;
         sheet.refresh_error = data.flag("refreshError", false);
         for c in data.kids("row").flat_map(|r| r.kids("cell")) {
             let Some(pos) = c.attr("r").and_then(CellRef::parse).filter(|p| p.row < MAX_ROWS && p.col < MAX_COLS) else { continue };
@@ -157,6 +160,22 @@ mod tests {
         let book = super::book(&crate::xml::parse(x).unwrap());
         let names: Vec<_> = book.names.iter().map(|n| (n.name.as_str(), n.refers_to.as_str())).collect();
         assert_eq!(names, [("HelloWorld", ""), ("Broken", "#REF!"), ("Rate", "Personal!$A$1")]);
+    }
+
+    #[test]
+    fn sheets_saved_without_cells_are_missing_and_failed_refreshes_are_kept() {
+        use gridcraft_core::{CellRef, Value};
+        let x = br#"<externalBook><sheetNames><sheetName val="Stock "/><sheetName val="Failed"/><sheetName val="Unsaved"/></sheetNames><sheetDataSet><sheetData sheetId="0" refreshError="1"><row r="1"><cell r="B1" t="str"><v>AAPL</v></cell><cell r="C1"/><cell r="D1" t="str"><v/></cell></row></sheetData><sheetData sheetId="1" refreshError="1"/></sheetDataSet></externalBook>"#;
+        let book = super::book(&crate::xml::parse(x).unwrap());
+        let flags: Vec<_> = book.sheets.iter().map(|s| (s.name.as_str(), s.refresh_error, s.missing, s.unreadable())).collect();
+        assert_eq!(flags, [("Stock ", true, false, false), ("Failed", true, false, true), ("Unsaved", false, true, false)]);
+        // A cell saved without a value is blank; one saved as an empty string is "".
+        let stock = book.sheet("stock ").unwrap();
+        let at = |s: &str| CellRef::parse(s).unwrap();
+        assert_eq!((stock.value(at("B1")), stock.value(at("C1")), stock.value(at("D1"))), (Value::text("AAPL"), Value::Empty, Value::text("")));
+        // A link saved without any `sheetDataSet` has every sheet missing.
+        let bare = super::book(&crate::xml::parse(br#"<externalBook><sheetNames><sheetName val="Rates"/></sheetNames></externalBook>"#).unwrap());
+        assert!(bare.sheets.iter().all(|s| s.missing));
     }
 
     #[test]

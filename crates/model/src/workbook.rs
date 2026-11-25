@@ -183,9 +183,12 @@ pub struct ExternalSheet {
     pub name: String,
     /// Cached cells, sorted by position (row, then column).
     pub cells: Vec<(CellRef, Value)>,
-    /// The last update of the link couldn't read this sheet (`refreshError`): Excel keeps the
-    /// cells it had saved, and references to anything else in it are `#REF!`.
+    /// The last update of the link couldn't read this sheet (`refreshError`). Excel keeps the
+    /// cells it had saved; when it had saved none, every reference into the sheet is `#REF!`.
     pub refresh_error: bool,
+    /// The link saved no cells for this sheet at all (no `sheetData` for it, as when the file
+    /// has no `sheetDataSet`): what Excel showed for references into it isn't known.
+    pub missing: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -223,6 +226,12 @@ impl ExternalSheet {
     /// The cached value at `c` (blank when the link didn't store the cell).
     pub fn value(&self, c: CellRef) -> Value {
         self.cells.binary_search_by(|(p, _)| p.cmp(&c)).ok().and_then(|i| self.cells.get(i)).map(|(_, v)| v.clone()).unwrap_or_default()
+    }
+    /// The last update couldn't read the sheet and no cell of it was saved before: Excel shows
+    /// `#REF!` for every cell of it. A refresh-error sheet that kept some cells reads the others
+    /// as blank, like any sheet.
+    pub fn unreadable(&self) -> bool {
+        self.refresh_error && self.cells.is_empty()
     }
     /// The cached cells inside `range`, in order.
     pub fn cells_in(&self, range: RangeRef) -> impl Iterator<Item = &(CellRef, Value)> {

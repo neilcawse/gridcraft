@@ -120,10 +120,11 @@ fn references_into_linked_workbooks_read_the_saved_values() {
     let prices = ExternalSheet {
         name: "P&L Prices".into(),
         cells: vec![(c("A1"), Value::text("gas")), (c("B1"), Value::Number(4.5)), (c("A2"), Value::text("power")), (c("B2"), Value::Number(61.0))],
-        refresh_error: false,
+        ..Default::default()
     };
-    let rates = ExternalSheet { name: "Rates".into(), cells: vec![(c("C3"), Value::Number(2.0))], refresh_error: false };
-    let failed = ExternalSheet { name: "Failed".into(), cells: vec![(c("A1"), Value::Number(9.0))], refresh_error: true };
+    let rates = ExternalSheet { name: "Rates".into(), cells: vec![(c("C3"), Value::Number(2.0))], ..Default::default() };
+    let failed = ExternalSheet { name: "Failed".into(), cells: vec![(c("A1"), Value::Number(9.0))], refresh_error: true, ..Default::default() };
+    let unreadable = ExternalSheet { name: "Unreadable".into(), refresh_error: true, ..Default::default() };
     let names = vec![
         ExternalName { name: "Gas".into(), sheet: None, refers_to: "'P&L Prices'!$B$1".into() },
         ExternalName { name: "Rate".into(), sheet: Some(1), refers_to: "$C$3".into() },
@@ -135,7 +136,8 @@ fn references_into_linked_workbooks_read_the_saved_values() {
         ExternalName { name: "Span".into(), sheet: None, refers_to: "Rates:Failed!$A$1".into() },
         ExternalName { name: "Loose".into(), sheet: None, refers_to: "$E$9".into() },
     ];
-    t.wb.external_books = vec![ExternalBook::default(), ExternalBook { sheets: vec![prices, rates, failed], names, ..Default::default() }].into();
+    t.wb.external_books =
+        vec![ExternalBook::default(), ExternalBook { sheets: vec![prices, rates, failed, unreadable], names, ..Default::default() }].into();
     t.wb.names.push(gridcraft_model::DefinedName {
         name: "Price".into(),
         scope: None,
@@ -155,19 +157,22 @@ fn references_into_linked_workbooks_read_the_saved_values() {
     for at in ["A5", "A6", "A7"] {
         assert_eq!(t.get(at), Value::Error(CellError::Ref), "{at}");
     }
-    // A sheet whose last refresh failed keeps its saved cells; anything else in it is #REF!.
+    // A sheet whose last refresh failed keeps its saved cells, and the cells it didn't save are
+    // blank (Excel shows 0 for them)...
     t.set("A8", "=[2]Failed!A1+[2]Failed!B1");
-    t.set("A9", "=[2]Failed!A1");
+    t.set("A9", "=[2]Failed!B7");
     t.set("A10", "=SUM([2]Failed!A1:B1)");
-    assert_eq!((t.get("A8"), t.num("A9"), t.get("A10")), (Value::Error(CellError::Ref), 9.0, Value::Error(CellError::Ref)));
+    assert_eq!((t.num("A8"), t.num("A9"), t.num("A10")), (9.0, 0.0, 9.0));
     // A reference Excel found deleted in a linked workbook is #REF!.
     t.set("A14", "=[2]Rates!#REF!+1");
     assert_eq!(t.get("A14"), Value::Error(CellError::Ref));
-    // A whole column, or more columns than a block can hold, reaches the same uncached cells.
-    t.set("A11", "=SUM([2]Failed!A:A)");
-    t.set("A12", "=SUM([2]Failed!A1:A2)");
-    t.set("A13", "=SUM([2]Failed!A:Z)");
-    for at in ["A11", "A12", "A13"] {
+    // ... but every cell of one that had saved no cells before is #REF!, through a block, a
+    // whole column, or more columns than a block can hold.
+    t.set("A11", "=SUM([2]Unreadable!A:A)");
+    t.set("A12", "=SUM([2]Unreadable!A1:A2)");
+    t.set("A13", "=SUM([2]Unreadable!A:Z)");
+    t.set("A15", "=[2]Unreadable!C3");
+    for at in ["A11", "A12", "A13", "A15"] {
         assert_eq!(t.get(at), Value::Error(CellError::Ref), "{at}");
     }
     // The linked workbook's own names: workbook-scoped and sheet-scoped.
@@ -200,8 +205,8 @@ fn references_into_linked_workbooks_read_the_saved_values() {
 fn linked_names_that_cannot_be_calculated_keep_their_saved_value() {
     use gridcraft_model::{ExternalBook, ExternalName, ExternalSheet};
     let mut t = T::new();
-    let data = ExternalSheet { name: "Data".into(), cells: vec![(c("A1"), Value::Number(7.0))], refresh_error: false };
-    let failed = ExternalSheet { name: "Failed".into(), cells: vec![], refresh_error: true };
+    let data = ExternalSheet { name: "Data".into(), cells: vec![(c("A1"), Value::Number(7.0))], ..Default::default() };
+    let failed = ExternalSheet { name: "Failed".into(), cells: vec![], refresh_error: true, ..Default::default() };
     let name = |name: &str, refers_to: &str| ExternalName { name: name.into(), sheet: None, refers_to: refers_to.into() };
     let names = vec![
         name("Broken", "#REF!"),
@@ -241,8 +246,8 @@ fn linked_names_that_cannot_be_calculated_keep_their_saved_value() {
         assert_eq!([t.num("B3"), t.num("B4"), t.num("B5"), t.num("B6")], [3.0, 4.0, 5.0, 6.0]);
         // What the saved values can answer is calculated, and users of a kept value see it.
         assert_eq!((t.num("B7"), t.num("B10")), (14.0, 21.0));
-        // A name the link doesn't define, a refresh-error sheet's unsaved cell, and a formula
-        // with no saved value are still #REF!.
+        // A name the link doesn't define, a cell of a refresh-error sheet that saved no cells,
+        // and a formula with no saved value are still #REF!.
         for at in ["B8", "B9", "B11"] {
             assert_eq!(t.get(at), Value::Error(CellError::Ref), "{at}");
         }
@@ -382,7 +387,7 @@ fn references_into_linked_workbooks_keep_their_position_and_size() {
     }
     cells.sort_by_key(|(p, _)| *p);
     t.wb.external_books =
-        vec![ExternalBook { sheets: vec![ExternalSheet { name: "Data".into(), cells, refresh_error: false }], ..Default::default() }].into();
+        vec![ExternalBook { sheets: vec![ExternalSheet { name: "Data".into(), cells, ..Default::default() }], ..Default::default() }].into();
     // `@` takes the cell on the formula's row (or column), as for this workbook's references.
     for at in ["D2", "D3", "D4", "D5", "D6"] {
         t.set(at, "=@[1]Data!B:B");
@@ -410,6 +415,33 @@ fn references_into_linked_workbooks_keep_their_position_and_size() {
 }
 
 #[test]
+fn linked_sheets_saved_without_cells_keep_the_saved_values() {
+    use gridcraft_model::{ExternalBook, ExternalSheet};
+    let mut t = T::new();
+    // The link names the sheets but saved no `sheetData` for them: nothing to calculate with.
+    let missing = |name: &str| ExternalSheet { name: name.into(), missing: true, ..Default::default() };
+    let saved_one = ExternalSheet { name: "Kept".into(), cells: vec![(c("A1"), Value::Number(3.0))], ..Default::default() };
+    t.wb.external_books = vec![ExternalBook { sheets: vec![missing("Rates"), missing("Census"), saved_one], ..Default::default() }].into();
+    let saved = [
+        ("A1", "=[1]Rates!$W$29", Value::text("")),
+        ("A2", "='[1]Census'!B33", Value::Number(1.0)),
+        ("A3", "=SUM([1]Census!A1:A9)+1", Value::Number(7.0)),
+        ("A4", "=A2+[1]Kept!A1", Value::Number(0.0)),
+    ];
+    for (at, formula, value) in saved {
+        let mut cell = Cell::formula(Formula::new(formula));
+        cell.value = value;
+        t.wb.sheet_mut(0).unwrap().cells.set(c(at), cell);
+    }
+    for _ in 0..2 {
+        t.calc.recalc_all(&mut t.wb);
+        assert_eq!((t.get("A1"), t.num("A2"), t.num("A3")), (Value::text(""), 1.0, 7.0));
+        // A sheet the link did save is read, and formulas over kept values see them.
+        assert_eq!(t.num("A4"), 4.0);
+    }
+}
+
+#[test]
 fn offset_refuses_a_base_in_a_linked_workbook() {
     use gridcraft_model::{ExternalBook, ExternalSheet};
     let mut t = T::new();
@@ -420,8 +452,8 @@ fn offset_refuses_a_base_in_a_linked_workbook() {
     let backup = vec![(c("D38"), Value::Number(39.0))];
     t.wb.external_books = vec![ExternalBook {
         sheets: vec![
-            ExternalSheet { name: "Curve".into(), cells: curve, refresh_error: false },
-            ExternalSheet { name: "Backup".into(), cells: backup, refresh_error: false },
+            ExternalSheet { name: "Curve".into(), cells: curve, ..Default::default() },
+            ExternalSheet { name: "Backup".into(), cells: backup, ..Default::default() },
         ],
         ..Default::default()
     }]

@@ -375,17 +375,19 @@ impl<'h> Evaluator<'h> {
     /// the position and size written, read from the values saved with the link, as Excel
     /// calculates while the source is closed (see [`LINKED_SHEETS`]). `None` = not a reference
     /// into a linked workbook; `#REF!` = the link didn't save that workbook or sheet, noted to the
-    /// host when the link has no saved workbook to look in (see [`Host::note_unknown_link`]).
+    /// host when the link has no saved values to look in: a link that isn't to a workbook, or a
+    /// sheet it saved no cells for at all (see [`Host::note_unknown_link`]).
     fn linked_area(&mut self, r: &Reference) -> Option<Result<Area, CellError>> {
         let SheetSel::Named(name) = &r.sheet else { return None };
         let (book, sheet) = external_sheet(name)?;
         let wb = self.host.workbook();
         let linked = book.checked_sub(1).and_then(|b| Some((b, wb.external_books.get(b)?)));
-        if linked.is_some_and(|(_, l)| l.opaque) {
+        let found = linked.and_then(|(b, l)| Some((b, l.sheet_index(sheet)?)));
+        let missing = found.and_then(|(b, s)| wb.external_books.get(b)?.sheets.get(s)).is_some_and(|s| s.missing);
+        if missing || linked.is_some_and(|(_, l)| l.opaque) {
             self.host.note_unknown_link();
             return Some(Err(CellError::Ref));
         }
-        let found = linked.and_then(|(b, l)| Some((b, l.sheet_index(sheet)?)));
         Some(found.and_then(|(b, s)| linked_sheet_number(b, s)).map(|sheet| Area { sheet, range: r.range() }).ok_or(CellError::Ref))
     }
 
@@ -526,16 +528,14 @@ impl<'h> Evaluator<'h> {
         if linked_parts(a.sheet).is_none() && self.host.workbook().sheet(a.sheet).is_none() {
             return a.range;
         }
-        // Past the cells a refresh-error sheet saved, everything is `#REF!`, not blank: keep one
-        // row and column past them, so `[1]Data!A:A` reads an uncached cell and agrees with
-        // `[1]Data!A1:A2`.
-        let past = u32::from(self.linked_sheet(a.sheet).is_some_and(|s| s.refresh_error));
+        // An unreadable linked sheet has no used range: the area's first cell, read as `#REF!`,
+        // stands for the rest.
         let used = self.host.used_range(a.sheet);
         let (mut r1, mut c1) = (a.range.end.row, a.range.end.col);
         match used {
             Some(u) => {
-                r1 = r1.min(u.end.row.saturating_add(past).max(a.range.start.row));
-                c1 = c1.min(u.end.col.saturating_add(past).max(a.range.start.col));
+                r1 = r1.min(u.end.row.max(a.range.start.row));
+                c1 = c1.min(u.end.col.max(a.range.start.col));
             }
             None => {
                 r1 = a.range.start.row;
