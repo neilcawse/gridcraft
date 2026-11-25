@@ -239,6 +239,49 @@ fn registry() -> &'static (Vec<FnSpec>, HashMap<&'static str, usize>) {
     })
 }
 
+/// Names of functions the evaluator implements itself (merged into the function list for UI).
+pub const SPECIAL_FUNCTIONS: &[&str] = &[
+    "IF",
+    "IFS",
+    "IFERROR",
+    "IFNA",
+    "CHOOSE",
+    "SWITCH",
+    "ROW",
+    "COLUMN",
+    "ROWS",
+    "COLUMNS",
+    "AREAS",
+    "ISREF",
+    "ISFORMULA",
+    "FORMULATEXT",
+    "SHEET",
+    "SHEETS",
+    "OFFSET",
+    "INDIRECT",
+    "INDEX",
+    "CELL",
+    "TRIMRANGE",
+    "GETPIVOTDATA",
+    "SUBTOTAL",
+    "AGGREGATE",
+    "TEXT",
+    "LET",
+    "LAMBDA",
+    "ISOMITTED",
+    "MAP",
+    "REDUCE",
+    "SCAN",
+    "BYROW",
+    "BYCOL",
+    "MAKEARRAY",
+];
+
+/// Whether the worksheet library or the evaluator handles this function name.
+pub fn is_known_function(name: &str) -> bool {
+    SPECIAL_FUNCTIONS.iter().any(|special| special.eq_ignore_ascii_case(name)) || lookup(name).is_some()
+}
+
 /// Looks a function up by name (case-insensitive; `_xlfn.`- and `_xlws.`-free names). A
 /// `_xludf.` name is user-defined and never found.
 pub fn lookup(name: &str) -> Option<&'static FnSpec> {

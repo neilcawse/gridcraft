@@ -7,7 +7,7 @@ use std::io::Read;
 use std::sync::Arc;
 
 use gridcraft_core::{CellRef, RangeRef, Value};
-use gridcraft_model::{DefinedName, PivotField, PivotTable, PivotValue, Sheet, Table, TableColumn, TotalsFn, Workbook};
+use gridcraft_model::{Cell, DefinedName, Formula, PivotField, PivotTable, PivotValue, Sheet, Table, TableColumn, TotalsFn, Workbook};
 use serde_json::json;
 
 use crate::io::{FileKind, open_bytes, save_bytes_reported};
@@ -680,6 +680,24 @@ fn table_rename_follows_bound_pivots_and_does_not_capture_let_or_lambda_names() 
     let mut wb = (*s.doc().unwrap().wb).clone();
     assert_eq!(wb.sheets[REPORT].pivots[0].source, "Data!Renamed");
     assert_eq!(total(&mut wb), Ok(FROM_DATA));
+}
+
+#[test]
+fn table_rename_keeps_builtin_calls_that_share_a_lambda_name() {
+    let mut wb = book("rData", true);
+    Arc::make_mut(&mut wb.sheets[1]).tables.push(kv_table("Sales"));
+    wb.names.push(name("IsRef", None, "LAMBDA(x,FALSE)"));
+    // A native file's cell tree parses the call as the built-in ISREF.
+    let at = CellRef::parse("M1").unwrap();
+    let f: Formula = serde_json::from_str(r#"{"text":"ISREF(Sales[V])","array":null}"#).unwrap();
+    Arc::make_mut(&mut wb.sheets[REPORT]).set_cell(at, Cell::formula(f));
+    let mut s = rename_session(wb);
+    s.execute("formulas.calculateNow", json!({})).unwrap();
+    assert_eq!(s.doc().unwrap().wb.sheets[REPORT].value(at), Value::Bool(true));
+    s.execute("table.rename", json!({"sheet": "Data", "table": "Sales", "name": "Renamed"})).unwrap();
+    let sh = &s.doc().unwrap().wb.sheets[REPORT];
+    assert_eq!(sh.value(at), Value::Bool(true));
+    assert_eq!(sh.cell(at).unwrap().formula.as_ref().unwrap().text, "ISREF(Renamed[V])");
 }
 
 fn rename_session(wb: Workbook) -> crate::Session {

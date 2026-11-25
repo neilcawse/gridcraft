@@ -26,7 +26,12 @@ pub struct TableRename<'a> {
 impl<'a> TableRename<'a> {
     pub fn new(wb: &'a Workbook, at: TablePosition, new: &'a str) -> Option<Self> {
         let old = wb.sheets.get(at.0)?.tables.get(at.1)?.name.as_str();
-        (old != new).then(|| Self { wb, at, old, new, first: wb.table(old) == Some(at), lambdas: wb.lambda_names() })
+        (old != new).then(|| {
+            let mut lambdas = wb.lambda_names();
+            // A same-named defined LAMBDA does not replace a built-in function.
+            lambdas.retain(|name| !gridcraft_functions::is_known_function(name));
+            Self { wb, at, old, new, first: wb.table(old) == Some(at), lambdas }
+        })
     }
 
     pub fn apply(&self, wb: &mut Workbook) {
@@ -480,6 +485,14 @@ mod tests {
             ("ROWS(Data!Sales)", "ROWS(Data!Renamed)"),
             ("Double(SUM(Sales[V]))", "Double(SUM(Renamed[V]))"),
             ("LET(double,LAMBDA(x,x+1),DOUBLE(SUM(Sales[V])))", "LET(double,LAMBDA(x,x+1),DOUBLE(SUM(Renamed[V])))"),
+            (
+                "LET(double,LAMBDA(x,DOUBLE(x)+SUM(Sales[V])),LET(inner,DOUBLE(1),DOUBLE(inner)))+DOUBLE(3)",
+                "LET(double,LAMBDA(x,Double(x)+SUM(Renamed[V])),LET(inner,DOUBLE(1),DOUBLE(inner)))+Double(3)",
+            ),
+            (
+                "LAMBDA(double,arg,DOUBLE(arg+SUM(Sales[V])))(LAMBDA(x,x+1),DOUBLE(1))",
+                "LAMBDA(double,arg,DOUBLE(arg+SUM(Renamed[V])))(LAMBDA(x,x+1),Double(1))",
+            ),
         ];
         let mut wb = book();
         wb.names.push(name("Double", "LAMBDA(x,x*2)"));

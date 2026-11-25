@@ -22,11 +22,9 @@ mod special;
 use array::map_unary;
 pub use array::{binary_values, zip2};
 pub use format::r1c1_to_a1;
+pub use gridcraft_functions::{SPECIAL_FUNCTIONS, is_known_function};
 pub(crate) use special::used_range_of;
-pub use special::{
-    DynamicReads, SPECIAL_FUNCTIONS, dynamic_reads, is_known_function, linked_parts, linked_value, precedents, precedents_at, resized_sum_range,
-    takes_reference,
-};
+pub use special::{DynamicReads, dynamic_reads, linked_parts, linked_value, precedents, precedents_at, resized_sum_range, takes_reference};
 use special::{external_name, external_sheet, linked_definition_readable, linked_sheet_number};
 
 /// Largest array a reference may expand to.

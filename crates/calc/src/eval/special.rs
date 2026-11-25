@@ -3,6 +3,7 @@ use super::{
     SheetSel, Value, Workbook,
 };
 use gridcraft_core::{CellRef, MAX_COLS, MAX_ROWS, RangeRef};
+use gridcraft_functions::SPECIAL_FUNCTIONS;
 
 /// SUMIF and AVERAGEIF with a sum range: Excel sizes the sum range like the criteria range.
 pub(super) fn resizes_sum_range(name: &str, args: usize) -> bool {
@@ -277,7 +278,7 @@ impl Precedents<'_> {
                     self.add(area, boxes);
                 }
             }
-            Expr::Call(n, _) if gridcraft_functions::lookup(n).is_none() && !is_special(n) => self.dynamic = true,
+            Expr::Call(n, _) if gridcraft_functions::lookup(n).is_none() && !SPECIAL_FUNCTIONS.contains(&n.as_str()) => self.dynamic = true,
             // A range ending in a function's result (`A1:INDEX(B1:B9,n)`), or a chain of plain
             // references the parser can't fold into one (`A1:B2:C3`), covers the cells between the
             // references inside it, not only those references. Both operands are visited once,
@@ -391,89 +392,8 @@ fn collect_dynamic_reads(wb: &Workbook, sheet: usize, e: &Expr, out: &mut Dynami
             known = false;
         }
         // A function defined by a name (a LAMBDA).
-        Expr::Call(n, _) if gridcraft_functions::lookup(n).is_none() && !is_special(n) => known &= name(out, n),
+        Expr::Call(n, _) if gridcraft_functions::lookup(n).is_none() && !SPECIAL_FUNCTIONS.contains(&n.as_str()) => known &= name(out, n),
         _ => {}
     });
     known
-}
-
-fn is_special(n: &str) -> bool {
-    matches!(
-        n,
-        "IF" | "IFS"
-            | "IFERROR"
-            | "IFNA"
-            | "CHOOSE"
-            | "SWITCH"
-            | "ROW"
-            | "COLUMN"
-            | "ROWS"
-            | "COLUMNS"
-            | "AREAS"
-            | "ISREF"
-            | "ISFORMULA"
-            | "FORMULATEXT"
-            | "SHEET"
-            | "SHEETS"
-            | "OFFSET"
-            | "INDIRECT"
-            | "INDEX"
-            | "CELL"
-            | "TRIMRANGE"
-            | "GETPIVOTDATA"
-            | "SUBTOTAL"
-            | "AGGREGATE"
-            | "TEXT"
-            | "LET"
-            | "LAMBDA"
-            | "ISOMITTED"
-            | "MAP"
-            | "REDUCE"
-            | "SCAN"
-            | "BYROW"
-            | "BYCOL"
-            | "MAKEARRAY"
-    )
-}
-
-/// Names of functions the evaluator implements itself (merged into the function list for UI).
-pub const SPECIAL_FUNCTIONS: &[&str] = &[
-    "IF",
-    "IFS",
-    "IFERROR",
-    "IFNA",
-    "CHOOSE",
-    "SWITCH",
-    "ROW",
-    "COLUMN",
-    "ROWS",
-    "COLUMNS",
-    "AREAS",
-    "ISREF",
-    "ISFORMULA",
-    "FORMULATEXT",
-    "SHEET",
-    "SHEETS",
-    "OFFSET",
-    "INDIRECT",
-    "INDEX",
-    "CELL",
-    "TRIMRANGE",
-    "GETPIVOTDATA",
-    "SUBTOTAL",
-    "AGGREGATE",
-    "TEXT",
-    "LET",
-    "LAMBDA",
-    "ISOMITTED",
-    "MAP",
-    "REDUCE",
-    "SCAN",
-    "BYROW",
-    "BYCOL",
-    "MAKEARRAY",
-];
-
-pub fn is_known_function(n: &str) -> bool {
-    is_special(&n.to_ascii_uppercase()) || gridcraft_functions::lookup(n).is_some()
 }

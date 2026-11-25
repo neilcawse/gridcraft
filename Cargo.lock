@@ -2366,6 +2366,7 @@ version = "0.19.1"
 dependencies = [
  "gridcraft-core",
  "gridcraft-formula",
+ "gridcraft-functions",
  "gridcraft-math",
  "serde",
  "serde_json",
