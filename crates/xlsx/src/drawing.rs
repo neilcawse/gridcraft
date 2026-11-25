@@ -56,14 +56,17 @@ fn craft_marker(m: CraftMarker) -> (CellRef, f64, f64) {
 }
 
 fn placement_to_anchor(p: &CraftPlacement, sheet: &Sheet) -> Anchor {
+    let layout_px = |px: f64| {
+        if sheet.geometry == gridcraft_model::Geometry::Legacy { f64::from(px as f32) } else { px }
+    };
     match p {
         CraftPlacement::TwoCell { from, to, edit_as } => {
             let (cell, dx, dy) = craft_marker(*from);
             let (to, tdx, tdy) = craft_marker(*to);
-            let x1 = sheet.col_left(cell.col) + dx;
-            let y1 = sheet.row_top(cell.row) + dy;
-            let x2 = sheet.col_left(to.col) + tdx;
-            let y2 = sheet.row_top(to.row) + tdy;
+            let x1 = sheet.col_left(cell.col) + layout_px(dx);
+            let y1 = sheet.row_top(cell.row) + layout_px(dy);
+            let x2 = sheet.col_left(to.col) + layout_px(tdx);
+            let y2 = sheet.row_top(to.row) + layout_px(tdy);
             let mode = match edit_as.as_deref() {
                 Some("absolute") => AnchorMode::Absolute,
                 Some("oneCell") => AnchorMode::MoveOnly,
@@ -73,11 +76,18 @@ fn placement_to_anchor(p: &CraftPlacement, sheet: &Sheet) -> Anchor {
         }
         CraftPlacement::OneCell { from, cx, cy } => {
             let (cell, dx, dy) = craft_marker(*from);
-            Anchor { cell, dx: dx as f32, dy: dy as f32, width: emu_to_px(*cx).max(0.0) as f32, height: emu_to_px(*cy).max(0.0) as f32, mode: AnchorMode::MoveOnly }
+            Anchor {
+                cell,
+                dx: dx as f32,
+                dy: dy as f32,
+                width: emu_to_px(*cx).max(0.0) as f32,
+                height: emu_to_px(*cy).max(0.0) as f32,
+                mode: AnchorMode::MoveOnly,
+            }
         }
         CraftPlacement::Absolute { x, y, cx, cy } => {
-            let x = emu_to_px(*x).max(0.0);
-            let y = emu_to_px(*y).max(0.0);
+            let x = layout_px(emu_to_px(*x).max(0.0));
+            let y = layout_px(emu_to_px(*y).max(0.0));
             let col = sheet.col_at(x);
             let row = sheet.row_at(y);
             Anchor {
@@ -897,6 +907,34 @@ fn marker_edge(line: u32, offset: f64, span: f64, limit: u32, error: f64) -> (u3
     }
 }
 
+type PixelMarker = (CellRef, f64, f64);
+
+fn anchor_markers(sheet: &Sheet, a: &Anchor) -> (PixelMarker, PixelMarker) {
+    let (mut fc, mut fr) = (a.cell.col, a.cell.row);
+    let (mut fdx, mut fdy) = (f64::from(a.dx), f64::from(a.dy));
+    let (w, h) = (f64::from(a.width.max(0.0)), f64::from(a.height.max(0.0)));
+    let (x2, y2) = (sheet.col_left(fc) + fdx + w, sheet.row_top(fr) + fdy + h);
+    let (mut tc, mut tr) = (sheet.col_at(x2), sheet.row_at(y2));
+    let (mut tdx, mut tdy) = (x2 - sheet.col_left(tc), y2 - sheet.row_top(tr));
+    if sheet.geometry != gridcraft_model::Geometry::Legacy {
+        (tc, tdx) = marker_edge(tc, tdx, f64::from(sheet.col_width(tc)), MAX_COLS, fdx.abs() + w);
+        (tr, tdy) = marker_edge(tr, tdy, f64::from(sheet.row_height(tr)), MAX_ROWS, fdy.abs() + h);
+        (fc, fdx) = marker_edge(fc, fdx, f64::from(sheet.col_width(fc)), MAX_COLS, fdx.abs());
+        (fr, fdy) = marker_edge(fr, fdy, f64::from(sheet.row_height(fr)), MAX_ROWS, fdy.abs());
+    }
+    ((CellRef::new(fr, fc), fdx, fdy), (CellRef::new(tr, tc), tdx, tdy))
+}
+
+/// Use the same snapped edges for group transforms as for their worksheet anchors.
+fn drawing_rect(sheet: &Sheet, anchor: &Anchor) -> ObjectRect {
+    if sheet.geometry == gridcraft_model::Geometry::Legacy {
+        return sheet.anchor_rect(anchor);
+    }
+    let ((from, dx, dy), (to, tdx, tdy)) = anchor_markers(sheet, anchor);
+    let (x, y) = (sheet.col_left(from.col) + dx, sheet.row_top(from.row) + dy);
+    ObjectRect { x, y, w: (sheet.col_left(to.col) + tdx - x).max(0.0), h: (sheet.row_top(to.row) + tdy - y).max(0.0) }
+}
+
 /// The opening `<xdr:twoCellAnchor>` for a model anchor, carrying Excel's `editAs` when the mode
 /// is not the default: omitted for "Move and size with cells", `editAs="oneCell"` for "Move but
 /// don't size", `editAs="absolute"` for "Don't move or size". (Excel writes pictures this way;
@@ -904,34 +942,21 @@ fn marker_edge(line: u32, offset: f64, span: f64, limit: u32, error: f64) -> (u3
 /// Returns the opening tag and the matching closing tag.
 fn anchor_open(sheet: &Sheet, a: &Anchor) -> (String, &'static str) {
     let px = |v: f64| ((v.max(0.0)) * EMU_PER_PX).round() as i64;
-    let x1 = sheet.col_left(a.cell.col) + a.dx as f64;
-    let y1 = sheet.row_top(a.cell.row) + a.dy as f64;
-    let x2 = x1 + a.width.max(0.0) as f64;
-    let y2 = y1 + a.height.max(0.0) as f64;
-    let (mut fc, mut fr) = (a.cell.col, a.cell.row);
-    let (mut fdx, mut fdy) = (f64::from(a.dx), f64::from(a.dy));
-    let mut tc = sheet.col_at(x2);
-    let mut tr = sheet.row_at(y2);
-    let mut tdx = x2 - sheet.col_left(tc);
-    let mut tdy = y2 - sheet.row_top(tr);
-    if sheet.geometry != gridcraft_model::Geometry::Legacy {
-        (tc, tdx) = marker_edge(tc, tdx, f64::from(sheet.col_width(tc)), MAX_COLS, fdx.abs() + f64::from(a.width.abs()));
-        (tr, tdy) = marker_edge(tr, tdy, f64::from(sheet.row_height(tr)), MAX_ROWS, fdy.abs() + f64::from(a.height.abs()));
-        (fc, fdx) = marker_edge(fc, fdx, f64::from(sheet.col_width(fc)), MAX_COLS, fdx.abs());
-        (fr, fdy) = marker_edge(fr, fdy, f64::from(sheet.row_height(fr)), MAX_ROWS, fdy.abs());
-    }
+    let ((from, fdx, fdy), (to, tdx, tdy)) = anchor_markers(sheet, a);
     let edit = match a.mode {
         AnchorMode::MoveAndSize => "",
         AnchorMode::MoveOnly => " editAs=\"oneCell\"",
         AnchorMode::Absolute => " editAs=\"absolute\"",
     };
     let open = format!(
-        "<xdr:twoCellAnchor{edit}><xdr:from><xdr:col>{}</xdr:col><xdr:colOff>{}</xdr:colOff><xdr:row>{}</xdr:row><xdr:rowOff>{}</xdr:rowOff></xdr:from><xdr:to><xdr:col>{tc}</xdr:col><xdr:colOff>{}</xdr:colOff><xdr:row>{tr}</xdr:row><xdr:rowOff>{}</xdr:rowOff></xdr:to>",
-        fc,
+        "<xdr:twoCellAnchor{edit}><xdr:from><xdr:col>{}</xdr:col><xdr:colOff>{}</xdr:colOff><xdr:row>{}</xdr:row><xdr:rowOff>{}</xdr:rowOff></xdr:from><xdr:to><xdr:col>{}</xdr:col><xdr:colOff>{}</xdr:colOff><xdr:row>{}</xdr:row><xdr:rowOff>{}</xdr:rowOff></xdr:to>",
+        from.col,
         px(fdx),
-        fr,
+        from.row,
         px(fdy),
+        to.col,
         px(tdx),
+        to.row,
         px(tdy)
     );
     (open, "</xdr:twoCellAnchor>")
@@ -999,7 +1024,7 @@ impl ChildSpace {
     /// space the group was opened (or last moved) with is kept: its anchor box maps onto its
     /// child box. An axis without extent gets the group's own offset at 1:1.
     fn new(sheet: &Sheet, g: &DrawingGroup, b: ObjectRect, off: (i64, i64), flip: (bool, bool)) -> ChildSpace {
-        let r0 = sheet.anchor_rect(&g.anchor);
+        let r0 = drawing_rect(sheet, &g.anchor);
         // Per axis: (sheet origin, child origin, EMUs per pixel).
         let axis = |start: f64, len: f64, start0: f64, len0: f64, ch_off: i64, span: i64, off: i64| {
             if len > 0.0 && len0 > 0.0 && span > 0 { (start0, ch_off as f64, span as f64 / len0) } else { (start, off as f64, EMU_PER_PX) }
@@ -1070,10 +1095,10 @@ impl DrawingOut<'_> {
     /// fewer members, or from turned ones, would move them).
     fn rect(&self, r: DrawingRef) -> Option<ObjectRect> {
         let members =
-            self.sheet.drawing_rect_with(r, &|o| self.index.get(&o).and_then(|&i| self.objs.get(i)).map(|o| self.sheet.anchor_rect(o.anchor())));
+            self.sheet.drawing_rect_with(r, &|o| self.index.get(&o).and_then(|&i| self.objs.get(i)).map(|o| drawing_rect(self.sheet, o.anchor())));
         match r {
             DrawingRef::Group(id) => match self.sheet.drawing_group(id) {
-                Some(g) if g.rotated() => members.map(|_| self.sheet.anchor_rect(&g.anchor)),
+                Some(g) if g.rotated() => members.map(|_| drawing_rect(self.sheet, &g.anchor)),
                 _ => members,
             },
             _ => members,
@@ -1463,6 +1488,67 @@ pub fn image_content_type(ext: &str) -> &'static str {
         "wmf" => "image/x-wmf",
         "webp" => "image/webp",
         _ => "image/png",
+    }
+}
+
+#[cfg(test)]
+mod mac_marker_tests {
+    use super::*;
+    use gridcraft_model::{Font, Geometry};
+
+    fn mac_sheet() -> Sheet {
+        let mut sheet = Sheet::new("Data");
+        sheet.geometry = Geometry::mac(&Font::default());
+        sheet.default_col_width = (53.0_f64 * 4.0 / 3.0) as f32;
+        sheet
+    }
+
+    fn edge_anchor(sheet: &Sheet, col_off: i64) -> Anchor {
+        placement_to_anchor(
+            &CraftPlacement::TwoCell { from: CraftMarker::default(), to: CraftMarker { col: 5, col_off, ..CraftMarker::default() }, edit_as: None },
+            sheet,
+        )
+    }
+
+    #[test]
+    fn fractional_end_at_cell_edge_carries_to_zero_offset() {
+        let sheet = mac_sheet();
+        let anchor = edge_anchor(&sheet, 0);
+        assert!(f64::from(anchor.width) < sheet.col_left(5), "the f32 extent rounds down");
+        assert_eq!(anchor_markers(&sheet, &anchor).1, (CellRef::new(0, 5), 0.0, 0.0));
+
+        let from = Anchor { dx: sheet.col_width(0), ..anchor };
+        assert_eq!(anchor_markers(&sheet, &from).0, (CellRef::new(0, 1), 0.0, 0.0));
+    }
+
+    #[test]
+    fn negative_source_offset_clamps_to_the_marked_cell_edge() {
+        let sheet = mac_sheet();
+        let anchor = edge_anchor(&sheet, -27_000);
+        assert_eq!(anchor_markers(&sheet, &anchor).1, (CellRef::new(0, 5), 0.0, 0.0));
+    }
+
+    #[test]
+    fn fractional_group_extent_uses_the_snapped_edge() {
+        let sheet = mac_sheet();
+        let anchor = edge_anchor(&sheet, 0);
+        let group = DrawingGroup {
+            id: 1,
+            name: "Group".into(),
+            anchor,
+            child_offset: (0, 0),
+            child_extent: (3_365_500, 0),
+            flip: (false, false),
+            rotation: 0,
+            member_rotations: Vec::new(),
+            file: None,
+            members: Vec::new(),
+        };
+        let rect = drawing_rect(&sheet, &anchor);
+        assert_eq!(rect.w, sheet.col_left(5));
+        assert_eq!(emu(rect.w), 3_365_500);
+        let space = ChildSpace::new(&sheet, &group, rect, (0, 0), (false, false));
+        assert_eq!(space.place(rect, false).1, group.child_extent);
     }
 }
 
