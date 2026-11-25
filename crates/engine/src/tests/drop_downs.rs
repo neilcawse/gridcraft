@@ -197,10 +197,32 @@ fn structural_edits_clamp_scroll_offsets_only_of_shortened_lists() {
     // The third list's sheet deleted: it names nothing, so its offsets go to 0.
     s.execute("home.deleteSheet", json!({"sheet": 1})).unwrap();
     assert_eq!(offsets(&s, 3), (Some(0), Some(0), Some(35)));
+    // Undo brings back the sheet, the list and the offsets exactly; redo clamps them again.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!((control(&s, 3).list_range.as_deref(), offsets(&s, 3)), (Some("Other!$A$1:$A$9"), (Some(8), Some(8), Some(35))));
+    s.execute("edit.redo", json!({})).unwrap();
+    assert!(control(&s, 3).list_range.as_deref().is_some_and(|r| r.contains("#REF!")), "{:?}", control(&s, 3).list_range);
+    assert_eq!(offsets(&s, 3), (Some(0), Some(0), Some(35)));
     // Saved and read back, the clamped offsets are what the file holds.
     reopen(&mut s);
     assert_eq!((offsets(&s, 1), offsets(&s, 3)), ((Some(4), Some(4), Some(35)), (Some(0), Some(0), Some(35))));
     assert_eq!(offsets(&s, 4), (Some(6), Some(6), Some(35)));
+}
+
+/// Deleting a sheet rewrites the links of the objects on the other sheets only: the deleted sheet,
+/// shared with the undo copy, is not copied on the way out.
+#[test]
+fn deleting_a_sheet_does_not_copy_it_to_rewrite_its_own_links() {
+    let mut wb = Workbook::new();
+    wb.sheets.push(std::sync::Arc::new(gridcraft_model::Sheet::new("Doomed")));
+    let lists = |at: &str| FormControl { kind: ControlKind::Drop, list_range: Some(at.into()), link: Some("$B$1".into()), ..Default::default() };
+    wb.sheet_mut(0).unwrap().controls.push(FormControl { id: 1, ..lists("Doomed!$A$1:$A$9") });
+    wb.sheet_mut(1).unwrap().controls.push(FormControl { id: 2, ..lists("Sheet1!$A$1:$A$9") });
+    let order: Vec<String> = wb.sheets.iter().map(|s| s.name.clone()).collect();
+    let mut edited = wb.clone();
+    crate::cmd::edit::rewrite_cell_links(&mut edited, Some(1), |_, e| gridcraft_formula::adjust::delete_sheet(e, "Doomed", &order));
+    assert!(std::sync::Arc::ptr_eq(&wb.sheets[1], &edited.sheets[1]), "the deleted sheet was copied");
+    assert!(edited.sheets[0].controls[0].list_range.as_deref().is_some_and(|r| r.contains("#REF!")));
 }
 
 #[test]
