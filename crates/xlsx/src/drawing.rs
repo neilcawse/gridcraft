@@ -351,10 +351,12 @@ fn read_object(
     depth: usize,
 ) -> Result<Option<DrawingRef>, IoError> {
     let reference = read_object_inner(cx, location, rels, sheet, obj, place, depth)?;
+    // An object's name is kept even when its nonvisual ID is the placeholder 0: the writer then
+    // gives it a fresh ID, but macros and the Selection Pane still find it by name.
     if let Some(r) = reference
         && let Some(nv) = obj.children.iter().find_map(|e| e.child("cNvPr"))
         && let (Some(id), Some(name)) = (nv.attr("id").and_then(|s| s.parse::<u32>().ok()), nv.attr("name"))
-        && id != 0
+        && (id != 0 || !name.is_empty())
     {
         sheet.drawing_names.insert(r, (id as usize, name.to_owned()));
     }
@@ -430,9 +432,6 @@ fn read_object_inner(
                     cx.warn(format!("chart {target} is missing from the package and was skipped ({part}, object {n})"));
                 }
             } else if uri.contains("slicer") || gd.child("slicer").is_some() {
-                if depth != 0 {
-                    return Ok(None);
-                }
                 let id = cx.next_object_id();
                 crate::slicer::read_frame(cx, &sheet.name, gd, anchor, id);
                 let sname = gd
@@ -442,7 +441,9 @@ fn read_object_inner(
                     .unwrap_or("")
                     .to_string();
                 cx.sheet_slicer_frames.push((sname, anchor, id));
-                return Ok(Some(DrawingRef::Slicer(id)));
+                // A grouped slicer is attached on its own, outside its group, as before: group
+                // members are written inside the group, and slicers are not.
+                return Ok((depth == 0).then_some(DrawingRef::Slicer(id)));
             } else if uri.contains("chartex") || uri.contains("chartEx") {
                 cx.warn(format!("a histogram, waterfall, treemap… chart without its chart part was skipped ({part}, object {n})"));
             } else {
@@ -1111,6 +1112,7 @@ impl DrawingOut<'_> {
 
     fn take_id(&mut self, reference: DrawingRef) -> usize {
         if let Some(&(id, _)) = self.sheet.drawing_names.get(&reference)
+            && id != 0
             && self.used_ids.insert(id)
         {
             return id;

@@ -86,6 +86,8 @@ pub(super) fn arrange(s: &mut Session, p: &Json, forward: bool) -> Result<Json> 
             ObjKind::Control => sh.controls.iter().position(|c| c.id == id).map(|i| reorder(&mut sh.controls, i, forward, extreme)),
         };
         found.ok_or_else(|| bad("arrange", "no such object"))?;
+        // The source stacking order would undo the reorder on save: write the edited one.
+        sh.drawing_order.clear();
         Ok(Json::Null)
     })
 }

@@ -73,6 +73,15 @@ sizing with cells, moving without sizing, and remaining fixed. It is not a claim
 anchor spelling Excel chooses after an edit. Separate chart `userShapes` annotations, VML,
 and unsupported drawing objects do not acquire worksheet placement from this path.
 
+Other edits that change row heights, column widths or line visibility after opening (row height
+and column width, standard width, hide/unhide, filters, outlines, sorted row heights, automatic
+row fits after an edit) drop the placement of any object over a changed line, and of a fixed
+(`absolute`) object after an earlier changed line, because the object the user sees no longer
+matches the stored markers. Imported objects keep their source stacking order and nonvisual
+IDs and names; a name is kept even when its ID is the placeholder `0`, which is renumbered.
+Bring Forward, Send Backward and moving a chart write the edited stacking order instead. A
+slicer inside a group is read as a separate slicer, as before.
+
 Dynamic-array formulas keep their mark on save. A formula read with dynamic-array cell metadata
 (`cm`, the `XLDAPR` record in `xl/metadata.xml`) is written back with it, together with the
 metadata part, even when it returns one value and GridCraft's own shape analysis would not need

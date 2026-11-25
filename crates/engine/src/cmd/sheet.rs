@@ -144,31 +144,10 @@ fn shift_sheet_features(sh: &mut Sheet, axis: Axis, at: u32, count: u32, insert:
     let obj_corners: Vec<(u32, u32, f32, f32)> = sh.object_anchors().map(|a| anchor_corner(sh, a)).collect();
     let mut drawing_files = std::mem::take(&mut sh.drawing_files);
     drawing_files.retain(|&r, file| {
-        let Some(a) = sh.raw_drawing_anchor(r).filter(|a| *a == file.anchor) else { return false };
-        let (col, row, _, _) = anchor_corner(sh, &a);
         let rows = axis == Axis::Rows;
-        let mut span = if rows { (a.cell.row, row) } else { (a.cell.col, col) };
-        if let gridcraft_model::DrawingRef::Group(id) = r {
-            let Some(group) = sh.drawing_group(id) else { return false };
-            if sh.source_group(group).is_none() {
-                return false;
-            }
-            for member in sh.group_contents(id).into_iter().filter_map(|r| sh.raw_drawing_anchor(r)) {
-                if member.mode != a.mode {
-                    return false;
-                }
-                let (col, row, _, _) = anchor_corner(sh, &member);
-                let (start, end) = if rows { (member.cell.row, row) } else { (member.cell.col, col) };
-                span = (span.0.min(start).min(end), span.1.max(start).max(end));
-            }
-        }
-        let span = file.placement.physical_span(rows, span, |line, offset| {
-            let pixels = offset as f64 / 9525.0;
-            if rows { sh.row_at(sh.row_top(line.min(MAX_ROWS - 1)) + pixels) } else { sh.col_at(sh.col_left(line.min(MAX_COLS - 1)) + pixels) }
-        });
-        file.placement.shift_lines(rows, at, count, insert, a.mode, span)
+        sh.drawing_file_span(r, file, rows).is_some_and(|span| file.placement.shift_lines(rows, at, count, insert, file.anchor.mode, span))
     });
-    let groups_to_refresh: Vec<_> = drawing_files
+    let groups_to_refresh: std::collections::HashSet<_> = drawing_files
         .keys()
         .filter_map(|r| {
             let gridcraft_model::DrawingRef::Group(id) = *r else { return None };
@@ -306,6 +285,79 @@ fn shift_sheet_features(sh: &mut Sheet, axis: Axis, at: u32, count: u32, insert:
         }
     }
     sh.unimported_pivots = std::mem::take(&mut sh.unimported_pivots).into_iter().filter_map(map_range).collect();
+}
+
+/// The first and last line whose drawn size differs between `before` and `after`; every line
+/// when the default size changed.
+fn changed_lines(
+    before: &std::collections::BTreeMap<u32, gridcraft_model::LineInfo>,
+    after: &std::collections::BTreeMap<u32, gridcraft_model::LineInfo>,
+    (default_before, default_after): (f32, f32),
+    limit: u32,
+) -> Option<(u32, u32)> {
+    if default_before != default_after {
+        return Some((0, limit - 1));
+    }
+    if before == after {
+        return None;
+    }
+    let size = |lines: &std::collections::BTreeMap<u32, gridcraft_model::LineInfo>, k: u32| {
+        lines.get(&k).map_or(default_after, |i| if i.hidden { 0.0 } else { i.size.unwrap_or(default_after) })
+    };
+    before
+        .keys()
+        .chain(after.keys())
+        .copied()
+        .filter(|&k| size(before, k) != size(after, k))
+        .fold(None, |span, k| Some(span.map_or((k, k), |(lo, hi): (u32, u32)| (lo.min(k), hi.max(k)))))
+}
+
+/// Row heights, column widths and line visibility that change without a structural shift
+/// (sizes, hide/unhide, filters, outlines, sorted row heights, automatic row fits) move or
+/// resize what the user sees without touching object anchors. A stored source placement over a
+/// changed line, or a fixed one after an earlier changed line, no longer describes that object,
+/// so it is dropped with its group transforms and regenerated from the editable geometry.
+/// Sheets in `shifted` had rows or columns inserted or deleted, which shift stored markers
+/// themselves.
+pub(crate) fn discard_placement_after_line_changes(old: &gridcraft_model::Workbook, wb: &mut gridcraft_model::Workbook, shifted: &[String]) {
+    use gridcraft_model::DrawingRef;
+    for si in 0..wb.sheets.len() {
+        let Some(after) = wb.sheets.get(si).filter(|sh| !sh.drawing_files.is_empty()) else { continue };
+        let Some(before) = old.sheet_index(&after.name).and_then(|i| old.sheets.get(i)) else { continue };
+        if Arc::ptr_eq(before, after) || shifted.iter().any(|s| s.eq_ignore_ascii_case(&after.name)) {
+            continue;
+        }
+        let rows = changed_lines(&before.rows, &after.rows, (before.default_row_height, after.default_row_height), MAX_ROWS);
+        let cols = changed_lines(&before.cols, &after.cols, (before.default_col_width, after.default_col_width), MAX_COLS);
+        if rows.is_none() && cols.is_none() {
+            continue;
+        }
+        let stale: Vec<DrawingRef> = after
+            .drawing_files
+            .iter()
+            .filter(|&(&r, file)| {
+                [(true, rows), (false, cols)].into_iter().any(|(axis, changed)| {
+                    let Some((lo, hi)) = changed else { return false };
+                    before.drawing_file_span(r, file, axis).is_none_or(|(near, far)| lo <= far && (hi >= near || file.is_fixed()))
+                })
+            })
+            .map(|(&r, _)| r)
+            .collect();
+        if stale.is_empty() {
+            continue;
+        }
+        let Some(sh) = wb.sheet_mut(si) else { continue };
+        for r in stale {
+            sh.invalidate_drawing_file(r);
+            let DrawingRef::Group(id) = r else { continue };
+            let nested = sh.group_contents(id);
+            for g in sh.groups.iter_mut().filter(|g| nested.contains(&DrawingRef::Group(g.id))) {
+                if let Some(file) = &mut g.file {
+                    file.edited = true;
+                }
+            }
+        }
+    }
 }
 
 /// Whether a formula's 3-D references cover a different set of sheets after a structural edit.

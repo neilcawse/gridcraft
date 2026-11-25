@@ -794,6 +794,29 @@ fn drawing_anchor_preserves_nested_transform_presence_and_precision() {
     assert_ne!(xfrm_at(group.path(&["grpSpPr", "xfrm"]).unwrap(), "ext"), (1340000, 989911));
 }
 
+/// A shape whose nonvisual ID is the placeholder 0 keeps its name (macros and the Selection
+/// Pane find shapes by name) and gets a fresh, unique ID.
+#[test]
+fn drawing_name_survives_a_placeholder_nonvisual_id() {
+    let shape = |id: u32, name: &str, row: u32| {
+        format!(
+            r#"<xdr:oneCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{row}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:ext cx="381000" cy="381000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="{id}" name="{name}"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rect"/></xdr:spPr></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>"#
+        )
+    };
+    let drawing = format!(
+        r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">{}{}</xdr:wsDr>"#,
+        shape(0, "InputBox", 1),
+        shape(2, "Other", 5)
+    );
+    let (wb, _) = read_xlsx(&with_drawing(&drawing)).unwrap();
+    let part = crate::package::Package::open(&crate::write_xlsx(&wb).unwrap()).unwrap().read_xml("xl/drawings/drawing1.xml").unwrap().unwrap();
+    let nv: Vec<_> = part.children.iter().map(|a| a.path(&["sp", "nvSpPr", "cNvPr"]).unwrap()).collect();
+    assert_eq!(nv.iter().map(|e| e.attr("name").unwrap()).collect::<Vec<_>>(), ["InputBox", "Other"]);
+    let ids: Vec<u32> = nv.iter().map(|e| e.attr_u32("id").unwrap()).collect();
+    assert_eq!(ids[1], 2);
+    assert!(ids[0] != 0 && ids[0] != ids[1], "{ids:?}");
+}
+
 /// The box of the shape with text `text`.
 fn shape_box(s: &gridcraft_model::Sheet, text: &str) -> (f64, f64, f64, f64) {
     let id = s.shapes.iter().find(|sh| sh.text == text).unwrap().id;

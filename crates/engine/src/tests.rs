@@ -5441,6 +5441,78 @@ fn source_group_placement_survives_copy_and_only_safe_line_edits() {
     assert!(sh.source_group(sh.drawing_group(inner).unwrap()).is_none());
 }
 
+/// Changing the size or visibility of a line under (or, for a fixed object, before) a source
+/// placement moves or resizes the object the user sees without changing its anchor: the stored
+/// markers must not be written for it any more. Undo brings them back with the old lines.
+#[test]
+fn source_drawing_placement_drops_when_its_lines_are_resized_or_hidden() {
+    use gridcraft_model::{AnchorMode, DrawingFile, DrawingMarker, DrawingPlacement, DrawingRef};
+    let from = DrawingMarker { col: 1, row: 4, col_off: 0, row_off: 0 };
+    let to = DrawingMarker { col: 2, row: 7, col_off: 23, row_off: 100 };
+    let moving = DrawingPlacement::TwoCell { from, to, edit_as: None };
+    let fixed = DrawingPlacement::Absolute { pos: (609_600, 762_000), ext: (381_000, 381_000) };
+    for (mode, placement, command, params, kept) in [
+        (AnchorMode::MoveAndSize, &moving, "home.rowHeight", json!({"sheet": 0, "rows": "12:12", "height": 50}), true),
+        (AnchorMode::MoveAndSize, &moving, "home.rowHeight", json!({"sheet": 0, "rows": "2:2", "height": 50}), true),
+        (AnchorMode::MoveAndSize, &moving, "home.rowHeight", json!({"sheet": 0, "rows": "6:6", "height": 50}), false),
+        (AnchorMode::MoveAndSize, &moving, "home.rowHeight", json!({"sheet": 0, "rows": "7:7", "height": 0}), false),
+        (AnchorMode::MoveAndSize, &moving, "home.columnWidth", json!({"sheet": 0, "cols": "B:B", "width": 120}), false),
+        (AnchorMode::MoveAndSize, &moving, "home.columnWidth", json!({"sheet": 0, "cols": "H:H", "width": 120}), true),
+        (AnchorMode::Absolute, &fixed, "home.rowHeight", json!({"sheet": 0, "rows": "2:2", "height": 50}), false),
+        (AnchorMode::Absolute, &fixed, "home.columnWidth", json!({"sheet": 0, "cols": "A:A", "width": 120}), false),
+        (AnchorMode::Absolute, &fixed, "home.rowHeight", json!({"sheet": 0, "rows": "12:12", "height": 50}), true),
+    ] {
+        let mut s = s();
+        let id = add_image(&mut s, "B5", mode);
+        let r = DrawingRef::Image(id);
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.drawing_files.insert(r, DrawingFile { anchor: sh.images[0].anchor, placement: placement.clone() });
+        let has = |s: &Session| s.doc().unwrap().wb.sheet(0).unwrap().drawing_files.contains_key(&r);
+        s.execute(command, params.clone()).unwrap();
+        assert_eq!(has(&s), kept, "{mode:?} {command} {params}");
+        s.execute("edit.undo", json!({})).unwrap();
+        assert!(has(&s), "undo restores the placement with the lines");
+    }
+}
+
+/// Bring Forward / Send Backward and moving a chart change the stacking order the user sees;
+/// the imported order must not undo that on save.
+#[test]
+fn stacking_edits_override_the_source_drawing_order() {
+    use gridcraft_model::{AnchorMode, DrawingRef};
+    let set_order = |s: &mut Session, order: &[(DrawingRef, usize)]| {
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let sh = wb.sheet_mut(0).unwrap();
+        for (i, &(r, n)) in order.iter().enumerate() {
+            sh.drawing_order.insert(r, n);
+            sh.drawing_names.insert(r, (10 + i, format!("Object {n}")));
+        }
+    };
+    let saved_names = |s: &Session| {
+        let (back, _) = gridcraft_xlsx::read_xlsx(&gridcraft_xlsx::write_xlsx(&s.doc().unwrap().wb).unwrap()).unwrap();
+        let sh = back.sheet(0).unwrap().clone();
+        let mut refs: Vec<_> = sh.drawing_order.iter().map(|(r, n)| (*n, sh.drawing_names[r].1.clone())).collect();
+        refs.sort();
+        refs.into_iter().map(|(_, name)| name).collect::<Vec<_>>()
+    };
+    let mut session = s();
+    let first = add_image(&mut session, "B2", AnchorMode::MoveAndSize);
+    let second = add_image(&mut session, "D2", AnchorMode::MoveAndSize);
+    set_order(&mut session, &[(DrawingRef::Image(first), 1), (DrawingRef::Image(second), 2)]);
+    session.execute("arrange.bringForward", json!({"kind": "image", "id": first})).unwrap();
+    assert_eq!(saved_names(&session), ["Object 2", "Object 1"], "the image brought forward is saved in front");
+
+    let mut session = s();
+    session.execute("cell.set", json!({"cell": "A1", "input": "1"})).unwrap();
+    session.execute("insert.chart", json!({"range": "A1:A1", "type": "line", "at": "G2"})).unwrap();
+    let image = add_image(&mut session, "B2", AnchorMode::MoveAndSize);
+    let chart = session.doc().unwrap().wb.sheet(0).unwrap().charts[0].id;
+    set_order(&mut session, &[(DrawingRef::Chart(chart), 1), (DrawingRef::Image(image), 2)]);
+    session.execute("chart.move", json!({"chart": chart})).unwrap();
+    assert_eq!(saved_names(&session).last().map(String::as_str), Some("Object 1"), "a moved chart is saved in front");
+}
+
 #[test]
 fn arrange_align_rejects_grouped_members() {
     use gridcraft_model::{AnchorMode, DrawingRef};

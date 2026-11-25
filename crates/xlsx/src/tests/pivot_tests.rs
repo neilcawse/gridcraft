@@ -876,6 +876,33 @@ fn pivot_slicer_round_trips() {
     assert_eq!(again.sheet(1).unwrap().slicers, b.slicers);
 }
 
+/// A slicer grouped with a shape is still read: as before, it is attached on its own (slicers
+/// are not written inside groups), and the rest of the group stays grouped.
+#[test]
+fn grouped_pivot_slicer_is_not_dropped() {
+    let mut parts = unzip(&write_xlsx(&slicer_workbook()).unwrap());
+    let key =
+        parts.keys().find(|k| k.starts_with("xl/drawings/drawing") && String::from_utf8_lossy(&parts[*k]).contains("sle:slicer")).cloned().unwrap();
+    let drawing = String::from_utf8(parts.remove(&key).unwrap()).unwrap();
+    let (start, end) =
+        (drawing.find("<mc:AlternateContent").unwrap(), drawing.find("</mc:AlternateContent>").unwrap() + "</mc:AlternateContent>".len());
+    let grouped = format!(
+        "{}<xdr:grpSp><xdr:nvGrpSpPr><xdr:cNvPr id=\"50\" name=\"With slicer\"/><xdr:cNvGrpSpPr/></xdr:nvGrpSpPr><xdr:grpSpPr/>{}<xdr:sp macro=\"\" textlink=\"\"><xdr:nvSpPr><xdr:cNvPr id=\"51\" name=\"Beside\"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"95250\" cy=\"95250\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr></xdr:sp></xdr:grpSp>{}",
+        &drawing[..start],
+        &drawing[start..end],
+        &drawing[end..]
+    );
+    parts.insert(key, grouped.into_bytes());
+    let refs: Vec<(&str, &[u8])> = parts.iter().map(|(n, d)| (n.as_str(), d.as_slice())).collect();
+    let (back, report) = read_xlsx(&super::make_zip(&refs)).unwrap();
+    let sh = back.sheet(1).unwrap();
+    assert_eq!(sh.slicers.len(), 1, "{:?}", report.warnings);
+    assert_eq!(sh.groups.len(), 1);
+    assert_eq!(sh.groups[0].members.len(), 1, "the slicer is not a group member");
+    let (again, _) = read_xlsx(&write_xlsx(&back).unwrap()).unwrap();
+    assert_eq!(again.sheet(1).unwrap().slicers.len(), 1);
+}
+
 /// A slicer on Product connected to "Sales by Region" and a second PivotTable on the same source
 /// that doesn't show Product (so its selection there is a hidden filter).
 #[test]

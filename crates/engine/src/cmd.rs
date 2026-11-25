@@ -478,6 +478,11 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
         edits,
         ..
     } = ctx;
+    let shifted: Vec<String> = edits
+        .iter()
+        .filter(|(_, e)| matches!(e, gridcraft_formula::adjust::Edit::Insert { .. } | gridcraft_formula::adjust::Edit::Delete { .. }))
+        .map(|(s, _)| s.clone())
+        .collect();
     if let Some(log) = d.edits.as_mut() {
         log.extend(edits);
     }
@@ -537,6 +542,7 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
     if let Some(t0) = t0 {
         eprintln!("commit: + rows {:?}", since(t0));
     }
+    sheet::discard_placement_after_line_changes(&d.wb, &mut wb, &shifted);
     d.wb = std::sync::Arc::new(wb);
     d.selection = sel;
     Ok(r)
