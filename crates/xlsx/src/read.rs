@@ -49,6 +49,8 @@ pub struct Ctx<'a> {
     pub pivot_charts: Vec<(u32, Vec<crate::chart::PivotSeriesCache>)>,
     /// Shared point-expansion budget across all charts in the workbook.
     pub chart_budget: crate::chart::ChartReadBudget,
+    /// What the current sheet's drawings hold that the model doesn't, for pass-through.
+    pub drawing_kept: crate::drawing::DrawingKeptIn,
     /// PivotTable slicer pieces collected from sheets, joined once sheets are read.
     pub slicers: crate::slicer::SlicersIn,
     /// Cells of the worksheet being read whose formulas lack dynamic-array metadata (legacy
@@ -376,6 +378,7 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
         cf_ext_ids: vec![],
         pivot_charts: vec![],
         chart_budget: crate::chart::ChartReadBudget::new(),
+        drawing_kept: Default::default(),
         slicers: Default::default(),
         legacy_formulas: vec![],
         shared_formula_bytes: 0,
@@ -476,6 +479,7 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
         }
         let name = names.unique(&name, i);
         cx.legacy_formulas.clear();
+        cx.drawing_kept = Default::default();
         cx.value_meta.clear();
         let (mut sheet, read_controls) = match crate::sheet_read::read_sheet(&mut cx, &rel.target, &name) {
             Ok(s) => s,

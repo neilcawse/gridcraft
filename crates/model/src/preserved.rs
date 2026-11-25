@@ -9,6 +9,8 @@ use std::sync::Arc;
 
 use gridcraft_core::{CellRef, Value};
 
+use crate::DrawingRef;
+use crate::features::{Image, Shape};
 use crate::sheet::Visibility;
 
 /// A relationship from an owning part (the package root, the workbook or a sheet, or a kept part)
@@ -229,6 +231,49 @@ pub struct PreservedNoteFills {
     pub parts: Vec<PreservedPart>,
 }
 
+/// The shapes drawn on a chart (its `c:userShapes` part, ECMA-376 Part 1 §21.3), with the parts
+/// behind it (pictures). GridCraft writes charts from the model and shows these shapes as shapes
+/// of the sheet; the part goes back with its chart while the chart is there and the shapes read
+/// from it are as they were read (`shapes`, `images`), and those shapes are then not written as
+/// shapes of the sheet as well.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PreservedChartShapes {
+    /// The chart's `id` in the model (`Chart::id`).
+    pub chart: u32,
+    /// The chart part's relationship to the shapes part, as the file had it.
+    pub rel: PreservedRel,
+    /// The shapes part and every kept part reachable from it.
+    pub parts: Vec<PreservedPart>,
+    /// The shapes of the sheet read from the part, as they were read.
+    pub shapes: Vec<Shape>,
+    /// The pictures of the sheet read from the part, as they were read.
+    pub images: Vec<Image>,
+}
+
+/// A hyperlink of a picture or shape of a sheet's drawing (`a:hlinkClick` or `a:hlinkHover` of
+/// its `cNvPr`), which the model does not hold. It goes back on the object while the object is
+/// there, however it was edited or moved. The object's id is its identity: while the link is
+/// kept no new object is given that id ([`crate::Workbook::free_object_ids`]), so it is only
+/// ever the object it was read with (or that object restored by undo).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreservedObjectLink {
+    /// The picture or shape (`DrawingRef::Image`, `DrawingRef::Shape`).
+    pub object: DrawingRef,
+    /// The `a:hlinkClick` or `a:hlinkHover` element, namespace declarations included. Its `r:id`
+    /// names a relationship in [`PreservedObjectLinks::rels`].
+    pub xml: String,
+}
+
+/// The hyperlinks of a sheet's pictures and shapes, with the drawing's relationships they use.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PreservedObjectLinks {
+    pub links: Vec<PreservedObjectLink>,
+    /// The relationships of the source drawing the links name, ids unchanged.
+    pub rels: Vec<PreservedRel>,
+    /// The parts behind internal `rels`.
+    pub parts: Vec<PreservedPart>,
+}
+
 /// Unmodelled content kept for one owner (the workbook, which also holds package-root content,
 /// or one sheet).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -256,6 +301,10 @@ pub struct Preserved {
     pub cell_meta: Vec<PreservedCellMeta>,
     /// The pictures that fill note boxes (sheet owner only).
     pub note_fills: Option<PreservedNoteFills>,
+    /// The shapes drawn on the sheet's charts (sheet owner only).
+    pub chart_shapes: Vec<PreservedChartShapes>,
+    /// The hyperlinks of the sheet's pictures and shapes (sheet owner only).
+    pub object_links: Option<PreservedObjectLinks>,
 }
 
 impl Preserved {
@@ -271,6 +320,8 @@ impl Preserved {
             && self.metadata.is_none()
             && self.cell_meta.is_empty()
             && self.note_fills.is_none()
+            && self.chart_shapes.is_empty()
+            && self.object_links.is_none()
     }
     /// Total bytes held.
     pub fn byte_len(&self) -> usize {
@@ -278,7 +329,9 @@ impl Preserved {
         let theme = self.theme.iter().flat_map(|t| &t.parts);
         let metadata = self.metadata.iter().flat_map(|m| &m.parts);
         let fills = self.note_fills.iter().flat_map(|n| &n.parts);
-        let held = self.parts.iter().chain(self.vml.iter()).chain(tables).chain(theme).chain(metadata).chain(fills);
+        let chart_shapes = self.chart_shapes.iter().flat_map(|c| &c.parts);
+        let links = self.object_links.iter().flat_map(|l| &l.parts);
+        let held = self.parts.iter().chain(self.vml.iter()).chain(tables).chain(theme).chain(metadata).chain(fills).chain(chart_shapes).chain(links);
         let theme_bytes = self.theme.as_ref().map_or(0, |t| t.data.len());
         held.fold(theme_bytes, |n, p| n.saturating_add(p.data.len()))
     }

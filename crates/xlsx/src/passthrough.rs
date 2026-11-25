@@ -34,6 +34,12 @@
 //! It moves with the note when the note's cell does (rows or columns inserted or deleted, a sort,
 //! a cut), as far as the note's sheet; a note that is gone leaves its picture behind.
 //!
+//! A sheet's drawing holds more than the model does ([`objects`]): the shapes part of a chart
+//! (`c:userShapes`), read into shapes and pictures of the sheet, goes back with its chart while
+//! the chart is there and those shapes are as they were read
+//! ([`gridcraft_model::PreservedChartShapes`]); the hyperlink of a picture or shape goes back on
+//! it while it is there ([`gridcraft_model::PreservedObjectLinks`]).
+//!
 //! Sheets GridCraft does not model (chart sheets, Excel 5.0 dialog sheets, Excel 4.0 macro
 //! sheets) are kept whole, at their place among the worksheets: the sheet part and everything
 //! behind it ([`KEPT_SHEET_GRAPH`]). Macro sheets only go into macro-enabled workbooks, like the
@@ -86,6 +92,7 @@ use crate::write::{NS_REL, Out, Rels, XML_DECL};
 use crate::xml::{self, esc_attr};
 
 mod names;
+mod objects;
 mod read;
 mod rebase;
 pub(crate) mod strict;

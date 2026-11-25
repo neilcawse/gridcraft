@@ -3,7 +3,7 @@ use super::*;
 /// A part's relationships with full type URIs, in their Transitional spelling (a Strict package's
 /// are renamed, so that one rule decides what each kind is). `Ok(vec![])` when it has none; an
 /// error when the rels part is damaged or too large (its part then can't be kept faithfully).
-fn raw_rels(cx: &mut Ctx<'_>, part: &str) -> Result<Vec<PreservedRel>, String> {
+pub(super) fn raw_rels(cx: &mut Ctx<'_>, part: &str) -> Result<Vec<PreservedRel>, String> {
     raw_rels_marked(cx, part).map(|(rels, _)| rels)
 }
 
@@ -322,7 +322,7 @@ impl KeptReader {
     }
 
     /// XML cut out of a part, as it is kept.
-    fn kept_xml(&self, x: String) -> String {
+    pub(super) fn kept_xml(&self, x: String) -> String {
         if self.strict { strict::xml(&x).into_owned() } else { x }
     }
 
@@ -381,12 +381,12 @@ impl KeptReader {
     }
 
     /// Keeps a set of relationships (all or nothing) and the parts behind them.
-    fn keep(&mut self, cx: &mut Ctx<'_>, p: &mut Preserved, roots: &[PreservedRel], seen: &mut HashSet<String>) -> Result<(), String> {
+    pub(super) fn keep(&mut self, cx: &mut Ctx<'_>, p: &mut Preserved, roots: &[PreservedRel], seen: &mut HashSet<String>) -> Result<(), String> {
         self.keep_through(cx, p, roots, seen, &[])
     }
 
     /// [`Self::keep`] for roots whose graph may reach the rewritten kinds in `through`.
-    fn keep_through(
+    pub(super) fn keep_through(
         &mut self,
         cx: &mut Ctx<'_>,
         p: &mut Preserved,
@@ -671,6 +671,7 @@ impl KeptReader {
         controls: &crate::controls::ReadControls,
     ) -> Option<Arc<Preserved>> {
         self.value_cells = self.value_cells.saturating_add(value_meta.len());
+        let drawn = std::mem::take(&mut cx.drawing_kept);
         if !self.on {
             return None;
         }
@@ -709,6 +710,7 @@ impl KeptReader {
         if rels.iter().any(|r| is_kind(r, &["comments"])) {
             self.note_fills(cx, name, &rels, &mut p, &mut seen);
         }
+        self.drawing_content(cx, name, sheet, drawn, &mut p);
         (!p.is_empty()).then(|| Arc::new(p))
     }
 

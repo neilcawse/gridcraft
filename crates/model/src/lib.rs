@@ -25,8 +25,9 @@ pub use group::{DrawingGroup, DrawingRef, GroupFile, GroupFileMember, MAX_GROUP_
 pub use macros::*;
 pub use password::PasswordHash;
 pub use preserved::{
-    Preserved, PreservedCellMeta, PreservedIndex, PreservedIndexed, PreservedMetadata, PreservedName, PreservedNoteFill, PreservedNoteFills,
-    PreservedPart, PreservedRel, PreservedSheet, PreservedSheetKind, PreservedTable, PreservedTableColumn, PreservedTheme, PreservedXml,
+    Preserved, PreservedCellMeta, PreservedChartShapes, PreservedIndex, PreservedIndexed, PreservedMetadata, PreservedName, PreservedNoteFill,
+    PreservedNoteFills, PreservedObjectLink, PreservedObjectLinks, PreservedPart, PreservedRel, PreservedSheet, PreservedSheetKind, PreservedTable,
+    PreservedTableColumn, PreservedTheme, PreservedXml,
 };
 pub use python::{PyCode, PyOutput};
 pub use sheet::{DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, LineIndex, Sheet, SheetUid, SheetViewMode, Visibility, points_to_chars};

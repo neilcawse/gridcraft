@@ -202,7 +202,7 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> (
     push_fragment_kids(&mut part.root, &kept.custom_sheet_views());
     push_fragment_kids(&mut part.root, &kept.custom_properties());
     build_sheet_printing(sheet, &mut part.features.print, &kept);
-    part.features.drawing = write_sheet_drawing_rel(wb, si, sheet, &mut rels, out);
+    part.features.drawing = write_sheet_drawing_rel(wb, si, sheet, &kept, &mut rels, out);
     let (legacy_rid, notes_frag) = write_sheet_notes_frag(sheet, si, &kept, &mut rels, out);
     part.features.legacy_drawing = legacy_rid;
 
@@ -453,19 +453,28 @@ fn write_sheet_notes_frag(
     (legacy_rid, kept.elements(&controls))
 }
 
-fn write_sheet_drawing_rel(wb: &Workbook, si: usize, sheet: &Sheet, rels: &mut Rels, out: &mut Out) -> Option<String> {
+fn write_sheet_drawing_rel(
+    wb: &Workbook,
+    si: usize,
+    sheet: &Sheet,
+    kept: &crate::passthrough::SheetKept<'_>,
+    rels: &mut Rels,
+    out: &mut Out,
+) -> Option<String> {
+    use gridcraft_model::{DrawingRef, Image, Shape};
     let slicers = out.slicers.on_sheet(si);
-    if sheet.images.is_empty() && sheet.charts.is_empty() && sheet.shapes.is_empty() && slicers.is_empty() {
+    let drawn = kept.drawing(sheet, out);
+    // The shapes and pictures drawn on a chart go back in its shapes part, not in the drawing.
+    let images: Vec<&Image> = sheet.images.iter().filter(|i| !i.data.is_empty() && !drawn.in_chart(DrawingRef::Image(i.id))).collect();
+    let shapes: Vec<&Shape> = sheet.shapes.iter().filter(|s| !drawn.in_chart(DrawingRef::Shape(s.id))).collect();
+    if images.is_empty() && sheet.charts.is_empty() && shapes.is_empty() && slicers.is_empty() {
         return None;
     }
     out.drawings += 1;
     let dn = out.drawings;
     let mut drels = Rels::default();
     let mut objs: Vec<Obj<'_>> = vec![];
-    for img in &sheet.images {
-        if img.data.is_empty() {
-            continue;
-        }
+    for img in images {
         let ext = image_ext(&img.mime, &img.data);
         out.default_type(ext, image_content_type(ext));
         let file = out.image_part(ext, &img.data);
@@ -486,13 +495,22 @@ fn write_sheet_drawing_rel(wb: &Workbook, si: usize, sheet: &Sheet, rels: &mut R
             out.part(&format!("xl/charts/_rels/chartEx{n}.xml.rels"), None, crels.xml().into_bytes());
             drels.add_uri(crate::chartex::REL_CHARTEX, &format!("../charts/chartEx{n}.xml"))
         } else {
-            let name = format!("xl/charts/chart{}.xml", out.charts);
-            out.part(&name, Some(CT_CHART), crate::chart::write_chart(wb, si, ch, &out.book_name).into_bytes());
-            drels.add("chart", &format!("../charts/chart{}.xml", out.charts))
+            let n = out.charts;
+            let mut xml = crate::chart::write_chart(wb, si, ch, &out.book_name);
+            let mut crels = Rels::default();
+            if let Some(user_shapes) = drawn.chart_shapes(ch.id, &mut crels, out)
+                && let Some(end) = xml.rfind("</c:chartSpace>")
+            {
+                // CT_ChartSpace: `userShapes` is the last child but for `extLst`.
+                xml.insert_str(end, &user_shapes);
+                out.part(&format!("xl/charts/_rels/chart{n}.xml.rels"), None, crels.xml().into_bytes());
+            }
+            out.part(&format!("xl/charts/chart{n}.xml"), Some(CT_CHART), xml.into_bytes());
+            drels.add("chart", &format!("../charts/chart{n}.xml"))
         };
         objs.push(Obj::Chart(ch, rid));
     }
-    for sh in &sheet.shapes {
+    for sh in shapes {
         objs.push(Obj::Shape(sh));
     }
     for p in &slicers {
@@ -500,7 +518,13 @@ fn write_sheet_drawing_rel(wb: &Workbook, si: usize, sheet: &Sheet, rels: &mut R
             objs.push(Obj::Slicer(sl, p.name.clone()));
         }
     }
-    out.part(&format!("xl/drawings/drawing{dn}.xml"), Some(CT_DRAWING), crate::drawing::write_drawing(sheet, &wb.theme, &objs).into_bytes());
+    let objects = objs.iter().filter_map(|o| match o {
+        Obj::Image(i, _) => Some(DrawingRef::Image(i.id)),
+        Obj::Shape(s) => Some(DrawingRef::Shape(s.id)),
+        _ => None,
+    });
+    let links = drawn.links(wb, (si, sheet), objects, &mut drels, out);
+    out.part(&format!("xl/drawings/drawing{dn}.xml"), Some(CT_DRAWING), crate::drawing::write_drawing(sheet, &wb.theme, &objs, &links).into_bytes());
     if !drels.is_empty() {
         out.part(&format!("xl/drawings/_rels/drawing{dn}.xml.rels"), None, drels.xml().into_bytes());
     }

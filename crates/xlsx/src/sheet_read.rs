@@ -1168,6 +1168,7 @@ mod tests {
             legacy_formulas: vec![],
             pivot_charts: vec![],
             chart_budget: crate::chart::ChartReadBudget::new(),
+            drawing_kept: Default::default(),
             slicers: Default::default(),
             file_tables: Default::default(),
             slicer_caches: Default::default(),

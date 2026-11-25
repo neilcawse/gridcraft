@@ -143,7 +143,6 @@ pub struct DefinedName {
     pub comment: String,
     pub hidden: bool,
 }
-
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct DocProps {
     pub title: String,
@@ -522,6 +521,11 @@ impl Workbook {
             .find(|n| n.scope == Some(sheet) && n.name.eq_ignore_ascii_case(name))
             .or_else(|| self.names.iter().find(|n| n.scope.is_none() && n.name.eq_ignore_ascii_case(name)))
     }
+    /// Finds the defined name of exactly scope `scope` (`None`: workbook scope), as `Data!Total`
+    /// names the one of sheet `Data` only.
+    pub fn name_in_scope(&self, name: &str, scope: Option<usize>) -> Option<&DefinedName> {
+        self.names.iter().find(|n| n.scope == scope && n.name.eq_ignore_ascii_case(name))
+    }
     /// Spells calls of LAMBDA names the way the names are defined (`Double(4)`, where the
     /// parser gives `DOUBLE(4)`: it upper-cases function names, as built-in ones are shown).
     pub fn name_call_case(&self, e: Expr) -> Expr {
@@ -634,6 +638,15 @@ impl Workbook {
                         }))
                     }))
                     .chain(s.controls.iter().map(|o| o.id))
+                    // And the objects kept hyperlinks belong to: a link read from the file stays
+                    // with its object (deleted, undo brings both back), never a new one.
+                    .chain(s.preserved.iter().flat_map(|p| p.object_links.iter().flat_map(|l| l.links.iter())).map(|l| {
+                        let (crate::DrawingRef::Chart(id)
+                        | crate::DrawingRef::Image(id)
+                        | crate::DrawingRef::Shape(id)
+                        | crate::DrawingRef::Group(id)) = l.object;
+                        id
+                    }))
             })
             .collect();
         used.sort_unstable();

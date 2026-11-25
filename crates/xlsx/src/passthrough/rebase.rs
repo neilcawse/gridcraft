@@ -28,6 +28,11 @@ impl<'a> SheetKept<'a> {
         Some(TableBinding { table, ids, fields })
     }
 
+    /// The sheet's kept content.
+    pub(super) fn preserved(&self) -> Option<&'a Preserved> {
+        self.p
+    }
+
     fn vml(&self) -> Option<&'a PreservedPart> {
         self.p?.vml.as_ref()
     }

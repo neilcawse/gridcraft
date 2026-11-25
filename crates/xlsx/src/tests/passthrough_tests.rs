@@ -16,6 +16,7 @@ mod custom_views;
 mod damaged_parts;
 mod deny_list;
 mod doc_props;
+mod drawing_objects;
 mod kept_sheets;
 mod rich_values;
 mod strict_kept;
@@ -129,7 +130,7 @@ struct Unpacked {
     parts: HashMap<String, Vec<u8>>,
 }
 
-/// (id, type, resolved target, external)
+/// (id, type, resolved target, external); a target in the package itself (`#Sheet1!A1`) as written.
 type RelList = Vec<(String, String, String, bool)>;
 
 impl Unpacked {
@@ -156,7 +157,12 @@ impl Unpacked {
             .map(|r| {
                 let ext = r.attr("TargetMode") == Some("External");
                 let t = r.attr("Target").unwrap();
-                (r.attr("Id").unwrap().into(), r.attr("Type").unwrap().into(), if ext { t.into() } else { resolve(dir, t) }, ext)
+                (
+                    r.attr("Id").unwrap().into(),
+                    r.attr("Type").unwrap().into(),
+                    if ext || t.starts_with('#') { t.into() } else { resolve(dir, t) },
+                    ext,
+                )
             })
             .collect()
     }
@@ -182,9 +188,13 @@ impl Unpacked {
                 let source = name.replace("_rels/", "").trim_end_matches(".rels").to_string();
                 let rels = self.rels(&source);
                 let mut ids = std::collections::HashSet::new();
-                for (id, _, target, ext) in rels {
+                for (id, ty, target, ext) in rels {
                     assert!(ids.insert(id.clone()), "{name}: duplicate id {id}");
-                    if !ext {
+                    // Only a hyperlink may lead to a place in the workbook (`#Sheet1!A1`) rather
+                    // than to a part.
+                    let place = target.starts_with('#');
+                    assert!(!place || ty.ends_with("/hyperlink"), "{name}: {id} ({ty}) → a place, not a part: {target}");
+                    if !ext && !place {
                         assert!(self.parts.keys().any(|p| normalize(p) == normalize(&target)), "{name}: {id} → missing {target}");
                     }
                 }
