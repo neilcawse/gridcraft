@@ -210,4 +210,28 @@ mod tests {
         assert!(books[1].items.is_empty() && books[2].items.is_empty());
         assert_eq!(books[3].sheet_index("Data"), Some(0));
     }
+
+    /// A legacy formula over a DDE item saved as an array shows its first value, as Excel does,
+    /// and is saved as written; a Ctrl+Shift+Enter array over it keeps the whole item.
+    #[test]
+    fn legacy_formulas_over_array_dde_items_read_with_implicit_intersection() {
+        const NS: &str = r#"xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main""#;
+        let dde = format!(
+            r#"<externalLink {NS}><ddeLink ddeService="REUTER" ddeTopic="IDN"><ddeItems><ddeItem name="MAL/VOL 6 23" advise="1"><values rows="2"><value t="str"><val>APR02</val></value><value t="str"><val>MAY02</val></value></values></ddeItem><ddeItem name="ENE"><values><value><val>85.33</val></value></values></ddeItem></ddeItems></ddeLink></externalLink>"#
+        );
+        let rels = r#"<Relationship Id="rId11" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink" Target="externalLinks/externalLink1.xml"/>"#;
+        let refs = r#"<externalReferences><externalReference r:id="rId11"/></externalReferences>"#;
+        let body = r#"<sheetData><row r="1"><c r="A1" t="str"><f>[1]!'MAL/VOL 6 23'</f><v>APR02</v></c><c r="B1"><f>[1]!ENE</f><v>85.33</v></c><c r="C1" t="str"><f t="array" ref="C1:C2">[1]!'MAL/VOL 6 23'</f><v>APR02</v></c></row></sheetData>"#;
+        let parts = [("xl/externalLinks/externalLink1.xml", dde.as_str())];
+        let (wb, _) = crate::read_xlsx(&crate::tests::minimal(body, &parts, rels, refs)).unwrap();
+        let text = |a: &str| wb.sheet(0).unwrap().cell(gridcraft_core::CellRef::parse(a).unwrap()).unwrap().formula.as_ref().unwrap().text.clone();
+        assert_eq!(
+            (text("A1"), text("B1"), text("C1")),
+            ("@[1]!'MAL/VOL 6 23'".to_string(), "[1]!ENE".to_string(), "[1]!'MAL/VOL 6 23'".to_string())
+        );
+        let bytes = crate::write_xlsx(&wb).unwrap();
+        let sheet = crate::package::Package::open(&bytes).unwrap().read_xml("xl/worksheets/sheet1.xml").unwrap().unwrap();
+        let saved = sheet.child("sheetData").unwrap().kids("row").flat_map(|r| r.kids("c")).find(|c| c.attr("r") == Some("A1")).unwrap();
+        assert_eq!((saved.attr("cm"), saved.child("f").unwrap().text.as_str()), (None, "[1]!'MAL/VOL 6 23'"));
+    }
 }

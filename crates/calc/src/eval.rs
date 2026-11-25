@@ -435,10 +435,8 @@ impl<'h> Evaluator<'h> {
         let wb = self.host.workbook();
         let Some(b) = book.checked_sub(1).and_then(|i| wb.external_books.get(i)) else { return err(CellError::Ref) };
         if b.opaque {
-            // An item that isn't a plain word is quoted: `[2]!'0#NG: 2 16 6'`, `''` for a quote.
-            let quoted = name.strip_prefix('\'').and_then(|n| n.strip_suffix('\'')).map(|n| n.replace("''", "'"));
             if sheet.is_empty()
-                && let Some(v) = b.item(quoted.as_deref().unwrap_or(name))
+                && let Some(v) = b.item(name)
             {
                 return Ev::V(v.clone());
             }
@@ -530,14 +528,16 @@ impl<'h> Evaluator<'h> {
         if linked_parts(a.sheet).is_none() && self.host.workbook().sheet(a.sheet).is_none() {
             return a.range;
         }
-        // An unreadable linked sheet has no used range: the area's first cell, read as `#REF!`,
-        // stands for the rest.
+        // Past the cells a refresh-error sheet saved, everything is `#REF!`, not blank: keep one
+        // row and column past them, so `[1]Data!A:A` reads an uncached cell and agrees with
+        // `[1]Data!A1:A2`.
+        let past = u32::from(self.linked_sheet(a.sheet).is_some_and(|s| s.refresh_error));
         let used = self.host.used_range(a.sheet);
         let (mut r1, mut c1) = (a.range.end.row, a.range.end.col);
         match used {
             Some(u) => {
-                r1 = r1.min(u.end.row.max(a.range.start.row));
-                c1 = c1.min(u.end.col.max(a.range.start.col));
+                r1 = r1.min(u.end.row.saturating_add(past).max(a.range.start.row));
+                c1 = c1.min(u.end.col.saturating_add(past).max(a.range.start.col));
             }
             None => {
                 r1 = a.range.start.row;

@@ -310,6 +310,11 @@ impl<'h> Evaluator<'h> {
                 let v0 = self.deref(ev0);
                 let v2 = self.value(&args[2]);
                 let v3 = args.get(3).map(|e| self.value(e));
+                // A table in a linked sheet whose update failed before any cell was saved has no
+                // key to find: #N/A, whatever the index (even one read from that sheet, #REF!).
+                if !matches!(v0, Value::Error(_)) && self.linked_sheet(area.sheet).is_some_and(|s| s.unreadable()) {
+                    return err(CellError::NA);
+                }
                 let max_len = if vertical { area.range.width() } else { area.range.height() } as usize;
                 let eff = self.read_range(&area);
                 let key_area = Area {

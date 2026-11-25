@@ -183,20 +183,6 @@ pub fn vh_lookup_pos(
         Value::Empty => Value::Number(0.0),
         v => v,
     };
-    let search = |approx: bool| {
-        let keys = as_array(keys_val);
-        if approx { bsearch_last_within(&x, &keys.data, false, len) } else { find_exact_in_array(&x, &keys, true, false) }
-    };
-    // An error given as the index is the answer only for a key that is found: one that isn't is
-    // #N/A whatever the index (observed in Excel with the index read from a linked sheet that
-    // couldn't be read).
-    if let Value::Error(e) = idx_val.scalar() {
-        let approx = match approx_val {
-            Some(v) => v.to_bool()?,
-            None => true,
-        };
-        return Err(if search(approx).is_some() { e } else { CellError::NA });
-    }
     let idx = idx_val.to_number()?;
     if idx.is_nan() || idx < 1.0 {
         return Err(CellError::Value);
@@ -209,7 +195,9 @@ pub fn vh_lookup_pos(
     if idx >= max_len {
         return Err(CellError::Ref);
     }
-    Ok((search(approx).ok_or(CellError::NA)?, idx))
+    let keys = as_array(keys_val);
+    let pos = if approx { bsearch_last_within(&x, &keys.data, false, len) } else { find_exact_in_array(&x, &keys, true, false) };
+    Ok((pos.ok_or(CellError::NA)?, idx))
 }
 
 /// Resolves the 0-based match position of `LOOKUP` against a 1-D key array; `len` as for
@@ -231,25 +219,15 @@ fn vh_lookup(args: &[Arg], vertical: bool) -> R<Value> {
     if let Value::Error(e) = &arg(args, 1)?.value {
         return Err(*e);
     }
-    // An error index is the answer only once the key is found, as in `vh_lookup_pos`.
-    let idx_error = match arg(args, 2)?.value.scalar() {
-        Value::Error(e) => Some(e),
-        _ => None,
-    };
-    let idx = match idx_error {
-        Some(_) => 0,
-        None => {
-            let idx = num(args, 2)?;
-            // NaN too: it would pass `idx < 1.0` and become index 0 (#2163).
-            if idx.is_nan() || idx < 1.0 {
-                return Err(CellError::Value);
-            }
-            (idx.trunc() as usize).saturating_sub(1)
-        }
-    };
+    let idx = num(args, 2)?;
+    // NaN too: it would pass `idx < 1.0` and become index 0 (#2163).
+    if idx.is_nan() || idx < 1.0 {
+        return Err(CellError::Value);
+    }
+    let idx = (idx.trunc() as usize).saturating_sub(1);
     let approx = opt_bool(args, 3, true)?;
     let len = if vertical { table.cols } else { table.rows };
-    if idx_error.is_none() && idx >= len {
+    if idx >= len {
         return Err(CellError::Ref);
     }
     // An exact text or numeric key is found through the table's index without copying its first
@@ -286,9 +264,6 @@ fn vh_lookup(args: &[Arg], vertical: bool) -> R<Value> {
         }
     };
     let pos = pos.ok_or(CellError::NA)?;
-    if let Some(e) = idx_error {
-        return Err(e);
-    }
     let v = if vertical { table.get(pos, idx) } else { table.get(idx, pos) };
     // An empty target stays blank, as in Excel: ISBLANK sees it as blank and `&` /
     // CONCATENATE treat it as ""; only a formula's final result displays 0 (#374).

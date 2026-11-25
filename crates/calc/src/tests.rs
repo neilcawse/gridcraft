@@ -157,20 +157,19 @@ fn references_into_linked_workbooks_read_the_saved_values() {
     for at in ["A5", "A6", "A7"] {
         assert_eq!(t.get(at), Value::Error(CellError::Ref), "{at}");
     }
-    // A sheet whose last refresh failed keeps its saved cells, and the cells it didn't save are
-    // blank (Excel shows 0 for them)...
+    // A sheet whose last refresh failed keeps its saved cells; anything else in it is #REF!.
     t.set("A8", "=[2]Failed!A1+[2]Failed!B1");
-    t.set("A9", "=[2]Failed!B7");
+    t.set("A9", "=[2]Failed!A1");
     t.set("A10", "=SUM([2]Failed!A1:B1)");
-    assert_eq!((t.num("A8"), t.num("A9"), t.num("A10")), (9.0, 0.0, 9.0));
+    assert_eq!((t.get("A8"), t.num("A9"), t.get("A10")), (Value::Error(CellError::Ref), 9.0, Value::Error(CellError::Ref)));
     // A reference Excel found deleted in a linked workbook is #REF!.
     t.set("A14", "=[2]Rates!#REF!+1");
     assert_eq!(t.get("A14"), Value::Error(CellError::Ref));
-    // ... but every cell of one that had saved no cells before is #REF!, through a block, a
-    // whole column, or more columns than a block can hold.
-    t.set("A11", "=SUM([2]Unreadable!A:A)");
-    t.set("A12", "=SUM([2]Unreadable!A1:A2)");
-    t.set("A13", "=SUM([2]Unreadable!A:Z)");
+    // A whole column, or more columns than a block can hold, reaches the same uncached cells, and
+    // every cell of a failed sheet that saved none is #REF!.
+    t.set("A11", "=SUM([2]Failed!A:A)");
+    t.set("A12", "=SUM([2]Failed!A1:A2)");
+    t.set("A13", "=SUM([2]Failed!A:Z)");
     t.set("A15", "=[2]Unreadable!C3");
     for at in ["A11", "A12", "A13", "A15"] {
         assert_eq!(t.get(at), Value::Error(CellError::Ref), "{at}");
@@ -457,11 +456,11 @@ fn linked_sheets_saved_without_cells_keep_the_saved_values() {
 }
 
 #[test]
-fn a_lookup_index_that_is_an_error_is_na_when_the_key_is_not_found() {
+fn lookups_into_an_unreadable_linked_sheet_are_na_and_error_indexes_come_first_elsewhere() {
     use gridcraft_model::{ExternalBook, ExternalSheet};
     let mut t = T::new();
     // Data's last update failed before any cell was saved: every cell of it is #REF!, the index
-    // read from it included, yet a key that isn't found is #N/A first.
+    // read from it included, yet a lookup into it is #N/A, as there is no key to find.
     let data = ExternalSheet { name: "Data".into(), refresh_error: true, ..Default::default() };
     t.wb.external_books = vec![ExternalBook { sheets: vec![data], ..Default::default() }].into();
     t.set("A1", "46349");
@@ -469,17 +468,21 @@ fn a_lookup_index_that_is_an_error_is_na_when_the_key_is_not_found() {
     t.set("B2", "=-VLOOKUP(A1,'[1]Data'!$B$4:$AM$3999,'[1]Data'!$AA$1,FALSE)");
     t.set("B3", "=HLOOKUP(A1,[1]Data!$A$1:$Z$9,[1]Data!$A$12)");
     t.set("B4", "=SUMPRODUCT([1]Data!C1:C9,[1]Data!D1:D9)");
+    t.set("B8", "=VLOOKUP(1/0,[1]Data!$A$1:$B$9,2)");
     let na = Value::Error(CellError::NA);
     assert_eq!([t.get("B1"), t.get("B2"), t.get("B3")], [na.clone(), na.clone(), na]);
-    assert_eq!(t.get("B4"), Value::Error(CellError::Ref));
-    // A key that is found gives the index's error.
+    assert_eq!((t.get("B4"), t.get("B8")), (Value::Error(CellError::Ref), Value::Error(CellError::Div0)));
+    // Over any other table an error index is the answer, whether or not the key is found.
     for (at, v) in [("D1", "x"), ("D2", "y"), ("E1", "1"), ("E2", "2")] {
         t.set(at, v);
     }
     t.set("B5", "=VLOOKUP(\"y\",D1:E2,1/0,FALSE)");
     t.set("B6", "=VLOOKUP(\"z\",D1:E2,1/0,FALSE)");
-    t.set("B7", "=VLOOKUP(\"y\",{\"x\",1;\"y\",2},#NAME?,FALSE)");
-    assert_eq!([t.get("B5"), t.get("B6"), t.get("B7")], [Value::Error(CellError::Div0), Value::Error(CellError::NA), Value::Error(CellError::Name)]);
+    t.set("B7", "=VLOOKUP(\"z\",{\"x\",1;\"y\",2},#NAME?,FALSE)");
+    assert_eq!(
+        [t.get("B5"), t.get("B6"), t.get("B7")],
+        [Value::Error(CellError::Div0), Value::Error(CellError::Div0), Value::Error(CellError::Name)]
+    );
 }
 
 #[test]

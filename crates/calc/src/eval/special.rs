@@ -107,11 +107,11 @@ pub(super) fn linked_definition_readable(b: &ExternalBook, def: &ExternalName, e
     readable
 }
 
-/// A value read from a linked sheet's saved cells. A cell the link didn't save is blank, unless
-/// the last update failed for the sheet before any of its cells were saved: Excel shows `#REF!`
-/// for every cell of such a sheet (see [`ExternalSheet::unreadable`]).
+/// A value read from a linked sheet's saved cells. When the last update of the link failed for
+/// the sheet (`refreshError`), Excel keeps the values it had and shows `#REF!` for anything it
+/// hadn't saved.
 pub fn linked_value(s: &ExternalSheet, v: Value) -> Value {
-    if v.is_empty() && s.unreadable() { Value::Error(CellError::Ref) } else { v }
+    if v.is_empty() && s.refresh_error { Value::Error(CellError::Ref) } else { v }
 }
 
 /// Most expression nodes [`precedents`] visits before giving up and marking the formula dynamic.

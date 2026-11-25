@@ -183,8 +183,8 @@ pub struct ExternalSheet {
     pub name: String,
     /// Cached cells, sorted by position (row, then column).
     pub cells: Vec<(CellRef, Value)>,
-    /// The last update of the link couldn't read this sheet (`refreshError`). Excel keeps the
-    /// cells it had saved; when it had saved none, every reference into the sheet is `#REF!`.
+    /// The last update of the link couldn't read this sheet (`refreshError`): Excel keeps the
+    /// cells it had saved, and references to anything else in it are `#REF!`.
     pub refresh_error: bool,
     /// The link saved no cells for this sheet at all (no `sheetData` for it, as when the file
     /// has no `sheetDataSet`): what Excel showed for references into it isn't known.
@@ -216,8 +216,11 @@ impl ExternalBook {
         let find = |scope: Option<usize>| self.names.iter().find(|n| n.sheet == scope && n.name.eq_ignore_ascii_case(name));
         si.and_then(|i| find(Some(i))).or_else(|| find(None))
     }
-    /// The value saved for DDE item `name` (`[1]!Price`).
+    /// The value saved for DDE item `name` as a formula writes it: `[1]!Price`, or quoted when it
+    /// isn't a plain word (`[1]!'0#NG: 2 16'`, `''` for a quote).
     pub fn item(&self, name: &str) -> Option<&Value> {
+        let quoted = name.strip_prefix('\'').and_then(|n| n.strip_suffix('\'')).filter(|n| !n.is_empty()).map(|n| n.replace("''", "'"));
+        let name = quoted.as_deref().unwrap_or(name);
         self.items.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v)
     }
 }
@@ -228,8 +231,7 @@ impl ExternalSheet {
         self.cells.binary_search_by(|(p, _)| p.cmp(&c)).ok().and_then(|i| self.cells.get(i)).map(|(_, v)| v.clone()).unwrap_or_default()
     }
     /// The last update couldn't read the sheet and no cell of it was saved before: Excel shows
-    /// `#REF!` for every cell of it. A refresh-error sheet that kept some cells reads the others
-    /// as blank, like any sheet.
+    /// `#REF!` for every cell of it.
     pub fn unreadable(&self) -> bool {
         self.refresh_error && self.cells.is_empty()
     }

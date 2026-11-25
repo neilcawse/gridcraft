@@ -588,7 +588,19 @@ impl<'a> Legacy<'a> {
             self.names.insert(key, Some((kind, one_cell_range)));
             return kind;
         }
+        // A DDE item saved with several values (`[2]!'0#NG: 2 16'`) is an array: a legacy formula
+        // shows its first value, as Excel does.
+        if Self::dde_array_item(self.wb, n) {
+            return Kind::Array;
+        }
         if self.wb.table(bare).is_some() { Kind::Ref } else { Kind::Scalar }
+    }
+
+    /// Whether `n` (`[2]!Item`, `[2]!'Quoted item'`) is an item of a DDE link saved as an array.
+    fn dde_array_item(wb: &Workbook, n: &str) -> bool {
+        let Some((book, item)) = n.strip_prefix('[').and_then(|r| r.split_once("]!")) else { return false };
+        let Some(b) = book.parse::<usize>().ok().and_then(|i| wb.external_books.get(i.checked_sub(1)?)).filter(|b| b.opaque) else { return false };
+        matches!(b.item(item), Some(gridcraft_core::Value::Array(_)))
     }
 
     fn call(&mut self, name: String, args: Vec<Expr>, sheet: usize, ctx: Ctx, depth: usize) -> (Expr, Kind) {
