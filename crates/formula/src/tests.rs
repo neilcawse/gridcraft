@@ -125,8 +125,12 @@ fn names_of_linked_workbooks_print_as_excel_writes_them() {
         ("'My Sheet'!Total", "'My Sheet'!Total"),
         ("[2]!'0#NG: 2 16 6 14'", "[2]!'0#NG: 2 16 6 14'"),
         ("SUM([2]!'it''s',1)", "SUM([2]!'it''s',1)"),
+        ("[2]!'''bid!ask[slot]'''", "[2]!'''bid!ask[slot]'''"),
+        ("'[2]Bid!Ask'!Price", "'[2]Bid!Ask'!Price"),
     ] {
-        assert_eq!(print(&parse(src).unwrap()), printed, "{src}");
+        let expr = parse(src).unwrap();
+        assert_eq!(print(&expr), printed, "{src}");
+        assert_eq!(parse(printed).unwrap(), expr, "{printed}");
     }
 }
 

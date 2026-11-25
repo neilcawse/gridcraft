@@ -310,23 +310,15 @@ impl<'h> Evaluator<'h> {
                 let v0 = self.deref(ev0);
                 let v2 = self.value(&args[2]);
                 let v3 = args.get(3).map(|e| self.value(e));
-                // A table in a linked sheet whose update failed before any cell was saved has no
-                // key to find: #N/A, whatever the index (even one read from that sheet, #REF!).
-                if !matches!(v0, Value::Error(_)) && self.linked_sheet(area.sheet).is_some_and(|s| s.unreadable()) {
-                    return err(CellError::NA);
-                }
                 let max_len = if vertical { area.range.width() } else { area.range.height() } as usize;
-                let eff = self.read_range(&area);
-                let key_area = Area {
-                    sheet: area.sheet,
-                    range: if vertical {
-                        RangeRef::new(eff.start, CellRef::new(eff.end.row, eff.start.col))
-                    } else {
-                        RangeRef::new(eff.start, CellRef::new(eff.start.row, eff.end.col))
-                    },
+                let (keys_val, len) = if self.linked_sheet(area.sheet).is_some_and(|s| s.unreadable()) {
+                    (None, 0)
+                } else {
+                    let eff = self.read_range(&area);
+                    let end = if vertical { CellRef::new(eff.end.row, eff.start.col) } else { CellRef::new(eff.start.row, eff.end.col) };
+                    let key_area = Area { sheet: area.sheet, range: RangeRef::new(eff.start, end) };
+                    (Some(self.area_value(&key_area)), search_len(&area, &key_area, vertical))
                 };
-                let keys_val = self.area_value(&key_area);
-                let len = search_len(&area, &key_area, vertical);
                 let read_hit = |this: &mut Self, pos: usize, idx: usize| -> Value {
                     let c = if vertical {
                         CellRef::new(area.range.start.row + pos as u32, area.range.start.col + idx as u32)
@@ -337,7 +329,7 @@ impl<'h> Evaluator<'h> {
                 };
                 let lifted = matches!(v0, Value::Array(_)) || matches!(v2, Value::Array(_)) || matches!(v3, Some(Value::Array(_)));
                 if !lifted {
-                    return Ev::V(match gridcraft_functions::vh_lookup_pos(&v0, &keys_val, &v2, v3.as_ref(), max_len, len) {
+                    return Ev::V(match gridcraft_functions::vh_lookup_pos(&v0, keys_val.as_ref(), &v2, v3.as_ref(), max_len, len) {
                         Ok((pos, idx)) => read_hit(self, pos, idx),
                         Err(e) => Value::Error(e),
                     });
@@ -364,7 +356,7 @@ impl<'h> Evaluator<'h> {
                         let n0 = a0.get_broadcast(r, c);
                         let n2 = a2.get_broadcast(r, c);
                         let n3 = a3.as_ref().map(|a| a.get_broadcast(r, c));
-                        let v = match gridcraft_functions::vh_lookup_pos(&n0, &keys_val, &n2, n3.as_ref(), max_len, len) {
+                        let v = match gridcraft_functions::vh_lookup_pos(&n0, keys_val.as_ref(), &n2, n3.as_ref(), max_len, len) {
                             Ok((pos, idx)) => read_hit(self, pos, idx),
                             Err(e) => Value::Error(e),
                         };

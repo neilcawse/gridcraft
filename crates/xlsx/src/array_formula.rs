@@ -510,6 +510,11 @@ impl<'a> Legacy<'a> {
         if let Some((_, kind)) = self.locals.iter().rev().find(|(key, _)| key.eq_ignore_ascii_case(n)) {
             return *kind;
         }
+        // Opaque links don't look in this workbook's names. A legacy formula over a DDE array
+        // shows its first value; a scalar or unsaved DDE item doesn't need intersection.
+        if let Some(kind) = Self::dde_item_kind(self.wb, n) {
+            return kind;
+        }
         let (scope, bare) = match n.rsplit_once('!') {
             Some((s, name)) => (self.wb.sheet_index(&gridcraft_core::unquote_sheet(s)).unwrap_or(sheet), name),
             None => (sheet, n),
@@ -588,19 +593,14 @@ impl<'a> Legacy<'a> {
             self.names.insert(key, Some((kind, one_cell_range)));
             return kind;
         }
-        // A DDE item saved with several values (`[2]!'0#NG: 2 16'`) is an array: a legacy formula
-        // shows its first value, as Excel does.
-        if Self::dde_array_item(self.wb, n) {
-            return Kind::Array;
-        }
         if self.wb.table(bare).is_some() { Kind::Ref } else { Kind::Scalar }
     }
 
-    /// Whether `n` (`[2]!Item`, `[2]!'Quoted item'`) is an item of a DDE link saved as an array.
-    fn dde_array_item(wb: &Workbook, n: &str) -> bool {
-        let Some((book, item)) = n.strip_prefix('[').and_then(|r| r.split_once("]!")) else { return false };
-        let Some(b) = book.parse::<usize>().ok().and_then(|i| wb.external_books.get(i.checked_sub(1)?)).filter(|b| b.opaque) else { return false };
-        matches!(b.item(item), Some(gridcraft_core::Value::Array(_)))
+    /// How a bare-book name on an opaque link evaluates, including items without saved values.
+    fn dde_item_kind(wb: &Workbook, n: &str) -> Option<Kind> {
+        let (book, item) = n.strip_prefix('[')?.split_once("]!")?;
+        let b = wb.external_books.get(book.parse::<usize>().ok()?.checked_sub(1)?)?;
+        b.opaque.then(|| if matches!(b.item(item), Some(gridcraft_core::Value::Array(_))) { Kind::Array } else { Kind::Scalar })
     }
 
     fn call(&mut self, name: String, args: Vec<Expr>, sheet: usize, ctx: Ctx, depth: usize) -> (Expr, Kind) {

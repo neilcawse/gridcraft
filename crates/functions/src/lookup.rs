@@ -167,12 +167,11 @@ fn row(a: &Array, r: usize) -> Vec<Value> {
 /// Resolves the 0-based `(row_or_col_pos, col_or_row_index)` of a `VLOOKUP` or `HLOOKUP` against a
 /// 1-D key array, without requiring the caller to materialize the rest of `table_array`.
 ///
-/// `len` is how long the key vector is: at least `keys_val`'s length, and longer when the
-/// reference runs on past the values read (a whole column of a linked workbook, whose cells past
-/// the saved ones are blank). Only the approximate search depends on it.
+/// `len` is the logical key vector length; approximate search includes positions beyond the
+/// materialized keys. `None` for `keys_val` denotes a linked sheet with a failed, empty cache.
 pub fn vh_lookup_pos(
     needle_val: &Value,
-    keys_val: &Value,
+    keys_val: Option<&Value>,
     idx_val: &Value,
     approx_val: Option<&Value>,
     max_len: usize,
@@ -183,6 +182,11 @@ pub fn vh_lookup_pos(
         Value::Empty => Value::Number(0.0),
         v => v,
     };
+    // Empirical (opspackage): a failed, empty linked table reports no match when the index
+    // is #REF!. Don't replace needle errors or extend this exception to other argument errors.
+    if keys_val.is_none() && matches!(idx_val, Value::Error(CellError::Ref)) && approx_val.is_none_or(|v| v.to_bool().is_ok()) {
+        return Err(CellError::NA);
+    }
     let idx = idx_val.to_number()?;
     if idx.is_nan() || idx < 1.0 {
         return Err(CellError::Value);
@@ -195,7 +199,7 @@ pub fn vh_lookup_pos(
     if idx >= max_len {
         return Err(CellError::Ref);
     }
-    let keys = as_array(keys_val);
+    let keys = as_array(keys_val.ok_or(CellError::NA)?);
     let pos = if approx { bsearch_last_within(&x, &keys.data, false, len) } else { find_exact_in_array(&x, &keys, true, false) };
     Ok((pos.ok_or(CellError::NA)?, idx))
 }

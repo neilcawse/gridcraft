@@ -376,7 +376,7 @@ impl<'h> Evaluator<'h> {
     /// calculates while the source is closed (see [`LINKED_SHEETS`]). `None` = not a reference
     /// into a linked workbook; `#REF!` = the link didn't save that workbook or sheet, noted to the
     /// host when the link has no saved values to look in: a link that isn't to a workbook, or a
-    /// sheet it saved no cells for at all (see [`Host::note_unknown_link`]).
+    /// sheet with no `sheetData` entry (see [`Host::note_unknown_link`]).
     fn linked_area(&mut self, r: &Reference) -> Option<Result<Area, CellError>> {
         let SheetSel::Named(name) = &r.sheet else { return None };
         let (book, sheet) = external_sheet(name)?;
@@ -403,7 +403,7 @@ impl<'h> Evaluator<'h> {
             return self.host.cell_value(sheet, c);
         }
         match self.linked_sheet(sheet) {
-            Some(s) => linked_value(s, s.value(c)),
+            Some(s) => linked_value(s, s.cached_value(c)),
             None => Value::Error(CellError::Ref),
         }
     }
@@ -415,7 +415,7 @@ impl<'h> Evaluator<'h> {
         }
         let Some(s) = self.linked_sheet(sheet) else { return vec![Value::Error(CellError::Ref); range.count() as usize] };
         let w = range.width() as usize;
-        let mut out = vec![linked_value(s, Value::Empty); range.height() as usize * w];
+        let mut out = vec![linked_value(s, None); range.height() as usize * w];
         for (c, v) in s.cells_in(range) {
             let i = (c.row - range.start.row) as usize * w + (c.col - range.start.col) as usize;
             if let Some(slot) = out.get_mut(i) {

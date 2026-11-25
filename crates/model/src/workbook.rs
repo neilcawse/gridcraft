@@ -219,8 +219,9 @@ impl ExternalBook {
     /// The value saved for DDE item `name` as a formula writes it: `[1]!Price`, or quoted when it
     /// isn't a plain word (`[1]!'0#NG: 2 16'`, `''` for a quote).
     pub fn item(&self, name: &str) -> Option<&Value> {
-        let quoted = name.strip_prefix('\'').and_then(|n| n.strip_suffix('\'')).filter(|n| !n.is_empty()).map(|n| n.replace("''", "'"));
-        let name = quoted.as_deref().unwrap_or(name);
+        let name = name.strip_prefix('\'').and_then(|n| n.strip_suffix('\'')).unwrap_or(name);
+        let decoded = name.contains("''").then(|| name.replace("''", "'"));
+        let name = decoded.as_deref().unwrap_or(name);
         self.items.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v)
     }
 }
@@ -228,10 +229,14 @@ impl ExternalBook {
 impl ExternalSheet {
     /// The cached value at `c` (blank when the link didn't store the cell).
     pub fn value(&self, c: CellRef) -> Value {
-        self.cells.binary_search_by(|(p, _)| p.cmp(&c)).ok().and_then(|i| self.cells.get(i)).map(|(_, v)| v.clone()).unwrap_or_default()
+        self.cached_value(c).cloned().unwrap_or_default()
     }
-    /// The last update couldn't read the sheet and no cell of it was saved before: Excel shows
-    /// `#REF!` for every cell of it.
+
+    /// Looks up a cached cell record, distinguishing a saved blank from an absent record.
+    pub fn cached_value(&self, c: CellRef) -> Option<&Value> {
+        self.cells.binary_search_by_key(&c, |(p, _)| *p).ok().and_then(|i| self.cells.get(i)).map(|(_, v)| v)
+    }
+    /// The last refresh failed and this sheet contains no cached cells.
     pub fn unreadable(&self) -> bool {
         self.refresh_error && self.cells.is_empty()
     }

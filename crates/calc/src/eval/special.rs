@@ -110,8 +110,12 @@ pub(super) fn linked_definition_readable(b: &ExternalBook, def: &ExternalName, e
 /// A value read from a linked sheet's saved cells. When the last update of the link failed for
 /// the sheet (`refreshError`), Excel keeps the values it had and shows `#REF!` for anything it
 /// hadn't saved.
-pub fn linked_value(s: &ExternalSheet, v: Value) -> Value {
-    if v.is_empty() && s.refresh_error { Value::Error(CellError::Ref) } else { v }
+pub fn linked_value(s: &ExternalSheet, v: Option<&Value>) -> Value {
+    match v {
+        Some(v) => v.clone(),
+        None if s.refresh_error => Value::Error(CellError::Ref),
+        None => Value::Empty,
+    }
 }
 
 /// Most expression nodes [`precedents`] visits before giving up and marking the formula dynamic.

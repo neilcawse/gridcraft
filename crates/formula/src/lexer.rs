@@ -54,7 +54,7 @@ fn is_word_char(c: char) -> bool {
 }
 
 /// `[2]`: a linked workbook's index with no sheet name, as before `!` in `[2]!Rates`.
-fn book_prefix_only(s: &str) -> bool {
+pub(crate) fn book_prefix_only(s: &str) -> bool {
     s.strip_prefix('[').and_then(|r| r.strip_suffix(']')).is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
 }
 
