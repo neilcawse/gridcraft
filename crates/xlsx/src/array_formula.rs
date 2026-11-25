@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use gridcraft_core::CellRef;
-use gridcraft_formula::{BinOp, Expr, RefKind, SheetSel, StructItem, UnOp};
+use gridcraft_formula::{BinOp, Expr, RefKind, Reference, SheetSel, StructItem, UnOp, ast::split_external_name};
 use gridcraft_model::{Formula, Workbook};
 
 use crate::FunctionInfo;
@@ -262,6 +262,8 @@ type NameKey = (String, usize, bool);
 #[derive(Default)]
 pub(crate) struct NameCache {
     map: HashMap<NameKey, NameInfo>,
+    /// A linked definition's syntax is independent of the workbook and scope it resolves in.
+    external_refs: HashMap<String, Option<Reference>>,
     /// How many names were analysed (not found in the cache).
     pub(crate) analyses: usize,
 }
@@ -510,10 +512,8 @@ impl<'a> Legacy<'a> {
         if let Some((_, kind)) = self.locals.iter().rev().find(|(key, _)| key.eq_ignore_ascii_case(n)) {
             return *kind;
         }
-        // Opaque links don't look in this workbook's names. A legacy formula over a DDE array
-        // shows its first value; a scalar or unsaved DDE item doesn't need intersection.
-        if let Some(kind) = Self::dde_item_kind(self.wb, n) {
-            return kind;
+        if let Some((book, scope, name)) = split_external_name(n) {
+            return self.external_name(book, scope, name);
         }
         let (scope, bare) = match n.rsplit_once('!') {
             Some((s, name)) => (self.wb.sheet_index(&gridcraft_core::unquote_sheet(s)).unwrap_or(sheet), name),
@@ -596,11 +596,42 @@ impl<'a> Legacy<'a> {
         if self.wb.table(bare).is_some() { Kind::Ref } else { Kind::Scalar }
     }
 
-    /// How a bare-book name on an opaque link evaluates, including items without saved values.
-    fn dde_item_kind(wb: &Workbook, n: &str) -> Option<Kind> {
-        let (book, item) = n.strip_prefix('[')?.split_once("]!")?;
-        let b = wb.external_books.get(book.parse::<usize>().ok()?.checked_sub(1)?)?;
-        b.opaque.then(|| if matches!(b.item(item), Some(gridcraft_core::Value::Array(_))) { Kind::Array } else { Kind::Scalar })
+    fn external_name(&mut self, book: usize, scope: &str, name: &str) -> Kind {
+        let Some(book) = book.checked_sub(1).and_then(|i| self.wb.external_books.get(i)) else { return Kind::Scalar };
+        if book.opaque {
+            // A bare-book DDE item can be an array value, not a reference. An opaque link
+            // never falls through to the host workbook's names.
+            return if scope.is_empty() && matches!(book.item(name), Some(gridcraft_core::Value::Array(_))) { Kind::Array } else { Kind::Scalar };
+        }
+        let Some(def) = book.name(name, (!scope.is_empty()).then_some(scope)) else { return Kind::Scalar };
+        let parse_ref = || match gridcraft_formula::parse(&def.refers_to) {
+            Ok(Expr::Ref(r)) => Some(r),
+            _ => None,
+        };
+        let fresh;
+        let reference = if let Some(cached) = self.shared.external_refs.get(&def.refers_to) {
+            cached.as_ref()
+        } else if self.shared.external_refs.len() < MAX_CACHED_NAMES {
+            self.shared.external_refs.entry(def.refers_to.clone()).or_insert_with(parse_ref).as_ref()
+        } else {
+            fresh = parse_ref();
+            fresh.as_ref()
+        };
+        let Some(r) = reference else { return Kind::Scalar };
+        // MS-OI29500 restricts refersTo to references in the linked book. An unavailable
+        // definition keeps the formula's existing saved-value behavior.
+        let sheet = match &r.sheet {
+            SheetSel::Named(s) => book.sheet(s),
+            SheetSel::Current => def.sheet.and_then(|i| book.sheets.get(i)),
+            SheetSel::Span(..) => None,
+        };
+        if sheet.is_none_or(|s| s.missing) {
+            return Kind::Scalar;
+        }
+        let single = r.range().is_single();
+        let one_cell_range = single && matches!(r.kind, RefKind::Range(..));
+        self.one_cell_range |= one_cell_range;
+        if !single || (self.collapsed && one_cell_range) { Kind::Ref } else { Kind::Scalar }
     }
 
     fn call(&mut self, name: String, args: Vec<Expr>, sheet: usize, ctx: Ctx, depth: usize) -> (Expr, Kind) {

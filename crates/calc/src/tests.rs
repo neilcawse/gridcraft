@@ -201,6 +201,33 @@ fn references_into_linked_workbooks_read_the_saved_values() {
 }
 
 #[test]
+fn external_names_resolve_on_sheets_with_literal_exclamation_marks() {
+    use gridcraft_model::{ExternalBook, ExternalName, ExternalSheet};
+    let mut t = T::new();
+    let sheet = ExternalSheet {
+        name: "A!B's[".into(),
+        cells: vec![(c("A1"), Value::Number(4.0)), (c("X1"), Value::Number(3.0)), (c("A2"), Value::Number(9.0))],
+        ..Default::default()
+    };
+    let names = vec![
+        ExternalName { name: "Rates".into(), sheet: Some(0), refers_to: "$A$1:$A$2".into() },
+        ExternalName { name: "Rates".into(), sheet: None, refers_to: "'A!B''s['!$X$1".into() },
+        ExternalName { name: "Alias".into(), sheet: None, refers_to: "'A!B''s['!Rates".into() },
+    ];
+    t.wb.external_books = vec![ExternalBook { sheets: vec![sheet], names, ..Default::default() }].into();
+    for (at, text, value) in [
+        ("B1", "='[1]A!B''s['!X1", 3.0),
+        ("B2", "=@'[1]A!B''s['!Rates", 9.0),
+        ("C2", "=[1]!Rates", 3.0),
+        ("D2", "=SUMPRODUCT(SQRT('[1]A!B''s['!Rates))", 5.0),
+        ("E2", "=SUM([1]!Alias)", 13.0),
+    ] {
+        t.set(at, text);
+        assert_eq!(t.get(at), Value::Number(value), "{text}");
+    }
+}
+
+#[test]
 fn linked_names_that_cannot_be_calculated_keep_their_saved_value() {
     use gridcraft_model::{ExternalBook, ExternalName, ExternalSheet};
     let mut t = T::new();

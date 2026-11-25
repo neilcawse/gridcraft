@@ -333,6 +333,16 @@ fn rename_sheet_updates_qualified_names() -> Result<(), Box<dyn std::error::Erro
 }
 
 #[test]
+fn linked_name_print_preserves_quoted_sheet_punctuation() -> Result<(), Box<dyn std::error::Error>> {
+    // A literal `[` in an imported sheet is punctuation, not another workbook index.
+    let text = "'[1]A!B''s['!Rates";
+    let expr = parse(text)?;
+    assert_eq!(print(&expr), text);
+    assert_eq!(parse(&print(&expr))?, expr);
+    Ok(())
+}
+
+#[test]
 fn moves_between_sheets() -> Result<(), Box<dyn std::error::Error>> {
     let mv = Edit::MoveToSheet { from: gridcraft_core::RangeRef::parse("A1:B2").ok_or("none")?, to_sheet: "New Name".into(), to_row: 9, to_col: 3 };
     for (host, input, expected) in [

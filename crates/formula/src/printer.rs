@@ -147,9 +147,12 @@ pub fn struct_ref_file(s: &StructRef) -> String {
     write_struct_ref(s, false)
 }
 
-/// Splits a qualified name at the last `!` outside brackets. A quoted DDE item instead starts
-/// immediately after the workbook index and may itself contain `!` or brackets.
+/// Splits a qualified name at the last `!` outside brackets. After a numeric workbook index,
+/// the sheet is already decoded, and a bare-book DDE item may itself contain `!` or brackets.
 pub fn split_qualified_name(n: &str) -> Option<(&str, &str)> {
+    if let Some((_, _, name)) = crate::ast::split_external_name(n) {
+        return Some((&n[..n.len() - name.len() - 1], name));
+    }
     if let Some((book, item)) = n.split_once('!')
         && crate::lexer::book_prefix_only(book)
         && item.starts_with('\'')

@@ -3,6 +3,7 @@ use super::{
     SheetSel, Value, Workbook,
 };
 use gridcraft_core::{CellRef, MAX_COLS, MAX_ROWS, RangeRef};
+pub(super) use gridcraft_formula::ast::split_external_name as external_name;
 
 /// SUMIF and AVERAGEIF with a sum range: Excel sizes the sum range like the criteria range.
 pub(super) fn resizes_sum_range(name: &str, args: usize) -> bool {
@@ -28,16 +29,6 @@ pub fn resized_sum_range(sum: RangeRef, height: u32, width: u32) -> RangeRef {
     let row = sum.start.row.saturating_add(height.saturating_sub(1)).min(MAX_ROWS - 1);
     let col = sum.start.col.saturating_add(width.saturating_sub(1)).min(MAX_COLS - 1);
     RangeRef::new(sum.start, CellRef::new(row, col))
-}
-
-/// `[2]!Rates` → linked workbook 2, no sheet, `Rates`; `[2]Prices!Rates` → sheet `Prices`.
-pub(super) fn external_name(name: &str) -> Option<(usize, &str, &str)> {
-    let (book, rest) = name.strip_prefix('[')?.split_once(']')?;
-    let (sheet, bare) = rest.split_once('!')?;
-    if book.is_empty() || !book.bytes().all(|b| b.is_ascii_digit()) || bare.is_empty() {
-        return None;
-    }
-    Some((book.parse().ok()?, sheet, bare))
 }
 
 /// Whether argument `i` of `name` is a range parameter that takes only a reference.
@@ -97,8 +88,8 @@ pub(super) fn linked_definition_readable(b: &ExternalBook, def: &ExternalName, e
                 SheetSel::Current => scope.is_some_and(|s| !s.missing),
                 SheetSel::Span(..) => false,
             },
-            Expr::Name(n) => match n.split_once('!') {
-                Some((s, bare)) => b.name(bare, Some(s.trim_matches('\''))).is_some(),
+            Expr::Name(n) => match n.rsplit_once('!') {
+                Some((s, bare)) => b.name(bare, Some(s)).is_some(),
                 None => b.name(n, scope.map(|s| s.name.as_str())).is_some(),
             },
             _ => true,

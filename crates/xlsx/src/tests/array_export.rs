@@ -496,6 +496,45 @@ fn legacy_formulas_into_linked_workbooks_read_with_implicit_intersection() {
     assert_eq!(cell(&sheet, "F6").attr("cm"), Some("1"));
 }
 
+#[test]
+fn legacy_external_range_names_intersect_only_in_value_positions() {
+    let cases = [
+        ("B2", "[1]!Rates", "@[1]!Rates"),
+        ("C2", "SUM(SQRT([1]!Rates))", "SUM(SQRT(@[1]!Rates))"),
+        ("D2", "SUM('[1]A!B''s['!Rates*2)", "SUM(@'[1]A!B''s['!Rates*2)"),
+        ("E2", "SUMPRODUCT(SQRT('[1]A!B''s['!Rates))", "SUMPRODUCT(SQRT('[1]A!B''s['!Rates))"),
+        ("F2", "SUM([1]!Rates)", "SUM([1]!Rates)"),
+        ("G2", "[1]!FixedRate*2", "[1]!FixedRate*2"),
+    ];
+    let mut body = String::from(r#"<sheetData><row r="2">"#);
+    for (at, file, _) in cases {
+        body.push_str(&format!(r#"<c r="{at}"><f>{file}</f><v>0</v></c>"#));
+    }
+    body.push_str(r#"<c r="H2" cm="1"><f t="array" ref="H2:H3">SQRT([1]!Rates)</f><v>2</v></c></row></sheetData>"#);
+    let link = r#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><externalBook><sheetNames><sheetName val="A!B's["/></sheetNames><definedNames><definedName name="Rates" refersTo="'A!B''s['!$A$1:$A$2"/><definedName name="Rates" sheetId="0" refersTo="$A$1:$A$2"/><definedName name="FixedRate" refersTo="'A!B''s['!$A$1"/></definedNames><sheetDataSet><sheetData sheetId="0"/></sheetDataSet></externalBook></externalLink>"#;
+    let bytes = super::minimal(
+        &body,
+        &[("xl/externalLinks/externalLink1.xml", link)],
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink" Target="externalLinks/externalLink1.xml"/>"#,
+        r#"<externalReferences><externalReference r:id="rId2"/></externalReferences>"#,
+    );
+    let (wb, _) = read_xlsx(&bytes).unwrap();
+    let saved = write_xlsx(&wb).unwrap();
+    let xml = Package::open(&saved).unwrap().read_xml("xl/worksheets/sheet1.xml").unwrap().unwrap();
+    let (reopened, _) = read_xlsx(&saved).unwrap();
+    for (address, file, evaluated) in cases {
+        for book in [&wb, &reopened] {
+            let formula = book.sheet(0).and_then(|s| s.cell(at(address))).and_then(|c| c.formula.as_ref()).unwrap();
+            assert_eq!(formula.text, evaluated, "{address}");
+        }
+        assert_scalar(&xml, address);
+        assert_eq!(cell(&xml, address).child("f").unwrap().text, file);
+    }
+    let dynamic = cell(&xml, "H2");
+    assert_eq!(dynamic.attr("cm"), Some("1"));
+    assert_eq!(dynamic.child("f").unwrap().text, "SQRT([1]!Rates)");
+}
+
 /// How `export` saved a formula, as comparable text.
 fn export_text(wb: &Workbook, at: CellRef, text: &str, names: &mut crate::array_formula::NameCache) -> String {
     use crate::array_formula::{Export, export};

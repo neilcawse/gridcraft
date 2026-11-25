@@ -49,6 +49,17 @@ pub(crate) fn book_prefix(sheet: &str) -> Option<(usize, &str)> {
     Some((book.parse().ok()?, rest))
 }
 
+/// Splits a decoded `Expr::Name` into the workbook index, sheet (empty for a bare book),
+/// and name or DDE item. The item keeps its original quotes and punctuation.
+pub fn split_external_name(name: &str) -> Option<(usize, &str, &str)> {
+    let (book, rest) = book_prefix(name)?;
+    let (sheet, name) = match rest.strip_prefix('!') {
+        Some(item) if item.starts_with('\'') && item.ends_with('\'') => ("", item),
+        _ => rest.rsplit_once('!')?,
+    };
+    (!name.is_empty()).then_some((book, sheet, name))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Reference {
     pub sheet: SheetSel,
