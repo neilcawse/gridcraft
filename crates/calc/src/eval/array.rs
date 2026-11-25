@@ -53,12 +53,11 @@ impl Acc {
 
 // ---------------------------------------------------------------- operators
 
-pub(super) fn map_unary(v: &Value, f: &dyn Fn(f64) -> Value, plus: bool, sys: gridcraft_core::DateSystem) -> Value {
+pub(super) fn map_unary(v: &Value, f: &dyn Fn(f64) -> Value, sys: gridcraft_core::DateSystem) -> Value {
     match v {
-        Value::Array(a) => Array::new(a.rows, a.cols, a.data.iter().map(|x| map_unary(x, f, plus, sys)).collect())
+        Value::Array(a) => Array::new(a.rows, a.cols, a.data.iter().map(|x| map_unary(x, f, sys)).collect())
             .map_or(Value::Error(CellError::Value), Value::from),
         Value::Error(e) => Value::Error(*e),
-        Value::Text(_) if plus => v.clone(),
         other => match other.to_number_in(sys) {
             Ok(n) => f(n),
             Err(e) => Value::Error(e),

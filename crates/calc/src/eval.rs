@@ -710,16 +710,17 @@ impl<'h> Evaluator<'h> {
             };
         }
         let v = self.value(x);
+        if op == UnOp::Plus {
+            return Ev::V(v);
+        }
         let sys = self.host.workbook().date_system;
         Ev::V(map_unary(
             &v,
             &|n| match op {
                 UnOp::Neg => Value::number(-n),
-                UnOp::Plus => Value::number(n),
                 UnOp::Percent => Value::number(n / 100.0),
-                UnOp::At | UnOp::Spill | UnOp::Trim(_) => Value::number(n),
+                UnOp::Plus | UnOp::At | UnOp::Spill | UnOp::Trim(_) => unreachable!(),
             },
-            op == UnOp::Plus,
             sys,
         ))
     }

@@ -34,6 +34,31 @@ impl T {
 }
 
 #[test]
+fn unary_plus_preserves_values_but_not_reference_identity() {
+    let mut t = T::new();
+    t.set("A1", "TRUE");
+    t.set("B1", "=+TRUE");
+    t.set("B2", "=+A1");
+    t.set("B3", "=TYPE(+\"3\")");
+    t.set("B4", "=IF(+A2=\"\",\"\",+A2)");
+    t.set("B5", "=+A2");
+    t.set("B6", "=+A1+1");
+    t.set("B7", "=-A1");
+    t.set("B8", "=+{TRUE;\"3\";#N/A}");
+    t.set("B11", "=ISREF(+A1)");
+
+    assert_eq!(t.get("B1"), Value::Bool(true));
+    assert_eq!(t.get("B2"), Value::Bool(true));
+    assert_eq!(t.num("B3"), 2.0);
+    assert_eq!(t.get("B4"), Value::text(""));
+    assert_eq!((t.num("B5"), t.num("B6"), t.num("B7")), (0.0, 2.0, -1.0));
+    assert_eq!(t.get("B8"), Value::Bool(true));
+    assert_eq!(t.get("B9"), Value::text("3"));
+    assert_eq!(t.get("B10"), Value::Error(CellError::NA));
+    assert_eq!(t.get("B11"), Value::Bool(false));
+}
+
+#[test]
 fn spill_range_operator() {
     let mut t = T::new();
     t.set("A1", "3");
