@@ -149,6 +149,7 @@ fn measured_transition_concat_blank() {
         for (formula, expected) in [
             ("=\"x\"&A1", blank.clone()),
             ("=IF(A1=\"\",\"x\"&A1,\"no\")", blank),
+            // Not measured: empty text keeps the previous result.
             ("=\"x\"&A2", Value::text("x")),
             ("=\"x\"&#N/A", Value::Error(CellError::NA)),
         ] {
@@ -168,6 +169,7 @@ fn measured_transition_average_text_literal() {
         t.set("A3", "text");
         t.set("B1", "=AVERAGE(A1:A3)");
         t.set("B2", "=AVERAGE(-1,\"1\")");
+        // Not measured: non-numeric text keeps the previous result.
         t.set("B3", "=AVERAGE(-1,\"abc\")");
         assert_eq!(t.get("B1"), Value::number(-1.0));
         assert_eq!(t.get("B2"), Value::number(if transition { -0.5 } else { 0.0 }));
@@ -201,6 +203,7 @@ fn measured_transition_datevalue_with_addition() {
         t.set("B1", "=DATEVALUE(A1+1)");
         t.set("B2", "=DATEVALUE(A1)");
         t.set("B3", "=DATEVALUE(A1)+1");
+        // Not measured: a numeric literal keeps the previous result.
         t.set("B4", "=DATEVALUE(1)");
         assert_eq!(t.get("B1"), if transition { Value::number(1.0) } else { Value::Error(CellError::Value) });
         assert!(t.num("B2") > 0.0);
@@ -223,6 +226,31 @@ fn measured_aggregate_reference_form_rejects_computed_arrays() {
         t.set("C4", "=AGGREGATE(2,6,-1)");
         assert_eq!([t.get("C1"), t.get("C2")], [Value::Error(CellError::Value), Value::Error(CellError::Value)]);
         assert_eq!([t.get("C3"), t.get("C4")], [Value::number(1.0), Value::number(1.0)]);
+    }
+}
+
+/// Only computed arrays were measured. Array constants, written or named, keep their previous
+/// treatment on both kinds of sheet.
+#[test]
+fn aggregate_reference_form_keeps_array_constants() {
+    for transition in [false, true] {
+        let mut t = T::new();
+        set_transition(&mut t, transition);
+        t.wb.names.push(gridcraft_model::DefinedName {
+            name: "Konst".into(),
+            scope: None,
+            formula: "{1,2,3}".into(),
+            comment: String::new(),
+            hidden: false,
+        });
+        t.set("A1", "4");
+        t.set("C1", "=AGGREGATE(9,6,{1,2,3})");
+        t.set("C2", "=AGGREGATE(9,6,({1,2,3}))");
+        t.set("C3", "=AGGREGATE(9,6,Konst)");
+        t.set("C4", "=AGGREGATE(9,6,A1,{1,2})");
+        t.set("C5", "=LET(Konst,{1,2,3}*1,AGGREGATE(9,6,Konst))");
+        assert_eq!([t.num("C1"), t.num("C2"), t.num("C3"), t.num("C4")], [6.0, 6.0, 6.0, 7.0], "transition={transition}");
+        assert_eq!(t.get("C5"), Value::Error(CellError::Value), "transition={transition}");
     }
 }
 
