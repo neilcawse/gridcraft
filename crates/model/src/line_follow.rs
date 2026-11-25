@@ -123,7 +123,7 @@ fn keep_visibility(lines: &mut BTreeMap<u32, LineInfo>, before: &BTreeMap<u32, L
         .collect();
     for k in toggled {
         match before.get(&k) {
-            Some(info) => lines.insert(k, info.clone()),
+            Some(info) => lines.insert(k, *info),
             None => lines.remove(&k),
         };
     }
@@ -172,8 +172,8 @@ impl Sheet {
             let Some(a) = self.raw_drawing_anchor(m) else { continue };
             let next = self.rect_anchor(map_rect(from_rect, to_rect, old.anchor_rect(&a)), a.mode);
             match m {
-                DrawingRef::Group(g) => {
-                    if let Some(g) = self.groups.iter_mut().find(|x| x.id == g) {
+                DrawingRef::Group(gid) => {
+                    if let Some(g) = self.groups.iter_mut().find(|g| g.id == gid) {
                         g.anchor = next;
                     }
                 }

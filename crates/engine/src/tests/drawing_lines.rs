@@ -107,7 +107,10 @@ fn resized_rows_and_columns_move_and_size_charts_by_anchor_mode() {
             };
             let old = size(&s);
             let param = if rows { "height" } else { "width" };
-            s.execute(command, json!({ key: lines, param: old + 30.0 })).unwrap();
+            let mut params = serde_json::Map::new();
+            params.insert(key.into(), json!(lines));
+            params.insert(param.into(), json!(old + 30.0));
+            s.execute(command, params.into()).unwrap();
             let grown = size(&s) - old;
             assert!(grown > 20.0, "{command} {lines} grows the line");
             let mut want = before;
