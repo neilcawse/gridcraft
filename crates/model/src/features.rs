@@ -828,18 +828,39 @@ pub enum ControlKind {
     Button,
     Slider,
     Spin,
+    /// A drop-down list: picks one item of a source range and writes its 1-based position to
+    /// the linked cell.
+    Drop,
 }
 
 impl ControlKind {
-    /// The kind's name in the window: Button, Slider, Spin Button.
+    /// The kind's name in the window: Button, Slider, Spin Button, Drop-down.
     pub fn label(self) -> &'static str {
         match self {
             ControlKind::Button => "Button",
             ControlKind::Slider => "Slider",
             ControlKind::Spin => "Spin Button",
+            ControlKind::Drop => "Drop-down",
         }
     }
 }
+
+/// How a drop-down list is drawn and edited (`dropStyle`). Spreadsheet applications write
+/// `combo` for the form drop-down; the others are kept as read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DropStyle {
+    /// A closed box with an arrow that opens the list.
+    #[default]
+    Combo,
+    /// As `Combo`, with an editable box.
+    ComboEdit,
+    /// The list always open.
+    Simple,
+}
+
+/// The rows a new drop-down list shows before it scrolls.
+pub const DROP_LINES_DEFAULT: u32 = 8;
 
 /// The largest value a slider or spin button takes (Excel's scroll bar limit). Values are whole
 /// numbers from 0 to this.
@@ -906,6 +927,14 @@ pub struct FormControl {
     pub print: bool,
     /// Locked when the sheet is protected.
     pub locked: bool,
+    /// The cells a drop-down lists, as reference text (`$AJ$6:$AJ$12`, or `Lists!$A$1:$A$9`).
+    /// Structural edits rewrite it like [`FormControl::link`].
+    pub list_range: Option<String>,
+    /// A drop-down's chosen item, 1-based (0: none). The linked cell holds it too.
+    pub selected: u32,
+    /// The rows a drop-down's open list shows before it scrolls.
+    pub drop_lines: u32,
+    pub drop_style: DropStyle,
 }
 
 impl Default for FormControl {
@@ -926,6 +955,10 @@ impl Default for FormControl {
             action: None,
             print: true,
             locked: true,
+            list_range: None,
+            selected: 0,
+            drop_lines: DROP_LINES_DEFAULT,
+            drop_style: DropStyle::Combo,
         }
     }
 }
@@ -939,7 +972,7 @@ impl FormControl {
     /// Checks the numbers of a slider or spin button: 0 ≤ min < max ≤ 30000, 1 ≤ step ≤ max − min,
     /// and (sliders) page ≥ step. Each rule has its own message.
     pub fn check_numbers(&self) -> Result<(), String> {
-        if self.kind == ControlKind::Button {
+        if matches!(self.kind, ControlKind::Button | ControlKind::Drop) {
             return Ok(());
         }
         if self.max > CONTROL_MAX {

@@ -1,22 +1,29 @@
-//! Form controls (buttons, scroll bars, spin buttons) in xlsx, from the published ECMA-376 and
-//! MS-XLSX formats. A control is written three ways, as spreadsheet applications expect:
+//! Form controls (buttons, scroll bars, spin buttons, drop-down lists) in xlsx, from the published
+//! ECMA-376 and MS-XLSX formats. A control is written three ways, as spreadsheet applications
+//! expect:
 //!
 //! - a control properties part (`xl/ctrlProps/ctrlPropN.xml`, `formControlPr`) with its type,
-//!   linked cell, limits and value;
+//!   linked cell, limits and value (a drop-down: its source range, chosen item and rows);
 //! - a `<control>` in the sheet's `<controls>`, inside `mc:AlternateContent` (it needs the 2010
 //!   extensions), naming the properties part, the VML shape and the anchor;
 //! - a legacy VML shape with `x:ClientData`, in the sheet's VML drawing (shared with notes).
 //!
+//! Excel also writes a hidden DrawingML shape for each control (`cNvPr hidden="1"` with an
+//! `a14:compatExt spid`) for applications that don't know controls; the drawing reader drops that
+//! proxy for every control the sheet lists (see [`listed_shapes`]), so it never becomes a shape
+//! of its own, and GridCraft doesn't write one.
+//!
 //! Reading prefers the properties part and falls back to the VML. Values are clamped to the
-//! 0..30000 whole numbers sliders and spin buttons take. Controls of other kinds (check boxes,
-//! list boxes, drop-downs, ActiveX controls) are left to pass-through (`passthrough.rs`), which
-//! keeps them unchanged; a sheet can hold both, in one `<controls>` element and one VML drawing.
+//! 0..30000 whole numbers sliders and spin buttons take, and a drop-down's chosen item and rows
+//! to the same range. Controls of other kinds (check boxes, list boxes, option buttons, ActiveX
+//! controls) are left to pass-through (`passthrough.rs`), which keeps them unchanged; a sheet can
+//! hold both, in one `<controls>` element and one VML drawing.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use gridcraft_core::CellRef;
-use gridcraft_model::{Anchor, AnchorMode, CONTROL_MAX, ControlAction, ControlKind, FormControl, MacroInput, Sheet};
+use gridcraft_model::{Anchor, AnchorMode, CONTROL_MAX, ControlAction, ControlKind, DROP_LINES_DEFAULT, DropStyle, FormControl, MacroInput, Sheet};
 
 use crate::package::Rel;
 use crate::read::Ctx;
@@ -39,6 +46,7 @@ fn object_type(k: ControlKind) -> &'static str {
         ControlKind::Button => "Button",
         ControlKind::Slider => "Scroll",
         ControlKind::Spin => "Spin",
+        ControlKind::Drop => "Drop",
     }
 }
 
@@ -47,7 +55,28 @@ fn kind_of(t: &str) -> Option<ControlKind> {
         "button" => Some(ControlKind::Button),
         "scroll" => Some(ControlKind::Slider),
         "spin" => Some(ControlKind::Spin),
+        "drop" => Some(ControlKind::Drop),
         _ => None,
+    }
+}
+
+/// A `dropStyle` (`combo`, `comboedit`, `simple`; the VML spells them `Combo`, `ComboEdit`,
+/// `Simple`).
+fn drop_style_of(t: &str) -> Option<DropStyle> {
+    match t.trim().to_ascii_lowercase().as_str() {
+        "combo" => Some(DropStyle::Combo),
+        "comboedit" => Some(DropStyle::ComboEdit),
+        "simple" => Some(DropStyle::Simple),
+        _ => None,
+    }
+}
+
+/// A drop style as the properties part spells it, and as the VML does.
+fn drop_style_names(s: DropStyle) -> (&'static str, &'static str) {
+    match s {
+        DropStyle::Combo => ("combo", "Combo"),
+        DropStyle::ComboEdit => ("comboedit", "ComboEdit"),
+        DropStyle::Simple => ("simple", "Simple"),
     }
 }
 
@@ -122,7 +151,8 @@ pub fn write(out: &mut Out, rels: &mut Rels, sheet: &Sheet, shape_id: impl Fn(us
                 emu(dy)
             )
         };
-        let mut pr = String::from(" defaultSize=\"0\" autoPict=\"0\"");
+        // A drop-down's box is not sized to its text (`autoLine`), as Excel writes it.
+        let mut pr = String::from(if c.kind == ControlKind::Drop { " defaultSize=\"0\" autoLine=\"0\" autoPict=\"0\"" } else { " defaultSize=\"0\" autoPict=\"0\"" });
         if !c.print {
             pr.push_str(" print=\"0\"");
         }
@@ -171,6 +201,19 @@ fn ctrl_prop(c: &FormControl) -> String {
                 let _ = write!(s, " page=\"{}\"", c.page);
             }
             let _ = write!(s, " val=\"{}\"", c.value);
+        }
+        ControlKind::Drop => {
+            let _ = write!(s, " dropLines=\"{}\" dropStyle=\"{}\" dx=\"22\"", c.drop_lines, drop_style_names(c.drop_style).0);
+            if let Some(l) = &c.link {
+                let _ = write!(s, " fmlaLink=\"{}\"", esc_attr(l));
+            }
+            if let Some(r) = &c.list_range {
+                let _ = write!(s, " fmlaRange=\"{}\"", esc_attr(r));
+            }
+            if c.selected > 0 {
+                let _ = write!(s, " sel=\"{}\"", c.selected);
+            }
+            s.push_str(" val=\"0\"");
         }
     }
     s.push_str("/>");
@@ -225,6 +268,25 @@ fn vml_shape(sheet: &Sheet, c: &FormControl, id: u64, z: usize) -> String {
             }
             data.push_str("<x:Dx>22</x:Dx>");
         }
+        ControlKind::Drop => {
+            data.push_str("<x:AutoLine>False</x:AutoLine>");
+            if let Some(l) = &c.link {
+                let _ = write!(data, "<x:FmlaLink>{}</x:FmlaLink>", esc(l));
+            }
+            let _ = write!(data, "<x:Val>0</x:Val><x:Min>0</x:Min><x:Max>0</x:Max><x:Inc>1</x:Inc><x:Page>{}</x:Page><x:Dx>22</x:Dx>", c.drop_lines);
+            if let Some(r) = &c.list_range {
+                let _ = write!(data, "<x:FmlaRange>{}</x:FmlaRange>", esc(r));
+            }
+            if c.selected > 0 {
+                let _ = write!(data, "<x:Sel>{}</x:Sel>", c.selected);
+            }
+            let _ = write!(
+                data,
+                "<x:SelType>Single</x:SelType><x:LCT>Normal</x:LCT><x:DropStyle>{}</x:DropStyle><x:DropLines>{}</x:DropLines>",
+                drop_style_names(c.drop_style).1,
+                c.drop_lines
+            );
+        }
     }
     data.push_str("</x:ClientData>");
     let text = if c.kind == ControlKind::Button {
@@ -263,6 +325,11 @@ struct Props {
     text: String,
     print: Option<bool>,
     locked: Option<bool>,
+    /// A drop-down's source range (`fmlaRange`), chosen item (`sel`), rows and style.
+    range: Option<String>,
+    sel: Option<i64>,
+    drop_lines: Option<i64>,
+    drop_style: Option<DropStyle>,
 }
 
 fn props_from_ctrl_prop(e: &El) -> Props {
@@ -280,6 +347,10 @@ fn props_from_ctrl_prop(e: &El) -> Props {
         text: String::new(),
         print: None,
         locked: None,
+        range: e.attr("fmlaRange").map(str::to_string),
+        sel: int("sel"),
+        drop_lines: int("dropLines"),
+        drop_style: e.attr("dropStyle").and_then(drop_style_of),
     }
 }
 
@@ -303,6 +374,10 @@ fn props_from_vml(shape: &El) -> Option<Props> {
         text,
         print: truth("PrintObject"),
         locked: truth("Locked"),
+        range: text_of("FmlaRange").filter(|t| !t.is_empty()),
+        sel: int("Sel"),
+        drop_lines: int("DropLines"),
+        drop_style: text_of("DropStyle").as_deref().and_then(drop_style_of),
     })
 }
 
@@ -342,7 +417,14 @@ fn build(p: Props, kind: ControlKind, anchor: Anchor, name: Option<&str>, id: u3
     c.value = c.snap(clamp(p.val, c.min) as f64);
     // Only sliders have an orientation; `horiz` is left out for a vertical one.
     c.horizontal = kind != ControlKind::Slider || p.horiz.unwrap_or(false);
-    c.link = p.link.map(|l| l.trim().trim_start_matches('=').to_string()).filter(|l| !l.is_empty() && l.chars().count() <= 300);
+    let reference = |r: Option<String>| r.map(|l| l.trim().trim_start_matches('=').to_string()).filter(|l| !l.is_empty() && l.chars().count() <= 300);
+    c.link = reference(p.link);
+    if kind == ControlKind::Drop {
+        c.list_range = reference(p.range);
+        c.selected = clamp(p.sel, 0);
+        c.drop_lines = clamp(p.drop_lines, DROP_LINES_DEFAULT).max(1);
+        c.drop_style = p.drop_style.unwrap_or_default();
+    }
     c.text = p.text.chars().take(1_024).collect();
     if let Some(n) = name {
         c.name = n.chars().take(255).collect();
@@ -404,6 +486,13 @@ pub struct ReadControls {
     /// The VML shape numbers of the controls read into the model: GridCraft writes those, so they
     /// are left out of the kept content.
     pub modelled: HashSet<u64>,
+}
+
+/// The shape numbers of every control a sheet's `<controls>` element lists, whether GridCraft
+/// models its kind or keeps it: their DrawingML compatibility proxies are not shapes of their own
+/// (see [`crate::drawing::read_drawing`]).
+pub fn listed_shapes(controls: Option<&El>) -> HashSet<u64> {
+    controls.map(controls_in).unwrap_or_default().into_iter().filter_map(|c| c.attr("shapeId").and_then(shape_number)).collect()
 }
 
 /// Whether a VML shape's client data is a note's: its `ObjectType` is `Note` in any case and with
@@ -469,6 +558,7 @@ pub fn read(cx: &mut Ctx<'_>, controls: Option<&El>, vml_rid: Option<&str>, rels
                     f.print = f.print.or(v.print);
                     f.locked = f.locked.or(v.locked);
                     f.macro_ = v.macro_;
+                    f.range = f.range.or(v.range);
                 }
                 f
             }

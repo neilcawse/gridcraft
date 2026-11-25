@@ -85,7 +85,7 @@ pub(super) fn in_cell_editor(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, s
 
 /// Test the popup itself, not whether the pointer is over any part of the app.
 /// A trigger can sit outside its popup, so its opening click must be ignored.
-pub(super) fn popup_dismissed(response: &egui::Response, was_open: bool) -> bool {
+pub(crate) fn popup_dismissed(response: &egui::Response, was_open: bool) -> bool {
     response.ctx.input(|i| !i.focused || i.key_pressed(egui::Key::Escape)) || (was_open && response.clicked_elsewhere())
 }
 

@@ -682,7 +682,7 @@ pub(crate) fn rewrite_all_formulas_many(
 
 /// Runs `f` over every reference a floating object holds (a chart's series values, categories,
 /// name and bubble sizes, and the source block it was made from, and a form control's linked
-/// cell). Every edit that moves
+/// cell and drop-down source range). Every edit that moves
 /// references calls it: inserting and deleting lines and cells and cut-moves (through
 /// [`rewrite_all_formulas`]), and renaming and deleting sheets. `f` maps a reference held by an
 /// object on the sheet named `host` to its new form; text that does not parse is kept. A source
@@ -708,6 +708,7 @@ pub(crate) fn rewrite_cell_links(wb: &mut gridcraft_model::Workbook, f: impl Fn(
         }
         for c in sh.controls.iter_mut() {
             c.link = c.link.as_deref().map(fix);
+            c.list_range = c.list_range.as_deref().map(fix);
         }
     }
 }

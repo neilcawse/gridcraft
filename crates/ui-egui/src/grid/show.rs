@@ -361,6 +361,7 @@ impl<F: Fn(&mut SheetApp, egui::Vec2) -> Geo> ActiveCellVisibility<'_, F> {
 
 fn show_grid_interactions(app: &mut SheetApp, ui: &mut egui::Ui, resp: &egui::Response, geo: &Geo, sh: &Sheet, wb: &Workbook) {
     let previous_popups = (app.grid.filter_menu, app.grid.list_picker, app.grid.header_menu, app.grid.fill_menu);
+    let previous_drop = app.grid.drop_open;
     // A pan the grid never saw end (it was hidden mid-drag) must not swallow the next press.
     if app.grid.touch_pan && !resp.dragged() && !resp.drag_stopped() {
         app.grid.touch_pan = false;
@@ -381,6 +382,7 @@ fn show_grid_interactions(app: &mut SheetApp, ui: &mut egui::Ui, resp: &egui::Re
     }
     filter_menu(app, ui, geo, previous_popups.0 == app.grid.filter_menu);
     list_picker(app, ui, geo, previous_popups.1 == app.grid.list_picker);
+    crate::form_controls::drop_picker(app, ui, geo, previous_drop == app.grid.drop_open);
     header_menu(app, ui, previous_popups.2 == app.grid.header_menu);
     context_menu(app, ui);
     fill_menu(app, ui, previous_popups.3 == app.grid.fill_menu);

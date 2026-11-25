@@ -1,13 +1,17 @@
-//! Form controls (Insert › Controls): buttons that run a macro or a command, and sliders and spin
-//! buttons that hold a whole number from 0 to 30000 and write it to a linked cell.
+//! Form controls (Insert › Controls): buttons that run a macro or a command, sliders and spin
+//! buttons that hold a whole number from 0 to 30000 and write it to a linked cell, and drop-down
+//! lists that show the cells of a source range and write the chosen item's 1-based position to
+//! a linked cell.
 //!
-//! A slider or spin button's value lives on the control and in its linked cell. Setting it goes
-//! through `cell.set`, so the cell's dependents recalculate and Undo takes both back as one step;
-//! editing the linked cell moves the control (see [`sync_linked_values`]). Pressing a button runs
-//! its action through the macro policy with the document's trust, so a button from a file someone
-//! else made asks before it runs anything.
+//! A slider or spin button's value, and a drop-down's chosen item, live on the control and in its
+//! linked cell. Setting it goes through `cell.set`, so the cell's dependents recalculate and Undo
+//! takes both back as one step; editing the linked cell moves the control (see
+//! [`sync_linked_values`]). A drop-down reads its items from the source range when it is drawn
+//! or listed, so editing those cells changes the list. Pressing a button runs its action through
+//! the macro policy with the document's trust, so a button from a file someone else made asks
+//! before it runs anything.
 
-use gridcraft_core::CellRef;
+use gridcraft_core::{CellRef, RangeRef};
 use gridcraft_model::{
     Anchor, AnchorMode, CONTROL_MAX, ControlAction, ControlKind, FormControl, MAX_MACRO_NAME, MacroInput, ObjKind, Sheet, Workbook,
 };
@@ -49,11 +53,20 @@ pub fn specs() -> Vec<CommandSpec> {
             |s, p| insert_number_control(s, p, ControlKind::Spin)
         ),
         cmd!(
+            "insert.dropDown",
+            "Drop-down",
+            ["Insert", "Controls"],
+            None,
+            "{at?: \"B2\" (or cell), dx?, dy?, width?, height?, listRange?: \"$A$1:$A$9\" | \"Lists!$A$1:$A$9\", link?: \"$B$1\", dropLines?: 8, value?: item (1-based)} a list of the range's cells; choosing one writes its position to the linked cell → {control: id}",
+            has_doc,
+            insert_drop_down
+        ),
+        cmd!(
             "control.format",
             "Format Control",
             [],
             None,
-            "{id, text?, name?, link?: \"$B$1\" | \"\" (no link), min?, max?, step?, page?, value?, horizontal?, print?, locked?} → the control (as control.list)",
+            "{id, text?, name?, link?: \"$B$1\" | \"\" (no link), min?, max?, step?, page?, value?, horizontal?, print?, locked?, listRange?: \"$A$1:$A$9\" | \"\" (drop-downs), dropLines?} → the control (as control.list)",
             has_doc,
             format
         ),
@@ -71,7 +84,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Change Control Value",
             [],
             None,
-            "{id, value} clamps the value to min..max, snaps it to the step, and writes it to the linked cell → {value}",
+            "{id, value} a slider or spin button: clamps the value to min..max, snaps it to the step; a drop-down: chooses item `value` (1-based, 0: none) of its list. Writes it to the linked cell → {value}",
             has_doc,
             set_value
         ),
@@ -84,7 +97,7 @@ pub fn specs() -> Vec<CommandSpec> {
             has_doc,
             press
         ),
-        cmd!(query "control.list", "Form Controls", [], None, "{} → the active sheet's controls: [{id, kind, name, text, at, link?, value, min, max, step, page, horizontal, action?}]", has_doc, list),
+        cmd!(query "control.list", "Form Controls", [], None, "{} → the active sheet's controls: [{id, kind, name, text, at, link?, value, min, max, step, page, horizontal, action?, listRange?, selected, dropLines, items}]", has_doc, list),
     ]
 }
 
@@ -94,7 +107,7 @@ const MAX_TEXT: usize = 1_024;
 fn control_json(c: &FormControl) -> Json {
     let mut o = json!({
         "id": c.id,
-        "kind": match c.kind { ControlKind::Button => "button", ControlKind::Slider => "slider", ControlKind::Spin => "spinButton" },
+        "kind": match c.kind { ControlKind::Button => "button", ControlKind::Slider => "slider", ControlKind::Spin => "spinButton", ControlKind::Drop => "dropDown" },
         "name": c.display_name(),
         "at": c.anchor.cell.a1(),
         "width": c.anchor.width,
@@ -102,19 +115,29 @@ fn control_json(c: &FormControl) -> Json {
         "print": c.print,
         "locked": c.locked,
     });
-    if c.kind == ControlKind::Button {
-        o["text"] = json!(c.text);
-        if let Some(a) = &c.action {
-            o["action"] = serde_json::to_value(a).unwrap_or(Json::Null);
+    match c.kind {
+        ControlKind::Button => {
+            o["text"] = json!(c.text);
+            if let Some(a) = &c.action {
+                o["action"] = serde_json::to_value(a).unwrap_or(Json::Null);
+            }
         }
-    } else {
-        o["value"] = json!(c.value);
-        o["min"] = json!(c.min);
-        o["max"] = json!(c.max);
-        o["step"] = json!(c.step);
-        if c.kind == ControlKind::Slider {
-            o["page"] = json!(c.page);
-            o["horizontal"] = json!(c.horizontal);
+        ControlKind::Drop => {
+            o["selected"] = json!(c.selected);
+            o["dropLines"] = json!(c.drop_lines);
+            if let Some(r) = &c.list_range {
+                o["listRange"] = json!(r);
+            }
+        }
+        ControlKind::Slider | ControlKind::Spin => {
+            o["value"] = json!(c.value);
+            o["min"] = json!(c.min);
+            o["max"] = json!(c.max);
+            o["step"] = json!(c.step);
+            if c.kind == ControlKind::Slider {
+                o["page"] = json!(c.page);
+                o["horizontal"] = json!(c.horizontal);
+            }
         }
     }
     if let Some(l) = &c.link {
@@ -123,9 +146,72 @@ fn control_json(c: &FormControl) -> Json {
     o
 }
 
+/// The most items `control.list` returns for one drop-down.
+const MAX_LISTED_ITEMS: u32 = 1_000;
+
 fn list(s: &mut Session, _: &Json) -> Result<Json> {
-    let sh = s.doc()?.wb.active().ok_or(EngineError::NoDocument)?;
-    Ok(Json::Array(sh.controls.iter().map(control_json).collect()))
+    let d = s.doc()?;
+    let host = d.wb.active_sheet();
+    let sh = d.wb.sheet(host).ok_or(EngineError::NoDocument)?;
+    Ok(Json::Array(
+        sh.controls
+            .iter()
+            .map(|c| {
+                let mut o = control_json(c);
+                if c.kind == ControlKind::Drop {
+                    o["items"] = json!(drop_items(&d.wb, host, c, 0, MAX_LISTED_ITEMS));
+                }
+                o
+            })
+            .collect(),
+    ))
+}
+
+/// The cells a drop-down lists, from the control's sheet `host`: (sheet index, source range).
+/// `None` without a source range, or when it doesn't name cells of an existing sheet.
+pub fn drop_source(wb: &Workbook, host: usize, c: &FormControl) -> Option<(usize, RangeRef)> {
+    let text = c.list_range.as_deref()?.trim().trim_start_matches('=');
+    let (sheet, body) = split_sheet(text);
+    let si = match sheet {
+        Some(n) => wb.sheet_index(&n)?,
+        None => host,
+    };
+    wb.sheet(si)?;
+    Some((si, RangeRef::parse(body.trim())?))
+}
+
+/// The source cells along which a drop-down's items run: down the first column, or along the
+/// row when the range is one row of several cells.
+fn drop_cells(r: RangeRef) -> (CellRef, bool, u32) {
+    if r.height() == 1 && r.width() > 1 { (r.start, false, r.width()) } else { (r.start, true, r.height()) }
+}
+
+/// How many items a drop-down lists (at most [`CONTROL_MAX`], the most a chosen item can be).
+pub fn drop_len(wb: &Workbook, host: usize, c: &FormControl) -> u32 {
+    drop_source(wb, host, c).map_or(0, |(_, r)| drop_cells(r).2.min(CONTROL_MAX))
+}
+
+/// Up to `count` of a drop-down's items from 0-based `start`, each as its cell shows it (through
+/// its number format). Only the asked-for cells are read, however large the range.
+pub fn drop_items(wb: &Workbook, host: usize, c: &FormControl, start: u32, count: u32) -> Vec<String> {
+    let Some((si, r)) = drop_source(wb, host, c) else { return Vec::new() };
+    let Some(sh) = wb.sheet(si) else { return Vec::new() };
+    let (first, down, len) = drop_cells(r);
+    let end = len.min(CONTROL_MAX).min(start.saturating_add(count));
+    (start..end)
+        .map(|i| {
+            let at = if down { CellRef::new(first.row.saturating_add(i), first.col) } else { CellRef::new(first.row, first.col.saturating_add(i)) };
+            crate::display::value_text(wb, sh, at)
+        })
+        .collect()
+}
+
+/// The item a drop-down shows closed: its chosen one, or nothing.
+pub fn drop_shown(wb: &Workbook, host: usize, c: &FormControl) -> String {
+    match c.selected.checked_sub(1) {
+        Some(i) => drop_items(wb, host, c, i, 1).pop().unwrap_or_default(),
+        None => String::new(),
+    }
 }
 
 /// A whole number from 0 to 30000 named `key`, if given. Numbers in text (`"12"`) count; anything
@@ -185,6 +271,30 @@ fn link_param(cmd: &str, wb: &Workbook, host: usize, p: &Json) -> Result<Option<
     } else {
         let name = wb.sheet(si).map(|sh| sh.name.clone()).unwrap_or_default();
         format!("{}!{abs}", gridcraft_formula::quote_sheet(&name))
+    })))
+}
+
+/// A drop-down's `listRange` parameter in its stored form: `$A$1:$A$9` on the host sheet,
+/// `'My Sheet'!$A$1:$A$9` elsewhere. An empty text removes the list.
+fn list_range_param(cmd: &str, wb: &Workbook, host: usize, p: &Json) -> Result<Option<Option<String>>> {
+    let text = match p.get("listRange") {
+        None => return Ok(None),
+        Some(Json::Null) => return Ok(Some(None)),
+        Some(Json::String(t)) => t.trim(),
+        Some(_) => return Err(bad(cmd, "`listRange` must be a range such as $A$1:$A$9")),
+    };
+    if text.is_empty() {
+        return Ok(Some(None));
+    }
+    let probe = FormControl { list_range: Some(text.to_string()), ..FormControl::default() };
+    let (si, r) = drop_source(wb, host, &probe).ok_or_else(|| bad(cmd, format!("`{text}` isn't a range of this workbook, such as $A$1:$A$9")))?;
+    let abs = |c: CellRef| format!("${}${}", gridcraft_core::col_to_letters(c.col), c.row as u64 + 1);
+    let body = if r.is_single() { abs(r.start) } else { format!("{}:{}", abs(r.start), abs(r.end)) };
+    Ok(Some(Some(if si == host {
+        body
+    } else {
+        let name = wb.sheet(si).map(|sh| sh.name.clone()).unwrap_or_default();
+        format!("{}!{body}", gridcraft_formula::quote_sheet(&name))
     })))
 }
 
@@ -254,6 +364,49 @@ fn insert_number_control(s: &mut Session, p: &Json, kind: ControlKind) -> Result
         }
         Ok(json!({"control": id}))
     })
+}
+
+fn insert_drop_down(s: &mut Session, p: &Json) -> Result<Json> {
+    const CMD: &str = "insert.dropDown";
+    let anchor = new_anchor(s, p, (120.0, 20.0))?;
+    let d = s.doc()?;
+    let sheet = d.wb.active_sheet();
+    let id = d.wb.next_object_id();
+    let mut c = FormControl { id, kind: ControlKind::Drop, anchor, ..FormControl::default() };
+    if let Some(r) = list_range_param(CMD, &d.wb, sheet, p)? {
+        c.list_range = r;
+    }
+    if let Some(link) = link_param(CMD, &d.wb, sheet, p)? {
+        c.link = link;
+    }
+    if let Some(n) = drop_lines_param(CMD, p)? {
+        c.drop_lines = n;
+    }
+    let given = match whole(CMD, p, "value")? {
+        Some(v) => Some(drop_choice(CMD, &d.wb, sheet, &c, v as f64)?),
+        None => None,
+    };
+    // Without a value, a drop-down shows the item its linked cell names.
+    c.selected = given.or_else(|| linked_choice(&d.wb, sheet, &c)).unwrap_or(0);
+    let (value, link) = (c.selected, c.link.clone());
+    s.grouped("Insert Drop-down", |s| {
+        edit(s, |cx| {
+            cx.sheet_mut(sheet)?.controls.push(c);
+            Ok(())
+        })?;
+        if given.is_some() {
+            write_link(s, sheet, link.as_deref(), value)?;
+        }
+        Ok(json!({"control": id}))
+    })
+}
+
+/// A drop-down's `dropLines`: a whole number from 1 to 30000, if given.
+fn drop_lines_param(cmd: &str, p: &Json) -> Result<Option<u32>> {
+    match whole(cmd, p, "dropLines")? {
+        Some(0) => Err(bad(cmd, "`dropLines` must be at least 1")),
+        n => Ok(n),
+    }
 }
 
 /// Applies `min`, `max`, `step`, `page` and `value` from `p` to `c` and checks the result.
@@ -339,8 +492,9 @@ fn format(s: &mut Session, p: &Json) -> Result<Json> {
             *slot = v;
         }
     }
+    let number = matches!(c.kind, ControlKind::Slider | ControlKind::Spin);
     let mut given = None;
-    if c.kind != ControlKind::Button {
+    if number {
         for (key, slot) in [("min", &mut c.min), ("max", &mut c.max), ("step", &mut c.step), ("page", &mut c.page)] {
             if let Some(v) = whole(CMD, p, key)? {
                 *slot = v;
@@ -352,11 +506,25 @@ fn format(s: &mut Session, p: &Json) -> Result<Json> {
     if let Some(link) = link_param(CMD, &s.doc()?.wb, sheet, p)? {
         c.link = link;
     }
-    // New bounds pull the value in; a given value is snapped to them.
-    c.value = c.snap(given.map_or(c.value as f64, f64::from));
-    let number = c.kind != ControlKind::Button;
-    let write = number && (given.is_some() || p.get("min").is_some() || p.get("max").is_some() || p.get("step").is_some());
-    let (value, link) = (c.value, c.link.clone());
+    if c.kind == ControlKind::Drop {
+        if let Some(r) = list_range_param(CMD, &s.doc()?.wb, sheet, p)? {
+            c.list_range = r;
+        }
+        if let Some(n) = drop_lines_param(CMD, p)? {
+            c.drop_lines = n;
+        }
+        given = whole(CMD, p, "value")?;
+        if let Some(v) = given {
+            c.selected = drop_choice(CMD, &s.doc()?.wb, sheet, &c, v as f64)?;
+        }
+    } else {
+        // New bounds pull the value in; a given value is snapped to them.
+        c.value = c.snap(given.map_or(c.value as f64, f64::from));
+    }
+    let write = (number && (given.is_some() || p.get("min").is_some() || p.get("max").is_some() || p.get("step").is_some()))
+        || (c.kind == ControlKind::Drop && given.is_some());
+    let value = if c.kind == ControlKind::Drop { c.selected } else { c.value };
+    let link = c.link.clone();
     s.grouped("Format Control", |s| {
         edit(s, |cx| {
             if let Some(slot) = cx.sheet_mut(sheet)?.controls.get_mut(i) {
@@ -481,6 +649,16 @@ fn assign(s: &mut Session, p: &Json) -> Result<Json> {
     })
 }
 
+/// A drop-down's item `v` (1-based; 0 chooses none), checked against the items its source range
+/// lists now.
+fn drop_choice(cmd: &str, wb: &Workbook, host: usize, c: &FormControl, v: f64) -> Result<u32> {
+    let len = drop_len(wb, host, c);
+    if v.fract() != 0.0 || v < 0.0 || v > len as f64 {
+        return Err(bad(cmd, format!("`value` must be an item of the list: a whole number from 1 to {len} (0: none)")));
+    }
+    Ok(v as u32)
+}
+
 fn set_value(s: &mut Session, p: &Json) -> Result<Json> {
     const CMD: &str = "control.setValue";
     let (sheet, i, c) = find(s, CMD, p)?;
@@ -494,13 +672,18 @@ fn set_value(s: &mut Session, p: &Json) -> Result<Json> {
     }
     .filter(|v| v.is_finite())
     .ok_or_else(|| bad(CMD, "`value` must be a number"))?;
-    let value = c.snap(v);
+    let drop = c.kind == ControlKind::Drop;
+    let (value, now) = if drop { (drop_choice(CMD, &s.doc()?.wb, sheet, &c, v)?, c.selected) } else { (c.snap(v), c.value) };
     let label = format!("Change {}", c.kind.label());
     s.grouped(&label, |s| {
-        if c.value != value {
+        if now != value {
             edit(s, |cx| {
                 if let Some(slot) = cx.sheet_mut(sheet)?.controls.get_mut(i) {
-                    slot.value = value;
+                    if drop {
+                        slot.selected = value;
+                    } else {
+                        slot.value = value;
+                    }
                 }
                 Ok(())
             })?;
@@ -600,9 +783,22 @@ fn approval_key(id: &str, params: &Json) -> String {
     format!("control-command\u{0}{id}\u{0}{params}")
 }
 
+/// The item a drop-down's linked cell chooses: the whole part of the number it holds, and none for
+/// an empty cell. `None` when the cell can't be read or holds something else (text, an error),
+/// which leaves the choice as it was.
+fn linked_choice(wb: &Workbook, host: usize, c: &FormControl) -> Option<u32> {
+    let (si, cell) = link_target(wb, host, c.link.as_deref()?)?;
+    let v = wb.sheet(si)?.cell(cell).map(|x| &x.value);
+    match v {
+        None => Some(0),
+        Some(v) if v.is_empty() => Some(0),
+        Some(v) => v.as_f64().filter(|n| n.is_finite()).map(|n| n.floor().clamp(0.0, CONTROL_MAX as f64) as u32),
+    }
+}
+
 /// After an edit: each slider and spin button whose linked cell holds a number takes that number
-/// (clamped and snapped), so editing the cell moves the control. Sheets without such a control
-/// are left untouched.
+/// (clamped and snapped), and each drop-down the item its linked cell names, so editing the cell
+/// moves the control. Sheets without such a control are left untouched.
 pub(crate) fn sync_linked_values(wb: &mut Workbook) {
     for si in 0..wb.sheets.len() {
         let updates: Vec<(usize, u32)> = match wb.sheet(si) {
@@ -610,8 +806,11 @@ pub(crate) fn sync_linked_values(wb: &mut Workbook) {
                 .controls
                 .iter()
                 .enumerate()
-                .filter(|(_, c)| c.kind != ControlKind::Button)
-                .filter_map(|(i, c)| linked_number(wb, si, c).map(|n| (i, c.snap(n))).filter(|(_, v)| *v != c.value))
+                .filter_map(|(i, c)| match c.kind {
+                    ControlKind::Button => None,
+                    ControlKind::Drop => linked_choice(wb, si, c).filter(|v| *v != c.selected).map(|v| (i, v)),
+                    ControlKind::Slider | ControlKind::Spin => linked_number(wb, si, c).map(|n| (i, c.snap(n))).filter(|(_, v)| *v != c.value),
+                })
                 .collect(),
             _ => continue,
         };
@@ -621,7 +820,11 @@ pub(crate) fn sync_linked_values(wb: &mut Workbook) {
         if let Some(sh) = wb.sheet_mut(si) {
             for (i, v) in updates {
                 if let Some(c) = sh.controls.get_mut(i) {
-                    c.value = v;
+                    if c.kind == ControlKind::Drop {
+                        c.selected = v;
+                    } else {
+                        c.value = v;
+                    }
                 }
             }
         }

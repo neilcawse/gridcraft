@@ -1,6 +1,6 @@
 //! Reading worksheet parts.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use craft_xlsx::{
@@ -262,8 +262,9 @@ pub fn read_sheet(cx: &mut Ctx<'_>, part: &str, name: &str) -> Result<(Sheet, cr
     }
     settle_python_spills_past_budget(&st, &mut sheet);
 
-    apply_craft_sheet_part(cx, &sheet_part, &rels, name, too_many_merges, &mut sheet)?;
     let root = from_craft_el(&sheet_part.root);
+    let control_shapes = crate::controls::listed_shapes(sheet_controls(&root));
+    apply_craft_sheet_part(cx, &sheet_part, &rels, name, too_many_merges, &control_shapes, &mut sheet)?;
     let read_controls = read_form_controls(cx, &root, &rels, &mut sheet);
     read_sheet_notes_and_tables(cx, &sheet_part, &rels, &mut sheet)?;
     Ok((sheet, read_controls))
@@ -275,6 +276,7 @@ fn apply_craft_sheet_part(
     rels: &[Rel],
     name: &str,
     skip_merges: bool,
+    control_shapes: &HashSet<u64>,
     sheet: &mut Sheet,
 ) -> Result<(), IoError> {
     let mut rel_by_id: HashMap<&str, &Rel> = HashMap::with_capacity(rels.len());
@@ -397,7 +399,7 @@ fn apply_craft_sheet_part(
         && let Some(rel) = rel_by_id.get(id.as_str()).copied()
     {
         let target = rel.target.clone();
-        crate::drawing::read_drawing(cx, &target, sheet)?;
+        crate::drawing::read_drawing(cx, &target, control_shapes, sheet)?;
     }
     Ok(())
 }
@@ -668,12 +670,17 @@ fn read_craft_hyperlinks(
     }
 }
 
-/// Buttons, scroll bars and spin buttons: the `<controls>` list (also inside
+/// The sheet's `<controls>` element (also inside `mc:AlternateContent`; the last one counts).
+fn sheet_controls(root: &El) -> Option<&El> {
+    root.children.iter().filter_map(crate::controls::controls_of).next_back()
+}
+
+/// Buttons, scroll bars, spin buttons and drop-downs: the `<controls>` list (also inside
 /// `mc:AlternateContent`) with its properties parts, else the shapes of the VML drawing that
 /// `<legacyDrawing r:id>` names (not the header and footer drawing of `<legacyDrawingHF>`).
 /// Returns the VML shape numbers read, so pass-through keeps only the others.
 fn read_form_controls(cx: &mut Ctx<'_>, root: &El, rels: &[Rel], sheet: &mut Sheet) -> crate::controls::ReadControls {
-    let controls = root.children.iter().filter_map(crate::controls::controls_of).next_back();
+    let controls = sheet_controls(root);
     let vml = root.child("legacyDrawing").and_then(|e| e.attr("id"));
     if controls.is_some() || vml.is_some() { crate::controls::read(cx, controls, vml, rels, sheet) } else { Default::default() }
 }

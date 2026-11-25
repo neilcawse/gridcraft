@@ -31,6 +31,7 @@ fn insert_id(kind: ControlKind) -> &'static str {
         ControlKind::Button => "insert.button",
         ControlKind::Slider => "insert.slider",
         ControlKind::Spin => "insert.spinButton",
+        ControlKind::Drop => "insert.dropDown",
     }
 }
 
@@ -435,7 +436,8 @@ fn assign(app: &mut SheetApp, d: &Dialog) -> bool {
 // ---------------------------------------------------------------- Format Control
 
 /// Format Control: a slider's or spin button's cell link, value and limits (orientation and page
-/// change for sliders); a button's text. `textOnly` shows just the text (Edit Text).
+/// change for sliders); a drop-down's input range, cell link and rows; a button's text.
+/// `textOnly` shows just the text (Edit Text).
 pub fn open_format(app: &SheetApp, params: &Json) -> Option<Dialog> {
     let id = params.get("id").and_then(Json::as_u64).and_then(|i| u32::try_from(i).ok())?;
     let c = control(app, id)?;
@@ -451,6 +453,8 @@ pub fn open_format(app: &SheetApp, params: &Json) -> Option<Dialog> {
         "step": c.step.to_string(),
         "page": c.page.to_string(),
         "link": c.link.clone().unwrap_or_default(),
+        "listRange": c.list_range.clone().unwrap_or_default(),
+        "dropLines": c.drop_lines.to_string(),
         "horizontal": c.horizontal,
         "print": c.print,
         "locked": c.locked,
@@ -475,6 +479,13 @@ pub fn format_params(app: &SheetApp, d: &Dialog) -> Result<Json, String> {
     let mut out = json!({"id": id, "name": val(d, "name"), "print": flag("print"), "locked": flag("locked")});
     if c.kind == ControlKind::Button {
         out["text"] = json!(val(d, "text"));
+        return Ok(out);
+    }
+    if c.kind == ControlKind::Drop {
+        let lines = whole(&val(d, "dropLines")).filter(|n| *n >= 1).ok_or_else(|| format!("Drop down lines must be a whole number from 1 to {CONTROL_MAX}."))?;
+        out["dropLines"] = json!(lines);
+        out["listRange"] = json!(val(d, "listRange").trim());
+        out["link"] = json!(val(d, "link").trim());
         return Ok(out);
     }
     let mut draft = c.clone();
@@ -515,6 +526,14 @@ pub fn format_dialog(app: &mut SheetApp, ui: &mut Ui, d: &mut Dialog, open: &mut
         ui.label("Text:");
         ui.add(egui::TextEdit::multiline(&mut text).desired_rows(2).desired_width(f32::INFINITY).id_salt("control_text"));
         d.values.insert("text".into(), json!(text));
+    } else if c.kind == ControlKind::Drop {
+        egui::Grid::new("format_control_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+            for (key, label, width) in [("listRange", "Input range:", 160.0), ("link", "Cell link:", 160.0), ("dropLines", "Drop down lines:", 90.0)] {
+                ui.label(label);
+                text_field(ui, d, key, width);
+                ui.end_row();
+            }
+        });
     } else {
         egui::Grid::new("format_control_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
             let mut fields = vec![("value", "Current value:"), ("min", "Minimum value:"), ("max", "Maximum value:"), ("step", "Incremental change:")];

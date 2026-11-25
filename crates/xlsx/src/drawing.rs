@@ -279,7 +279,10 @@ fn drawing_objects(children: &[El]) -> Vec<&El> {
         .collect()
 }
 
-pub fn read_drawing(cx: &mut Ctx<'_>, part: &str, sheet: &mut Sheet) -> Result<(), IoError> {
+/// Reads a sheet's drawing part. `control_shapes` are the shape numbers of the form controls the
+/// sheet lists: their DrawingML compatibility proxies (see [`control_proxy`]) are skipped, as the
+/// controls themselves are read (or kept) from the sheet's `<controls>`.
+pub fn read_drawing(cx: &mut Ctx<'_>, part: &str, control_shapes: &HashSet<u64>, sheet: &mut Sheet) -> Result<(), IoError> {
     let Some(bytes) = cx.pkg.read(part)? else {
         cx.warn(format!("missing part {part}"));
         return Ok(());
@@ -318,19 +321,39 @@ pub fn read_drawing(cx: &mut Ctx<'_>, part: &str, sheet: &mut Sheet) -> Result<(
         let place = Place { anchor, rect: sheet.anchor_rect(&anchor), scale: (px, px), flip: (false, false) };
         let obj_el = from_craft_el(&craft_a.object);
         for obj in drawing_objects(std::slice::from_ref(&obj_el)) {
-            read_object(cx, (part, n), &rels, sheet, obj, place, 0)?;
+            read_object(cx, (part, n, control_shapes), &rels, sheet, obj, place, 0)?;
         }
     }
     Ok(())
 }
 
+/// Whether shape `obj` is the DrawingML stand-in Excel writes for a form control in
+/// `control_shapes`: its `a14:compatExt spid` names the control's VML shape (`_x0000_s1026`), or,
+/// without one, the shape is hidden and its `cNvPr id` is the control's shape number.
+fn control_proxy(obj: &El, control_shapes: &HashSet<u64>) -> bool {
+    if control_shapes.is_empty() {
+        return false;
+    }
+    let Some(pr) = obj.path(&["nvSpPr", "cNvPr"]) else { return false };
+    let spid = pr
+        .child("extLst")
+        .into_iter()
+        .flat_map(|l| l.kids("ext"))
+        .find_map(|e| e.child("compatExt").and_then(|c| c.attr("spid")))
+        .and_then(crate::controls::shape_number);
+    match spid {
+        Some(n) => control_shapes.contains(&n),
+        None => pr.flag("hidden", false) && pr.attr("id").and_then(crate::controls::shape_number).is_some_and(|n| control_shapes.contains(&n)),
+    }
+}
+
 /// Imports one drawing object at `place`, returning what it became. A group's children are laid
 /// out through the group's child coordinate space (nested groups compose), keep the outer
 /// anchor's mode and are listed, back to front, in a [`DrawingGroup`]; children that aren't
-/// supported are dropped with their own warning.
+/// supported are dropped with their own warning. A form control's proxy shape is skipped.
 fn read_object(
     cx: &mut Ctx<'_>,
-    (part, n): (&str, usize),
+    (part, n, control_shapes): (&str, usize, &HashSet<u64>),
     rels: &[Rel],
     sheet: &mut Sheet,
     obj: &El,
@@ -416,6 +439,9 @@ fn read_object(
             Ok(None)
         }
         "sp" | "cxnSp" => {
+            if control_proxy(obj, control_shapes) {
+                return Ok(None);
+            }
             let Some(s) = read_shape(obj, anchor, depth > 0) else { return Ok(None) };
             let id = cx.next_object_id();
             sheet.shapes.push(Shape { id, ..s });
@@ -447,7 +473,7 @@ fn read_object(
                 let rot = if child.name == "grpSp" { 0 } else { xfrm_rot(cxf) };
                 let rect = map.child(cxf, quarter_turn(rot));
                 let place = Place { anchor: sheet.rect_anchor(rect, anchor.mode), rect, scale: map.scale, flip: map.flip };
-                let Some(m) = read_object(cx, (part, n), rels, sheet, child, place, depth + 1)? else {
+                let Some(m) = read_object(cx, (part, n, control_shapes), rels, sheet, child, place, depth + 1)? else {
                     file_complete = false;
                     continue;
                 };
