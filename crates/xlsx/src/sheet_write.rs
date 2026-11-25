@@ -153,8 +153,11 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> (
     // sheetPr
     let fit = sheet.print.fit_to.is_some();
     let summary = !sheet.summary_below || !sheet.summary_right;
-    if sheet.tab_color.is_some() || fit || summary {
+    if sheet.tab_color.is_some() || fit || summary || sheet.transition_evaluation {
         let mut pr = craft_xml::El::new("sheetPr");
+        if sheet.transition_evaluation {
+            pr.set_attr("transitionEvaluation", "1");
+        }
         if let Some(c) = &sheet.tab_color {
             let xml = format!("<tabColor {}/>", color_attrs(c));
             if let Some(el) = parse_craft_fragment(&xml) {

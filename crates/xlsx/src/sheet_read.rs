@@ -334,6 +334,7 @@ fn apply_craft_sheet_part(
         match child.name.as_str() {
             "sheetPr" => {
                 let e = from_craft_el(child);
+                sheet.transition_evaluation = e.flag("transitionEvaluation", false);
                 if let Some(t) = e.child("tabColor") {
                     sheet.tab_color = Some(read_color(t, &cx.palette));
                 }

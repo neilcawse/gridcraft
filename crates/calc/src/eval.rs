@@ -679,50 +679,41 @@ impl<'h> Evaluator<'h> {
     }
 
     fn unary(&mut self, op: UnOp, x: &Expr) -> Ev {
-        if let UnOp::Trim(mode) = op {
-            return self.trim_ref(mode, x);
-        }
-        if op == UnOp::Spill {
-            return match self.eval(x) {
-                Ev::R(areas) => match areas.as_slice() {
-                    [a] if a.range.is_single() => match self.host.spill_range(a.sheet, a.range.start) {
-                        Some(range) => Ev::R(vec![Area { sheet: a.sheet, range }]),
-                        None => err(CellError::Ref),
+        let numeric: fn(f64) -> Value = match op {
+            UnOp::Trim(mode) => return self.trim_ref(mode, x),
+            UnOp::Plus => return Ev::V(self.value(x)),
+            UnOp::Neg => |n| Value::number(-n),
+            UnOp::Percent => |n| Value::number(n / 100.0),
+            UnOp::Spill => {
+                return match self.eval(x) {
+                    Ev::R(areas) => match areas.as_slice() {
+                        [a] if a.range.is_single() => match self.host.spill_range(a.sheet, a.range.start) {
+                            Some(range) => Ev::R(vec![Area { sheet: a.sheet, range }]),
+                            None => err(CellError::Ref),
+                        },
+                        _ => err(CellError::Ref),
                     },
+                    Ev::V(Value::Error(e)) => err(e),
                     _ => err(CellError::Ref),
-                },
-                Ev::V(Value::Error(e)) => err(e),
-                _ => err(CellError::Ref),
-            };
-        }
-        if op == UnOp::At {
-            let ev = self.eval(x);
-            return match ev {
-                Ev::R(areas) => match areas.as_slice() {
-                    [a] => match self.implicit_intersect(a) {
-                        Some(c) => Ev::V(self.cell(a.sheet, c)),
-                        None => err(CellError::Value),
+                };
+            }
+            UnOp::At => {
+                return match self.eval(x) {
+                    Ev::R(areas) => match areas.as_slice() {
+                        [a] => match self.implicit_intersect(a) {
+                            Some(c) => Ev::V(self.cell(a.sheet, c)),
+                            None => err(CellError::Value),
+                        },
+                        _ => err(CellError::Value),
                     },
-                    _ => err(CellError::Value),
-                },
-                Ev::V(v) => Ev::V(v.scalar()),
-                l => l,
-            };
-        }
+                    Ev::V(v) => Ev::V(v.scalar()),
+                    l => l,
+                };
+            }
+        };
         let v = self.value(x);
-        if op == UnOp::Plus {
-            return Ev::V(v);
-        }
-        let sys = self.host.workbook().date_system;
-        Ev::V(map_unary(
-            &v,
-            &|n| match op {
-                UnOp::Neg => Value::number(-n),
-                UnOp::Percent => Value::number(n / 100.0),
-                UnOp::Plus | UnOp::At | UnOp::Spill | UnOp::Trim(_) => unreachable!(),
-            },
-            sys,
-        ))
+        let wb = self.host.workbook();
+        Ev::V(map_unary(&v, &numeric, wb.date_system, wb.sheet(self.sheet).is_some_and(|s| s.transition_evaluation)))
     }
 
     fn implicit_intersect(&self, a: &Area) -> Option<CellRef> {
@@ -819,10 +810,13 @@ impl<'h> Evaluator<'h> {
                     rest.push((*o, r.as_ref()));
                     left = l.as_ref();
                 }
+                let wb = self.host.workbook();
+                let sys = wb.date_system;
+                let transition = wb.sheet(self.sheet).is_some_and(|s| s.transition_evaluation);
                 let mut acc = self.value(left);
                 while let Some((o, r)) = rest.pop() {
                     let y = self.value(r);
-                    acc = binary_values(o, &acc, &y, self.host.workbook().date_system);
+                    acc = array::binary_values_in(o, &acc, &y, sys, transition);
                 }
                 Ev::V(acc)
             }

@@ -59,6 +59,32 @@ fn unary_plus_preserves_values_but_not_reference_identity() {
 }
 
 #[test]
+fn transition_arithmetic_uses_the_formula_worksheet() {
+    let mut t = T::new();
+    t.wb.sheets.push(std::sync::Arc::new(gridcraft_model::Sheet::new("Ordinary")));
+    t.wb.sheet_mut(0).unwrap().transition_evaluation = true;
+    t.wb.sheet_mut(1).unwrap().cells.set(c("A1"), Cell::value(Value::text("n/a")));
+    t.wb.sheet_mut(1).unwrap().cells.set(c("B1"), Cell::formula(Formula::new("=Sheet1!A1+2")));
+    t.wb.sheet_mut(1).unwrap().cells.set(c("C1"), Cell::formula(Formula::new("=ROUND(SUM(Sheet1!B1:C1),2)")));
+    t.set("A1", "n/a");
+    t.set("B1", "=4+(Ordinary!A1-2)/2");
+    t.set("C1", "=SUM({\"-\",2}+1)");
+    t.set("D1", "=7+\"comment\"/2");
+    t.set("E1", "=1/A1");
+    t.set("F1", "=A1&#N/A");
+    t.set("G1", "=A1&\"!\"");
+    t.set("H1", "=2+-A1");
+    t.calc.recalc_all(&mut t.wb);
+
+    assert_eq!((t.num("B1"), t.num("C1"), t.num("D1"), t.num("H1")), (3.0, 4.0, 7.0, 2.0));
+    assert_eq!(t.get("E1"), Value::Error(CellError::Div0));
+    assert_eq!(t.get("F1"), Value::Error(CellError::NA));
+    assert_eq!(t.get("G1"), Value::text("n/a!"));
+    assert_eq!(t.wb.sheet(1).unwrap().value(c("B1")), Value::Error(CellError::Value));
+    assert_eq!(t.wb.sheet(1).unwrap().value(c("C1")), Value::number(7.0));
+}
+
+#[test]
 fn spill_range_operator() {
     let mut t = T::new();
     t.set("A1", "3");

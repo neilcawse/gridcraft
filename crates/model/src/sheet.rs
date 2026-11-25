@@ -95,6 +95,9 @@ pub struct Sheet {
     /// sheet by its id keeps finding it; 0 for a sheet the file did not have. Not in JSON.
     #[serde(skip)]
     pub file_id: u32,
+    /// Whether this worksheet uses Lotus 1-2-3 transition formula evaluation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub transition_evaluation: bool,
     pub cells: CellStore,
     /// Static pictures are sparse rich content. Ordinary cells carry no picture pointer.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty", with = "picture_map")]
@@ -209,6 +212,7 @@ impl Sheet {
             name: name.into(),
             uid: SheetUid::fresh(),
             file_id: 0,
+            transition_evaluation: false,
             cells: CellStore::new(),
             cell_pictures: BTreeMap::new(),
             spill: BTreeMap::new(),

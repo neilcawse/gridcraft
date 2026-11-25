@@ -84,6 +84,17 @@ pub fn minimal(sheet_body: &str, extra_parts: &[(&str, &str)], wb_extra_rels: &s
 }
 
 #[test]
+fn transition_evaluation_survives_xlsx_round_trip() {
+    for (properties, expected) in [("", false), (r#"<sheetPr transitionEvaluation="0"/>"#, false), (r#"<sheetPr transitionEvaluation="1"/>"#, true)] {
+        let bytes = minimal(&format!("{properties}<sheetData/>"), &[], "", "");
+        let (wb, _) = crate::read_xlsx(&bytes).unwrap();
+        assert_eq!(wb.sheet(0).unwrap().transition_evaluation, expected);
+        let (reopened, _) = crate::read_xlsx(&crate::write_xlsx(&wb).unwrap()).unwrap();
+        assert_eq!(reopened.sheet(0).unwrap().transition_evaluation, expected);
+    }
+}
+
+#[test]
 /// Verifies that a cross-sheet `.xlsx` table slicer (`x15:tableSlicerCache`) imports cleanly without skipped-object warnings.
 fn cross_sheet_table_slicer_imports_without_skipped_object_warning() {
     let wb_xml = r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Dashboard" sheetId="1" r:id="rId1"/><sheet name="Tracker" sheetId="2" r:id="rId2"/></sheets></workbook>"#;
