@@ -53,7 +53,7 @@ impl Acc {
 
 // ---------------------------------------------------------------- operators
 
-fn operator_number(v: &Value, sys: gridcraft_core::DateSystem, transition: bool) -> Result<f64, CellError> {
+pub(super) fn operator_number(v: &Value, sys: gridcraft_core::DateSystem, transition: bool) -> Result<f64, CellError> {
     // Lotus transition formulas treat text operands as zero, not as numeric strings.
     if transition && matches!(v, Value::Text(_)) { Ok(0.0) } else { v.to_number_in(sys) }
 }
@@ -202,7 +202,7 @@ fn concat_arrays(x: &Value, y: &Value, sys: gridcraft_core::DateSystem, budget: 
     .unwrap_or(Value::Error(CellError::Num))
 }
 
-fn operator_compare(a: &Value, b: &Value, transition: bool) -> std::cmp::Ordering {
+pub(super) fn operator_compare(a: &Value, b: &Value, transition: bool) -> std::cmp::Ordering {
     if transition {
         // Transition formulas compare a blank with a space as equal, and
         // compare empty text with numbers as zero.

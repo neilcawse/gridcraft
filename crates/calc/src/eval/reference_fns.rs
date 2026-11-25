@@ -1,3 +1,4 @@
+use super::array::{operator_compare, operator_number};
 use super::format::{cell_format_code, r1c1_to_a1};
 use super::{Area, Arg, Array, CellError, Ev, Evaluator, Expr, FnCtx, MAX_CELLS, Value, err, linked_parts};
 use gridcraft_core::{CellRef, MAX_COLS, MAX_ROWS, RangeRef};
@@ -654,13 +655,9 @@ impl<'h> Evaluator<'h> {
     /// shape and the comparison is `FALSE` on `Value::Empty` (so every trailing blank cell beyond
     /// the sheets' used ranges divides by `FALSE` = `0`, producing `#DIV/0!` which `skip_errors`
     /// discards). Only matched positions inside the used range are read from `num`, avoiding
-    /// intermediate array allocations and suffix-range cache churn. Not on a transition sheet,
-    /// whose operators read text as 0 and compare blanks and empty text differently.
+    /// intermediate array allocations and suffix-range cache churn.
     fn eval_aggregate_filtered_div(&mut self, e: &Expr) -> Option<Value> {
         use gridcraft_formula::BinOp;
-        if self.transition {
-            return None;
-        }
         let Expr::Binary(BinOp::Div, num_expr, den_expr) = e else { return None };
         let mut inner = den_expr.as_ref();
         while let Expr::Paren(p) = inner {
@@ -696,8 +693,9 @@ impl<'h> Evaluator<'h> {
         if let Value::Error(err) = key {
             return Some(Value::Error(err));
         }
+        let transition = self.transition;
         let eval_cmp = |v: &Value| -> bool {
-            let ord = if ref_on_left { super::compare(v, &key) } else { super::compare(&key, v) };
+            let ord = if ref_on_left { operator_compare(v, &key, transition) } else { operator_compare(&key, v, transition) };
             use std::cmp::Ordering::*;
             match cmp_op {
                 BinOp::Eq => ord == Equal,
@@ -731,6 +729,8 @@ impl<'h> Evaluator<'h> {
         };
         let len = cond_max + 1;
         let sys = self.host.workbook().date_system;
+        // Equality keys with transition-only matches also match a blank and
+        // have already taken the fallback above.
         if *cmp_op == BinOp::Eq
             && matches!(key, Value::Text(_) | Value::Number(_))
             && u64::from(len) <= MAX_CELLS
@@ -772,7 +772,7 @@ impl<'h> Evaluator<'h> {
                 } else {
                     CellRef::new(num_area.range.start.row, num_area.range.start.col + i)
                 };
-                if let Ok(n) = self.host.cell_value(num_area.sheet, nc).to_number_in(sys) {
+                if let Ok(n) = operator_number(&self.host.cell_value(num_area.sheet, nc), sys, transition) {
                     matched.push(Value::number(n));
                 }
             }
@@ -798,7 +798,7 @@ impl<'h> Evaluator<'h> {
                 } else {
                     CellRef::new(num_area.range.start.row, num_area.range.start.col + i)
                 };
-                if let Ok(n) = self.host.cell_value(num_area.sheet, nc).to_number_in(sys) {
+                if let Ok(n) = operator_number(&self.host.cell_value(num_area.sheet, nc), sys, transition) {
                     matched.push(Value::number(n));
                 }
             }
@@ -884,11 +884,13 @@ mod tests {
         sh.set_value(CellRef::new(2, 1), Value::Number(20.0));
         sh.set_value(CellRef::new(3, 0), Value::from("k"));
         sh.set_value(CellRef::new(3, 1), Value::Number(42.0));
-        let mut host = Counting { wb, cells_read: 0 };
-        let mut ev = Evaluator::new(&mut host, 0, CellRef::new(1, 3));
         let expr = gridcraft_formula::parser::parse("=AGGREGATE(15,6,B3:$B$100000/(A3:$A$100000=A2),1)").unwrap_or_else(|e| panic!("{e}"));
-        let v = ev.value(&expr);
-        assert_eq!(v, Value::Number(42.0));
-        assert_eq!(host.cells_read, 0);
+        for transition in [false, true] {
+            wb.sheet_mut(0).unwrap().transition_evaluation = transition;
+            let mut host = Counting { wb: wb.clone(), cells_read: 0 };
+            let mut ev = Evaluator::new(&mut host, 0, CellRef::new(1, 3));
+            assert_eq!(ev.value(&expr), Value::Number(42.0));
+            assert_eq!(host.cells_read, 0, "transition={transition}");
+        }
     }
 }

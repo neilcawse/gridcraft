@@ -144,6 +144,13 @@ fn transition_arithmetic_applies_to_aggregate_filtered_division() {
     t.set("C2", "=COUNT(A1:A3/(B1:B3=\"y\"))");
     // Text divided by TRUE is 0 on a transition sheet, so it counts, as it does outside AGGREGATE.
     assert_eq!((t.num("C1"), t.num("C2")), (3.0, 3.0));
+
+    // Trailing blanks match zero too, so this case must evaluate the full range.
+    t.set("B1", "=\"\"");
+    t.set("B2", "0");
+    t.set("C3", "=AGGREGATE(2,6,A1:A64/(B1:B64=0))");
+    t.set("C4", "=COUNT(A1:A64/(B1:B64=0))");
+    assert_eq!((t.num("C3"), t.num("C4")), (63.0, 63.0));
 }
 
 #[test]
