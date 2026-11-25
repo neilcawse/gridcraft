@@ -1396,7 +1396,7 @@ fn slicer_cache_names_respect_ordinary_definitions() {
 }
 
 #[test]
-fn slicer_cache_names_preserve_imported_markers_and_respect_tables() {
+fn slicer_cache_names_preserve_imported_markers_and_respect_tables() -> Result<(), Box<dyn std::error::Error>> {
     let original = write_xlsx(&slicer_workbook()).unwrap();
     let mut parts = unzip(&original);
     for part in ["xl/workbook.xml", "xl/slicerCaches/slicerCache1.xml", "xl/slicers/slicer1.xml"] {
@@ -1437,14 +1437,21 @@ fn slicer_cache_names_preserve_imported_markers_and_respect_tables() {
     table.range = rr("H1:I2");
     table.columns.truncate(2);
     wb.sheet_mut(0).unwrap().tables.push(table);
-    let saved = write_xlsx(&wb).unwrap();
+    wb.sheet_mut(0).ok_or("missing source sheet")?.set_cell(at("H5"), Cell::formula(Formula::new("SUM(Slicer_Custom[Product])")));
+    let saved = write_xlsx(&wb)?;
     let parts = unzip(&saved);
-    let cache = std::str::from_utf8(&parts["xl/slicerCaches/slicerCache1.xml"]).unwrap();
-    assert!(cache.contains("name=\"Slicer_Product\""), "{cache}");
-    let (back, _) = read_xlsx(&saved).unwrap();
+    let cache = std::str::from_utf8(&parts["xl/slicerCaches/slicerCache1.xml"])?;
+    assert!(cache.contains("name=\"Slicer_Custom\""), "{cache}");
+    let (back, _) = read_xlsx(&saved)?;
     assert!(back.names.contains(&marker));
-    assert!(back.sheet(0).unwrap().tables.iter().any(|t| t.name == marker.name));
-    assert_eq!(back.sheet(1).unwrap().slicers.len(), 1);
+    let sheet = back.sheet(0).ok_or("missing reopened source sheet")?;
+    let (index, table) = sheet.tables.iter().enumerate().find(|(_, t)| t.range == rr("H1:I2")).ok_or("missing repaired table")?;
+    assert!(!table.name.eq_ignore_ascii_case(&marker.name));
+    assert_eq!(back.table(&table.name), Some((0, index)));
+    let formula = sheet.cell(at("H5")).and_then(|c| c.formula.as_ref()).ok_or("missing repaired formula")?;
+    assert_eq!(formula.text, format!("SUM({}[Product])", table.name));
+    assert_eq!(back.sheet(1).ok_or("missing reopened slicer sheet")?.slicers.len(), 1);
+    Ok(())
 }
 
 /// A sheet-scoped name spelled like an imported cache's marker is a separate definition: the

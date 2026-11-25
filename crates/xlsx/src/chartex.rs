@@ -53,12 +53,12 @@ fn chartex_text(tx: &El) -> Option<String> {
         if let Some(f) = d.child("f") {
             return Some(crate::chart::chart_ref_from_file(&f.text));
         }
-        return d.child("v").map(|v| v.text.clone());
+        return d.child("v").and_then(|v| crate::chart::literal_series_title(v.text.clone()));
     }
     let rich = tx.child("rich")?;
     let paras: Vec<String> = rich.kids("p").map(|p| p.kids("r").filter_map(|r| r.child("t")).map(|t| t.text.as_str()).collect()).collect();
     let s = paras.join("\n");
-    if s.is_empty() { None } else { Some(s) }
+    crate::chart::literal_series_title(s)
 }
 
 pub(crate) fn from_dml_chartex(dc: craft_drawingml::chart::Chart, root: Option<&El>) -> Option<Chart> {
@@ -120,7 +120,7 @@ pub(crate) fn from_dml_chartex(dc: craft_drawingml::chart::Chart, root: Option<&
                 .and_then(|el| el.child("tx"))
                 .and_then(chartex_text)
                 .or_else(|| s.refs.name.as_deref().map(crate::chart::chart_ref_from_file))
-                .or_else(|| (!s.name.is_empty()).then_some(s.name));
+                .or_else(|| crate::chart::literal_series_title(s.name));
             let categories = cat.or_else(|| s.refs.categories.as_deref().map(|f| crate::fmla::from_file(&crate::chart::chart_ref_from_file(f))));
             let values =
                 val.or_else(|| s.refs.values.as_deref().map(|f| crate::fmla::from_file(&crate::chart::chart_ref_from_file(f)))).unwrap_or_default();
@@ -187,6 +187,36 @@ pub fn read_chartex(root: &El) -> Option<Chart> {
 /// its data by names (`_xlchart.v1.0`), which the workbook defines, not by references.
 pub const NAME_PREFIX: &str = "_xlchart.v1.";
 
+/// Names emitted by `write_chartex`, counted without writing the chart parts.
+pub(crate) fn generated_names(wb: &Workbook) -> impl Iterator<Item = String> {
+    let count: usize = wb
+        .sheets
+        .iter()
+        .enumerate()
+        .map(|(si, sheet)| {
+            sheet
+                .charts
+                .iter()
+                .filter(|ch| is_chartex(ch.kind))
+                .map(|ch| {
+                    ch.series
+                        .iter()
+                        .map(|s| {
+                            1 + usize::from(ch.kind != ChartKind::Histogram && s.categories.is_some())
+                                + usize::from(s.name.as_deref().is_some_and(|n| series_title_ref(wb, si, n)))
+                        })
+                        .sum::<usize>()
+                })
+                .sum::<usize>()
+        })
+        .sum();
+    (0..count).map(|i| format!("{NAME_PREFIX}{i}"))
+}
+
+fn series_title_ref(wb: &Workbook, si: usize, f: &str) -> bool {
+    ref_range(wb, si, f).is_some() || crate::chart::is_structured_ref(f)
+}
+
 /// `<cx:f>` for a reference: a new hidden workbook name for it (collected in `names`, written
 /// with the workbook's defined names). A reference along a row says so; otherwise each column
 /// is one level.
@@ -208,7 +238,7 @@ fn ref_range(wb: &Workbook, si: usize, f: &str) -> Option<(usize, RangeRef)> {
 }
 
 fn tx_xml(t: &str, wb: &Workbook, si: usize, names: &mut Vec<String>) -> String {
-    if ref_range(wb, si, t).is_some() {
+    if series_title_ref(wb, si, t) {
         let v = crate::chart::ref_values(wb, si, t).and_then(|v| v.into_iter().next()).map(|v| v.display()).unwrap_or_default();
         format!("<cx:tx><cx:txData>{}<cx:v>{}</cx:v></cx:txData></cx:tx>", f_xml(wb, si, t, names), esc(&v))
     } else {

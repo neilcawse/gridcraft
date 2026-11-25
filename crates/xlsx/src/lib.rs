@@ -39,6 +39,7 @@ mod sheet_read;
 mod sheet_write;
 mod slicer;
 mod styles;
+mod table_names;
 mod tables;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;

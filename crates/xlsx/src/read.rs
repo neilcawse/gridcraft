@@ -66,8 +66,8 @@ pub struct Ctx<'a> {
     pub known_function: Option<&'a dyn Fn(&str) -> bool>,
     /// The code of the workbook's Python cells, from its Python part.
     pub python: crate::python_part::ScriptsIn,
-    /// Table file id → (table name, column file id → column header name), for resolving slicers.
-    pub file_tables: HashMap<u32, (String, HashMap<u32, String>)>,
+    /// Table file id → (model table id, column file id → header), for resolving slicers.
+    pub file_tables: HashMap<u32, (u32, HashMap<u32, String>)>,
     /// Slicer cache name → (table file id, column file id, sourceName).
     pub slicer_caches: HashMap<String, (Option<u32>, Option<u32>, String)>,
     /// Current sheet's slicer definitions: slicer name → (cache name, caption, column count).
@@ -563,7 +563,6 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
     }
     // Only kept macro sheets have a cell table whose shared string indexes are resolved later.
     cx.release_shared_strings_unless_needed(kept_sheet_needs_sst);
-    attach_pending_slicers(&mut cx, &mut wb);
     if wb.sheets.is_empty() {
         cx.warn("the workbook has no worksheets; added an empty sheet");
         wb.sheets.push(Arc::new(Sheet::new("Sheet1")));
@@ -630,6 +629,18 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
     // The kept macro sheets name their text by shared-string index: they are resolved here.
     wb.preserved = kept.workbook(&mut cx, &wb_part, &wb_xml, &file_to_model);
     crate::pivot::bind_sources(&mut wb, &pivot_caches);
+    let names = wb_xml
+        .child("definedNames")
+        .into_iter()
+        .flat_map(|dn| dn.kids("definedName"))
+        .filter(|d| d.attr("localSheetId").is_none())
+        .filter_map(|d| d.attr("name"))
+        .filter(|n| is_special_defined_name(&n.to_ascii_lowercase()))
+        .map(str::to_owned);
+    let mut owned = std::borrow::Cow::Owned(wb);
+    crate::table_names::repair(&mut owned, names);
+    wb = owned.into_owned();
+    attach_pending_slicers(&mut cx, &mut wb);
     cx.release_shared_strings_unless_needed(false);
     if let Some(w) = cx.python.warning() {
         cx.warn(w);
@@ -723,9 +734,10 @@ fn attach_pending_slicers(cx: &mut Ctx<'_>, wb: &mut Workbook) {
         let Some((table_id, col_id, source_name)) = cx.slicer_caches.get(&cache_name).cloned() else { continue };
         let resolved = table_id
             .and_then(|tid| cx.file_tables.get(&tid))
-            .map(|(tname, cols)| {
+            .and_then(|(id, cols)| {
+                let t = wb.sheets.iter().flat_map(|sh| &sh.tables).find(|t| t.id == *id)?;
                 let col = col_id.and_then(|cid| cols.get(&cid).cloned()).filter(|s| !s.is_empty()).unwrap_or_else(|| source_name.clone());
-                (tname.clone(), col)
+                Some((t.name.clone(), col))
             })
             .or_else(|| {
                 (!source_name.is_empty()).then(|| {

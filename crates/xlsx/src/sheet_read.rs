@@ -406,8 +406,8 @@ fn read_sheet_notes_and_tables(cx: &mut Ctx<'_>, sp: &CraftSheetPart, rels: &[Re
     let tables = cx.pkg.craft_mut().tables(sp).map_err(craft_error)?;
     for (_, t) in tables {
         let mut model = parts::from_craft_table(cx, &t);
-        record_file_table(cx, &t, &model);
         model.id = cx.next_object_id();
+        record_file_table(cx, &t, model.id);
         sheet.tables.push(model);
     }
     if let Some(comments) = cx.pkg.craft_mut().comments(sp).map_err(craft_error)? {
@@ -1084,14 +1084,12 @@ fn read_sheet_slicer_defs(cx: &mut Ctx<'_>, rels: &[crate::package::Rel]) -> Res
     Ok(())
 }
 
-/// Records a table's numeric `id`, name, and `tableColumn` id-to-name map on `cx` for `x15:tableSlicerCache` resolution.
-fn record_file_table(cx: &mut Ctx<'_>, t: &craft_xlsx::Table, model: &gridcraft_model::Table) {
-    if model.id == 0 {
-        return;
-    }
+/// Records file-to-model table and column identity for `x15:tableSlicerCache` resolution.
+fn record_file_table(cx: &mut Ctx<'_>, t: &craft_xlsx::Table, model_id: u32) {
+    let Some(id) = t.id.filter(|&id| id != 0) else { return };
     let col_map: HashMap<u32, String> =
         t.columns.iter().filter_map(|c| Some((c.id?, xml::decode_xstring(c.name.as_deref().unwrap_or(""))))).collect();
-    cx.file_tables.insert(model.id, (model.name.clone(), col_map));
+    cx.file_tables.insert(id, (model_id, col_map));
 }
 
 #[cfg(test)]

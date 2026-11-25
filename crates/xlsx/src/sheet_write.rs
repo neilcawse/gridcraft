@@ -1,6 +1,6 @@
 //! Writing worksheet parts and the parts they own (tables, comments, drawings, charts).
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use craft_xlsx::{
@@ -34,7 +34,7 @@ mod parts;
 mod rules;
 
 pub(crate) use parts::password_attrs;
-use parts::{autofilter_xml, comments_xml, protected_ranges_xml, table_columns, table_name, table_xml, thread_ids, threaded_xml, vml_xml};
+use parts::{autofilter_xml, comments_xml, protected_ranges_xml, table_columns, table_xml, thread_ids, threaded_xml, vml_xml};
 use rules::{cf_rule_xml, solid_bar_x14, validation_xml, x14_cf_rule_xml};
 
 fn sqref(ranges: &[RangeRef]) -> String {
@@ -85,24 +85,11 @@ fn push_fragment_kids(root: &mut craft_xml::El, xml: &str) {
     }
 }
 
-/// Plans table names with the base writer's per-sheet uniqueness and package-wide table IDs.
+/// Projects the repaired names of tables that are emitted.
 pub(crate) fn table_names(wb: &Workbook) -> Vec<Vec<Option<String>>> {
-    let mut id = 0;
     wb.sheets
         .iter()
-        .map(|sheet| {
-            let mut used = HashSet::new();
-            sheet
-                .tables
-                .iter()
-                .map(|t| {
-                    (t.range.height() > t.totals_row as u32).then(|| {
-                        id += 1;
-                        table_name(&t.name, &mut used, id)
-                    })
-                })
-                .collect()
-        })
+        .map(|sheet| sheet.tables.iter().map(|t| (t.range.height() > u32::from(t.totals_row)).then(|| t.name.clone())).collect())
         .collect()
 }
 
@@ -402,8 +389,11 @@ fn write_sheet_extensions(s: &mut String, sheet: &Sheet, x14_cf: &str, slicers: 
                 SparklineKind::Column => " type=\"column\"",
                 SparklineKind::WinLoss => " type=\"stacked\"",
             };
-            let src =
-                if sp.source.contains('!') { sp.source.clone() } else { format!("{}!{}", gridcraft_formula::quote_sheet(&sheet.name), sp.source) };
+            let src = if sp.source.contains('!') || crate::chart::is_structured_ref(&sp.source) {
+                std::borrow::Cow::Borrowed(sp.source.as_str())
+            } else {
+                std::borrow::Cow::Owned(format!("{}!{}", gridcraft_formula::quote_sheet(&sheet.name), sp.source))
+            };
             let color = if sp.color == Color::Auto { "rgb=\"FF376092\"".to_string() } else { color_attrs(&sp.color) };
             let _ = write!(
                 s,

@@ -18,41 +18,55 @@ struct TableRename<'a> {
 }
 
 impl TableRename<'_> {
-    fn rewrite(&self, mut e: &mut Expr, sheet: usize, env: &mut Vec<String>) -> bool {
+    fn replacement(&self, n: &str, sheet: usize, env: &[String]) -> Option<Expr> {
+        if n.starts_with('[') {
+            return None;
+        }
+        let (scope, bare, qualifier) = match n.rsplit_once('!') {
+            Some((s, b)) => (self.wb.sheet_index(s)?, b, Some(s)),
+            None => (sheet, n, None),
+        };
+        if !bare.eq_ignore_ascii_case(self.old) || self.wb.name(bare, scope).is_some() {
+            return None;
+        }
+        let renamed = qualifier.map_or_else(|| self.new.into(), |s| format!("{s}!{}", self.new));
+        Some(if env.iter().any(|local| gridcraft_formula::same_name(local, &renamed)) || self.wb.name(self.new, scope).is_some() {
+            Expr::Struct(gridcraft_formula::StructRef { table: self.new.into(), specifiers: vec![], col_start: None, col_end: None })
+        } else {
+            Expr::Name(renamed)
+        })
+    }
+}
+
+/// Rewrites table tokens and free names, leaving LET/LAMBDA binders, bound names and text alone.
+/// The callback receives a name, whether it is the table token of a structured reference, and
+/// the lexical binders currently in scope. For a table token it returns the new name.
+pub fn rewrite_table_tokens(e: &mut Expr, replacement: &impl Fn(&str, bool, &[String]) -> Option<Expr>) -> bool {
+    fn args(xs: &mut [Expr], env: &mut Vec<String>, replacement: &impl Fn(&str, bool, &[String]) -> Option<Expr>) -> bool {
+        xs.iter_mut().fold(false, |changed, e| visit(e, env, replacement) | changed)
+    }
+    fn visit(mut e: &mut Expr, env: &mut Vec<String>, replacement: &impl Fn(&str, bool, &[String]) -> Option<Expr>) -> bool {
         let mut changed = false;
         while let Expr::Binary(_, a, b) = e {
-            changed |= self.rewrite(b, sheet, env);
+            changed |= visit(b, env, replacement);
             e = a;
         }
         changed
             | match e {
-                Expr::Struct(st) if st.table.eq_ignore_ascii_case(self.old) => {
-                    st.table = self.new.into();
-                    true
-                }
-                Expr::Name(n) if !n.starts_with('[') => {
-                    let (scope, bare, qualifier) = match n.rsplit_once('!') {
-                        Some((s, b)) => match self.wb.sheet_index(s) {
-                            Some(i) => (i, b, Some(s)),
-                            None => return changed,
-                        },
-                        None => (sheet, n.as_str(), None),
-                    };
-                    if !bare.eq_ignore_ascii_case(self.old)
-                        || env.iter().any(|local| gridcraft_formula::same_name(local, n))
-                        || self.wb.name(bare, scope).is_some()
-                    {
-                        return changed;
+                Expr::Struct(st) if !st.table.is_empty() => match replacement(&st.table, true, env) {
+                    Some(Expr::Name(n)) => {
+                        st.table = n;
+                        true
                     }
-                    let renamed = qualifier.map_or_else(|| self.new.into(), |s| format!("{s}!{}", self.new));
-                    if env.iter().any(|local| gridcraft_formula::same_name(local, &renamed)) || self.wb.name(self.new, scope).is_some() {
-                        *e =
-                            Expr::Struct(gridcraft_formula::StructRef { table: self.new.into(), specifiers: vec![], col_start: None, col_end: None });
-                    } else {
-                        *n = renamed;
+                    _ => false,
+                },
+                Expr::Name(n) if !env.iter().any(|local| gridcraft_formula::same_name(local, n)) => match replacement(n, false, env) {
+                    Some(new) => {
+                        *e = new;
+                        true
                     }
-                    true
-                }
+                    None => false,
+                },
                 Expr::Call(name, args) if name == "LET" && args.len() >= 3 && args.len() % 2 != 0 => {
                     let Some((body, pairs)) = args.split_last_mut() else { return changed };
                     let before = env.len();
@@ -62,10 +76,10 @@ impl TableRename<'_> {
                             env.truncate(before);
                             return changed | rewritten;
                         };
-                        rewritten |= self.rewrite(value, sheet, env);
+                        rewritten |= visit(value, env, replacement);
                         env.push(n.clone());
                     }
-                    rewritten |= self.rewrite(body, sheet, env);
+                    rewritten |= visit(body, env, replacement);
                     env.truncate(before);
                     rewritten
                 }
@@ -79,19 +93,22 @@ impl TableRename<'_> {
                         };
                         env.push(n.trim_start_matches('[').trim_end_matches(']').into());
                     }
-                    let rewritten = self.rewrite(body, sheet, env);
+                    let rewritten = visit(body, env, replacement);
                     env.truncate(before);
                     rewritten
                 }
                 Expr::Call(name, _) if name == "LET" => false,
-                Expr::Call(_, args) => self.rewrite_args(args, sheet, env),
-                Expr::Invoke(c, args) => self.rewrite(c, sheet, env) | self.rewrite_args(args, sheet, env),
-                Expr::Array(rows) => rows.iter_mut().fold(false, |changed, row| self.rewrite_args(row, sheet, env) | changed),
-                Expr::Unary(_, inner) | Expr::Paren(inner) => self.rewrite(inner, sheet, env),
+                Expr::Call(_, xs) => args(xs, env, replacement),
+                Expr::Invoke(c, xs) => visit(c, env, replacement) | args(xs, env, replacement),
+                Expr::Array(rows) => rows.iter_mut().fold(false, |changed, row| args(row, env, replacement) | changed),
+                Expr::Unary(_, inner) | Expr::Paren(inner) => visit(inner, env, replacement),
                 _ => false,
             }
     }
+    visit(e, &mut Vec::new(), replacement)
+}
 
+impl TableRename<'_> {
     fn might_use_table(&self, e: &Expr) -> bool {
         let mut found = false;
         e.walk(&mut |e| {
@@ -102,10 +119,6 @@ impl TableRename<'_> {
             };
         });
         found
-    }
-
-    fn rewrite_args(&self, args: &mut [Expr], sheet: usize, env: &mut Vec<String>) -> bool {
-        args.iter_mut().fold(false, |changed, e| self.rewrite(e, sheet, env) | changed)
     }
 }
 
@@ -740,7 +753,14 @@ impl Workbook {
                             return None;
                         }
                         let mut ne = e.clone();
-                        rename.rewrite(&mut ne, i, &mut Vec::new()).then(|| (c, f.rewritten(ne)))
+                        rewrite_table_tokens(&mut ne, &|n, structured, env| {
+                            if structured {
+                                n.eq_ignore_ascii_case(rename.old).then(|| Expr::Name(rename.new.into()))
+                            } else {
+                                rename.replacement(n, i, env)
+                            }
+                        })
+                        .then(|| (c, Formula { array: f.array, ..f.rewritten(ne) }))
                     })?
                 })
                 .collect();

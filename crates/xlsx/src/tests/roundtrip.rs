@@ -910,7 +910,7 @@ fn writing_repairs_invalid_models() {
     let names: Vec<&str> = s.tables[0].columns.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, ["X", "x2", "Column3"]);
     assert_eq!(s.value(at("A1")), Value::text("X"));
-    assert_eq!(s.tables[0].name, "Table1");
+    assert_eq!(s.tables[0].name, "_bad_name");
     assert_eq!(s.cell(at("B2")).unwrap().style, StyleId::DEFAULT);
 }
 
@@ -1602,9 +1602,9 @@ fn table_newline_column_and_backslash_name_survive() {
     assert!(gridcraft_formula::parse("COUNTA(\\_Prime.1[Name])").is_ok(), "backslash table name parses as a structured reference");
 }
 
-/// Table name sanitation stays per sheet; saving does not rewrite workbook formulas.
+/// Direct-model export repairs collisions without changing the source workbook.
 #[test]
-fn table_save_uses_base_names_without_rewriting_formulas() {
+fn table_save_repairs_the_workbook_namespace() {
     let mut wb = Workbook::new();
     wb.names.push(DefinedName {
         name: "Sales".into(),
@@ -1652,10 +1652,10 @@ fn table_save_uses_base_names_without_rewriting_formulas() {
     let (bytes, report) = crate::write_xlsx_named_with(&wb, crate::XlsxKind::Workbook, "book.xlsx", crate::FunctionInfo::default()).unwrap();
     let (back, _) = read_xlsx(&bytes).unwrap();
     let names = |si: usize| back.sheet(si).unwrap().tables.iter().map(|t| t.name.clone()).collect::<Vec<_>>();
-    assert_eq!(names(0), ["sales", "a_b", "Kept"]);
-    assert_eq!(names(1), ["SALES"]);
+    assert_eq!(names(0), ["sales_2", "a_b", "Kept"]);
+    assert_eq!(names(1), ["SALES_3"]);
     let g1 = back.sheet(0).unwrap().cell(at("G1")).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone());
-    assert_eq!(g1.as_deref(), Some("SUM(sales[V])+SUM(Kept[V])"));
+    assert_eq!(g1.as_deref(), Some("SUM(sales_2[V])+SUM(Kept[V])"));
     assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     assert_eq!(wb.sheet(0).unwrap().tables[0].name, "sales", "the workbook saved is left as it is");
 }

@@ -518,7 +518,7 @@ pub(crate) fn from_dml_chart(dc: DmlChart, root: Option<&El>, budget: &mut Chart
                 .filter(|e| e.child("trendlineType").and_then(|c| c.attr("val")).and_then(TrendlineType::from_xml).is_some());
             let values_el = sel.and_then(|e| e.child("val").or_else(|| e.child("yVal")));
             let ser = Series {
-                name: s.refs.name.as_deref().map(chart_ref_from_file).or_else(|| (!s.name.is_empty()).then_some(s.name)),
+                name: s.refs.name.as_deref().map(chart_ref_from_file).or_else(|| literal_series_title(s.name)),
                 categories: s
                     .refs
                     .categories
@@ -731,6 +731,19 @@ fn is_ref(f: &str) -> bool {
     matches!(gridcraft_formula::parse(f), Ok(Expr::Ref(_)))
 }
 
+pub(crate) fn is_structured_ref(f: &str) -> bool {
+    matches!(gridcraft_formula::parse(f), Ok(Expr::Struct(r)) if !r.table.is_empty())
+}
+
+/// The series model also accepts quoted text. Keep a literal imported title from being
+/// interpreted as a formula if it spells a structured reference.
+pub(crate) fn literal_series_title(title: String) -> Option<String> {
+    if title.is_empty() {
+        return None;
+    }
+    Some(if is_structured_ref(&title) || title.starts_with('"') { format!("\"{}\"", title.replace('"', "\"\"")) } else { title })
+}
+
 /// The items of an array constant (`{1,"a";#N/A,2}`), row-major; nothing for anything else.
 fn array_items(f: &str) -> Vec<Expr> {
     match gridcraft_formula::parse(f) {
@@ -930,7 +943,7 @@ fn multi_level_cat(f: &str, values: &str, wb: &Workbook, si: usize) -> Option<St
 fn series_xml(s: &Series, idx: usize, g: G, labels: bool, wb: &Workbook, si: usize) -> String {
     let mut x = format!("<c:ser><c:idx val=\"{idx}\"/><c:order val=\"{idx}\"/>");
     if let Some(n) = &s.name {
-        if is_ref(n) || is_defined_name(wb, si, n) {
+        if is_ref(n) || is_structured_ref(n) || is_defined_name(wb, si, n) {
             x.push_str(&str_data("tx", n, wb, si));
         } else {
             let _ = write!(x, "<c:tx><c:v>{}</c:v></c:tx>", esc(&literal_text(n)));

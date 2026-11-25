@@ -45,10 +45,19 @@ The shared reader in `craft-libs` should skip the decoder for declared-empty ent
 
 ## X09 — XLSX package round-trip
 
-Table export retains the base writer's per-sheet name sanitation and does not rewrite formulas. An imported table may still collide with a defined name or with a table on another sheet after sanitation. Repairing those collisions requires a separate change that updates references in all formula-bearing objects. X09 checks PivotTable source bindings against the definitions the written package will expose instead of renaming tables throughout the workbook.
-
 X09b checks both definition identity and the range native refresh resolves. Save tries the original name, the bare name, then a sheet-qualified name before falling back to an explicit range. An unchanged cache can retain its snapshot even if its bound name now points to different cells; the next refresh uses the current definition. An unresolved imported name cannot silently acquire a source. External caches are kept only, never rebuilt from local cells.
 
 Kept worksheet sources retain their bytes when the original attributes still bind correctly. Rebuilt local sources write only supported unqualified attributes. Cache IDs are assigned across kept and rebuilt caches; the x14 cache ID is written only when imported or needed by a slicer. Slicer targets are checked against the definitions that will be written before any slicer or cache parts are emitted.
 
 Pivot slicer caches reuse an imported cache name only when the name is free or still belongs to that cache's original marker. A marker is owned only while no other workbook-scoped name or table shares its name; a sheet-scoped name of the same spelling does not take it away, but does keep a new cache from using a free name. Imported markers are written as ordinary defined names, retaining their attributes even if the cache is pruned; only caches without an existing marker synthesize a name. A copied sheet's slicers drop the import provenance, so the original keeps its cache name.
+
+## X17 — XLSX table name collisions
+
+X17 repairs the table namespace on XLSX import and before export. Workbook-scoped defined names take precedence; otherwise the first valid table in sheet order, then table order, keeps its spelling. Explicit references with an ambiguous original token follow that same order, except table-column formulas can identify their own table. File table IDs identify table slicers; X09b's bound pivot definition identities are retained. Ordinary strings, including literal `INDIRECT` arguments, are not rewritten. A malformed formula whose intended table cannot be parsed is not inferred from text.
+
+A bare token in a workbook-scoped defined-name body can depend on the caller's sheet. If a sheet-local name shadows that token, X17 leaves it alone rather than forcing all callers onto the table. Use an explicit structured reference to identify the table in a caller-independent way.
+
+Table slicers resolve their source on import, but table slicer export is unsupported on the base and remains out of scope: they are dropped on save.
+
+See Microsoft's [table naming rules](https://support.microsoft.com/en-us/excel/rename-an-excel-table) and [structure reference grammar](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oe376/bcd72180-31a3-423b-8f83-d224b2286da3). A scan of conventional table parts found no collisions in 1,122 public table workbooks (33,370 eligible XLSX-family rows; 19 unreadable). The repair is tested with synthetic packages; how Excel repairs such malformed packages remains unmeasured.
+

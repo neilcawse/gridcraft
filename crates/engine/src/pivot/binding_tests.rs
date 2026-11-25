@@ -488,17 +488,24 @@ fn a_table_renamed_on_saving_never_takes_the_name_a_source_is_saved_as() {
     let wb = reopened(&wb);
     for rebuilt in [false, true] {
         let mut wb = wb.clone();
-        // As a file can give it: a table name the file can't hold, `r_Data` once made valid.
-        Arc::make_mut(&mut wb.sheets[REPORT]).tables[0].name = "r Data".into();
+        // The invalid table name would sanitize to the existing workbook name without X17.
+        let sheet = Arc::make_mut(&mut wb.sheets[REPORT]);
+        sheet.tables[0].name = "r?Data".into();
+        let table_formula = CellRef::new(0, 8);
+        sheet.set_cell(table_formula, gridcraft_model::Cell::formula(gridcraft_model::Formula::new("SUM(r?Data[V])")));
         if rebuilt {
             wb = edited(wb);
         }
         assert_eq!(total(&mut wb), Ok(FROM_DATA));
         let (written, warnings, mut back) = save_package(&wb);
         let case = format!("rebuilt: {rebuilt}: {written:?} {warnings:?}");
-        assert_eq!(written[0].source, r#"<worksheetSource name="r_Data" sheet="Data"/>"#, "{case}");
+        assert_eq!(written[0].source, r#"<worksheetSource name="r_Data"/>"#, "{case}");
         assert!(warnings.is_empty(), "{case}");
-        assert_eq!(back.sheets[REPORT].tables[0].name, "r_Data");
+        assert_eq!(back.sheets[REPORT].tables[0].name, "r_Data_2");
+        assert!(matches!(back.pivot_source(&back.sheets[REPORT].pivots[0], REPORT).map(|s| s.source),
+            Ok(gridcraft_model::PivotSource::Name { name, .. }) if name.name == "r_Data" && name.formula == "Data!$A$1:$B$3"));
+        assert_eq!(back.table("r_Data_2"), Some((REPORT, 0)));
+        assert_eq!(back.sheets[REPORT].cell(table_formula).and_then(|c| c.formula.as_ref()).map(|f| f.text.as_str()), Some("SUM(r_Data_2[V])"));
         assert_eq!(total(&mut back), Ok(FROM_DATA), "after a native reopen: {case}");
     }
 }
