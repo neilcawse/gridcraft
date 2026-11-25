@@ -1376,7 +1376,14 @@ impl Import {
             };
             let formula = gridcraft_formula::print(&crate::fmla::strip_param_prefixes(expr));
             if !self.built_in_name(&n.name, n.scope, &formula) {
-                self.wb.names.push(DefinedName { name: n.name, scope: n.scope, formula, comment: String::new(), hidden: false });
+                self.wb.names.push(DefinedName {
+                    name: n.name,
+                    scope: n.scope,
+                    formula,
+                    comment: String::new(),
+                    hidden: false,
+                    uid: Default::default(),
+                });
             }
         }
         // A second name of a spelling the first imported is no loss.

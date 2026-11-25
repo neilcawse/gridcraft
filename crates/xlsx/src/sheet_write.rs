@@ -85,7 +85,28 @@ fn push_fragment_kids(root: &mut craft_xml::El, xml: &str) {
     }
 }
 
-pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> (String, Rels) {
+/// Plans table names with the base writer's per-sheet uniqueness and package-wide table IDs.
+pub(crate) fn table_names(wb: &Workbook) -> Vec<Vec<Option<String>>> {
+    let mut id = 0;
+    wb.sheets
+        .iter()
+        .map(|sheet| {
+            let mut used = HashSet::new();
+            sheet
+                .tables
+                .iter()
+                .map(|t| {
+                    (t.range.height() > t.totals_row as u32).then(|| {
+                        id += 1;
+                        table_name(&t.name, &mut used, id)
+                    })
+                })
+                .collect()
+        })
+        .collect()
+}
+
+pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, table_names: &[Option<String>], out: &mut Out) -> (String, Rels) {
     let mut rels = Rels::default();
     let Some(sheet) = wb.sheet(si) else { return (String::new(), rels) };
     let nstyles = wb.styles.len() as u32;
@@ -111,12 +132,8 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> (
         _ => sheet.tables.clone(),
     };
     let mut overrides: BTreeMap<CellRef, String> = BTreeMap::new();
-    let tables: Vec<(&Table, Vec<String>)> = folded
-        .iter()
-        .filter(|t| t.range.height() > t.header_row as u32 + t.totals_row as u32 || (t.header_row && t.range.height() > t.totals_row as u32))
-        .map(|t| (t, table_columns(t)))
-        .collect();
-    for (t, cols) in &tables {
+    let tables: Vec<_> = folded.iter().zip(table_names).filter_map(|(t, name)| Some((t, table_columns(t), name.as_deref()?))).collect();
+    for (t, cols, _) in &tables {
         if t.header_row {
             for (i, name) in cols.iter().enumerate() {
                 overrides.insert(CellRef::new(t.range.start.row, t.range.start.col + i as u32), name.clone());
@@ -207,14 +224,12 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> (
     part.features.legacy_drawing = legacy_rid;
 
     if !tables.is_empty() {
-        let mut used_names: HashSet<String> = HashSet::new();
-        for (t, cols) in &tables {
+        for (t, cols, name) in &tables {
             out.tables += 1;
             out.table_id += 1;
             let n = out.tables;
-            let name = table_name(&t.name, &mut used_names, out.table_id);
             let bound = kept.table_binding(t.id, cols);
-            let xml = table_xml(t, cols, &name, out.table_id, bound.as_ref(), out);
+            let xml = table_xml(t, cols, name, out.table_id, bound.as_ref(), out);
             let path = format!("xl/tables/table{n}.xml");
             out.part(&path, Some(CT_TABLE), xml.into_bytes());
             if let Some(b) = &bound {

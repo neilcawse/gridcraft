@@ -60,6 +60,7 @@ fn spill_range_operator() {
         formula: "Sheet1!$B$1#".into(),
         comment: String::new(),
         hidden: false,
+        uid: Default::default(),
     });
     t.set("E1", "=SUM(Seq)*10");
     assert_eq!(t.num("E1"), 30.0);
@@ -142,6 +143,7 @@ fn references_into_linked_workbooks_read_the_saved_values() {
         formula: "'[2]P&L Prices'!$A$1:$B$65536".into(),
         comment: String::new(),
         hidden: false,
+        uid: Default::default(),
     });
     t.set("A1", "='[2]P&L Prices'!B2*2");
     t.set("A2", "=VLOOKUP(\"gas\",Price,2,FALSE)");
@@ -276,7 +278,14 @@ fn linked_dynamic_array_through_defined_name_keeps_saved_spill_values() {
     let mut t = T::new();
     t.wb.external_books =
         vec![ExternalBook { opaque: true, sheets: vec![ExternalSheet { name: "Data".into(), ..Default::default() }], ..Default::default() }].into();
-    t.wb.names.push(DefinedName { name: "Price".into(), scope: None, formula: "'[1]Data'!A1:A2".into(), comment: String::new(), hidden: false });
+    t.wb.names.push(DefinedName {
+        name: "Price".into(),
+        scope: None,
+        formula: "'[1]Data'!A1:A2".into(),
+        comment: String::new(),
+        hidden: false,
+        uid: Default::default(),
+    });
     let sh = t.wb.sheet_mut(0).unwrap();
     sh.cells.set(c("A1"), Cell { value: Value::Number(10.0), ..Cell::formula(Formula::new("=Price")) });
     sh.spill_ranges.insert(c("A1"), RangeRef::parse("A1:A2").unwrap());
@@ -1240,6 +1249,7 @@ fn arrays_do_not_spill_in_tables() {
         filter: vec![],
         table_type: None,
         connection_id: None,
+        uid: Default::default(),
     });
     t.set("C4", "=SEQUENCE(2)");
     t.set("E1", "=SEQUENCE(4)");
@@ -1309,6 +1319,7 @@ fn references_functions() {
         formula: "Sheet1!$A$3".into(),
         comment: String::new(),
         hidden: false,
+        uid: Default::default(),
     });
     t.calc.rebuild(&t.wb);
     t.set("C3", "=INDIRECT(\"Third\",FALSE)");
@@ -1365,6 +1376,7 @@ fn relative_names() {
             formula: formula.into(),
             comment: String::new(),
             hidden: false,
+            uid: Default::default(),
         });
     }
     t.calc.rebuild(&t.wb);
@@ -1542,6 +1554,7 @@ fn lambda_argument_count() {
         formula: "LAMBDA(a,b,a+b)".into(),
         comment: String::new(),
         hidden: false,
+        uid: Default::default(),
     });
     t.calc.rebuild(&t.wb);
     let omit = "LAMBDA(x,y,IF(ISOMITTED(y),\"Missing\",x+y))";
@@ -1578,6 +1591,7 @@ fn a_lambda_that_calls_itself_without_end_is_num_on_a_small_stack() {
                 formula: "LAMBDA(n,LOOP(n))".into(),
                 comment: String::new(),
                 hidden: false,
+                uid: Default::default(),
             });
             t.calc.rebuild(&t.wb);
             let endless = "=LET(f,LAMBDA(g,x,g(g,x)),f(f,1))";
@@ -1610,6 +1624,7 @@ fn a_recursive_lambda_stops_at_the_same_call_on_any_stack_size() {
                     formula: "LAMBDA(n,IF(n=0,0,1+CNT(n-1)))".into(),
                     comment: String::new(),
                     hidden: false,
+                    uid: Default::default(),
                 });
                 // F(F,n) has n + 1 calls in progress at its deepest; W adds one more call per step.
                 let tail = |n: u32| format!("=LET(F,LAMBDA(me,n,IF(n=0,0,me(me,n-1))),F(F,{n}))");
@@ -1662,7 +1677,14 @@ fn a_recursive_lambda_that_reads_another_cells_recursive_lambda_shares_the_stack
 #[test]
 fn names_and_sheets() {
     let mut t = T::new();
-    t.wb.names.push(gridcraft_model::DefinedName { name: "Rate".into(), scope: None, formula: "0.5".into(), comment: String::new(), hidden: false });
+    t.wb.names.push(gridcraft_model::DefinedName {
+        name: "Rate".into(),
+        scope: None,
+        formula: "0.5".into(),
+        comment: String::new(),
+        hidden: false,
+        uid: Default::default(),
+    });
     t.wb.sheets.push(std::sync::Arc::new(gridcraft_model::Sheet::new("Data")));
     t.wb.sheet_mut(1).unwrap().set_value(c("A1"), Value::Number(8.0));
     t.calc.rebuild(&t.wb);
@@ -1678,7 +1700,14 @@ fn name_referring_to_several_ranges() {
     let mut t = T::new();
     // As Excel writes it in `<definedName>`: a union with no parentheses around it.
     let union = "Sheet1!$A$1:$A$2,Sheet1!$C$1:$C$2";
-    t.wb.names.push(gridcraft_model::DefinedName { name: "u".into(), scope: None, formula: union.into(), comment: String::new(), hidden: false });
+    t.wb.names.push(gridcraft_model::DefinedName {
+        name: "u".into(),
+        scope: None,
+        formula: union.into(),
+        comment: String::new(),
+        hidden: false,
+        uid: Default::default(),
+    });
     for (at, v) in [("A1", "1"), ("A2", "2"), ("C1", "5"), ("C2", "7")] {
         t.set(at, v);
     }
@@ -1701,6 +1730,7 @@ fn linked_saved_value_recalculates_through_union_name() {
         formula: "Sheet1!$A$1:$A$2,Sheet1!$C$1:$C$2".into(),
         comment: String::new(),
         hidden: false,
+        uid: Default::default(),
     });
     for (at, value) in [("A1", "1"), ("A2", "2"), ("C1", "5"), ("C2", "7")] {
         t.set(at, value);
@@ -1947,6 +1977,7 @@ fn subtotal_skips_filtered_rows() {
         filter: crit(),
         table_type: None,
         connection_id: None,
+        uid: Default::default(),
     });
     sh.autofilter = Some(AutoFilter { range: gridcraft_core::RangeRef::parse("C1:C7").unwrap(), criteria: crit() });
     // Rows 3 and 5 are filtered out; row 9 (outside both filters) is hidden by hand.
@@ -2069,6 +2100,7 @@ fn sumif_resized_sum_range_on_another_sheet_and_through_a_name() {
         formula: "Data!$B$1".into(),
         comment: String::new(),
         hidden: false,
+        uid: Default::default(),
     });
     for (r, k) in ["a", "b", "a"].iter().enumerate() {
         t.set(&format!("A{}", r + 1), k);
@@ -2626,6 +2658,7 @@ fn analysis_toolpak_value_params_reject_multi_cell_references() {
         formula: "Sheet1!$A$1:$A$3".into(),
         comment: String::new(),
         hidden: false,
+        uid: Default::default(),
     });
     let value = Value::Error(CellError::Value);
     for f in [
@@ -3507,6 +3540,7 @@ fn vlookup_hlookup_and_lookup_do_not_trigger_false_circular_refs_across_unused_c
         filter: vec![],
         table_type: None,
         connection_id: None,
+        uid: Default::default(),
     });
     for (c, h) in [("A1", "k"), ("B1", "calc1"), ("C1", "base"), ("D1", "calc2")] {
         t2.set(c, h);

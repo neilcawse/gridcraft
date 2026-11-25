@@ -2,8 +2,7 @@ use std::collections::HashMap;
 
 use super::*;
 
-/// Valid table name: letters, digits, `_` and `.`, starting with a letter, `_` or `\`
-/// (Microsoft "Names in formulas" rules).
+/// Valid table name: letters, digits, `_` and `.`, starting with a letter, `_` or `\`.
 pub(super) fn table_name(name: &str, used: &mut HashSet<String>, n: u32) -> String {
     let mut s: String =
         name.chars().enumerate().map(|(i, c)| if c.is_alphanumeric() || c == '_' || c == '.' || (i == 0 && c == '\\') { c } else { '_' }).collect();
@@ -421,6 +420,7 @@ mod tests {
             filter: vec![],
             table_type: None,
             connection_id: None,
+            uid: Default::default(),
         };
         let names = table_columns(&t);
         assert_eq!(names.len(), 10_000);

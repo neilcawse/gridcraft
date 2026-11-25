@@ -424,6 +424,7 @@ fn forecast_sheet(s: &mut Session, p: &Json) -> Result<Json> {
             filter: vec![],
             table_type: None,
             connection_id: None,
+            uid: Default::default(),
         });
         let q = gridcraft_formula::quote_sheet(&sheet_name);
         let col_ref = |c: u32| format!("{q}!${0}$2:${0}${end_row}", col_letters(c));

@@ -1,6 +1,6 @@
 use super::{
     CellError, HashMap, MONTHS, Ordering, PivotDateGroup, PivotField, PivotFilter, PivotFunc, PivotSort, PivotTable, SlicerCrossFilter, Source,
-    Value, Workbook, datetime_from_serial, number_to_text, read_source,
+    Value, Workbook, datetime_from_serial, number_to_text, read_pivot_source,
 };
 
 // ---------------------------------------------------------------- items
@@ -191,7 +191,7 @@ pub struct SlicerTile {
 /// field (`Jan`…, the finest level), which is what Excel's slicer lists. A filter on another
 /// level of the field filters like another field's.
 pub fn slicer_tiles(wb: &Workbook, pt: &PivotTable, sheet: usize, field: &str, sort: PivotSort, cross: SlicerCrossFilter) -> Vec<SlicerTile> {
-    let Ok(src) = read_source(wb, &pt.source, sheet) else { return vec![] };
+    let Ok(src) = read_pivot_source(wb, pt, sheet) else { return vec![] };
     let Some(col) = src.col(field) else { return vec![] };
     let fmt_of = |c: usize| src.formats.get(c).map(String::as_str).unwrap_or("General");
     let group = pt.field_group(field);

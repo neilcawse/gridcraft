@@ -180,19 +180,42 @@ fn local(name: &[u8]) -> String {
     String::from_utf8_lossy(n).into_owned()
 }
 
-fn start_el(e: &BytesStart<'_>) -> El {
+fn start_el(e: &BytesStart<'_>, namespaces: Option<&quick_xml::name::NamespaceResolver>) -> El {
+    use quick_xml::name::ResolveResult::Bound;
+
     let mut el = El { name: local(e.name().as_ref()), ..Default::default() };
+    if namespaces.is_some_and(|ns| crate::pivot::is_x14_cache_definition(ns, e)) {
+        el.name = "x14:pivotCacheDefinition".into();
+    }
     for a in e.attributes().with_checks(false).flatten() {
         let key = a.key.as_ref();
         // Namespace declarations carry no data for us.
         if key == b"xmlns" || key.starts_with(b"xmlns:") {
             continue;
         }
+        let name = match el.name.as_str() {
+            "worksheetSource" => match key {
+                b"name" | b"sheet" | b"ref" => local(key),
+                _ if namespaces.is_some_and(|ns| {
+                    let (resolved, local) = ns.resolve_attribute(a.key);
+                    local.as_ref() == b"id"
+                        && matches!(resolved, Bound(uri) if matches!(uri.as_ref(),
+                        b"http://schemas.openxmlformats.org/officeDocument/2006/relationships" |
+                        b"http://purl.oclc.org/ooxml/officeDocument/relationships"))
+                }) =>
+                {
+                    "r:id".into()
+                }
+                _ => continue,
+            },
+            "x14:pivotCacheDefinition" if key.contains(&b':') => continue,
+            _ => local(key),
+        };
         let v = match a.normalized_value(XmlVersion::Explicit1_0) {
             Ok(v) => v.into_owned(),
             Err(_) => String::from_utf8_lossy(&a.value).into_owned(),
         };
-        el.attrs.push((local(key), v));
+        el.attrs.push((name, v));
     }
     el
 }
@@ -228,7 +251,7 @@ pub fn first_start(xml: &[u8], local_name: &str) -> Option<El> {
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf).ok()? {
-            Event::Start(e) | Event::Empty(e) if local(e.name().as_ref()) == local_name => return Some(start_el(&e)),
+            Event::Start(e) | Event::Empty(e) if local(e.name().as_ref()) == local_name => return Some(start_el(&e, None)),
             Event::Eof => return None,
             _ => {}
         }
@@ -263,6 +286,9 @@ pub fn parse_streaming_partial(xml: &[u8], split: &[&str], cb: &mut dyn FnMut(El
     }
     let mut stack: Vec<El> = Vec::new();
     let mut root: Option<El> = None;
+    // Only pivot cache parts use expanded names in this tree. Other readers retain their
+    // existing tolerant local-name handling.
+    let mut namespaces: Option<quick_xml::name::NamespaceResolver> = None;
     let mut buf = Vec::new();
     // Elements kept in the tree so far, so a pathological part that passes the byte limits can
     // still be refused before the tree itself outgrows memory. Elements inside a `split` element
@@ -313,14 +339,29 @@ pub fn parse_streaming_partial(xml: &[u8], split: &[&str], cb: &mut dyn FnMut(El
                     if stack.len() >= MAX_DEPTH {
                         return Err(IoError::Xml("XML nested too deeply".into()));
                     }
-                    stack.push(start_el(&e));
+                    if stack.is_empty() && e.local_name().as_ref() == b"pivotCacheDefinition" {
+                        namespaces = Some(Default::default());
+                    }
+                    if let Some(ns) = &mut namespaces {
+                        ns.push(&e).map_err(|e| IoError::Xml(e.to_string()))?;
+                    }
+                    stack.push(start_el(&e, namespaces.as_ref()));
                     kept_at_start.push(kept);
                 }
                 Event::Empty(e) => {
-                    let el = start_el(&e);
+                    if let Some(ns) = &mut namespaces {
+                        ns.push(&e).map_err(|e| IoError::Xml(e.to_string()))?;
+                    }
+                    let el = start_el(&e, namespaces.as_ref());
+                    if let Some(ns) = &mut namespaces {
+                        ns.pop();
+                    }
                     finish(&mut stack, &mut root, el, split, cb, &mut kept, None)?;
                 }
                 Event::End(_) => {
+                    if let Some(ns) = &mut namespaces {
+                        ns.pop();
+                    }
                     if let Some(el) = stack.pop() {
                         let at_start = kept_at_start.pop();
                         finish(&mut stack, &mut root, el, split, cb, &mut kept, at_start)?;

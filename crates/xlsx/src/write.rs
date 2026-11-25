@@ -297,12 +297,17 @@ pub fn write_xlsx_named_with(wb: &Workbook, kind: XlsxKind, book_name: Option<&s
     // The workbook's kept cell and value metadata is written when it fits what GridCraft writes
     // with it. Its dynamic-array formulas are marked `cm="1"`, an entry the kept part may lack:
     // the workbook is then written again without the kept metadata.
-    if let Some(written) = write_package(wb, kind, book_name, functions, true)? {
-        return Ok(written);
-    }
-    let (bytes, mut report) =
-        write_package(wb, kind, book_name, functions, false)?.ok_or_else(|| IoError::Format("the workbook could not be written".into()))?;
-    report.warnings.insert(0, "The cell and value metadata kept from the file did not fit the dynamic-array formulas and was left out.".into());
+    let (bytes, report) = match write_package(wb, kind, book_name, functions, true)? {
+        Some(written) => written,
+        None => {
+            let (bytes, mut report) =
+                write_package(wb, kind, book_name, functions, false)?.ok_or_else(|| IoError::Format("the workbook could not be written".into()))?;
+            report
+                .warnings
+                .insert(0, "The cell and value metadata kept from the file did not fit the dynamic-array formulas and was left out.".into());
+            (bytes, report)
+        }
+    };
     Ok((bytes, report))
 }
 
@@ -355,6 +360,18 @@ fn write_package(
         return Err(IoError::Format("a static cell picture cannot also contain a formula".into()));
     }
     check_sheet_names(wb)?;
+    let table_names = crate::sheet_write::table_names(wb);
+    let mut warnings = vec![];
+    let defined_names = defined_names_to_write(wb, &mut warnings);
+    let mut slicers = crate::slicer::SlicerWriter::new(wb, &table_names);
+    let mut catalog = pivot_catalog(wb, &table_names, &defined_names, &slicers);
+    while let Some(projection) = &catalog {
+        if !slicers.prune_targets(wb, projection) {
+            slicers.finish_plan(wb, projection);
+            break;
+        }
+        catalog = pivot_catalog(wb, &table_names, &defined_names, &slicers);
+    }
     let mut out = Out {
         parts: vec![],
         overrides: vec![],
@@ -379,11 +396,11 @@ fn write_package(
         dynamic_arrays: false,
         needs_calc: false,
         cell_pictures: Default::default(),
-        slicers: crate::slicer::SlicerWriter::new(wb),
+        slicers,
         kept: Default::default(),
         functions,
         names: Default::default(),
-        warnings: vec![],
+        warnings,
         python_scripts: vec![],
     };
     out.kept.reserve_vml_blocks(wb);
@@ -399,8 +416,9 @@ fn write_package(
     };
 
     let mut wb_rels = Rels::default();
-    let (sheets_xml, kept, pivots, sheet_ids) = write_sheets(wb, &mut out, active, &mut wb_rels, kind.is_macro_enabled());
-    let names = write_defined_names(wb, &kept, &out.chart_names, &out.slicers, &mut out.warnings);
+    let (sheets_xml, kept, pivots, sheet_ids) =
+        write_sheets(wb, (&table_names, catalog.as_ref()), &mut out, active, &mut wb_rels, kind.is_macro_enabled());
+    let names = write_defined_names(wb, &defined_names, &kept, &out.chart_names, &out.slicers);
 
     let mut w = format!("{XML_DECL}<workbook xmlns=\"{NS_MAIN}\" xmlns:r=\"{NS_REL}\">");
     // A workbook read from a file keeps its <fileVersion> as it was: Excel trusts the saved values
@@ -569,6 +587,7 @@ fn write_cell_metadata(wb: &Workbook, out: &mut Out, wb_rels: &mut Rels) -> Resu
 
 fn write_sheets(
     wb: &Workbook,
+    (table_names, catalog): (&[Vec<Option<String>>], Option<&Workbook>),
     out: &mut Out,
     active: usize,
     wb_rels: &mut Rels,
@@ -584,8 +603,10 @@ fn write_sheets(
     let mut ids = crate::passthrough::SheetIds::new(wb, &kept);
     for (i, sheet) in wb.sheets.iter().enumerate() {
         sheets_xml.push_str(&kept.sheet_entries(i, false, &mut ids));
-        let (xml, mut rels) = crate::sheet_write::write_sheet(wb, i, i == active, out);
-        pivots.add_sheet(wb, i, out, &mut rels);
+        let (xml, mut rels) = crate::sheet_write::write_sheet(wb, i, i == active, &table_names[i], out);
+        if let Some(catalog) = catalog {
+            pivots.add_sheet(wb, catalog, i, out, &mut rels);
+        }
         let name = format!("xl/worksheets/sheet{}.xml", i + 1);
         out.part(&name, Some(CT_WORKSHEET), xml.into_bytes());
         if !rels.is_empty() {
@@ -608,34 +629,87 @@ fn write_sheets(
     (sheets_xml, kept, pivots, sheet_ids)
 }
 
+fn defined_names_to_write<'a>(wb: &'a Workbook, warnings: &mut Vec<String>) -> Vec<&'a gridcraft_model::DefinedName> {
+    let mut seen = std::collections::HashSet::new();
+    wb.names
+        .iter()
+        .filter(|n| {
+            if n.name.is_empty() || n.scope.is_some_and(|sc| sc >= wb.sheets.len()) {
+                return false;
+            }
+            if seen.insert((n.name.to_ascii_lowercase(), n.scope)) {
+                return true;
+            }
+            let w = "Defined names that differ only in case from an earlier one in the same scope were left out.";
+            if !warnings.iter().any(|s| s == w) {
+                warnings.push(w.into());
+            }
+            false
+        })
+        .collect()
+}
+
+/// A small projection of the definitions native import will see, with the original identities.
+/// Never use this workbook as the source of data to build a cache.
+fn pivot_catalog(
+    wb: &Workbook,
+    table_names: &[Vec<Option<String>>],
+    names: &[&gridcraft_model::DefinedName],
+    slicers: &crate::slicer::SlicerWriter,
+) -> Option<Workbook> {
+    if !wb.sheets.iter().any(|s| !s.pivots.is_empty()) {
+        return None;
+    }
+    let mut catalog = Workbook::new();
+    catalog.sheets = wb
+        .sheets
+        .iter()
+        .zip(table_names)
+        .map(|(s, names)| {
+            let mut sheet = gridcraft_model::Sheet::new(&s.name);
+            sheet.tables = s
+                .tables
+                .iter()
+                .zip(names)
+                .filter_map(|(tb, name)| {
+                    let mut tb = tb.clone();
+                    tb.name.clone_from(name.as_ref()?);
+                    Some(tb)
+                })
+                .collect();
+            std::sync::Arc::new(sheet)
+        })
+        .collect();
+    catalog.names = names
+        .iter()
+        .filter(|n| !crate::read::is_special_defined_name(&n.name.to_ascii_lowercase()))
+        .map(|&n| {
+            let mut n = n.clone();
+            n.formula = crate::fmla::from_file(crate::fmla::text_to_file(&n.formula).trim());
+            n
+        })
+        .chain(slicers.cache_names().map(|name| gridcraft_model::DefinedName {
+            name: name.into(),
+            formula: "#N/A".into(),
+            scope: None,
+            hidden: false,
+            comment: String::new(),
+            uid: Default::default(),
+        }))
+        .collect();
+    Some(catalog)
+}
+
 fn write_defined_names(
     wb: &Workbook,
+    defined_names: &[&gridcraft_model::DefinedName],
     kept: &crate::passthrough::WorkbookKept,
     chart_names: &[String],
     slicers: &crate::slicer::SlicerWriter,
-    warnings: &mut Vec<String>,
 ) -> String {
     // Defined names, then print areas and titles.
     let mut names = String::new();
-    let mut seen = std::collections::HashSet::new();
-    for n in &wb.names {
-        // A slicer cache's name is written with its cache.
-        if n.name.is_empty() || (n.scope.is_none() && slicers.is_cache_name(&n.name)) {
-            continue;
-        }
-        // Excel's names are case-insensitive: one per name and scope.
-        if !seen.insert((n.name.to_ascii_lowercase(), n.scope)) {
-            let w = "Defined names that differ only in case from an earlier one in the same scope were left out.".to_string();
-            if !warnings.contains(&w) {
-                warnings.push(w);
-            }
-            continue;
-        }
-        if let Some(sc) = n.scope
-            && sc >= wb.sheets.len()
-        {
-            continue;
-        }
+    for n in defined_names {
         let _ = write!(names, "<definedName name=\"{}\"", esc_attr(&n.name));
         if let Some(sc) = n.scope {
             let _ = write!(names, " localSheetId=\"{}\"", kept.file_index(sc));

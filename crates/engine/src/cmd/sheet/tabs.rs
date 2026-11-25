@@ -151,6 +151,18 @@ pub(super) fn rename_sheet(s: &mut Session, p: &Json) -> Result<Json> {
                     }
                 }
             }
+            // A PivotTable's source names the sheet (`Data!$A$1:$C$9`, `Data!rData`): it follows,
+            // still bound to what it was.
+            for pt in sh.pivots.iter_mut() {
+                let (sheet, body) = gridcraft_core::split_sheet(&pt.source);
+                if sheet.is_some_and(|s| s.eq_ignore_ascii_case(&old)) {
+                    let source = format!("{}!{body}", gridcraft_core::quote_sheet(&name));
+                    if let Some(b) = pt.binding.0.as_mut().filter(|b| b.text == pt.source) {
+                        b.text.clone_from(&source);
+                    }
+                    pt.source = source;
+                }
+            }
         }
         crate::cmd::edit::rewrite_cell_links(&mut cx.wb, |_, e| gridcraft_formula::adjust::rename_sheet(e, &old, &name));
         for n in cx.wb.names.iter_mut() {
@@ -220,7 +232,8 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
                     let formula = gridcraft_formula::parse_name(&nm.formula)
                         .map(|e| gridcraft_formula::print(&gridcraft_formula::adjust::rename_sheet(e, &base, &sh.name)))
                         .unwrap_or_else(|_| nm.formula.clone());
-                    gridcraft_model::DefinedName { scope: Some(at), formula, ..nm.clone() }
+                    // Names of their own: nothing bound to the original's is bound to them.
+                    gridcraft_model::DefinedName { scope: Some(at), formula, uid: Default::default(), ..nm.clone() }
                 })
                 .collect();
             for nm in cx.wb.names.iter_mut() {

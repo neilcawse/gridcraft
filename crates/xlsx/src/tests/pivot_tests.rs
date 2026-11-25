@@ -76,8 +76,16 @@ fn workbook() -> Workbook {
         filter: vec![],
         table_type: None,
         connection_id: None,
+        uid: Default::default(),
     });
-    wb.names.push(DefinedName { name: "SalesData".into(), scope: None, formula: "Data!$A$1:$F$9".into(), comment: String::new(), hidden: false });
+    wb.names.push(DefinedName {
+        name: "SalesData".into(),
+        scope: None,
+        formula: "Data!$A$1:$F$9".into(),
+        comment: String::new(),
+        hidden: false,
+        uid: Default::default(),
+    });
 
     let mut report = Sheet::new("Report");
     // Pivot 1: tabular, page filter, custom and built-in value formats, collapsed item, Enable
@@ -1298,7 +1306,14 @@ fn separate_imported_caches_and_sheet_relative_defined_names_do_not_merge_caches
         s2.cells.set(at(c), Cell::value(v));
     }
     wb.sheets.push(Arc::new(s2));
-    wb.names.push(DefinedName { name: "RelRange".into(), scope: None, formula: "A1:B2".into(), comment: String::new(), hidden: false });
+    wb.names.push(DefinedName {
+        name: "RelRange".into(),
+        scope: None,
+        formula: "A1:B2".into(),
+        comment: String::new(),
+        hidden: false,
+        uid: Default::default(),
+    });
 
     let mk_pt = |id: u32, name: &str, cache_id: Option<u32>| PivotTable {
         id,

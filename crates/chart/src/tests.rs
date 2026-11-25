@@ -1743,6 +1743,7 @@ fn a_series_named_by_a_name_on_a_sheet_with_an_apostrophe_resolves() {
         formula: "'Bob''s'!$A$1".into(),
         comment: String::new(),
         hidden: false,
+        uid: Default::default(),
     });
     let mut c = chart(ChartKind::ColumnClustered);
     c.series = vec![Series {
@@ -1780,6 +1781,7 @@ fn a_series_named_by_a_name_on_a_sheet_with_a_bang_resolves() {
         formula: "'a!b'!$A$1".into(),
         comment: String::new(),
         hidden: false,
+        uid: Default::default(),
     });
     let mut c = chart(ChartKind::ColumnClustered);
     c.series = vec![Series {
@@ -1859,6 +1861,7 @@ fn volatile_defined_names_are_followed() {
         formula: formula.into(),
         comment: String::new(),
         hidden: false,
+        uid: Default::default(),
     };
     let mut wb = Workbook::new();
     wb.sheet_mut(0).unwrap().name = "Bob's".into();

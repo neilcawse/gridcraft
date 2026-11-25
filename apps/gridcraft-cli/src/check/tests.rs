@@ -816,7 +816,14 @@ fn a_cache_computed_under_another_locale_matches_under_it() {
 }
 
 fn define(wb: &mut Workbook, name: &str, scope: Option<usize>, formula: &str) {
-    wb.names.push(gridcraft_engine::model::DefinedName { name: name.into(), scope, formula: formula.into(), comment: String::new(), hidden: false });
+    wb.names.push(gridcraft_engine::model::DefinedName {
+        name: name.into(),
+        scope,
+        formula: formula.into(),
+        comment: String::new(),
+        hidden: false,
+        uid: Default::default(),
+    });
 }
 
 /// How many formulas of the checked book are volatile, and how many of those only through names.
@@ -1685,6 +1692,7 @@ fn with_table(cells: &[(&str, &str, Value)], columns: &[&str]) -> Workbook {
         filter: Vec::new(),
         table_type: None,
         connection_id: None,
+        uid: Default::default(),
     });
     wb
 }

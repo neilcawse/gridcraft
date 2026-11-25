@@ -51,6 +51,8 @@ pub struct Ctx<'a> {
     pub chart_budget: crate::chart::ChartReadBudget,
     /// What the current sheet's drawings hold that the model doesn't, for pass-through.
     pub drawing_kept: crate::drawing::DrawingKeptIn,
+    /// The current sheet's PivotTables whose parts are kept, for pass-through.
+    pub pivot_parts: Vec<crate::pivot::PivotPartsIn>,
     /// PivotTable slicer pieces collected from sheets, joined once sheets are read.
     pub slicers: crate::slicer::SlicersIn,
     /// Cells of the worksheet being read whose formulas lack dynamic-array metadata (legacy
@@ -347,6 +349,54 @@ fn read_workbook_properties(cx: &mut Ctx<'_>, wb: &mut Workbook, xml: &El) {
     }
 }
 
+pub(crate) fn is_special_defined_name(lower: &str) -> bool {
+    matches!(lower, "_xlnm._filterdatabase" | "_xlnm.print_area" | "_xlnm.print_titles") || lower.starts_with("_xlchart.")
+}
+
+fn read_defined_names(wb: &mut Workbook, wb_xml: &El, file_to_model: &[Option<usize>]) -> Vec<(String, String)> {
+    // Chartex parts refer to their data through hidden `_xlchart.*` names.
+    let mut chart_names: Vec<(String, String)> = vec![];
+    if let Some(dn) = wb_xml.child("definedNames") {
+        for d in dn.kids("definedName") {
+            let Some(name) = d.attr("name") else { continue };
+            let scope = match d.attr_u32("localSheetId") {
+                Some(i) => match file_to_model.get(i as usize).copied().flatten() {
+                    Some(m) => Some(m),
+                    None => continue,
+                },
+                None => None,
+            };
+            let text = d.text.trim();
+            let lname = name.to_ascii_lowercase();
+            if is_special_defined_name(&lname) {
+                if lname.starts_with("_xlchart.") {
+                    chart_names.push((lname, crate::fmla::from_file(&crate::chart::chart_ref_from_file(text))));
+                } else if let Some(sheet) = scope.and_then(|si| wb.sheet_mut(si)) {
+                    match lname.as_str() {
+                        "_xlnm.print_area" => sheet.print.print_area = parse_print_area(text),
+                        "_xlnm.print_titles" => {
+                            let (rows, cols) = parse_print_titles(text);
+                            sheet.print.title_rows = rows;
+                            sheet.print.title_cols = cols;
+                        }
+                        _ => {}
+                    }
+                }
+                continue;
+            }
+            wb.names.push(DefinedName {
+                name: name.to_string(),
+                scope,
+                formula: crate::fmla::from_file(text),
+                comment: d.attr("comment").unwrap_or("").to_string(),
+                hidden: d.flag("hidden", false),
+                uid: Default::default(),
+            });
+        }
+    }
+    chart_names
+}
+
 /// The single window modelled by GridCraft: prefer the first visible window,
 /// including the format's default visibility, and otherwise retain the first one.
 fn selected_workbook_view(workbook: &El) -> Option<&El> {
@@ -379,6 +429,7 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
         pivot_charts: vec![],
         chart_budget: crate::chart::ChartReadBudget::new(),
         drawing_kept: Default::default(),
+        pivot_parts: vec![],
         slicers: Default::default(),
         legacy_formulas: vec![],
         shared_formula_bytes: 0,
@@ -480,6 +531,7 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
         let name = names.unique(&name, i);
         cx.legacy_formulas.clear();
         cx.drawing_kept = Default::default();
+        cx.pivot_parts.clear();
         cx.value_meta.clear();
         let (mut sheet, read_controls) = match crate::sheet_read::read_sheet(&mut cx, &rel.target, &name) {
             Ok(s) => s,
@@ -523,50 +575,7 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
     wb.external_books = Arc::new(crate::external::read(&mut cx, &wb_xml, &wb_rels)?);
     crate::slicer::resolve(&mut cx, &wb_xml, &wb_rels, &sheet_els, &file_to_model, &pivot_caches, &mut wb);
 
-    // Defined names. Chartex parts refer to their data through hidden `_xlchart.*` names.
-    let mut chart_names: Vec<(String, String)> = vec![];
-    if let Some(dn) = wb_xml.child("definedNames") {
-        for d in dn.kids("definedName") {
-            let Some(name) = d.attr("name") else { continue };
-            let scope = match d.attr_u32("localSheetId") {
-                Some(i) => match file_to_model.get(i as usize).copied().flatten() {
-                    Some(m) => Some(m),
-                    None => continue,
-                },
-                None => None,
-            };
-            let text = d.text.trim();
-            let lname = name.to_ascii_lowercase();
-            if lname == "_xlnm._filterdatabase" {
-                continue;
-            }
-            if lname.starts_with("_xlchart.") {
-                chart_names.push((lname, crate::fmla::from_file(&crate::chart::chart_ref_from_file(text))));
-                continue;
-            }
-            if lname == "_xlnm.print_area" || lname == "_xlnm.print_titles" {
-                if let Some(si) = scope
-                    && let Some(sheet) = wb.sheet_mut(si)
-                {
-                    if lname == "_xlnm.print_area" {
-                        sheet.print.print_area = parse_print_area(text);
-                    } else {
-                        let (rows, cols) = parse_print_titles(text);
-                        sheet.print.title_rows = rows;
-                        sheet.print.title_cols = cols;
-                    }
-                }
-                continue;
-            }
-            wb.names.push(DefinedName {
-                name: name.to_string(),
-                scope,
-                formula: crate::fmla::from_file(text),
-                comment: d.attr("comment").unwrap_or("").to_string(),
-                hidden: d.flag("hidden", false),
-            });
-        }
-    }
+    let chart_names = read_defined_names(&mut wb, &wb_xml, &file_to_model);
 
     if !chart_names.is_empty() {
         let resolve = |f: &mut String| {
@@ -620,6 +629,7 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
     }
     // The kept macro sheets name their text by shared-string index: they are resolved here.
     wb.preserved = kept.workbook(&mut cx, &wb_part, &wb_xml, &file_to_model);
+    crate::pivot::bind_sources(&mut wb, &pivot_caches);
     cx.release_shared_strings_unless_needed(false);
     if let Some(w) = cx.python.warning() {
         cx.warn(w);

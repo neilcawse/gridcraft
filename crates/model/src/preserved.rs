@@ -10,8 +10,9 @@ use std::sync::Arc;
 use gridcraft_core::{CellRef, Value};
 
 use crate::DrawingRef;
-use crate::features::{Image, Shape};
+use crate::features::{Image, PivotTable, Shape};
 use crate::sheet::Visibility;
+use crate::style::Style;
 
 /// A relationship from an owning part (the package root, the workbook or a sheet, or a kept part)
 /// to a kept part or to an external target.
@@ -250,6 +251,30 @@ pub struct PreservedChartShapes {
     pub images: Vec<Image>,
 }
 
+/// A PivotTable GridCraft read but can't write from the model (its source is in another
+/// workbook, or a defined name): its part, its cache and the cache's records as the file had
+/// them. They are written back while the PivotTable is as it was read, its source still stands
+/// for the definition it was bound to ([`crate::Workbook::pivot_source`]), and the number and
+/// differential formats they use are still there.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PreservedPivot {
+    /// The PivotTable as it was read; the kept parts describe it only while it is unchanged.
+    pub table: PivotTable,
+    /// The PivotTable part; its relationships lead to the cache definition in `parts`.
+    pub part: PreservedPart,
+    /// The cache definition part (normalized name of one of `parts`).
+    pub cache: String,
+    /// The cache definition, its records and every other part reachable from them.
+    pub parts: Vec<PreservedPart>,
+    /// The number formats the table and cache use by id (`numFmtId`), with the file's code for
+    /// each that the styles part defined; the ids are given anew on save.
+    pub num_fmts: Vec<(u32, String)>,
+    /// The differential formats the table uses by index (`dxfId`), as read.
+    pub dxfs: Vec<(u32, Style)>,
+    /// Whether the cache's source is in another workbook.
+    pub external: bool,
+}
+
 /// A hyperlink of a picture or shape of a sheet's drawing (`a:hlinkClick` or `a:hlinkHover` of
 /// its `cNvPr`), which the model does not hold. It goes back on the object while the object is
 /// there, however it was edited or moved. The object's id is its identity: while the link is
@@ -303,6 +328,8 @@ pub struct Preserved {
     pub note_fills: Option<PreservedNoteFills>,
     /// The shapes drawn on the sheet's charts (sheet owner only).
     pub chart_shapes: Vec<PreservedChartShapes>,
+    /// The sheet's PivotTables that are written as the file had them (sheet owner only).
+    pub pivots: Vec<PreservedPivot>,
     /// The hyperlinks of the sheet's pictures and shapes (sheet owner only).
     pub object_links: Option<PreservedObjectLinks>,
 }
@@ -321,6 +348,7 @@ impl Preserved {
             && self.cell_meta.is_empty()
             && self.note_fills.is_none()
             && self.chart_shapes.is_empty()
+            && self.pivots.is_empty()
             && self.object_links.is_none()
     }
     /// Total bytes held.
@@ -330,8 +358,19 @@ impl Preserved {
         let metadata = self.metadata.iter().flat_map(|m| &m.parts);
         let fills = self.note_fills.iter().flat_map(|n| &n.parts);
         let chart_shapes = self.chart_shapes.iter().flat_map(|c| &c.parts);
+        let pivots = self.pivots.iter().flat_map(|p| std::iter::once(&p.part).chain(&p.parts));
         let links = self.object_links.iter().flat_map(|l| &l.parts);
-        let held = self.parts.iter().chain(self.vml.iter()).chain(tables).chain(theme).chain(metadata).chain(fills).chain(chart_shapes).chain(links);
+        let held = self
+            .parts
+            .iter()
+            .chain(self.vml.iter())
+            .chain(tables)
+            .chain(theme)
+            .chain(metadata)
+            .chain(fills)
+            .chain(chart_shapes)
+            .chain(pivots)
+            .chain(links);
         let theme_bytes = self.theme.as_ref().map_or(0, |t| t.data.len());
         held.fold(theme_bytes, |n, p| n.saturating_add(p.data.len()))
     }

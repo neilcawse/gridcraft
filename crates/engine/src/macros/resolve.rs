@@ -585,6 +585,7 @@ mod tests {
             formula: "Sheet1!$F$20".into(),
             comment: String::new(),
             hidden: false,
+            uid: Default::default(),
         });
         wb.names.push(gridcraft_model::DefinedName {
             name: "Rates".into(),
@@ -592,6 +593,7 @@ mod tests {
             formula: "'My Data'!$A$1:$A$5".into(),
             comment: String::new(),
             hidden: false,
+            uid: Default::default(),
         });
         wb
     }
@@ -803,6 +805,7 @@ mod tests {
                 formula: formula.into(),
                 comment: String::new(),
                 hidden: false,
+                uid: Default::default(),
             });
         }
         let env = Env { wb: &wb, active_sheet: 0, inputs: &[], output: None, item: None };
@@ -904,6 +907,7 @@ mod tests {
             filter: Vec::new(),
             table_type: None,
             connection_id: None,
+            uid: Default::default(),
         });
         let inputs = vec![("Input".to_string(), place("B2:D2"), true), ("Plain".to_string(), place("B2:D2"), false)];
         let env = Env { wb: &wb, active_sheet: 0, inputs: &inputs, output: None, item: None };
@@ -950,6 +954,7 @@ mod tests {
             formula: "'US$'!$F$20".into(),
             comment: String::new(),
             hidden: false,
+            uid: Default::default(),
         });
         let env = Env { wb: &wb, active_sheet: 0, inputs: &[], output: None, item: None };
         check(&env, "Name:Dollars", "'US$'!F20");

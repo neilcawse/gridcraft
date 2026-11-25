@@ -17,6 +17,7 @@ mod damaged_parts;
 mod deny_list;
 mod doc_props;
 mod drawing_objects;
+mod kept_pivots;
 mod kept_sheets;
 mod rich_values;
 mod strict_kept;

@@ -11,6 +11,7 @@ pub mod features;
 pub mod group;
 pub mod macros;
 pub mod password;
+mod pivot_source;
 pub mod preserved;
 pub mod python;
 pub mod sheet;
@@ -24,10 +25,11 @@ pub use features::*;
 pub use group::{DrawingGroup, DrawingRef, GroupFile, GroupFileMember, MAX_GROUP_DEPTH, ObjectRect, rotates};
 pub use macros::*;
 pub use password::PasswordHash;
+pub use pivot_source::{FoundSource, PivotSource, SavedSource};
 pub use preserved::{
     Preserved, PreservedCellMeta, PreservedChartShapes, PreservedIndex, PreservedIndexed, PreservedMetadata, PreservedName, PreservedNoteFill,
-    PreservedNoteFills, PreservedObjectLink, PreservedObjectLinks, PreservedPart, PreservedRel, PreservedSheet, PreservedSheetKind, PreservedTable,
-    PreservedTableColumn, PreservedTheme, PreservedXml,
+    PreservedNoteFills, PreservedObjectLink, PreservedObjectLinks, PreservedPart, PreservedPivot, PreservedRel, PreservedSheet, PreservedSheetKind,
+    PreservedTable, PreservedTableColumn, PreservedTheme, PreservedXml,
 };
 pub use python::{PyCode, PyOutput};
 pub use sheet::{DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, LineIndex, Sheet, SheetUid, SheetViewMode, Visibility, points_to_chars};
@@ -38,8 +40,8 @@ pub use style::{
     Underline, VAlign, VertAlign,
 };
 pub use workbook::{
-    CalcMode, CalcSettings, DefinedName, DocProps, EQUATION_BUDGET_MESSAGE, ExternalBook, ExternalName, ExternalSheet, MAX_EQUATION_LAYOUT_BYTES,
-    PhoneticProps, PhoneticRun, PhoneticString, ShowObjects, Workbook, WorkbookView,
+    CalcMode, CalcSettings, DefinedName, DefinitionUid, DocProps, EQUATION_BUDGET_MESSAGE, ExternalBook, ExternalName, ExternalSheet,
+    MAX_EQUATION_LAYOUT_BYTES, PhoneticProps, PhoneticRun, PhoneticString, ShowObjects, Workbook, WorkbookView,
 };
 
 /// Font used for new workbooks. Only a name: renderers substitute an available open font

@@ -1169,6 +1169,7 @@ mod tests {
             pivot_charts: vec![],
             chart_budget: crate::chart::ChartReadBudget::new(),
             drawing_kept: Default::default(),
+            pivot_parts: vec![],
             slicers: Default::default(),
             file_tables: Default::default(),
             slicer_caches: Default::default(),

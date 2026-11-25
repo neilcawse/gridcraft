@@ -250,8 +250,15 @@ pub(super) fn change_source(s: &mut Session, p: &Json) -> Result<Json> {
     }
     let source = source_param(s, p)?;
     let (si, _) = find_pivot(s, p)?;
-    let src = pv::read_source(&s.doc()?.wb, &source, si).map_err(other)?;
+    // What the new text stands for, found as reading a file finds it (a qualified workbook name
+    // or table too): the PivotTable is then bound to that, never to what it stood for before
+    // (undo brings the old binding back).
+    let wb = &s.doc()?.wb;
+    let binding = wb.bind_pivot_source(&source, si);
+    let probe = gridcraft_model::PivotTable { source: source.clone(), binding: binding.clone(), ..Default::default() };
+    let src = pv::read_pivot_source(wb, &probe, si).map_err(other)?;
     update(s, p, move |pt, _, _| {
+        pt.binding = binding;
         pt.source = source.clone();
         let mut dropped: Vec<String> = vec![];
         let keep = |name: &str, dropped: &mut Vec<String>| {

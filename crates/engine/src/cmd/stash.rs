@@ -206,7 +206,14 @@ pub fn set_many(wb: &mut Workbook, items: &[(String, String)]) -> Result<()> {
             return Err(EngineError::Other(format!("`{key}` is given twice.")));
         }
         for (i, formula) in chunk_formulas(text).into_iter().enumerate() {
-            planned.push(DefinedName { name: format!("{PREFIX}{key}_{i}"), scope: None, formula, comment: "GridCraft data".into(), hidden: true });
+            planned.push(DefinedName {
+                name: format!("{PREFIX}{key}_{i}"),
+                scope: None,
+                formula,
+                comment: "GridCraft data".into(),
+                hidden: true,
+                uid: Default::default(),
+            });
         }
     }
     // A visible name of an item's shape is someone's own (see `item_of`); a hidden name beside
@@ -376,7 +383,7 @@ mod tests {
     use super::*;
 
     fn name(n: &str, formula: &str) -> DefinedName {
-        DefinedName { name: n.into(), scope: None, formula: formula.into(), comment: String::new(), hidden: true }
+        DefinedName { name: n.into(), scope: None, formula: formula.into(), comment: String::new(), hidden: true, uid: Default::default() }
     }
 
     fn excel_limits_hold(wb: &Workbook) {

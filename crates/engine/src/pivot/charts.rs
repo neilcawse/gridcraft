@@ -1,6 +1,7 @@
 use super::output::Output;
 use super::{
-    CellRef, Chart, HashMap, HashSet, PivotLookup, PivotTable, RangeRef, Series, Workbook, distinct_labels, quote_sheet, read_source, resolve_source,
+    CellRef, Chart, HashMap, HashSet, PivotLookup, PivotTable, RangeRef, Series, Workbook, distinct_labels, quote_sheet, read_pivot_source,
+    resolve_source,
 };
 
 // ---------------------------------------------------------------- PivotCharts
@@ -218,7 +219,7 @@ pub(super) struct ChartFormats {
 /// The items of the pivot's row and column fields, counting the ones a filter hides.
 fn pivot_items(wb: &Workbook, pt: &PivotTable, pivot_sheet: usize) -> HashSet<String> {
     let mut labels = HashSet::new();
-    if let Ok(src) = read_source(wb, &pt.source, pivot_sheet) {
+    if let Ok(src) = read_pivot_source(wb, pt, pivot_sheet) {
         for f in pt.rows.iter().chain(&pt.columns) {
             if let Some(c) = src.col(&f.source_col) {
                 labels.extend(distinct_labels(wb, &src, c, f.date_group, usize::MAX));

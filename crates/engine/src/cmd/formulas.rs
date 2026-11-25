@@ -389,14 +389,25 @@ fn define_name(s: &mut Session, p: &Json) -> Result<Json> {
         None => None,
     };
     edit(s, |cx| {
+        // The name edited (or defined over) keeps its identity: what is bound to it, a
+        // PivotTable's source, still is. A new name gets a new one.
+        let same = |n: &DefinedName, name: &str, scope: Option<usize>| n.name.eq_ignore_ascii_case(name) && n.scope == scope;
+        let mut uid = None;
         if let Some((old_name, old_scope)) = &old {
-            cx.wb.names.retain(|n| !(n.name.eq_ignore_ascii_case(old_name) && n.scope == *old_scope));
+            uid = cx.wb.names.iter().find(|n| same(n, old_name, *old_scope)).map(|n| n.uid);
+            cx.wb.names.retain(|n| !same(n, old_name, *old_scope));
             if !old_name.eq_ignore_ascii_case(&name) {
                 rename_name_in_formulas(&mut cx.wb, old_name, *old_scope, &name);
             }
         }
-        cx.wb.names.retain(|n| !(n.name.eq_ignore_ascii_case(&name) && n.scope == scope));
-        cx.wb.names.push(DefinedName { name: name.clone(), scope, formula: refers.clone(), comment: comment.clone(), hidden: false });
+        let renamed = uid.filter(|_| old.as_ref().is_some_and(|(old_name, _)| *old_name != name));
+        uid = uid.or_else(|| cx.wb.names.iter().find(|n| same(n, &name, scope)).map(|n| n.uid));
+        cx.wb.names.retain(|n| !same(n, &name, scope));
+        let uid = uid.unwrap_or_default();
+        cx.wb.names.push(DefinedName { name: name.clone(), scope, formula: refers.clone(), comment: comment.clone(), hidden: false, uid });
+        if let Some(uid) = renamed {
+            cx.wb.follow_renamed_definition(uid);
+        }
         cx.structural = true;
         Ok(json!({"name": name, "refersTo": format!("={refers}")}))
     })
@@ -566,7 +577,7 @@ fn create_from_selection(s: &mut Session, p: &Json) -> Result<Json> {
     edit(s, |cx| {
         for (name, f) in made {
             cx.wb.names.retain(|x| !(x.name.eq_ignore_ascii_case(&name) && x.scope.is_none()));
-            cx.wb.names.push(DefinedName { name, scope: None, formula: f, comment: String::new(), hidden: false });
+            cx.wb.names.push(DefinedName { name, scope: None, formula: f, comment: String::new(), hidden: false, uid: Default::default() });
         }
         cx.structural = true;
         Ok(json!({"created": n, "skipped": skipped}))
@@ -998,9 +1009,23 @@ mod tests {
         let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
         let text = "m".repeat(9_000);
         stash::set(wb, "macro_1", &text).unwrap();
-        wb.names.push(DefinedName { name: "_sc_watch".into(), scope: None, formula: "\"[]\"".into(), comment: String::new(), hidden: true });
+        wb.names.push(DefinedName {
+            name: "_sc_watch".into(),
+            scope: None,
+            formula: "\"[]\"".into(),
+            comment: String::new(),
+            hidden: true,
+            uid: Default::default(),
+        });
         // A legacy item is read whether or not it is hidden, so a visible one is data too.
-        wb.names.push(DefinedName { name: "_sc_old".into(), scope: None, formula: "\"[]\"".into(), comment: String::new(), hidden: false });
+        wb.names.push(DefinedName {
+            name: "_sc_old".into(),
+            scope: None,
+            formula: "\"[]\"".into(),
+            comment: String::new(),
+            hidden: false,
+            uid: Default::default(),
+        });
         let names = |s: &Session| s.doc().unwrap().wb.names.clone();
         let before = names(&s);
         assert!(before.len() >= 3, "the item takes two chunks");
@@ -1026,7 +1051,14 @@ mod tests {
         assert_eq!(stash::get(&s.doc().unwrap().wb, "macro_1").as_deref(), Some(text.as_str()));
         // A visible name of the shape is the person's own (the stash never reads it): the name
         // commands change and remove it without `force`, as Name Manager cannot pass one.
-        let own = DefinedName { name: "_gc_rate_0".into(), scope: None, formula: "=1".into(), comment: String::new(), hidden: false };
+        let own = DefinedName {
+            name: "_gc_rate_0".into(),
+            scope: None,
+            formula: "=1".into(),
+            comment: String::new(),
+            hidden: false,
+            uid: Default::default(),
+        };
         std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).names.push(own.clone());
         s.execute("formulas.defineName", json!({"name": "Rate0", "refersTo": "=2", "oldName": "_gc_rate_0"})).unwrap();
         s.execute("formulas.deleteName", json!({"name": "Rate0"})).unwrap();
@@ -1077,6 +1109,34 @@ mod tests {
         assert_eq!(v(&mut s, "E1"), json!(15.0));
     }
 
+    /// A PivotTable source read from a file is bound to the name it named: renaming the name
+    /// renames the source, still bound to it, and undo brings both back.
+    #[test]
+    fn a_bound_pivot_source_follows_its_renamed_name() {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("range.setValues", json!({"range": "A1", "values": [["K", "V"], ["a", 1], ["b", 2]]})).unwrap();
+        s.execute("formulas.defineName", json!({"name": "rData", "refersTo": "=Sheet1!$A$1:$B$3"})).unwrap();
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let binding = wb.bind_pivot_source("rData", 0);
+        assert!(binding.0.is_some());
+        let pt = gridcraft_model::PivotTable { name: "P1".into(), source: "rData".into(), binding, ..Default::default() };
+        wb.sheet_mut(0).unwrap().pivots.push(pt);
+        let source = |s: &Session| {
+            let wb = &s.doc().unwrap().wb;
+            let pt = &wb.sheets[0].pivots[0];
+            let found = wb.pivot_source(pt, 0).map(|f| match f.source {
+                gridcraft_model::PivotSource::Name { name, .. } => (name.name.clone(), f.rebound.is_some()),
+                other => panic!("{other:?}"),
+            });
+            (pt.source.clone(), found)
+        };
+        s.execute("formulas.defineName", json!({"name": "rNew", "refersTo": "=Sheet1!$A$1:$B$3", "oldName": "rData"})).unwrap();
+        assert_eq!(source(&s), ("rNew".to_string(), Ok(("rNew".to_string(), false))));
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(source(&s), ("rData".to_string(), Ok(("rData".to_string(), false))));
+    }
+
     #[test]
     fn name_manager_previews_a_name_over_several_ranges() {
         let mut s = Session::new();
@@ -1105,6 +1165,7 @@ mod tests {
             formula: formula.into(),
             comment: String::new(),
             hidden,
+            uid: Default::default(),
         };
         wb.names.push(name("_Filter", None, "Sheet1!$A$1:$B$9", true));
         wb.names.push(name("TAX", Some(0), "0.25", false));

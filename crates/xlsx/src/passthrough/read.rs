@@ -672,6 +672,7 @@ impl KeptReader {
     ) -> Option<Arc<Preserved>> {
         self.value_cells = self.value_cells.saturating_add(value_meta.len());
         let drawn = std::mem::take(&mut cx.drawing_kept);
+        let pivots = std::mem::take(&mut cx.pivot_parts);
         if !self.on {
             return None;
         }
@@ -711,6 +712,7 @@ impl KeptReader {
             self.note_fills(cx, name, &rels, &mut p, &mut seen);
         }
         self.drawing_content(cx, name, sheet, drawn, &mut p);
+        self.pivots(cx, name, sheet, &rels, pivots, &mut p);
         (!p.is_empty()).then(|| Arc::new(p))
     }
 

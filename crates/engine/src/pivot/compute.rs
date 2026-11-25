@@ -4,7 +4,7 @@ use super::output::{
 };
 use super::{
     CalcSet, CellError, CellRef, HashMap, HashSet, MAX_AXIS_FIELDS, MAX_COLS, MAX_INDEXED_CELLS, MAX_VALUE_FIELDS, PivotDataCell, PivotDateGroup,
-    PivotField, PivotFilter, PivotFunc, PivotItemRef, PivotLayout, PivotShowAs, PivotTable, PivotValue, Source, Value, Workbook, read_source,
+    PivotField, PivotFilter, PivotFunc, PivotItemRef, PivotLayout, PivotShowAs, PivotTable, PivotValue, Source, Value, Workbook, read_pivot_source,
 };
 
 /// Why Show Details turns a cell down when it isn't a value cell of a PivotTable (the front end
@@ -16,7 +16,7 @@ pub const NOT_A_VALUE_CELL: &str = "select a value cell in a PivotTable";
 /// that cell holds no value (a label, a header, a blank). An error, for any cell, when the report
 /// on the sheet is no longer what the source computes: the cell's records would be another cell's.
 pub fn detail_records(wb: &Workbook, pt: &PivotTable, pivot_sheet: usize, row: u32, col: u32) -> Result<Option<(Source, Vec<usize>)>, String> {
-    let src = read_source(wb, &pt.source, pivot_sheet)?;
+    let src = read_pivot_source(wb, pt, pivot_sheet)?;
     let mut probe = Probe { at: Some((row as usize, col as usize)), hit: None, paths: Some(Vec::new()), cells: None };
     let out = compute_from(wb, pt, &src, Some(&mut probe))?;
     // Checked first: in a stale report even a cell that computes as a label may show a value.
@@ -31,7 +31,7 @@ pub fn detail_records(wb: &Workbook, pt: &PivotTable, pivot_sheet: usize, row: u
 /// records: its value, subtotal and grand total cells, from one computation of the report. The
 /// same errors as [`detail_records`].
 pub fn detail_cells(wb: &Workbook, pt: &PivotTable, pivot_sheet: usize) -> Result<HashSet<(u32, u32)>, String> {
-    let src = read_source(wb, &pt.source, pivot_sheet)?;
+    let src = read_pivot_source(wb, pt, pivot_sheet)?;
     let mut probe = Probe { at: None, hit: None, paths: None, cells: Some(HashSet::new()) };
     let out = compute_from(wb, pt, &src, Some(&mut probe))?;
     check_current(wb, pt, pivot_sheet, &out)?;

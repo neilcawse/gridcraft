@@ -10,8 +10,9 @@ mod pivot;
 mod print;
 
 pub use pivot::{
-    PIVOT_INDEXER, PivotCacheId, PivotCalcField, PivotDataCell, PivotDateGroup, PivotField, PivotFilter, PivotFunc, PivotIndexer, PivotItemRef,
-    PivotLayout, PivotLookup, PivotScopeItem, PivotShowAs, PivotSort, PivotTable, PivotValue, pivot_key,
+    Binding, BindingKind, PIVOT_INDEXER, PivotCacheId, PivotCalcField, PivotDataCell, PivotDateGroup, PivotField, PivotFilter, PivotFunc,
+    PivotIndexer, PivotItemRef, PivotLayout, PivotLookup, PivotScopeItem, PivotShowAs, PivotSort, PivotTable, PivotValue, SourceBinding,
+    WorksheetSourceAttrs, X14CacheId, pivot_key,
 };
 pub use print::{EditRange, HfPage, LineInfo, Orientation, PageOrder, PrintSettings, SheetProtection, password_hash};
 
@@ -102,6 +103,9 @@ pub struct Table {
     /// The connection (`xl/connections.xml`) an XML table is bound through.
     #[serde(default)]
     pub connection_id: Option<u32>,
+    /// The table's identity while the app runs ([`crate::DefinitionUid`]). Not in JSON or the file.
+    #[serde(skip)]
+    pub uid: crate::DefinitionUid,
 }
 
 impl Table {

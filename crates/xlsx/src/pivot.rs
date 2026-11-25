@@ -6,6 +6,8 @@
 //! `refreshOnLoad="1"` so a reader recomputes the report from the source on open. Fields used on
 //! an axis get shared items (or, for date grouping, `fieldGroup` group items) so the table's
 //! `<items>` can refer to them. The report cells the engine wrote stay on the sheet as plain cells.
+//! A PivotTable whose cache can't be rebuilt from the model (a source in another workbook, or a
+//! defined name) goes back as the file had it while it is unchanged (`passthrough::pivots`).
 //!
 //! Reading: the cache's source and field names plus the table's areas, functions, show-values-as,
 //! layout flags, grand totals and style become a model [`PivotTable`]. Anything we don't model
@@ -29,12 +31,23 @@ use crate::xml::{El, esc_attr};
 mod read;
 mod write;
 
-pub use read::{CachesIn, NonSourceField, read_pivots};
+pub use read::{CachesIn, NonSourceField, bind_sources, read_pivots};
 pub use write::{PivotSlicerInfo, PivotWriter};
 pub(crate) use write::{can_share, slicer_field_ok};
 pub const CT_PIVOT_TABLE: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.pivotTable+xml";
 pub const CT_PIVOT_CACHE_DEF: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml";
 pub const CT_PIVOT_CACHE_REC: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheRecords+xml";
+
+/// The parts of a PivotTable read into the model whose cache the writer may not rebuild (a source
+/// in another workbook, or a defined name), noted for pass-through.
+pub struct PivotPartsIn {
+    /// The PivotTable's model id.
+    pub pivot: u32,
+    pub table_part: String,
+    pub cache_part: String,
+    /// Whether the cache's source is in another workbook.
+    pub external: bool,
+}
 
 /// Largest source block scanned for a cache (cells); bigger sources are not written.
 const MAX_SOURCE_CELLS: u64 = 10_000_000;
@@ -74,6 +87,11 @@ const CUSTOM_SUBTOTALS: [&str; 11] = [
     "varPSubtotal",
 ];
 const NS_X14: &str = "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main";
+
+pub(crate) fn is_x14_cache_definition(ns: &quick_xml::name::NamespaceResolver, e: &quick_xml::events::BytesStart<'_>) -> bool {
+    let (resolved, name) = ns.resolve_element(e.name());
+    name.as_ref() == b"pivotCacheDefinition" && matches!(resolved, quick_xml::name::ResolveResult::Bound(uri) if uri.as_ref() == NS_X14.as_bytes())
+}
 
 const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 

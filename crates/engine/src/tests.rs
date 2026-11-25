@@ -569,7 +569,14 @@ fn kept_value_session(cells: &[(&str, &str, f64)], names: &[(&str, &str)]) -> Se
     wb.external_books = vec![gridcraft_model::ExternalBook { names: linked, ..Default::default() }].into();
     for (name, refers_to) in names {
         let formula = refers_to.to_string();
-        wb.names.push(gridcraft_model::DefinedName { name: name.to_string(), scope: None, formula, comment: String::new(), hidden: false });
+        wb.names.push(gridcraft_model::DefinedName {
+            name: name.to_string(),
+            scope: None,
+            formula,
+            comment: String::new(),
+            hidden: false,
+            uid: Default::default(),
+        });
     }
     for (at, input, saved) in cells {
         let cell = if let Some(f) = input.strip_prefix('=') {
@@ -3957,7 +3964,14 @@ fn save_reports_what_the_file_is_written_without() {
     assert!(r.get("warnings").is_none(), "{r}");
     let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
     for name in ["Rate", "RATE"] {
-        wb.names.push(gridcraft_model::DefinedName { name: name.into(), scope: None, formula: "1".into(), comment: String::new(), hidden: false });
+        wb.names.push(gridcraft_model::DefinedName {
+            name: name.into(),
+            scope: None,
+            formula: "1".into(),
+            comment: String::new(),
+            hidden: false,
+            uid: Default::default(),
+        });
     }
     let r = s.execute("file.save", json!({"path": dir.join("names.xlsx")})).unwrap();
     let warnings = r["warnings"].as_array().unwrap();

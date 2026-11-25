@@ -1002,7 +1002,14 @@ mod fuel_tests {
     fn a_computed_criterion_out_of_work_makes_the_database_function_calc() {
         use gridcraft_model::{Cell, Formula};
         let mut wb = Workbook::new();
-        let name = |name: String, formula: String| gridcraft_model::DefinedName { name, scope: None, formula, comment: String::new(), hidden: false };
+        let name = |name: String, formula: String| gridcraft_model::DefinedName {
+            name,
+            scope: None,
+            formula,
+            comment: String::new(),
+            hidden: false,
+            uid: Default::default(),
+        };
         wb.names.push(name("Step0".into(), "1".into()));
         for i in 1..=60 {
             wb.names.push(name(format!("Step{i}"), format!("Step{}+Step{}", i - 1, i - 1)));
@@ -1037,7 +1044,14 @@ mod fuel_tests {
     fn names_that_double_at_each_step_run_out_of_work() {
         // Step1 = Step0+Step0, Step2 = Step1+Step1, ...: Step60 would evaluate Step0 2^60 times.
         let mut wb = Workbook::default();
-        let name = |name: String, formula: String| gridcraft_model::DefinedName { name, scope: None, formula, comment: String::new(), hidden: false };
+        let name = |name: String, formula: String| gridcraft_model::DefinedName {
+            name,
+            scope: None,
+            formula,
+            comment: String::new(),
+            hidden: false,
+            uid: Default::default(),
+        };
         wb.names.push(name("Step0".into(), "1".into()));
         for i in 1..=60 {
             wb.names.push(name(format!("Step{i}"), format!("Step{}+Step{}", i - 1, i - 1)));

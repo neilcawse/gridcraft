@@ -3,6 +3,7 @@ use super::{
     PivotDateGroup, PivotField, PivotFilter, PivotFunc, PivotLayout, PivotScopeItem, PivotShowAs, PivotSort, PivotTable, PivotValue, RangeRef,
     VALUES_FIELD, abs_range, func_caption, func_from, number_to_text, quote_sheet, same, serial_from_iso_ymd,
 };
+use gridcraft_model::WorksheetSourceAttrs;
 
 /// A cache field as read.
 #[derive(Clone, Debug, Default)]
@@ -33,6 +34,12 @@ struct CacheIn {
     fields: Vec<FieldIn>,
     /// `x14:pivotCacheDefinition pivotCacheId`: how slicer caches name the cache.
     slicer_id: Option<u32>,
+    /// Whether the source is in another workbook (`worksheetSource r:id`) or a defined name: the
+    /// writer may not rebuild such a cache from the model, so the file's parts are kept.
+    kept: bool,
+    external: bool,
+    /// The `worksheetSource` attributes of a source that is a name of this workbook, as read.
+    attrs: Option<WorksheetSourceAttrs>,
 }
 
 /// Workbook-level pivot cache lookup, filled from `<pivotCaches>`; caches are parsed once.
@@ -42,6 +49,8 @@ pub struct CachesIn {
     parsed: HashMap<String, Option<CacheIn>>,
     next_id: u32,
     next_cache_id: u32,
+    /// PivotTable id → (its source text, the `worksheetSource` attributes it was read from).
+    read_as: HashMap<u32, (String, WorksheetSourceAttrs)>,
 }
 
 impl CachesIn {
@@ -56,7 +65,7 @@ impl CachesIn {
                 }
             }
         }
-        CachesIn { by_id, parsed: HashMap::new(), next_id: 1, next_cache_id: 1 }
+        CachesIn { by_id, parsed: HashMap::new(), next_id: 1, next_cache_id: 1, read_as: HashMap::new() }
     }
 
     /// Whether a slicer cache id resolves to a parsed PivotTable cache.
@@ -150,10 +159,29 @@ fn read_cache(cx: &mut Ctx<'_>, part: &str, sheet_name: &str) -> Option<CacheIn>
         return None;
     }
     let ws = src.and_then(|s| s.child("worksheetSource"));
-    let source = match ws {
-        Some(w) if w.attr("name").is_some_and(|n| !n.trim().is_empty()) => w.attr("name").unwrap_or("").trim().to_string(),
-        Some(w) => {
-            if w.attr("id").is_some() {
+    let name = ws.and_then(|w| w.attr("name")).map(str::trim).filter(|n| !n.is_empty()).map(str::to_string);
+    // A source in another workbook keeps naming that workbook (`[Book.xlsx]Sheet!A1:B3`), so the
+    // writer never takes a same-named sheet or name of this one for it.
+    let book = ws.and_then(|w| w.attr("r:id")).map(|id| {
+        let target = cx.pkg.rels(part).ok().and_then(|rels| rels.into_iter().find(|r| r.id == id && r.external).map(|r| r.target));
+        let file = target.as_deref().map(|t| t.rsplit(['/', '\\']).next().unwrap_or(t).to_string()).filter(|f| !f.is_empty());
+        file.unwrap_or_else(|| id.to_string())
+    });
+    let external = book.is_some();
+    let kept = external || name.is_some();
+    let source = match (ws, &name) {
+        (Some(_), Some(n)) => match &book {
+            Some(b) => format!("[{b}]{n}"),
+            // A name with a sheet (`name sheet`) is `Data!rData`, the sheet's name exactly as the
+            // file has it (` Data ` is another sheet than `Data`); what it stands for is settled
+            // once the names and tables are read ([`bind_sources`]).
+            None => match ws.and_then(|w| w.attr("sheet")).filter(|s| !s.is_empty()) {
+                Some(s) => format!("{}!{n}", quote_sheet(s)),
+                None => n.clone(),
+            },
+        },
+        (Some(w), None) => {
+            if external {
                 cx.warn("a PivotTable's source is in another workbook; its source reference may not resolve");
             }
             let r = w.attr("ref").map(|r| r.replace('$', "")).and_then(|r| RangeRef::parse(&r));
@@ -162,9 +190,13 @@ fn read_cache(cx: &mut Ctx<'_>, part: &str, sheet_name: &str) -> Option<CacheIn>
                 return None;
             };
             let sheet = w.attr("sheet").filter(|s| !s.is_empty()).unwrap_or(sheet_name);
-            format!("{}!{}", quote_sheet(sheet), abs_range(&r))
+            let sheet = match &book {
+                Some(b) => format!("[{b}]{sheet}"),
+                None => sheet.to_string(),
+            };
+            format!("{}!{}", quote_sheet(&sheet), abs_range(&r))
         }
-        None => {
+        (None, _) => {
             cx.warn("a PivotTable's cache has no worksheet source; kept as plain cells");
             return None;
         }
@@ -204,8 +236,44 @@ fn read_cache(cx: &mut Ctx<'_>, part: &str, sheet_name: &str) -> Option<CacheIn>
         return None;
     }
     let slicer_id =
-        x.child("extLst").and_then(|l| l.kids("ext").find_map(|e| e.child("pivotCacheDefinition"))).and_then(|d| d.attr_u32("pivotCacheId"));
-    Some(CacheIn { id: 0, source, fields, slicer_id })
+        x.child("extLst").and_then(|l| l.kids("ext").flat_map(|e| e.kids("x14:pivotCacheDefinition")).find_map(|d| d.attr_u32("pivotCacheId")));
+    let attrs = ws.filter(|_| name.is_some() && !external).and_then(|w| {
+        Some(WorksheetSourceAttrs {
+            name: w.attr("name")?.into(),
+            sheet: w.attr("sheet").map(str::to_owned),
+            reference: w.attr("ref").map(str::to_owned),
+        })
+    });
+    Some(CacheIn { id: 0, source, fields, slicer_id, kept, external, attrs })
+}
+
+/// Binds the source of every PivotTable read to the defined name or table it stands for
+/// ([`gridcraft_model::Workbook::bind_pivot_source`]), with the attributes it was read from, and
+/// of the kept PivotTables as read, so that they are still the same. Runs once the workbook's
+/// sheets, names and tables are read.
+pub fn bind_sources(wb: &mut gridcraft_model::Workbook, caches: &CachesIn) {
+    for si in 0..wb.sheets.len() {
+        let sheet = &wb.sheets[si];
+        let bound: Vec<_> = sheet.pivots.iter().map(|pt| wb.bind_pivot_source(&pt.source, si)).collect();
+        let kept: Vec<_> = sheet.preserved.iter().flat_map(|p| p.pivots.iter()).map(|pp| wb.bind_pivot_source(&pp.table.source, si)).collect();
+        if bound.iter().chain(&kept).all(|b| b.0.is_none()) && !sheet.pivots.iter().any(|pt| caches.read_as.contains_key(&pt.id)) {
+            continue;
+        }
+        let sheet = std::sync::Arc::make_mut(&mut wb.sheets[si]);
+        for (pt, mut b) in sheet.pivots.iter_mut().zip(bound) {
+            if let Some(b) = b.0.as_mut() {
+                b.read_as = caches.read_as.get(&pt.id).filter(|(text, _)| *text == b.text).cloned();
+            } else if let Some((text, _)) = caches.read_as.get(&pt.id) {
+                b.1 = Some(text.clone());
+            }
+            pt.binding = b;
+        }
+        if let Some(p) = sheet.preserved.as_mut() {
+            for (pp, b) in std::sync::Arc::make_mut(p).pivots.iter_mut().zip(kept) {
+                pp.table.binding = b;
+            }
+        }
+    }
 }
 
 /// Reads the PivotTables related to a worksheet part.
@@ -245,6 +313,17 @@ pub fn read_pivots(cx: &mut Ctx<'_>, caches: &mut CachesIn, sheet_part: &str, sh
         let Some(cache) = cache else { continue };
         if let Some(pt) = read_table(cx, &x, &cache, caches.next_id) {
             caches.next_id = caches.next_id.saturating_add(1);
+            if cache.kept {
+                cx.pivot_parts.push(crate::pivot::PivotPartsIn {
+                    pivot: pt.id,
+                    table_part: rel.target.clone(),
+                    cache_part: cache_part.clone(),
+                    external: cache.external,
+                });
+            }
+            if let Some(attrs) = &cache.attrs {
+                caches.read_as.insert(pt.id, (pt.source.clone(), attrs.clone()));
+            }
             out.push(pt);
         }
     }
@@ -326,6 +405,7 @@ fn field_ref(cx: &mut Ctx<'_>, cache: &CacheIn, i: usize) -> Option<(String, Piv
 
 fn read_table(cx: &mut Ctx<'_>, x: &El, cache: &CacheIn, id: u32) -> Option<PivotTable> {
     let mut pt = PivotTable { id, cache_id: gridcraft_model::PivotCacheId(Some(cache.id)), ..PivotTable::default() };
+    pt.had_x14_cache_id.0 = cache.slicer_id.is_some();
     if let Some(n) = x.attr("name").filter(|n| !n.trim().is_empty()) {
         pt.name = n.to_string();
     } else {
