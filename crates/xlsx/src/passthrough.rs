@@ -101,7 +101,7 @@ mod rebase;
 pub(crate) mod strict;
 mod write;
 
-pub use names::rewrite_kept_names;
+pub use names::{kept_defined_names, rewrite_kept_names};
 pub use pivots::{kept_pivot, kept_pivot_out, write_pivot_cache, write_pivot_table};
 pub use read::{KeptReader, seal_cell_meta};
 pub use rebase::{SheetKept, TableBinding, rebase_links};

@@ -304,36 +304,53 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
 
 /// Names for the copies of `tables` (the tables of a sheet being copied), in order.
 ///
-/// Excel names a copied table `<name><n>`. In Excel-saved public files, sheet copies turned
-/// `Table6` into `Table69` (table id 8) and `Table610` (id 9), and `Table3` into `Table38`
-/// (id 7): `n` is one more than the copy's table id, which is the workbook's next. GridCraft
-/// doesn't keep Excel's table ids and saves them as 1, 2… in sheet order, so in a workbook of
-/// `N` tables the `k`th copy (from 1) takes id `N + k` and the number `N + k + 1`. For a file
-/// whose ids have gaps (tables deleted before it was saved), Excel's numbers are larger.
+/// In two Excel-saved public files, copied names append one more than the copy's saved table
+/// id: `Table6` became `Table69` (id 8) and `Table610` (id 9), and `Table3` became `Table38`
+/// (id 7). GridCraft doesn't retain Excel's table ids and writes them in sheet order, so the
+/// suffix starts at `N + k + 1` for `N` existing tables and the `k`th copy (from 1).
 ///
-/// Unmeasured (Excel probe pending): the numbers when one sheet holds several tables (taken
-/// here in the sheet's table order); the name when that one is taken (by a table or a defined
-/// name of any scope, X17's rule; the next free number is used here), or isn't a valid table
-/// name, as `R` + `12` reads as a cell (`R_12` here); and a name past 255 characters (the base
-/// is shortened to fit here).
+/// The synthetic Excel for Mac probes confirm this order for successive multi-table copies and
+/// a skip over a taken defined name. Gapped ids and multi-table collisions remain unmeasured.
 fn copied_table_names(wb: &gridcraft_model::Workbook, tables: &[gridcraft_model::Table]) -> Vec<String> {
+    if tables.is_empty() {
+        return Vec::new();
+    }
     use gridcraft_core::valid_table_name;
     use gridcraft_formula::fold_name;
     let mut taken: std::collections::HashSet<String> =
         wb.sheets.iter().flat_map(|s| s.tables.iter().map(|t| fold_name(&t.name))).chain(wb.names.iter().map(|n| fold_name(&n.name))).collect();
+    taken.extend(gridcraft_xlsx::kept_defined_names(wb).map(|n| fold_name(&n)));
+    // A cache can be imported without a matching defined-name marker. Do not displace its name.
+    taken.extend(wb.sheets.iter().flat_map(|s| &s.slicers).filter_map(|s| {
+        let name = &s.imported_cache.name;
+        (!name.is_empty()).then(|| fold_name(name))
+    }));
     let mut next = wb.sheets.iter().map(|s| s.tables.len()).sum::<usize>() + 1;
     tables
         .iter()
         .map(|t| {
             next += 1;
             let base = if valid_table_name(&t.name) { t.name.as_str() } else { "Table" };
+            let normalized_r = base.eq_ignore_ascii_case("R_");
+            let base_len = base.chars().count();
             let fit = |tail: String| {
-                let mut name: String = base.chars().take(255 - tail.len()).collect();
+                // P4: a full-length source was shortened to 254 characters including the suffix.
+                let keep = if base_len + tail.len() > 255 { 254 - tail.len() } else { base_len };
+                let mut name: String = base.chars().take(keep).collect();
                 name.push_str(&tail);
                 name
             };
             (next..)
-                .map(|n| Some(fit(n.to_string())).filter(|name| valid_table_name(name)).unwrap_or_else(|| fit(format!("_{n}"))))
+                .map(|n| {
+                    // P3: Excel's formula-visible name R_ copied as R__3, not R_3.
+                    if !normalized_r {
+                        let name = fit(n.to_string());
+                        if valid_table_name(&name) {
+                            return name;
+                        }
+                    }
+                    fit(format!("_{n}"))
+                })
                 .find(|name| taken.insert(fold_name(name)))
                 .unwrap_or_default()
         })

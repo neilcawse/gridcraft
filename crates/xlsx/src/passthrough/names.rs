@@ -8,6 +8,15 @@ use gridcraft_formula::Expr;
 
 use super::{Arc, Workbook};
 
+/// Decoded spellings of the defined names scoped to sheets GridCraft keeps as raw XML.
+pub fn kept_defined_names(wb: &Workbook) -> impl Iterator<Item = String> + '_ {
+    wb.preserved
+        .iter()
+        .flat_map(|p| &p.sheets)
+        .flat_map(|s| &s.names)
+        .filter_map(|n| crate::xml::parse(format!("<n{}/>", n.attrs).as_bytes()).ok()?.attr("name").map(str::to_owned))
+}
+
 /// Rewrites the formula of every defined name scoped to a kept sheet of `wb` through `rewrite`:
 /// the edit that renamed a sheet, deleted it, or moved the cells a name refers to. A name that
 /// `rewrite` leaves as it is stays exactly as the file spelled it, and so does one whose formula

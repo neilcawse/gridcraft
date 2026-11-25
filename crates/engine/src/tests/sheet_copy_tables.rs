@@ -113,12 +113,129 @@ fn a_copied_table_name_skips_names_already_taken() {
     // Three tables: the number would be 5, taken by a table whatever its case.
     copy_data(&mut s);
     assert_eq!(tables(&s, "Data (2)"), ["Sales6"]);
-    // Several tables on one sheet number in order.
+}
+
+#[test]
+fn copy_numbers_multiple_tables_on_successive_copies() {
     let mut s = book();
     s.execute("range.setValues", json!({"range": "F1", "values": [["K"], [1], [2]]})).unwrap();
     s.execute("insert.table", json!({"range": "F1:F3", "name": "Keys"})).unwrap();
+    s.execute("cell.set", json!({"cell": "H4", "input": "=SUM(Sales[Qty])"})).unwrap();
+    s.execute("cell.set", json!({"cell": "H5", "input": "=SUM(Keys[K])"})).unwrap();
     copy_data(&mut s);
     assert_eq!(tables(&s, "Data (2)"), ["Sales5", "Keys6"]);
+    assert_eq!(formula(&s, "Data (2)", "H4"), "SUM(Sales5[Qty])");
+    assert_eq!(formula(&s, "Data (2)", "H5"), "SUM(Keys6[K])");
+    s.execute("sheet.move", json!({"sheet": "Data", "to": 3, "copy": true})).unwrap();
+    assert_eq!(tables(&s, "Data (3)"), ["Sales7", "Keys8"]);
+    s.execute("sheet.move", json!({"sheet": "Data (2)", "to": 4, "copy": true})).unwrap();
+    assert_eq!(tables(&s, "Data (2) (2)"), ["Sales59", "Keys610"]);
+    assert_eq!(formula(&s, "Data (2) (2)", "H4"), "SUM(Sales59[Qty])");
+    assert_eq!(formula(&s, "Data (2) (2)", "H5"), "SUM(Keys610[K])");
+}
+
+fn single_table(name: &str) -> Session {
+    let mut s = s();
+    s.execute("sheet.rename", json!({"sheet": 0, "name": "Data"})).unwrap();
+    s.execute("range.setValues", json!({"range": "A1", "values": [["Qty"], [18]]})).unwrap();
+    s.execute("insert.table", json!({"range": "A1:A2", "name": name})).unwrap();
+    s.execute("cell.set", json!({"cell": "H1", "input": format!("=SUM({name}[Qty])")})).unwrap();
+    s
+}
+
+#[test]
+fn copy_skips_workbook_name_with_one_source_table() {
+    let mut s = single_table("Sales");
+    s.execute("formulas.defineName", json!({"name": "Sales3", "refersTo": "=1"})).unwrap();
+    copy_data(&mut s);
+    assert_eq!(tables(&s, "Data (2)"), ["Sales4"]);
+}
+
+#[test]
+fn copy_adds_separator_to_formula_visible_r_name() {
+    let mut s = single_table("R_");
+    copy_data(&mut s);
+    assert_eq!(tables(&s, "Data"), ["R_"]);
+    assert_eq!(tables(&s, "Data (2)"), ["R__3"]);
+    assert_eq!(formula(&s, "Data (2)", "H1"), "SUM(R__3[Qty])");
+}
+
+#[test]
+fn copy_shortens_a_255_character_table_name() {
+    let source = format!("T{}", "x".repeat(254));
+    let copied = format!("T{}3", "x".repeat(252));
+    let mut s = single_table(&source);
+    copy_data(&mut s);
+    assert_eq!(tables(&s, "Data"), [source]);
+    assert_eq!(tables(&s, "Data (2)"), [copied.clone()]);
+    assert_eq!(formula(&s, "Data (2)", "H1"), format!("SUM({copied}[Qty])"));
+}
+
+#[test]
+fn copy_reserves_kept_sheet_defined_names() {
+    let mut s = book();
+    let kept = gridcraft_model::PreservedSheet {
+        name: "ChartSheet".into(),
+        names: vec![gridcraft_model::PreservedName { attrs: r#" name="sAlEs&#52;" hidden="1""#.into(), formula: "1".into() }],
+        ..Default::default()
+    };
+    std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).preserved =
+        Some(gridcraft_model::Preserved { sheets: vec![kept], ..Default::default() }.into());
+    copy_data(&mut s);
+    assert_eq!(tables(&s, "Data (2)"), ["Sales5"]);
+}
+
+#[test]
+fn copy_reserves_an_imported_slicer_cache_without_a_defined_name_marker() {
+    let mut s = book();
+    let w = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    w.sheet_mut(0).unwrap().slicers[0].imported_cache.name = "sales4".into();
+    copy_data(&mut s);
+    assert_eq!(tables(&s, "Data (2)"), ["Sales5"]);
+    assert!(save_and_reopen(&mut s).is_empty());
+    assert_eq!(wb(&s).sheets[0].slicers[0].imported_cache.name, "sales4");
+    assert_eq!(slicers(&s, "Data (2)"), [("Sales5".into(), "Region".into())]);
+}
+
+#[test]
+fn copied_conditional_formatting_validation_and_charts_follow_the_copied_table() {
+    let mut s = book();
+    s.execute("home.conditionalFormat", json!({"range": "D1", "rule": {"type": "expression", "formula": "=SUM(Sales[Qty])>50"}})).unwrap();
+    s.execute(
+        "data.validation",
+        json!({"range": "D2", "type": "whole", "operator": "between", "formula1": "=MIN(Sales[Qty])", "formula2": "=MAX(Sales[Qty])"}),
+    )
+    .unwrap();
+    s.execute("insert.chart", json!({"range": "A1:B5", "type": "bubble"})).unwrap();
+    let w = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let series = &mut w.sheet_mut(0).unwrap().charts[0].series[0];
+    series.values = "Sales[Qty]".into();
+    series.categories = Some("Targets[Target]".into());
+    series.name = Some("Sales[[#Headers],[Qty]]".into());
+    series.bubble_sizes = Some("Sales[Qty]".into());
+    let mut literal_title = series.clone();
+    literal_title.name = Some("Sales".into());
+    w.sheet_mut(0).unwrap().charts[0].series.push(literal_title);
+    // Insert before the source so the test does not assume the copy follows it.
+    s.execute("sheet.move", json!({"sheet": "Data", "to": 0, "copy": true})).unwrap();
+    s.execute("cell.set", json!({"sheet": "Data (2)", "cell": "B2", "input": "90"})).unwrap();
+    let w = wb(&s);
+    for (sheet, table, first) in [("Data", "Sales", 3.0), ("Data (2)", "Sales4", 90.0)] {
+        let si = w.sheet_index(sheet).unwrap();
+        let sh = &w.sheets[si];
+        let gridcraft_model::CfRule::Expression { formula, .. } = &sh.cond_formats[0].rule else { panic!("expected expression rule") };
+        assert_eq!(formula.trim_start_matches('='), format!("SUM({table}[Qty])>50"));
+        assert_eq!(sh.validations[0].f1, format!("MIN({table}[Qty])"));
+        assert_eq!(sh.validations[0].f2, Some(format!("MAX({table}[Qty])")));
+        let chart = &sh.charts[0];
+        assert_eq!(chart.series[0].values, format!("{table}[Qty]"));
+        assert_eq!(chart.series[0].categories.as_deref(), Some("Targets[Target]"));
+        assert_eq!(chart.series[0].bubble_sizes, Some(format!("{table}[Qty]")));
+        assert_eq!(chart.series[0].name, Some(format!("{table}[[#Headers],[Qty]]")));
+        assert_eq!(chart.series[1].name.as_deref(), Some("Sales"));
+        assert_eq!(gridcraft_chart::resolve(w, si, chart).series[0].values[0], Some(first));
+    }
+    assert_eq!(formula(&s, "Report", "A1"), "SUM(Sales[Qty])");
 }
 
 #[test]
@@ -131,7 +248,7 @@ fn a_copied_sheets_own_references_use_its_tables() {
     // row `SUBTOTAL(109,Table69[Sales])`); references to other sheets' tables are not.
     assert_eq!(formula(&s, "Data (2)", "B6"), totals.replace("Sales[", "Sales4["));
     assert_eq!(formula(&s, "Data (2)", "D1"), "SUM(Sales4[Qty])");
-    assert_eq!(formula(&s, "Data (2)", "D2"), "ROWS(Sales4)");
+    assert_eq!(formula(&s, "Data (2)", "D2"), "ROWS(Sales)");
     assert_eq!(formula(&s, "Data (2)", "D3"), "ROWS(Targets)");
     assert_eq!(wb(&s).sheets[1].tables[0].columns[1].formula.as_deref(), Some("Sales4[@Qty]*1"));
     assert_eq!(name_formula(&s, "Local", Some("Data (2)")), "SUM(Sales4[Qty])");
@@ -227,6 +344,7 @@ fn a_copied_sheet_saves_reopens_and_saves_again_with_the_same_bindings() {
     let (made_sheets, mut made_names) = summary(&s);
     let warnings = save_and_reopen(&mut s);
     assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(formula(&s, "Data (2)", "D2"), "ROWS(Sales)");
     let reopened = summary(&s);
     assert_eq!(reopened.0, made_sheets);
     // Each slicer has a cache of its own, named by X19's planner; the file adds their markers.

@@ -26,8 +26,7 @@ pub(crate) fn repair(wb: &mut Cow<'_, Workbook>, extra_names: impl IntoIterator<
     if wb.sheets.iter().any(|s| s.print.title_cols.is_some() || s.print.title_rows.is_some()) {
         used.insert(fold_name("_xlnm.Print_Titles"));
     }
-    let kept = wb.preserved.iter().flat_map(|p| &p.sheets).flat_map(|s| &s.names);
-    used.extend(kept.filter_map(|n| crate::xml::parse(format!("<n{}/>", n.attrs).as_bytes()).ok()?.attr("name").map(fold_name)));
+    used.extend(crate::kept_defined_names(wb).map(|n| fold_name(&n)));
     let mut pending = Vec::new();
     for (si, sheet) in wb.sheets.iter().enumerate() {
         for (ti, t) in sheet.tables.iter().enumerate() {

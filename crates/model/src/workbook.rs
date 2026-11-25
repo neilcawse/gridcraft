@@ -12,28 +12,27 @@ use crate::sheet::Sheet;
 use crate::style::{StyleTable, Theme};
 
 struct TableRename<'a> {
-    wb: &'a Workbook,
+    /// Present on rename, absent on sheet copy (which only retargets structured references).
+    wb: Option<&'a Workbook>,
     old: &'a str,
     new: &'a str,
-    /// Only the sheet's own unqualified references change (a sheet copy's tables): a
-    /// sheet-qualified name keeps naming `old`.
-    local: bool,
 }
 
 impl TableRename<'_> {
     fn replacement(&self, n: &str, sheet: usize, env: &[String]) -> Option<Expr> {
+        let wb = self.wb?;
         if n.starts_with('[') {
             return None;
         }
         let (scope, bare, qualifier) = match n.rsplit_once('!') {
-            Some((s, b)) => (self.wb.sheet_index(s)?, b, Some(s)),
+            Some((s, b)) => (wb.sheet_index(s)?, b, Some(s)),
             None => (sheet, n, None),
         };
-        if !bare.eq_ignore_ascii_case(self.old) || self.wb.name(bare, scope).is_some() {
+        if !bare.eq_ignore_ascii_case(self.old) || wb.name(bare, scope).is_some() {
             return None;
         }
         let renamed = qualifier.map_or_else(|| self.new.into(), |s| format!("{s}!{}", self.new));
-        Some(if env.iter().any(|local| gridcraft_formula::same_name(local, &renamed)) || self.wb.name(self.new, scope).is_some() {
+        Some(if env.iter().any(|local| gridcraft_formula::same_name(local, &renamed)) || wb.name(self.new, scope).is_some() {
             Expr::Struct(gridcraft_formula::StructRef { table: self.new.into(), specifiers: vec![], col_start: None, col_end: None })
         } else {
             Expr::Name(renamed)
@@ -45,15 +44,15 @@ impl TableRename<'_> {
         if structured {
             return n.eq_ignore_ascii_case(self.old).then(|| Expr::Name(self.new.into()));
         }
-        if self.local && n.contains('!') {
-            return None;
-        }
         self.replacement(n, sheet, env)
     }
 
     /// Formula text read on `sheet` with the table renamed, when that changes it.
     fn text(&self, text: &str, sheet: usize) -> Option<String> {
-        let mut e = gridcraft_formula::parse_name(text).ok()?;
+        self.expression_text(gridcraft_formula::parse_name(text).ok()?, text, sheet)
+    }
+
+    fn expression_text(&self, mut e: Expr, text: &str, sheet: usize) -> Option<String> {
         if !self.might_use_table(&e) || !rewrite_table_tokens(&mut e, &|n, structured, env| self.token(n, structured, sheet, env)) {
             return None;
         }
@@ -62,8 +61,8 @@ impl TableRename<'_> {
     }
 
     /// Sheet `i`'s cell formulas that change with the table renamed.
-    fn cells(&self, i: usize) -> Vec<(CellRef, Formula)> {
-        self.wb.sheets[i]
+    fn cells(&self, sheet: &Sheet, i: usize) -> Vec<(CellRef, Formula)> {
+        sheet
             .cells
             .iter()
             .filter_map(|(c, cell)| {
@@ -78,6 +77,54 @@ impl TableRename<'_> {
                 })?
             })
             .collect()
+    }
+
+    fn features(&self, sheet: &mut Sheet, si: usize) {
+        let text = |f: &mut String| {
+            if let Some(new) = self.text(f, si) {
+                *f = new;
+            }
+        };
+        let threshold = |v: &mut crate::CfValueKind| {
+            if let crate::CfValueKind::Formula(f) = v {
+                text(f);
+            }
+        };
+        for cf in &mut sheet.cond_formats {
+            match &mut cf.rule {
+                crate::CfRule::CellIs { a, b, .. } => {
+                    text(a);
+                    b.iter_mut().for_each(text);
+                }
+                crate::CfRule::Expression { formula, .. } => text(formula),
+                crate::CfRule::ColorScale { stops } => stops.iter_mut().for_each(|(v, _)| threshold(v)),
+                crate::CfRule::DataBar { min, max, .. } => {
+                    threshold(min);
+                    threshold(max);
+                }
+                crate::CfRule::IconSet { thresholds, .. } => thresholds.iter_mut().for_each(threshold),
+                _ => {}
+            }
+        }
+        for dv in &mut sheet.validations {
+            text(&mut dv.f1);
+            dv.f2.iter_mut().for_each(text);
+        }
+        for chart in &mut sheet.charts {
+            for series in &mut chart.series {
+                text(&mut series.values);
+                series.categories.iter_mut().for_each(text);
+                series.bubble_sizes.iter_mut().for_each(text);
+                // A bare series title can be literal text, even if it is the table name.
+                if let Some(name) = &mut series.name
+                    && let Ok(e) = gridcraft_formula::parse(name)
+                    && (name.trim_start().starts_with('=') || matches!(&e, Expr::Struct(r) if r.table.eq_ignore_ascii_case(self.old)))
+                    && let Some(new) = self.expression_text(e, name, si)
+                {
+                    *name = new;
+                }
+            }
+        }
     }
 }
 
@@ -800,21 +847,21 @@ impl Workbook {
             }
         }
         for i in 0..self.sheets.len() {
-            let rewritten = TableRename { wb: self, old: &old, new: name, local: false }.cells(i);
+            let rewritten = TableRename { wb: Some(self), old: &old, new: name }.cells(&self.sheets[i], i);
             self.set_formulas(i, rewritten);
         }
     }
 
     /// Points sheet `si`'s own references to table `old` at table `new`, as a sheet copy does for
     /// each table it copies (`si` the copy, `old` the original table and `new` its copy). That
-    /// covers unqualified references in the sheet's cell formulas, calculated column formulas and
-    /// custom totals, its own sheet-scoped names and its table slicers. Other sheets and
-    /// workbook-scoped names keep naming `old`, as do sheet-qualified names (`Data!Sales`).
+    /// retargets structured references in formulas, names, formatting and validation rules, and
+    /// chart series. Table slicers also follow the copy. Bare table names are left alone, as are
+    /// references on other sheets and workbook-scoped names.
     pub fn retarget_table_on_sheet(&mut self, si: usize, old: &str, new: &str) {
         if si >= self.sheets.len() {
             return;
         }
-        let rename = TableRename { wb: self, old, new, local: true };
+        let rename = TableRename { wb: None, old, new };
         let names: Vec<(usize, String)> = self
             .names
             .iter()
@@ -833,7 +880,8 @@ impl Workbook {
                 (formula.is_some() || label.is_some()).then_some((ti, ci, formula, label))
             })
             .collect();
-        let cells = rename.cells(si);
+        let cells = rename.cells(&self.sheets[si], si);
+        rename.features(Arc::make_mut(&mut self.sheets[si]), si);
         self.set_formulas(si, cells);
         for (at, formula) in names {
             self.names[at].formula = formula;
