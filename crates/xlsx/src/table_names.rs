@@ -10,12 +10,18 @@ use gridcraft_model::{CfRule, CfValueKind, Formula, PivotSource, SlicerSource, T
 
 type Position = (usize, usize);
 
+/// ECMA-376 Part 1 §18.5.1.2 makes a table's `displayName` unique amongst all other display
+/// names and defined names in the workbook, whatever their scope; GridCraft's own Insert Table
+/// and Rename Table refuse a name any defined name has. Sheet-scoped names, including those kept
+/// with chart, dialog and macro sheets, therefore reserve their spelling as well.
 pub(crate) fn repair(wb: &mut Cow<'_, Workbook>, extra_names: impl IntoIterator<Item = String>) {
     if wb.sheets.iter().all(|sheet| sheet.tables.is_empty()) {
         return;
     }
     let mut used: HashSet<String> = extra_names.into_iter().map(|n| fold_name(&n)).collect();
-    used.extend(wb.names.iter().filter(|n| n.scope.is_none() && !n.name.is_empty()).map(|n| fold_name(&n.name)));
+    used.extend(wb.names.iter().filter(|n| !n.name.is_empty()).map(|n| fold_name(&n.name)));
+    let kept = wb.preserved.iter().flat_map(|p| &p.sheets).flat_map(|s| &s.names);
+    used.extend(kept.filter_map(|n| crate::xml::parse(format!("<n{}/>", n.attrs).as_bytes()).ok()?.attr("name").map(fold_name)));
     let mut pending = Vec::new();
     for (si, sheet) in wb.sheets.iter().enumerate() {
         for (ti, t) in sheet.tables.iter().enumerate() {
@@ -90,6 +96,16 @@ impl Rewrite<'_> {
         if name.bytes().any(|b| b.is_ascii_uppercase()) { self.first.get(&name.to_ascii_lowercase()).copied() } else { self.first.get(name).copied() }
     }
 
+    /// The table an unqualified token names: the owner table when it is spelled like the owner,
+    /// else the first table of that spelling.
+    fn resolve(&self, bare: &str, owner: Option<Position>) -> Option<Position> {
+        owner.filter(|&(si, ti)| self.original.sheets[si].tables[ti].name.eq_ignore_ascii_case(bare)).or_else(|| self.table(bare))
+    }
+
+    fn renames(&self, bare: &str, owner: Option<Position>) -> bool {
+        self.resolve(bare, owner).is_some_and(|at| self.renamed.contains_key(&at))
+    }
+
     fn replacement(&self, n: &str, structured: bool, sheet: usize, owner: Option<Position>, env: &[String]) -> Option<Expr> {
         if n.starts_with('[') || structured && n.contains('!') {
             return None;
@@ -104,9 +120,7 @@ impl Rewrite<'_> {
         if !structured && scope == usize::MAX && self.original.names.iter().any(|n| n.scope.is_some() && n.name.eq_ignore_ascii_case(bare)) {
             return None;
         }
-        let at = owner
-            .filter(|&(si, ti)| qualifier.is_none() && self.original.sheets[si].tables[ti].name.eq_ignore_ascii_case(bare))
-            .or_else(|| self.table(bare))?;
+        let at = self.resolve(bare, owner.filter(|_| qualifier.is_none()))?;
         let name = self.renamed.get(&at)?.clone();
         Some(if structured {
             Expr::Name(name)
@@ -146,12 +160,15 @@ impl Rewrite<'_> {
                 .iter()
                 .filter_map(|(c, cell)| {
                     let f = cell.formula.as_ref()?;
+                    // A formula in a table's own cells (its calculated column or totals row) is
+                    // read in that table's context, as the column formula is.
+                    let owner = self.original.sheets[si].tables.iter().position(|t| t.range.contains(c)).map(|ti| (si, ti));
                     f.with_expr(|e| {
                         let mut uses_table = false;
                         e.walk(&mut |e| {
                             uses_table |= match e {
-                                Expr::Name(n) => self.table(n.rsplit('!').next().unwrap_or(n)).is_some_and(|at| self.renamed.contains_key(&at)),
-                                Expr::Struct(s) => self.table(&s.table).is_some_and(|at| self.renamed.contains_key(&at)),
+                                Expr::Name(n) => self.renames(n.rsplit('!').next().unwrap_or(n), owner),
+                                Expr::Struct(s) => self.renames(&s.table, owner),
                                 _ => false,
                             }
                         });
@@ -159,7 +176,7 @@ impl Rewrite<'_> {
                             return None;
                         }
                         let mut e = e.clone();
-                        self.expression(&mut e, si, None).then(|| (c, Formula { array: f.array, ..f.rewritten(e) }))
+                        self.expression(&mut e, si, owner).then(|| (c, Formula { array: f.array, ..f.rewritten(e) }))
                     })?
                 })
                 .collect();

@@ -329,3 +329,144 @@ fn a_name_scoped_to_a_kept_sheet_follows_the_repaired_table() -> Result<(), Box<
     assert_eq!(local.text, "Source_Rows[Value]");
     Ok(())
 }
+
+/// The calculated column and totals row cells of the renamed duplicate follow it as its column
+/// formula does; a formula outside it keeps the first table of that spelling.
+#[test]
+fn a_tables_own_cells_follow_it_like_its_column_formula() -> Result<(), Box<dyn std::error::Error>> {
+    let book = r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="One" sheetId="1" r:id="rId1"/><sheet name="Two" sheetId="2" r:id="rId2"/></sheets></workbook>"#;
+    let book_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#;
+    let sheet = |n: &str, v: u32| {
+        format!(
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Value</t></is></c><c r="B1" t="inlineStr"><is><t>Twice</t></is></c><c r="D1"><f>SUM({n}[Value])</f><v>1</v></c></row><row r="2"><c r="A2"><v>{v}</v></c><c r="B2"><f>{n}[[#This Row],[Value]]*2</f><v>{}</v></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Total</t></is></c><c r="B3"><f>SUBTOTAL(109,{n}[Twice])</f><v>{}</v></c></row></sheetData><tableParts count="1"><tablePart r:id="rId1"/></tableParts></worksheet>"#,
+            2 * v,
+            2 * v
+        )
+    };
+    let rels = |id: u32| {
+        format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table{id}.xml"/></Relationships>"#
+        )
+    };
+    let table = |id: u32, n: &str| {
+        format!(
+            r#"<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="{id}" name="{n}" displayName="{n}" ref="A1:B3" totalsRowCount="1"><tableColumns count="2"><tableColumn id="1" name="Value" totalsRowLabel="Total"/><tableColumn id="2" name="Twice" totalsRowFunction="sum"><calculatedColumnFormula>{n}[[#This Row],[Value]]*2</calculatedColumnFormula></tableColumn></tableColumns></table>"#
+        )
+    };
+    let (one, two) = (sheet("Items", 1), sheet("ITEMS", 5));
+    let malformed = make_zip(&[
+        ("[Content_Types].xml", CT.as_bytes()),
+        ("_rels/.rels", ROOT_RELS.as_bytes()),
+        ("xl/workbook.xml", book.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", book_rels.as_bytes()),
+        ("xl/worksheets/sheet1.xml", one.as_bytes()),
+        ("xl/worksheets/sheet2.xml", two.as_bytes()),
+        ("xl/worksheets/_rels/sheet1.xml.rels", rels(1).as_bytes()),
+        ("xl/worksheets/_rels/sheet2.xml.rels", rels(2).as_bytes()),
+        ("xl/tables/table1.xml", table(1, "Items").as_bytes()),
+        ("xl/tables/table2.xml", table(2, "ITEMS").as_bytes()),
+    ]);
+    let (mut wb, _) = read_xlsx(&malformed)?;
+    for cycle in 0..2 {
+        let formula = |si: usize, row, col| wb.sheets[si].cell(CellRef::new(row, col)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone());
+        assert_eq!(wb.sheets[0].tables[0].name, "Items", "cycle {cycle}");
+        assert_eq!(wb.sheets[1].tables[0].name, "ITEMS_2", "cycle {cycle}");
+        assert_eq!(wb.sheets[1].tables[0].columns[1].formula.as_deref(), Some("ITEMS_2[@Value]*2"), "cycle {cycle}");
+        assert_eq!(formula(1, 1, 1).as_deref(), Some("ITEMS_2[@Value]*2"), "cycle {cycle}");
+        assert_eq!(formula(1, 2, 1).as_deref(), Some("SUBTOTAL(109,ITEMS_2[Twice])"), "cycle {cycle}");
+        assert_eq!(formula(1, 0, 3).as_deref(), Some("SUM(ITEMS[Value])"), "outside the table: the first table, cycle {cycle}");
+        assert_eq!(formula(0, 1, 1).as_deref(), Some("Items[@Value]*2"), "cycle {cycle}");
+        (wb, _) = read_xlsx(&write_xlsx(&wb)?)?;
+    }
+    Ok(())
+}
+
+fn chart(id: u32, kind: ChartKind, series: Series) -> Chart {
+    Chart {
+        id,
+        kind,
+        series: vec![series],
+        anchor: Anchor { width: 160.0, height: 120.0, ..Default::default() },
+        title: None,
+        legend: LegendPos::Right,
+        data_labels: false,
+        data_table: None,
+        gridlines: false,
+        style: 1,
+        hole_size: 75,
+        first_slice_angle: 0,
+        x_title: None,
+        y_title: None,
+        source: None,
+        by_rows: false,
+        pivot: None,
+        axis_number_formats: Default::default(),
+        pivot_label_formats: vec![],
+    }
+}
+
+/// Bare series titles the model holds as literals (older files, other formats) stay literal when
+/// they only spell a structured reference: no table has that name.
+#[test]
+fn a_literal_series_title_spelling_a_structured_reference_stays_literal() -> Result<(), Box<dyn std::error::Error>> {
+    let mut wb = Workbook::new();
+    let sh = Arc::make_mut(&mut wb.sheets[0]);
+    sh.set_value(CellRef::new(0, 0), Value::Number(1.0));
+    let series = Series { name: Some("Sales[2024]".into()), values: "Sheet1!$A$1:$A$1".into(), ..Default::default() };
+    sh.charts.push(chart(1, ChartKind::ColumnClustered, series.clone()));
+    sh.charts.push(chart(2, ChartKind::Waterfall, series));
+    let saved = write_xlsx(&wb)?;
+    let classic = xml(&saved, "xl/charts/chart1.xml")?;
+    assert!(classic.contains("<c:tx><c:v>Sales[2024]</c:v></c:tx>"), "{classic}");
+    let extended = xml(&saved, "xl/charts/chartEx2.xml")?;
+    assert!(extended.contains("<cx:tx><cx:txData><cx:v>Sales[2024]</cx:v></cx:txData></cx:tx>"), "{extended}");
+    let (back, _) = read_xlsx(&saved)?;
+    for chart in &back.sheets[0].charts {
+        assert_eq!(chart.series[0].name.as_deref(), Some("\"Sales[2024]\""), "read back as quoted text");
+    }
+    Ok(())
+}
+
+/// ECMA-376 §18.5.1.2: a table's name is unique amongst all defined names, whatever their scope.
+/// The sheet's own name keeps its spelling and its bare references; the table's references follow
+/// the table.
+#[test]
+fn sheet_scoped_names_reserve_table_names() -> Result<(), Box<dyn std::error::Error>> {
+    let mut wb = Workbook::new();
+    wb.sheets.push(Arc::new(Sheet::new("Other")));
+    let sh = Arc::make_mut(&mut wb.sheets[0]);
+    sh.tables.push(table("Foo", 0));
+    sh.tables.push(table("LocalRef", 3));
+    sh.set_cell(CellRef::new(5, 0), Cell::formula(Formula::new("FOO+SUM(Foo[Value])")));
+    Arc::make_mut(&mut wb.sheets[1]).set_cell(CellRef::new(0, 0), Cell::formula(Formula::new("SUM(Foo[Value])+COUNT(Foo)")));
+    wb.names.push(DefinedName {
+        name: "FOO".into(),
+        scope: Some(0),
+        formula: "Sheet1!$H$1".into(),
+        comment: String::new(),
+        hidden: false,
+        uid: Default::default(),
+    });
+    wb.preserved = Some(Arc::new(Preserved {
+        sheets: vec![PreservedSheet {
+            name: "Module1".into(),
+            kind: PreservedSheetKind::Module,
+            before: 2,
+            sheet_id: 3,
+            names: vec![PreservedName { attrs: r#" name="LOCALREF""#.into(), formula: "Sheet1!$H$2".into() }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    }));
+    let mut back = wb;
+    for cycle in 0..2 {
+        (back, _) = read_xlsx(&crate::write_xlsx_as(&back, crate::XlsxKind::MacroWorkbook)?)?;
+        let formula = |si: usize, at: CellRef| back.sheets[si].cell(at).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone());
+        let names: Vec<_> = back.sheets[0].tables.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["Foo_2", "LocalRef_2"], "cycle {cycle}");
+        assert_eq!(formula(0, CellRef::new(5, 0)).as_deref(), Some("FOO+SUM(Foo_2[Value])"), "cycle {cycle}");
+        assert_eq!(formula(1, CellRef::new(0, 0)).as_deref(), Some("SUM(Foo_2[Value])+COUNT(Foo_2)"), "cycle {cycle}");
+        assert_eq!(back.name("FOO", 0).map(|n| n.formula.as_str()), Some("Sheet1!$H$1"));
+    }
+    Ok(())
+}

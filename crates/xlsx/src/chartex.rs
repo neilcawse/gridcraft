@@ -214,7 +214,7 @@ pub(crate) fn generated_names(wb: &Workbook) -> impl Iterator<Item = String> {
 }
 
 fn series_title_ref(wb: &Workbook, si: usize, f: &str) -> bool {
-    ref_range(wb, si, f).is_some() || crate::chart::is_structured_ref(f)
+    ref_range(wb, si, f).is_some() || crate::chart::is_table_ref(wb, f)
 }
 
 /// `<cx:f>` for a reference: a new hidden workbook name for it (collected in `names`, written

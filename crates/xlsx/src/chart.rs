@@ -735,6 +735,13 @@ pub(crate) fn is_structured_ref(f: &str) -> bool {
     matches!(gridcraft_formula::parse(f), Ok(Expr::Struct(r)) if !r.table.is_empty())
 }
 
+/// A series title that is a structured reference to one of the workbook's tables. Bare text the
+/// model holds as a literal (from older files and other formats) can spell a structured
+/// reference to no table: that stays literal text.
+pub(crate) fn is_table_ref(wb: &Workbook, f: &str) -> bool {
+    matches!(gridcraft_formula::parse(f), Ok(Expr::Struct(r)) if !r.table.is_empty() && wb.table(&r.table).is_some())
+}
+
 /// The series model also accepts quoted text. Keep a literal imported title from being
 /// interpreted as a formula if it spells a structured reference.
 pub(crate) fn literal_series_title(title: String) -> Option<String> {
@@ -943,7 +950,7 @@ fn multi_level_cat(f: &str, values: &str, wb: &Workbook, si: usize) -> Option<St
 fn series_xml(s: &Series, idx: usize, g: G, labels: bool, wb: &Workbook, si: usize) -> String {
     let mut x = format!("<c:ser><c:idx val=\"{idx}\"/><c:order val=\"{idx}\"/>");
     if let Some(n) = &s.name {
-        if is_ref(n) || is_structured_ref(n) || is_defined_name(wb, si, n) {
+        if is_ref(n) || is_table_ref(wb, n) || is_defined_name(wb, si, n) {
             x.push_str(&str_data("tx", n, wb, si));
         } else {
             let _ = write!(x, "<c:tx><c:v>{}</c:v></c:tx>", esc(&literal_text(n)));

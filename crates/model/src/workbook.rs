@@ -896,6 +896,47 @@ fn spell_calls(e: Expr, lambdas: &[String]) -> Expr {
 mod tests {
     use super::*;
 
+    /// Renaming a table rewrites a legacy array formula's text and keeps its array range.
+    #[test]
+    fn rename_table_keeps_the_array_range_of_a_formula_it_rewrites() {
+        let mut wb = Workbook::new();
+        let range = |a: &str| RangeRef::parse(a).unwrap_or_else(|| RangeRef::new(CellRef::new(0, 0), CellRef::new(0, 0)));
+        let at = CellRef::new(0, 2);
+        if let Some(sh) = wb.sheet_mut(0) {
+            let col = |n: &str| crate::TableColumn {
+                name: n.into(),
+                totals: crate::TotalsFn::None,
+                totals_label: None,
+                formula: None,
+                unique_name: None,
+                xml: None,
+            };
+            sh.tables.push(crate::Table {
+                id: 1,
+                name: "Items".into(),
+                range: range("A1:A3"),
+                header_row: true,
+                totals_row: false,
+                columns: vec![col("V")],
+                style: String::new(),
+                banded_rows: false,
+                banded_cols: false,
+                first_col: false,
+                last_col: false,
+                filter_button: true,
+                filter: vec![],
+                table_type: None,
+                connection_id: None,
+                uid: Default::default(),
+            });
+            sh.set_cell(at, crate::Cell::formula(Formula { array: Some(range("C1:D1")), ..Formula::new("TRANSPOSE(Items[V])") }));
+        }
+        wb.rename_table(0, 0, "Renamed");
+        let f = wb.sheet(0).and_then(|sh| sh.cell(at)).and_then(|c| c.formula.clone());
+        assert_eq!(f.as_deref().map(|f| f.text.as_str()), Some("TRANSPOSE(Renamed[V])"));
+        assert_eq!(f.and_then(|f| f.array), Some(range("C1:D1")));
+    }
+
     #[test]
     fn phonetics_are_additive_in_json() -> Result<(), Box<dyn std::error::Error>> {
         let mut wb = Workbook::new();
