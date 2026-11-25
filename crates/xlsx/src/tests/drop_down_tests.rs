@@ -148,6 +148,33 @@ fn a_pass_through_controls_stand_in_is_read_as_before() {
     assert!(kept.contains("shapeId=\"1026\""), "the list box is kept: {kept}");
 }
 
+/// A drop-down with its own item list (`itemLst`, VML `ListItem`) or a macro holds more than the
+/// model does: it stays with pass-through, unchanged, and its stand-in is read as before.
+#[test]
+fn a_drop_down_with_its_own_items_or_a_macro_is_kept_unchanged() {
+    let items = r#"<?xml version="1.0"?><formControlPr xmlns="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" objectType="Drop" fmlaLink="$AJ$5" sel="2"><itemLst><item val="One"/><item val="Two"/></itemLst></formControlPr>"#.to_string();
+    let vml_items = vml("Drop", "2").replace("<x:DropStyle>", "<x:ListItem>One</x:ListItem><x:ListItem>Two</x:ListItem><x:DropStyle>");
+    let vml_macro = vml("Drop", "2").replace("<x:DropStyle>", "<x:FmlaMacro>[0]!Changed</x:FmlaMacro><x:DropStyle>");
+    let range = ctrl_prop(r#"fmlaLink="$AJ$5" fmlaRange="$AJ$6:$AJ$12" sel="2""#);
+    let bare = ctrl_prop(r#"fmlaLink="$AJ$5" sel="2""#);
+    // The properties part has the item list, or only the VML has the items or the macro.
+    let cases = [(items.as_str(), vml("Drop", "2")), (bare.as_str(), vml_items), (range.as_str(), vml_macro)];
+    for (i, (prop, v)) in cases.iter().enumerate() {
+        let (wb, _) = read_xlsx(&hanson_with(2, Some(prop), Some(v), Some(&drawing("_x0000_s1026", false)))).unwrap();
+        let sh = wb.sheet(0).unwrap();
+        assert!(sh.controls.is_empty(), "case {i}: {:?}", sh.controls);
+        assert_eq!(sh.shapes.len(), 1, "case {i}: the stand-in is read as before");
+        let kept = sh.preserved.as_ref().and_then(|k| k.elements.iter().find(|e| e.slot == "controls")).map(|e| e.xml.clone()).unwrap_or_default();
+        assert!(kept.contains("shapeId=\"1026\""), "case {i}: {kept}");
+        // Saved and read back, it is still kept, not modelled.
+        let (back, _) = read_xlsx(&write_xlsx(&wb).unwrap()).unwrap();
+        let bs = back.sheet(0).unwrap();
+        assert!(bs.controls.is_empty(), "case {i}: {:?}", bs.controls);
+        let kept = bs.preserved.as_ref().and_then(|k| k.elements.iter().find(|e| e.slot == "controls")).map(|e| e.xml.clone()).unwrap_or_default();
+        assert!(kept.contains("shapeId=\"1026\""), "case {i} back: {kept}");
+    }
+}
+
 /// Saved without an edit: the properties part, the VML shape, the `<controls>` entry and their
 /// relationships say what the file said, and the copy reads back the same and saves the same.
 #[test]
@@ -171,6 +198,14 @@ fn an_unedited_drop_down_round_trips_with_its_parts() {
     }
     let shape_ids: Vec<&str> = sheet.split("<control shapeId=\"").skip(1).filter_map(|s| s.split('"').next()).collect();
     assert!(shape_ids.iter().all(|id| vml_out.contains(&format!("id=\"_x0000_s{id}\""))), "{shape_ids:?}");
+    // The drawing keeps the control's hidden stand-in, naming the same VML shape.
+    assert!(rels.contains("/relationships/drawing\"") && sheet.contains("<drawing r:id="), "{rels}");
+    let drawing_out = text(&mut pkg, "xl/drawings/drawing1.xml");
+    assert!(!shape_ids.is_empty());
+    for id in &shape_ids {
+        let want = format!(r#"<xdr:cNvPr id="{id}" name="Drop Down 2" hidden="1">"#);
+        assert!(drawing_out.contains(&want) && drawing_out.contains(&format!(r#"spid="_x0000_s{id}""#)), "{want}: {drawing_out}");
+    }
 
     let (back, report) = read_xlsx(&out).unwrap();
     assert!(report.warnings.is_empty(), "{:?}", report.warnings);

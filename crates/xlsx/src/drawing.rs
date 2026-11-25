@@ -13,8 +13,8 @@ use craft_xlsx::{Anchor as CraftAnchor, Drawing as CraftDrawing, Item as CraftIt
 
 use gridcraft_core::{CellRef, MAX_COLS, MAX_ROWS};
 use gridcraft_model::{
-    Anchor, AnchorMode, Color, DrawingGroup, DrawingRef, GroupFile, GroupFileMember, Image, MAX_GROUP_DEPTH, ObjectRect, Shape, ShapeFormat,
-    ShapeKind, ShapeTextAlign, ShapeTextAnchor, Sheet, Theme, rotates,
+    Anchor, AnchorMode, Color, DrawingGroup, DrawingRef, FormControl, GroupFile, GroupFileMember, Image, MAX_GROUP_DEPTH, ObjectRect, Shape,
+    ShapeFormat, ShapeKind, ShapeTextAlign, ShapeTextAnchor, Sheet, Theme, rotates,
 };
 
 use crate::IoError;
@@ -1051,6 +1051,9 @@ struct DrawingOut<'a> {
     done: Vec<bool>,
     groups_done: HashSet<u32>,
     next_id: usize,
+    /// The `cNvPr` ids the form controls' stand-ins take (their VML shape numbers): other objects
+    /// skip them.
+    reserved: HashSet<usize>,
 }
 
 impl DrawingOut<'_> {
@@ -1066,6 +1069,9 @@ impl DrawingOut<'_> {
     }
 
     fn take_id(&mut self) -> usize {
+        while self.reserved.contains(&self.next_id) {
+            self.next_id += 1;
+        }
         let id = self.next_id;
         self.next_id += 1;
         id
@@ -1211,8 +1217,9 @@ impl DrawingOut<'_> {
 
 /// The drawing part for a sheet's objects (relationship ids already assigned). A grouped object
 /// goes out with its outermost group: one anchor holding the `grpSp`, written where the group's
-/// first object comes in `objs`.
-pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>]) -> String {
+/// first object comes in `objs`. `stand_ins` are the sheet's form controls with their VML shape
+/// numbers: each gets the hidden shape Excel writes for applications that don't know controls.
+pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>], stand_ins: &[(&FormControl, u64)]) -> String {
     let mut index = HashMap::new();
     for (i, o) in objs.iter().enumerate() {
         if let Some(r) = o.drawing_ref() {
@@ -1237,6 +1244,7 @@ pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>]) -> String {
         done: vec![false; objs.len()],
         groups_done: HashSet::new(),
         next_id: 2,
+        reserved: stand_ins.iter().filter_map(|&(_, n)| usize::try_from(n).ok()).collect(),
     };
     for (i, o) in objs.iter().enumerate() {
         if let Some(dref) = o.drawing_ref()
@@ -1269,8 +1277,25 @@ pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>]) -> String {
         out.s.push_str("<xdr:clientData/>");
         out.s.push_str(close);
     }
+    for &(c, n) in stand_ins {
+        write_stand_in(&mut out.s, sheet, c, n);
+    }
     out.s.push_str("</xdr:wsDr>");
     out.s
+}
+
+/// Control `c`'s DrawingML stand-in, as Excel writes it: a hidden, unfilled rectangle at the
+/// control's anchor whose `cNvPr id` is the control's VML shape number `n` and whose
+/// `a14:compatExt spid` names that shape. It needs the 2010 drawing extensions, so it sits in
+/// `mc:AlternateContent` with nothing for other readers.
+fn write_stand_in(s: &mut String, sheet: &Sheet, c: &FormControl, n: u64) {
+    let (open, close) = anchor_open(sheet, &c.anchor);
+    let _ = write!(
+        s,
+        "<mc:AlternateContent xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\"><mc:Choice xmlns:a14=\"http://schemas.microsoft.com/office/drawing/2010/main\" Requires=\"a14\">{open}<xdr:sp macro=\"\" textlink=\"\"><xdr:nvSpPr><xdr:cNvPr id=\"{n}\" name=\"{}\" hidden=\"1\"><a:extLst><a:ext uri=\"{{63B3BB69-23CF-44E3-9099-C40C66FF867C}}\"><a14:compatExt spid=\"_x0000_s{n}\"/></a:ext></a:extLst></xdr:cNvPr><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr bwMode=\"auto\"><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></xdr:spPr></xdr:sp><xdr:clientData fPrintsWithSheet=\"{}\"/>{close}</mc:Choice><mc:Fallback/></mc:AlternateContent>",
+        esc_attr(&c.display_name()),
+        u8::from(c.print),
+    );
 }
 
 /// One object's element, with `cNvPr` id `id` and its transform at `off`/`ext` (EMUs), rotated

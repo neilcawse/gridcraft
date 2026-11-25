@@ -11,14 +11,16 @@
 //! Excel also writes a hidden DrawingML shape for each control (`cNvPr hidden="1"` with an
 //! `a14:compatExt spid` naming the VML shape) for applications that don't know controls. The
 //! drawing reader drops that stand-in for every control read here ([`ReadControls::modelled`]),
-//! so it doesn't also become a shape, and GridCraft doesn't write one. The stand-ins of controls
-//! left to pass-through are read as before.
+//! so it doesn't also become a shape, and the writer writes one for each control
+//! (`drawing::write_drawing`), so the sheet keeps its drawing. The stand-ins of controls left to
+//! pass-through are read as shapes, as before.
 //!
 //! Reading prefers the properties part and falls back to the VML. Values are clamped to the
 //! 0..30000 whole numbers sliders and spin buttons take, and a drop-down's chosen item and rows
 //! to the same range. Controls of other kinds (check boxes, list boxes, option buttons, ActiveX
-//! controls) are left to pass-through (`passthrough.rs`), which keeps them unchanged; a sheet can
-//! hold both, in one `<controls>` element and one VML drawing.
+//! controls), and drop-downs with their own item list or a macro, are left to pass-through
+//! (`passthrough.rs`), which keeps them unchanged; a sheet can hold both, in one `<controls>`
+//! element and one VML drawing.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -335,6 +337,14 @@ struct Props {
     sel: Option<i64>,
     drop_lines: Option<i64>,
     drop_style: Option<DropStyle>,
+    /// A drop-down lists items of its own (`itemLst`, VML `ListItem`) instead of a source range.
+    items: bool,
+}
+
+/// Whether a control of `kind` with properties `p` holds more than the model does, so it is left
+/// to pass-through, which keeps it unchanged: a drop-down with its own item list or a macro.
+fn beyond_model(p: &Props, kind: ControlKind) -> bool {
+    kind == ControlKind::Drop && (p.items || p.macro_.as_deref().is_some_and(|m| !m.trim().is_empty()))
 }
 
 fn props_from_ctrl_prop(e: &El) -> Props {
@@ -356,6 +366,7 @@ fn props_from_ctrl_prop(e: &El) -> Props {
         sel: int("sel"),
         drop_lines: int("dropLines"),
         drop_style: e.attr("dropStyle").and_then(drop_style_of),
+        items: e.child("itemLst").is_some_and(|l| l.kids("item").next().is_some()),
     }
 }
 
@@ -383,6 +394,7 @@ fn props_from_vml(shape: &El) -> Option<Props> {
         sel: int("Sel"),
         drop_lines: int("DropLines"),
         drop_style: text_of("DropStyle").as_deref().and_then(drop_style_of),
+        items: data.child("ListItem").is_some(),
     })
 }
 
@@ -557,6 +569,7 @@ pub fn read(cx: &mut Ctx<'_>, controls: Option<&El>, vml_rid: Option<&str>, rels
                     f.locked = f.locked.or(v.locked);
                     f.macro_ = v.macro_;
                     f.range = f.range.or(v.range);
+                    f.items |= v.items;
                 }
                 f
             }
@@ -570,8 +583,9 @@ pub fn read(cx: &mut Ctx<'_>, controls: Option<&El>, vml_rid: Option<&str>, rels
             p.print = pr.attr_bool("print").or(p.print);
             p.locked = pr.attr_bool("locked").or(p.locked);
         }
-        // Other kinds (a check box, a list box) stay with pass-through.
-        let Some(kind) = p.kind else { continue };
+        // Other kinds (a check box, a list box), and drop-downs the model can't hold, stay with
+        // pass-through.
+        let Some(kind) = p.kind.filter(|&k| !beyond_model(&p, k)) else { continue };
         let anchor =
             pr.and_then(|pr| pr.child("anchor")).and_then(|a| anchor_from_markers(a, sheet)).or_else(|| shape.and_then(|s| vml_anchor(s, sheet)));
         let Some(anchor) = anchor else { continue };
@@ -588,7 +602,8 @@ pub fn read(cx: &mut Ctx<'_>, controls: Option<&El>, vml_rid: Option<&str>, rels
         }
         let _ = n.filter(|_| sheet.controls.len() < MAX_CONTROLS).and_then(|n| {
             let p = props_from_vml(s)?;
-            let (kind, anchor) = (p.kind?, vml_anchor(s, sheet)?);
+            let kind = p.kind.filter(|&k| !beyond_model(&p, k))?;
+            let anchor = vml_anchor(s, sheet)?;
             let id = cx.next_object_id();
             sheet.controls.push(build(p, kind, anchor, None, id));
             read.insert(n);
