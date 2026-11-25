@@ -117,13 +117,13 @@ impl Arg {
     }
 
     /// Cells of the reference past its value: blanks the used range cut off.
-    pub fn cut_blanks(&self) -> usize {
+    pub fn cut_blanks(&self) -> u64 {
         let (h, w) = self.shape();
         let read = match &self.value {
             Value::Array(a) => a.data.len(),
             _ => 1,
         };
-        h.saturating_mul(w).saturating_sub(read)
+        (h as u64).saturating_mul(w as u64).saturating_sub(read as u64)
     }
 }
 

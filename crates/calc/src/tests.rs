@@ -1385,6 +1385,14 @@ fn indirect_r1c1_wraps_and_takes_whole_rows_and_columns() {
     assert_eq!(t.num("A11"), 7.0);
     assert_eq!(t.get("H12"), Value::Error(CellError::Value));
     assert_eq!(t.get("H13"), Value::Error(CellError::Div0));
+    t.set("H14", "=INDIRECT(\"R[-9223372036854775808]C\",FALSE)");
+    t.set("H15", "=INDIRECT(\"RC[9223372036854775807]\",FALSE)");
+    t.set("H16", "=INDIRECT(\"B2\",TRUE)");
+    t.set("H17", "=INDIRECT(\"XFE1\",TRUE)");
+    assert_eq!(t.get("H14"), Value::Error(CellError::Ref));
+    assert_eq!(t.get("H15"), Value::Error(CellError::Ref));
+    assert_eq!(t.get("H16"), Value::Number(5.0));
+    assert_eq!(t.get("H17"), Value::Error(CellError::Ref));
 }
 
 /// Excel 365: an OFFSET height or width between 0 and 1 is one cell, larger fractions truncate.
@@ -1398,10 +1406,14 @@ fn offset_fractional_sizes_below_one_are_one_cell() {
     t.set("E2", "=SUM(OFFSET(A1,1,1,2,1.9))");
     t.set("E3", "=SUM(OFFSET(A1,1,1,0.5,2))");
     t.set("E4", "=SUM(OFFSET(A1,1,1,2,0))");
+    t.set("E5", "=SUM(OFFSET(A1,1,1,-0.5,2))");
+    t.set("E6", "=SUM(OFFSET(A1,1,1,2,-0.5))");
     assert_eq!(t.num("E1"), 3.0);
     assert_eq!(t.num("E2"), 3.0);
     assert_eq!(t.num("E3"), 11.0);
     assert_eq!(t.get("E4"), Value::Error(CellError::Ref));
+    assert_eq!(t.get("E5"), Value::Error(CellError::Ref));
+    assert_eq!(t.get("E6"), Value::Error(CellError::Ref));
 }
 
 /// An array is one area: INDEX of it with another area number is #REF! (Excel 365).
@@ -1411,9 +1423,17 @@ fn index_of_an_array_takes_area_one_only() {
     t.set("A1", "=INDEX({1,2,3},1,2,1)");
     t.set("A2", "=INDEX({1,2,3},1,0,2)");
     t.set("A3", "=INDEX(5,1,1,2)");
+    t.set("B1", "=INDEX({1,2,3},{1;1},0,2)");
+    t.set("C1", "=INDEX({1,2,3},{1;1},0,1)");
     assert_eq!(t.num("A1"), 2.0);
     assert_eq!(t.get("A2"), Value::Error(CellError::Ref));
     assert_eq!(t.get("A3"), Value::Error(CellError::Ref));
+    for at in ["B1", "B2"] {
+        assert_eq!(t.get(at), Value::Error(CellError::Ref));
+    }
+    for at in ["C1", "C2"] {
+        assert_eq!(t.get(at), Value::Error(CellError::Calc));
+    }
 }
 
 #[test]
@@ -4183,4 +4203,20 @@ fn whole_column_criteria_ranges_count_the_blanks_past_the_used_range() {
     assert_eq!(t.num("D5"), 1.0);
     assert_eq!(t.num("D6"), 1.0);
     assert_eq!(t.num("D7"), 16_383.0);
+}
+
+#[test]
+fn single_criterion_aggregates_match_blanks_past_the_used_range() {
+    let mut t = T::new();
+    let mut data = gridcraft_model::Sheet::new("Data");
+    data.set_value(c("B1"), Value::Number(99.0));
+    data.set_value(c("B8"), Value::Number(4.0));
+    data.set_value(c("B10"), Value::Number(12.0));
+    t.wb.sheets.push(std::sync::Arc::new(data));
+    t.calc.rebuild(&t.wb);
+    t.set("A1", "occupied");
+    t.set("C1", "=SUMIF(A:A,\"\",Data!B1)");
+    t.set("C2", "=AVERAGEIF(A:A,\"\",Data!B1)");
+    assert_eq!(t.get("C1"), Value::Number(16.0));
+    assert_eq!(t.get("C2"), Value::Number(8.0));
 }

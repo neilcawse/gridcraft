@@ -66,24 +66,11 @@ fn find_exact_in_array(x: &Value, arr: &Array, wild: bool, reverse: bool) -> Opt
     find_exact(x, &arr.data, wild, reverse)
 }
 
-/// Approximate match of VLOOKUP, HLOOKUP, LOOKUP and MATCH: the position of the largest entry
-/// `<= x` in data sorted ascending (`desc = false`), or of the smallest entry `>= x` in data
-/// sorted descending. Like Excel this is a bisection over the whole vector, so on unsorted data
-/// it answers what Excel answers rather than a linear "best" entry:
-/// - the probe is the middle entry of the remaining window; a probe whose type differs from the
-///   needle (text vs number vs logical, blanks, errors) is replaced by the nearest entry of the
-///   needle's type above it in the window, or when there is none by the nearest below it (and
-///   then nothing past it can be a later match), so entries of other types are skipped
-///   (`LOOKUP(9.9E+307, range)` finds the last number);
-/// - a probe equal to the needle ends the search at once (the run of equal entries that follows
-///   it is taken, so sorted duplicates give the last one).
-///
-/// Observed in Excel: `VLOOKUP(534, {"INTEGRAL";0;1;2;534;9999999999;-9999999999}, …)` finds 534,
-/// `HLOOKUP("STRING", {"INTEGRAL","DOUBLE","BLANK","STRING","REF","AREA (rows)",<blank>}, …)`
-/// finds "STRING", `LOOKUP("DOUBLE", {"DOUBLE","BLANK","STRING","REF","AREA (rows)"}, …)`
-/// finds "DOUBLE", and `VLOOKUP("OJT", {"Period";1;…;8;<blank>;<blank>;"OJT";"Seminar"}, …)`
-/// finds "OJT" (the middle entry, a number, gives way to "OJT" above it, not "Period" below).
-/// Work is linear in the vector length at worst.
+/// Legacy approximate lookup in ascending data, or descending for `MATCH(...,-1)`. Excel's
+/// documentation requires sorted input and does not specify the result of unsorted lookups.
+/// This uses bisection and skips other types: prefer the first compatible key at or after the
+/// midpoint (preserving a mixed-key VLOOKUP corpus case), then fall back to a compatible key
+/// before it. On equality, use the end of the contiguous run of equal keys.
 fn bsearch_last(x: &Value, hay: &[Value], desc: bool) -> Option<usize> {
     let mut hi = hay.len().checked_sub(1)?;
     let mut lo = 0usize;
@@ -198,16 +185,14 @@ fn range_lookup_arg(v: &Value, from_ref: bool) -> R<bool> {
 /// The 0-based column (VLOOKUP) or row (HLOOKUP) of the index argument in a table `len` wide.
 /// Excel resolves it only once the key is found: a lookup that finds nothing is `#N/A` whatever
 /// the index (Excel 2013: `HLOOKUP(x, E45:AB49, 43, 0)` without x in the first row is `#N/A`).
-/// An index that is no whole number is `#REF!`: an error read from a cell, and text that doesn't
-/// read as a whole number (Excel 16: text "2" is column 2, but text "0.9", "29.9e-1" and "abc" are
-/// #REF!, while the number 0.9 is #VALUE! and 2.99 is column 2). An error computed in the formula
-/// is that error (Excel 2013: `VLOOKUP(a, t, HLOOKUP(…), FALSE)` with the HLOOKUP #N/A is #N/A).
+/// An error or non-integral text read from a cell is `#REF!` (public LookupFunctionsTestCaseData.xls).
+/// A computed index keeps normal numeric coercion, including propagation of a computed error.
 /// Below 1 (a blank, FALSE) it is `#VALUE!`; past the table `#REF!`.
 fn lookup_index(v: &Value, from_ref: bool, len: usize) -> R<usize> {
     let idx = match v.scalar() {
         Value::Error(_) if from_ref => return Err(CellError::Ref),
         Value::Error(e) => return Err(e),
-        Value::Text(t) => parse_number_text(&t).filter(|n| n.fract() == 0.0).ok_or(CellError::Ref)?,
+        Value::Text(t) if from_ref => parse_number_text(&t).filter(|n| n.fract() == 0.0).ok_or(CellError::Ref)?,
         v => v.to_number()?,
     };
     // NaN too: it would pass `idx < 1.0` and become index 0 (#2163).
@@ -342,9 +327,8 @@ fn match_fn(args: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     let arr = as_array(av);
     let hay = vector(&arr).ok_or(CellError::NA)?;
     let mt = opt_num(args, 2, 1.0)?;
-    // A text needle with wildcards is matched as a pattern whatever the match type: Excel 16 on
-    // {Albert; Charles; Ed; Greg; Ian; Cedric} gives `MATCH("??eg", …, 1)` and `MATCH("G*?eg", …,
-    // -1)` 4 (Greg) and `MATCH("*Ian*", …, 1)` 5, where a bisection would miss them.
+    // Public MatchFunctionTestCaseData.xls has wildcard hits in approximate modes too.
+    // Use the same pattern search as exact mode; the cache does not establish every tie case.
     let wild = matches!(&x, Value::Text(t) if has_wildcards(t));
     let pos = if mt == 0.0 || wild {
         find_exact_in_array(&x, &arr, true, false)
@@ -764,11 +748,13 @@ mod tests {
         is_err(ev("VLOOKUP", vec![n(0.5), rf(table()), n(9.0), b(false)]), CellError::NA);
         is_err(ev("VLOOKUP", vec![n(0.5), rf(table()), n(0.0), b(false)]), CellError::NA);
         is_err(ev("HLOOKUP", vec![n(0.5), rf(table()), n(9.0), b(false)]), CellError::NA);
-        for idx in [rf(Value::Error(CellError::Div0)), rf(Value::Error(CellError::NA)), rf(tv("abc")), rf(tv("0.9")), rf(tv("29.9e-1")), t("abc")] {
+        for idx in [rf(Value::Error(CellError::Div0)), rf(Value::Error(CellError::NA)), rf(tv("abc")), rf(tv("0.9")), rf(tv("29.9e-1"))] {
             is_err(ev("VLOOKUP", vec![n(3.0), rf(table()), idx, b(false)]), CellError::Ref);
         }
         is_text(ev("VLOOKUP", vec![n(3.0), rf(table()), rf(tv("2")), b(false)]), "three");
         close(ev("VLOOKUP", vec![n(3.0), rf(table()), t("3"), b(false)]), 30.0);
+        is_err(ev("VLOOKUP", vec![n(3.0), rf(table()), t("invalid"), b(false)]), CellError::Value);
+        is_text(ev("VLOOKUP", vec![n(3.0), rf(table()), t("2.75"), b(false)]), "three");
         close(ev("VLOOKUP", vec![n(1.0), rf(table()), b(true), b(false)]), 1.0);
         is_err(ev("VLOOKUP", vec![n(3.0), rf(table()), b(false), b(false)]), CellError::Value);
         is_err(ev("VLOOKUP", vec![n(3.0), rf(table()), rf(Value::Empty), b(false)]), CellError::Value);
@@ -861,13 +847,13 @@ mod tests {
         tall.extend((0..10_000).map(|_| vec![Value::Empty]));
         close(ev("MATCH", vec![n(9.0), rf(arr(tall))]), 3.0);
         // A probe of another type gives way to the nearest entry of the needle's type above it.
-        let mut keys = vec![vec![tv("Period"), tv("Minutes")]];
+        let mut keys = vec![vec![tv("Header"), tv("Result")]];
         keys.extend((1..=8).map(|p| vec![nv(p as f64), nv(50.0 + p as f64)]));
         keys.extend([vec![Value::Empty, Value::Empty], vec![Value::Empty, Value::Empty]]);
-        keys.extend([vec![tv("OJT"), nv(60.0)], vec![tv("Seminar"), nv(3.0)]]);
+        keys.extend([vec![tv("Beta"), nv(60.0)], vec![tv("Gamma"), nv(3.0)]]);
         let keys = arr(keys);
-        close(ev("VLOOKUP", vec![t("OJT"), rf(keys.clone()), n(2.0)]), 60.0);
-        close(ev("VLOOKUP", vec![t("Seminar"), rf(keys.clone()), n(2.0)]), 3.0);
+        close(ev("VLOOKUP", vec![t("Beta"), rf(keys.clone()), n(2.0)]), 60.0);
+        close(ev("VLOOKUP", vec![t("Gamma"), rf(keys.clone()), n(2.0)]), 3.0);
         close(ev("VLOOKUP", vec![n(5.0), rf(keys.clone()), n(2.0)]), 55.0);
         close(ev("VLOOKUP", vec![n(99.0), rf(keys), n(2.0)]), 58.0);
     }
@@ -891,16 +877,16 @@ mod tests {
         close(ev("MATCH", vec![t("c"), av(s.clone())]), 2.0);
         is_err(ev("MATCH", vec![n(1.0), rf(table())]), CellError::NA);
         close(ev("MATCH", vec![b(true), av(arr(vec![vec![nv(1.0), Value::Bool(true)]])), n(0.0)]), 2.0);
-        // A wildcard needle is a pattern in every match type, unsorted data included.
-        let names = arr(["Albert", "Charles", "Ed", "Greg", "Ian", "Cedric"].iter().map(|s| vec![tv(s)]).collect());
+        // Approximate modes also match wildcard needles in MatchFunctionTestCaseData.xls.
+        let names = arr(["Alpha", "Delta", "Eta", "Kappa", "Mu", "Chi"].iter().map(|s| vec![tv(s)]).collect());
         for mt in [1.0, -1.0, 0.0] {
-            close(ev("MATCH", vec![t("ed*"), rf(names.clone()), n(mt)]), 3.0);
-            close(ev("MATCH", vec![t("??eg"), rf(names.clone()), n(mt)]), 4.0);
-            close(ev("MATCH", vec![t("G*?eg"), rf(names.clone()), n(mt)]), 4.0);
-            close(ev("MATCH", vec![t("*Ian*"), rf(names.clone()), n(mt)]), 5.0);
+            close(ev("MATCH", vec![t("et*"), rf(names.clone()), n(mt)]), 3.0);
+            close(ev("MATCH", vec![t("??ppa"), rf(names.clone()), n(mt)]), 4.0);
+            close(ev("MATCH", vec![t("K*?ppa"), rf(names.clone()), n(mt)]), 4.0);
+            close(ev("MATCH", vec![t("*Mu*"), rf(names.clone()), n(mt)]), 5.0);
             is_err(ev("MATCH", vec![t("Z*"), rf(names.clone()), n(mt)]), CellError::NA);
         }
-        close(ev("MATCH", vec![t("Ian*"), rf(names)]), 5.0);
+        close(ev("MATCH", vec![t("Mu*"), rf(names)]), 5.0);
     }
 
     #[test]

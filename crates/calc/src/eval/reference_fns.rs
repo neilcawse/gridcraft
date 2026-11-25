@@ -28,9 +28,8 @@ impl<'h> Evaluator<'h> {
             Ok(n) => n.trunc() as i64,
             Err(e) => return err(e),
         };
-        // A height or width is truncated, except that a fraction between 0 and 1 is 1 cell
-        // (Excel 365: `OFFSET(W39,2,2,3,0.9)` is three rows by one column; 1.2 is one, 0 #REF!).
-        let size = |n: f64| if n != 0.0 && n.abs() < 1.0 { n.signum() as i64 } else { n.trunc() as i64 };
+        // The public ROW_COLUM.xlsx cache demonstrates a positive fractional width below one.
+        let size = |n: f64| if n > 0.0 && n < 1.0 { 1 } else { n.trunc() as i64 };
         let h = match self.arg_num(args, 3, base.range.height() as f64) {
             Ok(n) => size(n),
             Err(e) => return err(e),
@@ -130,7 +129,7 @@ impl<'h> Evaluator<'h> {
                         // A position that picks several cells is #CALC!. That is decided from the
                         // shape: reading the block first, for every position, let a short formula
                         // read one large range over and over only to discard it.
-                        (Ok(row), Ok(col)) if index_picks_several_values(&src, row, col, two) => Value::Error(CellError::Calc),
+                        (Ok(row), Ok(col)) if area_n == 1 && index_picks_several_values(&src, row, col, two) => Value::Error(CellError::Calc),
                         (Ok(row), Ok(col)) => {
                             let one = self.index_one(src.clone(), row, col, area_n, two);
                             let cells = match &one {

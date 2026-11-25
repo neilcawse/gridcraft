@@ -352,7 +352,7 @@ pub(super) fn countblank(a: &[Arg], _: C) -> R<Value> {
         x => usize::from(blank(x)),
     };
     // A whole-column reference is read inside the used range; the cells past it are blank.
-    num_val(c.saturating_add(range.cut_blanks()) as f64)
+    num_val((c as u64).saturating_add(range.cut_blanks()) as f64)
 }
 
 pub(super) fn mode_mult(a: &[Arg], _: C) -> R<Value> {

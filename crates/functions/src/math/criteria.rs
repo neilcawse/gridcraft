@@ -3,85 +3,51 @@ use super::{Arg, Array, CellError, Criterion, Ctx, R, Value, as_array, has, num_
 // ---------------------------------------------------------------------------------------------
 // Criteria aggregates
 
-enum MatchedPositions<'a> {
-    Indexed(&'a [u32]),
-    Mask(Vec<bool>),
+type CriteriaPair<'a> = (std::borrow::Cow<'a, Array>, Criterion);
+
+fn criteria_match(pairs: &[CriteriaPair<'_>], row: usize, col: usize) -> bool {
+    pairs.iter().all(|(r, c)| c.matches(r.get(row, col).unwrap_or(&Value::Empty)))
 }
 
-/// Matched positions for every (range, criteria) pair.
-fn criteria_positions<'a>(pairs: &'a [(std::borrow::Cow<'a, Array>, Criterion)], rows: usize, cols: usize) -> MatchedPositions<'a> {
-    let mut best_indexed: Option<(usize, &'a [u32])> = None;
-    for (idx, (r, c)) in pairs.iter().enumerate() {
-        if let Some(pat) = c.exact_text()
-            && let Some(pos) = r.text_positions(pat)
-            && best_indexed.is_none_or(|(_, prev)| pos.len() < prev.len())
+/// Visit matching coordinates in a read rectangle, in row-major order. A criterion that
+/// rejects blanks may constrain the scan to its own read rectangle or indexed hits.
+fn visit_matches(pairs: &[CriteriaPair<'_>], rows: usize, cols: usize, mut visit: impl FnMut(usize, usize) -> R<()>) -> R<()> {
+    let mut anchor = None;
+    let (mut rows, mut cols) = (rows, cols);
+    for (i, (range, criterion)) in pairs.iter().enumerate() {
+        if !criterion.matches(&Value::Empty) {
+            rows = rows.min(range.rows);
+            cols = cols.min(range.cols);
+        }
+        if let Some(pat) = criterion.exact_text()
+            && let Some(positions) = range.text_positions(pat)
+            && anchor.is_none_or(|(_, _, best): (usize, usize, &[u32])| positions.len() < best.len())
         {
-            best_indexed = Some((idx, pos));
+            anchor = Some((i, range.cols, positions));
         }
     }
-    if let Some((best_idx, candidates)) = best_indexed {
-        if pairs.len() == 1 {
-            return MatchedPositions::Indexed(candidates);
+    if let Some((i, stride, positions)) = anchor {
+        for &pos in positions {
+            let pos = pos as usize;
+            let (row, col) = (pos / stride, pos % stride);
+            if row < rows && col < cols && criteria_match(&pairs[..i], row, col) && criteria_match(&pairs[i + 1..], row, col) {
+                visit(row, col)?;
+            }
         }
-        let mut mask = vec![false; rows.saturating_mul(cols)];
-        'cand: for &pos in candidates {
-            let i = pos as usize;
-            for (pair_idx, (r, c)) in pairs.iter().enumerate() {
-                if pair_idx != best_idx {
-                    let v = r.data.get(i).unwrap_or(&Value::Empty);
-                    if !c.matches(v) {
-                        continue 'cand;
-                    }
+    } else {
+        for row in 0..rows {
+            for col in 0..cols {
+                if criteria_match(pairs, row, col) {
+                    visit(row, col)?;
                 }
             }
-            if let Some(slot) = mask.get_mut(i) {
-                *slot = true;
-            }
-        }
-        return MatchedPositions::Mask(mask);
-    }
-    let mut mask = vec![true; rows.saturating_mul(cols)];
-    for (r, c) in pairs {
-        for (m, v) in mask.iter_mut().zip(r.iter()) {
-            if *m && !c.matches(v) {
-                *m = false;
-            }
         }
     }
-    MatchedPositions::Mask(mask)
+    Ok(())
 }
 
-/// `arr` padded with blanks to `rows` × `cols` (borrowed when it has that shape already).
-fn padded(arr: std::borrow::Cow<'_, Array>, rows: usize, cols: usize) -> std::borrow::Cow<'_, Array> {
-    if arr.rows == rows && arr.cols == cols {
-        return arr;
-    }
-    let data = (0..rows).flat_map(|r| (0..cols).map(move |c| (r, c))).map(|(r, c)| arr.get(r, c).cloned().unwrap_or(Value::Empty)).collect();
-    match Array::new(rows, cols, data) {
-        Some(a) => std::borrow::Cow::Owned(a),
-        None => arr,
-    }
-}
-
-/// The block every range of a criteria call is read over: the largest read part among `ranges`.
-/// A whole-column range is read inside its sheet's used range only, so ranges on different sheets
-/// can come back cut to different sizes; past its own part each is blank.
-fn read_block(ranges: &[&Arg]) -> (usize, usize) {
-    ranges.iter().fold((0, 0), |(r, c), a| match &a.value {
-        Value::Array(x) => (r.max(x.rows), c.max(x.cols)),
-        _ => (r.max(1), c.max(1)),
-    })
-}
-
-/// Parses `(range, criteria)` argument pairs starting at `first_pair`, checks that every range
-/// has the written shape `shape`, and reads each over the `rows` × `cols` block.
-fn parse_criteria_pairs<'a>(
-    a: &'a [Arg],
-    first_pair: usize,
-    shape: (usize, usize),
-    rows: usize,
-    cols: usize,
-) -> R<Vec<(std::borrow::Cow<'a, Array>, Criterion)>> {
+/// Parses `(range, criteria)` pairs and checks that their written shapes match.
+fn parse_criteria_pairs(a: &[Arg], first_pair: usize, shape: (usize, usize)) -> R<Vec<CriteriaPair<'_>>> {
     let rest = a.get(first_pair..).unwrap_or(&[]);
     if rest.is_empty() || rest.len() % 2 != 0 {
         return Err(CellError::Value);
@@ -95,75 +61,57 @@ fn parse_criteria_pairs<'a>(
         if range.shape() != shape {
             return Err(CellError::Value);
         }
-        let r = padded(as_array(&range.value), rows, cols);
         let scalar = crit.value.scalar();
         let c = if single_pair { Criterion::parse_arg(&scalar)? } else { Criterion::parse_arg_truncated(&scalar) };
-        pairs.push((r, c));
+        pairs.push((as_array(&range.value), c));
     }
     Ok(pairs)
 }
 
-/// The range arguments of an *IFS call: the target (when `first_pair` is 1) and every pair's range.
-fn ifs_ranges(a: &[Arg], first_pair: usize) -> Vec<&Arg> {
-    let mut out: Vec<&Arg> = a.get(..first_pair).unwrap_or(&[]).iter().collect();
-    out.extend(a.get(first_pair..).unwrap_or(&[]).iter().step_by(2));
-    out
-}
-
-/// Numbers in `target` at matched positions (errors at matched positions propagate).
-fn masked_numbers(target: &Array, matched: MatchedPositions<'_>) -> R<Vec<f64>> {
-    let mut out = Vec::new();
-    match matched {
-        MatchedPositions::Indexed(positions) => {
-            for &pos in positions {
-                match target.data.get(pos as usize) {
-                    Some(Value::Number(n)) => out.push(*n),
-                    Some(Value::Error(e)) => return Err(*e),
-                    _ => {}
-                }
-            }
-        }
-        MatchedPositions::Mask(mask) => {
-            for (v, m) in target.iter().zip(mask.iter()) {
-                if !*m {
-                    continue;
-                }
-                match v {
-                    Value::Number(n) => out.push(*n),
-                    Value::Error(e) => return Err(*e),
-                    _ => {}
-                }
-            }
-        }
-    }
-    Ok(out)
-}
-
 pub(super) fn countifs(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     let shape = crate::util::arg(a, 0)?.shape();
-    let ranges = ifs_ranges(a, 0);
-    let (rows, cols) = read_block(&ranges);
-    let pairs = parse_criteria_pairs(a, 0, shape, rows, cols)?;
-    let count = match criteria_positions(&pairs, rows, cols) {
-        MatchedPositions::Indexed(pos) => pos.len(),
-        MatchedPositions::Mask(mask) => mask.iter().filter(|m| **m).count(),
-    };
-    // Cells of whole-column ranges past every range's used part are blank in all of them.
-    let cut = shape.0.saturating_mul(shape.1).saturating_sub(rows.saturating_mul(cols));
-    let cut_matches = if cut > 0 && pairs.iter().all(|(_, c)| c.matches(&Value::Empty)) { cut } else { 0 };
-    num_val(count.saturating_add(cut_matches) as f64)
+    let mut pairs = parse_criteria_pairs(a, 0, shape)?;
+    let mut count = 0u64;
+    if pairs.iter().all(|(_, c)| c.matches(&Value::Empty)) {
+        // Everything outside the union of the read rectangles matches. Subtract misses inside
+        // the union once each: after a wider rectangle, only the rows below it can be new.
+        count = (shape.0 as u64).saturating_mul(shape.1 as u64);
+        pairs.sort_unstable_by_key(|(r, _)| std::cmp::Reverse(r.cols));
+        let mut seen_rows = 0;
+        for (range, _) in &pairs {
+            for row in seen_rows..range.rows {
+                for col in 0..range.cols {
+                    if !criteria_match(&pairs, row, col) {
+                        count = count.saturating_sub(1);
+                    }
+                }
+            }
+            seen_rows = seen_rows.max(range.rows);
+        }
+    } else {
+        visit_matches(&pairs, shape.0, shape.1, |_, _| {
+            count = count.saturating_add(1);
+            Ok(())
+        })?;
+    }
+    num_val(count as f64)
 }
 
-/// The values of the `*IFS` target range with the mask from its pairs. Blank cells add nothing,
-/// so the cells a whole-column reference leaves out past the used range don't matter here.
+/// Collect numbers in the materialized target whose coordinates match the criteria.
 fn ifs_numbers(a: &[Arg]) -> R<Vec<f64>> {
-    let shape = crate::util::arg(a, 0)?.shape();
-    let ranges = ifs_ranges(a, 1);
-    let (rows, cols) = read_block(&ranges);
-    let target = padded(as_array(&crate::util::arg(a, 0)?.value), rows, cols);
-    let pairs = parse_criteria_pairs(a, 1, shape, rows, cols)?;
-    let matched = criteria_positions(&pairs, rows, cols);
-    masked_numbers(&target, matched)
+    let target = crate::util::arg(a, 0)?;
+    let pairs = parse_criteria_pairs(a, 1, target.shape())?;
+    let target = as_array(&target.value);
+    let mut out = Vec::new();
+    visit_matches(&pairs, target.rows, target.cols, |row, col| {
+        match target.get(row, col) {
+            Some(Value::Number(n)) => out.push(*n),
+            Some(Value::Error(e)) => return Err(*e),
+            _ => {}
+        }
+        Ok(())
+    })?;
+    Ok(out)
 }
 
 pub(super) fn sumifs(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
@@ -200,14 +148,16 @@ pub(super) fn countif(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     // A whole-column reference is read inside the used range; the cells past it are blank.
     let cut = range_arg.cut_blanks();
     let cut_matches = if cut > 0 && c.matches(&Value::Empty) { cut } else { 0 };
-    num_val(range.iter().filter(|v| c.matches(v)).count().saturating_add(cut_matches) as f64)
+    let read_matches = range.iter().filter(|v| c.matches(v)).count() as u64;
+    num_val(read_matches.saturating_add(cut_matches) as f64)
 }
 
 /// SUMIF / AVERAGEIF: matched numbers from the sum range, read at the criteria range's positions.
 /// Excel sizes a sum range reference like the criteria range, anchored at its own top-left cell;
 /// the evaluator does that resizing (it has the references), so cells line up one to one here.
 fn if_numbers(a: &[Arg]) -> R<Vec<f64>> {
-    let range = as_array(&crate::util::arg(a, 0)?.value);
+    let range_arg = crate::util::arg(a, 0)?;
+    let range = as_array(&range_arg.value);
     let c = Criterion::parse_arg(&crate::util::arg(a, 1)?.value.scalar())?;
     let sum_range = if has(a, 2) { Some(as_array(&crate::util::arg(a, 2)?.value)) } else { None };
     let mut out = Vec::new();
@@ -231,16 +181,19 @@ fn if_numbers(a: &[Arg]) -> R<Vec<f64>> {
         }
         return Ok(out);
     }
-    for r in 0..range.rows {
-        for col in 0..range.cols {
-            let Some(v) = range.get(r, col) else { continue };
-            if !c.matches(v) {
+    let target = sum_range.as_deref().unwrap_or(&range);
+    let (rows, cols) = if c.matches(&Value::Empty) {
+        let (h, w) = range_arg.shape();
+        (h.min(target.rows), w.min(target.cols))
+    } else {
+        (range.rows.min(target.rows), range.cols.min(target.cols))
+    };
+    for r in 0..rows {
+        for col in 0..cols {
+            if !c.matches(range.get(r, col).unwrap_or(&Value::Empty)) {
                 continue;
             }
-            let target = match &sum_range {
-                Some(s) => s.get(r, col),
-                None => Some(v),
-            };
+            let target = target.get(r, col);
             match target {
                 Some(Value::Number(n)) => out.push(*n),
                 Some(Value::Error(e)) => return Err(*e),

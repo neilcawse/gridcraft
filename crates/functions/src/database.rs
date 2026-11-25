@@ -16,9 +16,7 @@ use crate::criteria::Criterion;
 use crate::util::{A, R, as_array, has, num_val};
 use crate::{Arg, Ctx, FnSpec};
 
-/// A label as Excel compares it: text trimmed, a number as it displays in General, a logical as
-/// `TRUE` / `FALSE`. A criteria label `true` (text) names a column headed by the logical TRUE, and
-/// a label 1 a column headed 1, not TRUE (Excel 365).
+/// A header's comparison text: trimmed text, a General number, or a logical's name.
 fn label_text(v: &Value) -> Option<Cow<'_, str>> {
     match v {
         Value::Text(t) => Some(Cow::Borrowed(t.trim())),
@@ -39,12 +37,12 @@ fn field_index(db: &Array, a: &[Arg]) -> R<Option<usize>> {
     if !has(a, 1) {
         return Ok(None);
     }
-    let v = match a.get(1).map(|x| &x.value) {
-        // A field given as a range of more than one cell (`E1:F1`) names no single column.
-        Some(Value::Array(arr)) if arr.data.len() > 1 => return Err(CellError::Value),
-        Some(v) => v.scalar(),
-        None => Value::Empty,
-    };
+    let Some(field) = a.get(1) else { return Ok(None) };
+    // A field must be one cell, even if a larger reference was read as a clipped 1×1 array.
+    if field.shape() != (1, 1) {
+        return Err(CellError::Value);
+    }
+    let v = field.value.scalar();
     let column_number = |n: f64| {
         let i = n.trunc();
         // NaN too: it would pass both comparisons and become index 0 (#2163).
@@ -420,6 +418,8 @@ mod tests {
         // A field of two cells, and a database that is only its labels.
         let two = arr(vec![vec![tv("Region"), tv("Revenue")]]);
         is_err(ev("DSUM", vec![rf(table.clone()), rf(two), rf(all.clone())]), CellError::Value);
+        let clipped_field = crate::Arg { full_shape: Some((1_048_576, 1)), ..rf(arr(vec![vec![tv("Revenue")]])) };
+        is_err(ev("DSUM", vec![rf(table.clone()), clipped_field, rf(all.clone())]), CellError::Value);
         let labels = arr(vec![vec![tv("Region"), tv("Revenue")]]);
         for f in ["DSUM", "DCOUNT", "DCOUNTA", "DAVERAGE", "DMIN", "DPRODUCT"] {
             is_err(ev(f, vec![rf(labels.clone()), t("Revenue"), rf(all.clone())]), CellError::Value);

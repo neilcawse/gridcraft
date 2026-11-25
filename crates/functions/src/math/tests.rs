@@ -10,6 +10,34 @@ fn ev2(name: &str, x: f64, y: f64) -> Value {
 }
 
 #[test]
+fn criteria_reads_crossed_clipped_rectangles_without_padding() {
+    const SIDE: usize = 16_384;
+    let mut tall = vec![Value::Empty; SIDE];
+    tall[SIDE - 1] = nv(7.0);
+    let mut wide = vec![Value::Empty; SIDE];
+    wide[SIDE - 1] = nv(9.0);
+    let clipped = |value| Arg { full_shape: Some((SIDE, SIDE)), ..rf(value) };
+    let tall = clipped(Value::Array(Array::column(tall).into()));
+    let wide = clipped(Value::Array(Array::row(wide).into()));
+    close(ev("COUNTIFS", vec![tall.clone(), t(""), wide.clone(), t("")]), (SIDE as u64 * SIDE as u64 - 2) as f64);
+    close(ev("COUNTIFS", vec![tall.clone(), t(""), wide.clone(), n(9.0)]), 1.0);
+    close(ev("SUMIFS", vec![tall.clone(), wide.clone(), t("")]), 7.0);
+    close(ev("AVERAGEIFS", vec![wide, tall, t("")]), 9.0);
+}
+
+#[test]
+fn criteria_index_hits_keep_the_source_stride() {
+    let mut keys = vec![Value::Empty; 64];
+    keys[61] = tv("selected");
+    let keys = Arg { full_shape: Some((32, 3)), ..rf(arr(keys.chunks(2).map(<[Value]>::to_vec).collect())) };
+    let target = arr((0..32).map(|r| vec![nv(0.0), nv(r as f64), Value::Error(NA)]).collect());
+    for _ in 0..2 {
+        close(ev("SUMIFS", vec![rf(target.clone()), keys.clone(), t("selected")]), 30.0);
+    }
+    is_err(ev("COUNTIFS", vec![keys, t("selected"), rf(row(&[1.0, 2.0])), n(2.0)]), CellError::Value);
+}
+
+#[test]
 fn percentof() {
     // SUM(subset) / SUM(all): text, booleans and blanks inside ranges are skipped like SUM.
     let all = arr(vec![vec![nv(10.0)], vec![nv(30.0)], vec![tv("x")], vec![Value::Empty], vec![nv(60.0)]]);
