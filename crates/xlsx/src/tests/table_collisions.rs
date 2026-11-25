@@ -610,7 +610,7 @@ fn a_reference_to_no_table_is_not_captured_by_a_repaired_name() -> Result<(), Bo
         priority: 1,
         stop_if_true: false,
     });
-    sh.validations.push(Validation { ranges, kind: ValidationKind::List, f1: "Sale__2[Value]".into(), ..Default::default() });
+    sh.validations.push(Validation { ranges, kind: ValidationKind::List, f1: "=Sale__2[Value]".into(), ..Default::default() });
     let series = Series { name: None, categories: Some("Sale__2[Value]".into()), values: "Sale__2[Value]".into(), ..Default::default() };
     sh.charts.push(chart(1, ChartKind::Waterfall, series.clone()));
     sh.charts.push(chart(2, ChartKind::Bubble, Series { bubble_sizes: Some("Sale__2[Value]".into()), ..series }));
@@ -654,5 +654,51 @@ fn a_reference_to_no_table_is_not_captured_by_a_repaired_name() -> Result<(), Bo
         assert_eq!(sh.charts.len(), 2);
         assert_eq!(back.name("Dangling", 0).map(|n| n.formula.as_str()), Some("#REF!"), "cycle {cycle}");
     }
+    Ok(())
+}
+
+/// A location's one `#` marker goes on read, write and repair; a second `#` before an error token
+/// is the error's own, so `##NAME?` stays `#NAME?` rather than becoming the name `NAME?`.
+#[test]
+fn a_doubled_location_marker_keeps_the_error_token() -> Result<(), Box<dyn std::error::Error>> {
+    let book = r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+    let book_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#;
+    let links = [("C1", "##NAME?"), ("C2", "##REF!"), ("C3", "#NAME?"), ("C4", "#Sheet1!A2"), ("C5", "Sheet1!A2")];
+    let hyperlinks: String = links.iter().map(|(at, loc)| format!(r#"<hyperlink ref="{at}" location="{loc}"/>"#)).collect();
+    let sheet = format!(
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Value</t></is></c></row><row r="2"><c r="A2"><v>1</v></c></row></sheetData><hyperlinks>{hyperlinks}</hyperlinks><tableParts count="1"><tablePart r:id="rId1"/></tableParts></worksheet>"#
+    );
+    let sheet_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/></Relationships>"#;
+    // An invalid table name, so open repairs the workbook and its links.
+    let table_xml = r#"<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="Sale?" displayName="Sale?" ref="A1:A2"><tableColumns count="1"><tableColumn id="1" name="Value"/></tableColumns></table>"#;
+    let package = make_zip(&[
+        ("[Content_Types].xml", CT.as_bytes()),
+        ("_rels/.rels", ROOT_RELS.as_bytes()),
+        ("xl/workbook.xml", book.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", book_rels.as_bytes()),
+        ("xl/worksheets/sheet1.xml", sheet.as_bytes()),
+        ("xl/worksheets/_rels/sheet1.xml.rels", sheet_rels.as_bytes()),
+        ("xl/tables/table1.xml", table_xml.as_bytes()),
+    ]);
+    let (mut wb, _) = read_xlsx(&package)?;
+    assert_eq!(wb.sheets[0].tables[0].name, "Sale_");
+    let targets = |wb: &Workbook| links.map(|(at, _)| wb.sheets[0].hyperlinks.get(&CellRef::parse(at).unwrap()).map(|h| h.target.clone()));
+    let read = ["#NAME?", "#REF!", "#NAME?", "Sheet1!A2", "Sheet1!A2"].map(|t| Some(t.to_string()));
+    assert_eq!(targets(&wb), read);
+    // Model targets keep their doubled marker until save, which repairs again (a duplicate table).
+    let sh = Arc::make_mut(&mut wb.sheets[0]);
+    for (at, target) in [("C1", "##NAME?"), ("C2", "##REF!")] {
+        sh.hyperlinks.insert(CellRef::parse(at).unwrap(), Hyperlink { target: target.into(), tooltip: None, external: false });
+    }
+    sh.tables.push(table("Sale_", 3));
+    let saved = write_xlsx(&wb)?;
+    let sheet_xml = xml(&saved, "xl/worksheets/sheet1.xml")?;
+    for (at, loc) in [("C1", "#NAME?"), ("C2", "#REF!"), ("C3", "#NAME?"), ("C4", "Sheet1!A2"), ("C5", "Sheet1!A2")] {
+        let link = sheet_xml.split("<hyperlink ").find(|l| l.contains(&format!(r#"ref="{at}""#))).and_then(|l| l.split('>').next());
+        assert!(link.is_some_and(|l| l.contains(&format!(r#"location="{loc}""#))), "{at}: {link:?}");
+    }
+    let (back, _) = read_xlsx(&saved)?;
+    assert_eq!(back.sheets[0].tables.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["Sale_", "Sale__2"]);
+    assert_eq!(targets(&back), read);
     Ok(())
 }

@@ -96,6 +96,17 @@ impl CellError {
     }
 }
 
+/// The in-workbook place a hyperlink target names: the target without one leading `#` marker,
+/// unless the target is itself an error token (`#REF!`, a broken link's location). So `#Sheet2!A1`
+/// names `Sheet2!A1`, `##NAME?` names `#NAME?`, and `#NAME?` stays the error rather than the name
+/// `NAME?`.
+pub fn link_location(target: &str) -> &str {
+    match target.strip_prefix('#') {
+        Some(rest) if CellError::parse(target).is_none() => rest,
+        _ => target,
+    }
+}
+
 impl fmt::Display for CellError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())

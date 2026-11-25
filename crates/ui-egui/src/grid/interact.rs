@@ -1383,7 +1383,7 @@ pub fn follow_link(app: &mut SheetApp, target: &str) {
     use gridcraft_engine::links::{LinkKind, classify};
     match classify(target) {
         LinkKind::Internal(r) => {
-            let _ = app.session.run("edit.goTo", json!({"reference": r.trim_start_matches('#')}));
+            let _ = app.session.run("edit.goTo", json!({"reference": r}));
             app.grid.ensure_visible = true;
         }
         LinkKind::External(url) => app.open_dialog("openLink", json!({"url": url})),

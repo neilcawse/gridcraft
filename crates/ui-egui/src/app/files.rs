@@ -53,11 +53,42 @@ impl SheetApp {
     }
 
     /// Unlike a clean open, a clean save leaves any existing info-bar notice alone. Called once the
-    /// file is written or handed over.
+    /// file is written or handed over by a save the user asked for, which always shows its warnings.
     pub(crate) fn show_save_warnings(&mut self, r: &Json) {
-        if let Some(notice) = file_warning_notice(&file_warnings(r)) {
+        let msgs = file_warnings(r);
+        self.note_save_warnings(&msgs);
+        if let Some(notice) = file_warning_notice(&msgs) {
             self.notice = Some(notice);
         }
+    }
+
+    /// AutoSave's warnings show only when they differ from those last shown for the workbook at
+    /// its path, so a dismissed notice stays dismissed while they don't change.
+    fn show_changed_save_warnings(&mut self, r: &Json) {
+        let msgs = file_warnings(r);
+        if self.note_save_warnings(&msgs)
+            && let Some(notice) = file_warning_notice(&msgs)
+        {
+            self.notice = Some(notice);
+        }
+    }
+
+    /// Records the active workbook's save warnings as shown; whether they differ from the last
+    /// ones recorded for it at its current path. Closed workbooks' records go (a `uid` is never
+    /// reused, so a reopened file starts afresh).
+    fn note_save_warnings(&mut self, msgs: &[&str]) -> bool {
+        let Some(doc) = self.session.active() else { return true };
+        let (uid, path) = (doc.uid, doc.path.as_deref());
+        let open = self.session.documents();
+        self.save_warnings_shown.retain(|uid, _| open.iter().any(|d| d.uid == *uid));
+        let unchanged = self
+            .save_warnings_shown
+            .get(&uid)
+            .is_some_and(|(shown_path, shown)| shown_path.as_deref() == path && shown.iter().map(String::as_str).eq(msgs.iter().copied()));
+        if !unchanged {
+            self.save_warnings_shown.insert(uid, (path.map(str::to_owned), msgs.iter().map(|m| (*m).to_owned()).collect()));
+        }
+        !unchanged
     }
 
     /// The open windows in order, for the Switch Windows lists.
@@ -112,7 +143,7 @@ impl SheetApp {
             self.grid.last_autosave = now;
             self.store_view_state();
             if let Ok(result) = self.session.run("file.save", json!({})) {
-                self.show_save_warnings(&result);
+                self.show_changed_save_warnings(&result);
             }
         } else if self.ui.autosave && dirty_xlsx {
             // Keep checking even when no input arrives while the window is hidden.

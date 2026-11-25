@@ -272,9 +272,7 @@ impl Rewrite<'_> {
                 }
             }
             for link in sheet.hyperlinks.values_mut().filter(|l| !l.external) {
-                // A leading `#` can mark an in-workbook destination rather than a formula error.
-                let target = link.target.trim();
-                let target = if target.starts_with('#') && CellError::parse(target).is_none() { target.trim_start_matches('#') } else { target };
+                let target = gridcraft_core::link_location(link.target.trim());
                 if let Some(new) = self.rewritten_text(target, si, None) {
                     link.target = new;
                 }

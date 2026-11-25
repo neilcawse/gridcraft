@@ -9,7 +9,7 @@
 //! external addresses; only the host, after showing the address and getting OK from the user,
 //! opens one through [`crate::Session::open_confirmed_link`], which no command reaches.
 
-use gridcraft_core::{CellError, RangeRef};
+use gridcraft_core::{CellError, RangeRef, link_location};
 use serde_json::{Value as Json, json};
 
 use crate::{EngineError, Result, Session, UiRequest};
@@ -37,7 +37,7 @@ impl Session {
     /// address may call it.
     pub fn open_confirmed_link(&mut self, target: &str) -> Result<Json> {
         match classify(target) {
-            LinkKind::Internal(r) => self.execute("edit.goTo", json!({"reference": r.trim_start_matches('#')})),
+            LinkKind::Internal(r) => self.execute("edit.goTo", json!({"reference": r})),
             LinkKind::External(u) => {
                 self.ui_requests.push(UiRequest::OpenUrl(u.clone()));
                 Ok(json!({"opened": u}))
@@ -50,7 +50,8 @@ impl Session {
 /// What a link target is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LinkKind {
-    /// A cell, range, name or table of the workbook (`Sheet2!A1`, `Total`).
+    /// A cell, range, name or table of the workbook (`Sheet2!A1`, `Total`), without the `#`
+    /// marker a target may start with ([`link_location`]).
     Internal(String),
     /// An address to hand to the system, trimmed: `http`, `https` or `mailto` only.
     External(String),
@@ -69,18 +70,20 @@ pub fn classify(target: &str) -> LinkKind {
     if t.starts_with("\\\\") || t.starts_with("//") {
         return LinkKind::Refused("Links to network locations aren't opened.".into());
     }
+    // The scheme test below reads the whole target: `#http://…` stays an in-workbook name.
+    let place = link_location(t);
     // A broken link location is not a `#`-prefixed name (e.g. NAME? is a valid name).
-    if t.starts_with('#') && CellError::parse(t).is_some() {
+    if CellError::parse(place).is_some() {
         return LinkKind::Refused("Reference isn't valid.".into());
     }
     if RangeRef::parse(t).is_some() {
-        return LinkKind::Internal(t.to_string());
+        return LinkKind::Internal(place.to_string());
     }
-    let Some((scheme, rest)) = t.split_once(':') else { return LinkKind::Internal(t.to_string()) };
+    let Some((scheme, rest)) = t.split_once(':') else { return LinkKind::Internal(place.to_string()) };
     let scheme_like = scheme.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
         && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
     if !scheme_like {
-        return LinkKind::Internal(t.to_string());
+        return LinkKind::Internal(place.to_string());
     }
     let lower = scheme.to_ascii_lowercase();
     if ALLOWED.contains(&lower.as_str()) && !rest.trim().is_empty() {
@@ -129,8 +132,41 @@ mod tests {
 
     #[test]
     fn error_locations_cannot_be_followed_as_names() {
-        for r in ["#NAME?", "#REF!"] {
-            assert_eq!(classify(r), LinkKind::Refused("Reference isn't valid.".into()));
+        for r in ["#NAME?", "#REF!", "#Name?", "##NAME?", "##REF!", " ##ref! "] {
+            assert_eq!(classify(r), LinkKind::Refused("Reference isn't valid.".into()), "{r:?}");
         }
+        // One `#` marker goes; a second is part of the place named.
+        for (r, place) in [("#Sheet1!A1", "Sheet1!A1"), ("##Sheet1!A1", "#Sheet1!A1"), ("NAME?", "NAME?"), ("#http://a.example", "http://a.example")]
+        {
+            assert_eq!(classify(r), LinkKind::Internal(place.into()), "{r:?}");
+        }
+    }
+
+    /// Through an XLSX save that repairs a table name and the reopen, a doubled marker before an
+    /// error token still classifies as the broken reference it is.
+    #[test]
+    fn doubled_error_locations_stay_refused_through_a_repairing_save() -> Result<()> {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("range.setValues", json!({"range": "A1:A2", "values": [["Header"], [1]]}))?;
+        s.execute("insert.table", json!({"range": "A1:A2", "name": "DataRows"}))?;
+        let doc = s.doc_mut()?;
+        let sheet = std::sync::Arc::make_mut(&mut doc.wb).sheet_mut(0).ok_or(EngineError::Other("missing sheet".into()))?;
+        sheet.tables[0].name = "Data?Rows".into();
+        let links = [("##NAME?", false), ("##REF!", false), ("#NAME?", false), ("#Sheet1!A2", true)];
+        for (row, (target, _)) in (0u32..).zip(links) {
+            sheet
+                .hyperlinks
+                .insert(gridcraft_core::CellRef::new(row, 2), gridcraft_model::Hyperlink { target: target.into(), tooltip: None, external: false });
+        }
+        let saved = gridcraft_xlsx::write_xlsx(&s.doc()?.wb).map_err(|e| EngineError::Other(e.to_string()))?;
+        let (back, _) = gridcraft_xlsx::read_xlsx(&saved).map_err(|e| EngineError::Other(e.to_string()))?;
+        assert_eq!(back.sheets[0].tables[0].name, "Data_Rows");
+        for (row, (target, internal)) in (0u32..).zip(links) {
+            let kind = classify(&back.sheets[0].hyperlinks[&gridcraft_core::CellRef::new(row, 2)].target);
+            assert_eq!(matches!(kind, LinkKind::Internal(_)), internal, "{target:?} -> {kind:?}");
+            assert!(internal || kind == LinkKind::Refused("Reference isn't valid.".into()), "{target:?} -> {kind:?}");
+        }
+        Ok(())
     }
 }

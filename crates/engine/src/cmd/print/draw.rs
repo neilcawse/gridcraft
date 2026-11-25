@@ -523,7 +523,8 @@ pub(super) fn draw_block_links(pg: &mut Page, b: &Block, page: usize, pending: &
 }
 
 pub(super) fn printed_target(wb: &Workbook, blocks: &[PrintedBlock], source_sheet: usize, target: &str) -> Option<(usize, f32, f32)> {
-    let target = target.trim().trim_start_matches('#').trim_start_matches('=');
+    // `classify` has already removed the link's `#` marker.
+    let target = target.trim().trim_start_matches('=');
     let (sheet_name, range) = split_sheet(target);
     let sheet = sheet_name.map_or(Some(source_sheet), |name| wb.sheet_index(&name))?;
     let cell = RangeRef::parse(&range.replace('$', ""))?.start;

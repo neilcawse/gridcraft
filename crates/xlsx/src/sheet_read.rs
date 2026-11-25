@@ -620,8 +620,7 @@ fn push_hyperlink(cx: &mut Ctx<'_>, name: &str, h: RawHyperlink<'_>, rels: &Hash
     let external = !target.is_empty();
     if let Some(loc) = location {
         if target.is_empty() {
-            // The leading `#` is part of an error location, not a link prefix.
-            target = if loc.starts_with('#') && CellError::parse(loc).is_none() { loc.trim_start_matches('#') } else { loc }.to_string();
+            target = gridcraft_core::link_location(loc).to_string();
         } else {
             target = format!("{target}#{loc}");
         }
