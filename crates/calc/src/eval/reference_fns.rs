@@ -28,7 +28,7 @@ impl<'h> Evaluator<'h> {
             Ok(n) => n.trunc() as i64,
             Err(e) => return err(e),
         };
-        // Excel 365 reads `OFFSET(W39,2,2,3,0.9)` as one column: a positive size below one is one.
+        // Excel accepts a positive fractional width below one as one column; apply the same minimum to height.
         let size = |n: f64| if n > 0.0 && n < 1.0 { 1 } else { n.trunc() as i64 };
         let h = match self.arg_num(args, 3, base.range.height() as f64) {
             Ok(n) => size(n),
