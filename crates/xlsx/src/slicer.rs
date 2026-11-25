@@ -331,9 +331,12 @@ impl SlicerWriter {
     pub fn new(wb: &Workbook, table_names: &[Vec<Option<String>>]) -> SlicerWriter {
         let mut planned: Vec<Planned> = Vec::new();
         let mut names: Vec<String> = Vec::new();
+        // A slicer cache's own marker read from the file (`Slicer_K` = `#N/A`) is not a name a
+        // cache must avoid: the cache that takes the name writes it again, once.
         let mut caches: Vec<String> = wb
             .names
             .iter()
+            .filter(|n| !is_cache_marker(n))
             .map(|n| n.name.clone())
             .chain(wb.sheets.iter().flat_map(|s| s.tables.iter().map(|t| t.name.clone())))
             .chain(table_names.iter().flatten().flatten().cloned())
@@ -415,6 +418,12 @@ impl SlicerWriter {
 
     pub fn cache_names(&self) -> impl Iterator<Item = &str> {
         self.planned.iter().map(|p| p.cache.as_str())
+    }
+
+    /// Whether `n` is the marker of a slicer cache this save writes ([`Self::defined_names`]),
+    /// which then is not written as a defined name of its own.
+    pub fn writes_marker(&self, n: &gridcraft_model::DefinedName) -> bool {
+        is_cache_marker(n) && self.cache_names().any(|c| c.eq_ignore_ascii_case(&n.name))
     }
 
     /// `<definedName>` elements Excel keeps for slicer caches.
@@ -572,6 +581,11 @@ fn unique(base: &str, sep: &str, taken: &mut Vec<String>) -> String {
     }
     taken.push(n.clone());
     n
+}
+
+/// Whether `n` has the form Excel gives a slicer cache's defined name: workbook scope, `#N/A`.
+fn is_cache_marker(n: &gridcraft_model::DefinedName) -> bool {
+    n.scope.is_none() && n.formula.trim().trim_start_matches('=').trim().eq_ignore_ascii_case("#N/A")
 }
 
 /// Ascending item order: numbers (dates are serials) by value, before text by case-insensitive

@@ -1348,3 +1348,18 @@ fn separate_imported_caches_and_sheet_relative_defined_names_do_not_merge_caches
     assert!(parts.contains_key("xl/pivotCache/pivotCacheDefinition2.xml"));
     assert!(!parts.contains_key("xl/pivotCache/pivotCacheDefinition3.xml"));
 }
+
+/// A slicer cache's defined name read from a file is the cache's own: saving again writes it once,
+/// under the same name, not as a plain name beside a renumbered cache.
+#[test]
+fn a_read_slicer_cache_name_is_written_once_under_its_name() {
+    let wb = slicer_workbook();
+    let names = |bytes: &[u8]| {
+        let wbx = String::from_utf8(unzip(bytes)["xl/workbook.xml"].clone()).unwrap();
+        wbx.match_indices("<definedName name=\"").map(|(i, m)| wbx[i + m.len()..].split('"').next().unwrap().to_string()).collect::<Vec<_>>()
+    };
+    let first = write_xlsx(&wb).unwrap();
+    let (back, _) = read_xlsx(&first).unwrap();
+    let second = write_xlsx(&back).unwrap();
+    assert_eq!(names(&second), names(&first));
+}

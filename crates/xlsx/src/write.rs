@@ -362,14 +362,16 @@ fn write_package(
     check_sheet_names(wb)?;
     let table_names = crate::sheet_write::table_names(wb);
     let mut warnings = vec![];
-    let defined_names = defined_names_to_write(wb, &mut warnings);
     let mut slicers = crate::slicer::SlicerWriter::new(wb, &table_names);
+    let mut defined_names = defined_names_to_write(wb, &slicers, &mut warnings);
     let mut catalog = pivot_catalog(wb, &table_names, &defined_names, &slicers);
     while let Some(projection) = &catalog {
         if !slicers.prune_targets(wb, projection) {
             slicers.finish_plan(wb, projection);
             break;
         }
+        // A pruned cache no longer writes its marker: a marker read for it is a name again.
+        defined_names = defined_names_to_write(wb, &slicers, &mut warnings);
         catalog = pivot_catalog(wb, &table_names, &defined_names, &slicers);
     }
     let mut out = Out {
@@ -629,12 +631,18 @@ fn write_sheets(
     (sheets_xml, kept, pivots, sheet_ids)
 }
 
-fn defined_names_to_write<'a>(wb: &'a Workbook, warnings: &mut Vec<String>) -> Vec<&'a gridcraft_model::DefinedName> {
+/// The defined names written as such: one per name and scope, leaving out the markers of the
+/// slicer caches written with their caches.
+fn defined_names_to_write<'a>(
+    wb: &'a Workbook,
+    slicers: &crate::slicer::SlicerWriter,
+    warnings: &mut Vec<String>,
+) -> Vec<&'a gridcraft_model::DefinedName> {
     let mut seen = std::collections::HashSet::new();
     wb.names
         .iter()
         .filter(|n| {
-            if n.name.is_empty() || n.scope.is_some_and(|sc| sc >= wb.sheets.len()) {
+            if n.name.is_empty() || n.scope.is_some_and(|sc| sc >= wb.sheets.len()) || slicers.writes_marker(n) {
                 return false;
             }
             if seen.insert((n.name.to_ascii_lowercase(), n.scope)) {
