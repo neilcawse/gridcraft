@@ -214,6 +214,17 @@ pub fn drop_shown(wb: &Workbook, host: usize, c: &FormControl) -> String {
     }
 }
 
+/// Keeps a drop-down's saved scroll positions (`val`, the first item shown open) inside a list of
+/// `len` items, after an edit changed which cells it lists. Offsets the file left out stay out.
+pub(crate) fn clamp_scroll_offsets(c: &mut FormControl, len: u32) {
+    let last = len.saturating_sub(1);
+    for display in [&mut c.drop_display, &mut c.drop_vml_display] {
+        if let Some(offset) = &mut display.scroll_offset {
+            *offset = (*offset).min(last);
+        }
+    }
+}
+
 /// A whole number from 0 to 30000 named `key`, if given. Numbers in text (`"12"`) count; anything
 /// else is refused with a message that names the parameter.
 fn whole(cmd: &str, p: &Json, key: &str) -> Result<Option<u32>> {
@@ -511,12 +522,8 @@ fn format(s: &mut Session, p: &Json) -> Result<Json> {
             && r != c.list_range
         {
             c.list_range = r;
-            let last = drop_len(&s.doc()?.wb, sheet, &c).saturating_sub(1);
-            for display in [&mut c.drop_display, &mut c.drop_vml_display] {
-                if let Some(offset) = &mut display.scroll_offset {
-                    *offset = (*offset).min(last);
-                }
-            }
+            let len = drop_len(&s.doc()?.wb, sheet, &c);
+            clamp_scroll_offsets(&mut c, len);
         }
         if let Some(n) = drop_lines_param(CMD, p)? {
             c.drop_lines = n;

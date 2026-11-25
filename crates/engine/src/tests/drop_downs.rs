@@ -154,6 +154,52 @@ fn changing_the_input_range_clamps_only_present_scroll_offsets() {
     assert_eq!(settings(&s, 2), (Default::default(), Default::default()));
 }
 
+/// Structural edits keep saved scroll positions inside the list only when they shorten it (rows
+/// deleted inside it, its sheet deleted); an unrelated insert or a rename leaves them as read,
+/// even one the file saved past the end of its list.
+#[test]
+fn structural_edits_clamp_scroll_offsets_only_of_shortened_lists() {
+    use gridcraft_model::DropDisplay;
+    let mut s = s();
+    let mut wb = Workbook::new();
+    wb.sheets.push(std::sync::Arc::new(gridcraft_model::Sheet::new("Lists")));
+    let offset = |n| DropDisplay { scroll_offset: Some(n), scroll_width: Some(35), ..Default::default() };
+    let sh = wb.sheet_mut(0).unwrap();
+    for (id, list_range, at) in [(1, "$A$1:$A$9", 8), (2, "$C$1:$C$3", 7), (3, "Lists!$A$1:$A$9", 8)] {
+        sh.controls.push(FormControl {
+            id,
+            kind: ControlKind::Drop,
+            list_range: Some(list_range.into()),
+            drop_display: offset(at),
+            drop_vml_display: offset(at),
+            ..Default::default()
+        });
+    }
+    s.add_document(crate::DocState::new(wb, None, "Offsets".into(), Trust::FromFile));
+    let offsets = |s: &Session, id| {
+        let c = control(s, id);
+        (c.drop_display.scroll_offset, c.drop_vml_display.scroll_offset, c.drop_display.scroll_width)
+    };
+    // A row inserted above every list, and a rename: no list is shorter, so nothing is clamped
+    // (control 2 was saved past the end of its three items and stays so).
+    s.execute("home.insertRows", json!({"rows": "1:1", "sheet": 0})).unwrap();
+    s.execute("sheet.rename", json!({"sheet": 1, "name": "Other"})).unwrap();
+    assert_eq!(
+        (offsets(&s, 1), offsets(&s, 2), offsets(&s, 3)),
+        ((Some(8), Some(8), Some(35)), (Some(7), Some(7), Some(35)), (Some(8), Some(8), Some(35)))
+    );
+    // Four rows deleted inside the first list leave five items: the offsets end at the last one.
+    s.execute("home.deleteRows", json!({"rows": "3:6", "sheet": 0})).unwrap();
+    assert_eq!(control(&s, 1).list_range.as_deref(), Some("$A$2:$A$6"));
+    assert_eq!(offsets(&s, 1), (Some(4), Some(4), Some(35)));
+    // The third list's sheet deleted: it names nothing, so its offsets go to 0.
+    s.execute("home.deleteSheet", json!({"sheet": 1})).unwrap();
+    assert_eq!(offsets(&s, 3), (Some(0), Some(0), Some(35)));
+    // Saved and read back, the clamped offsets are what the file holds.
+    reopen(&mut s);
+    assert_eq!((offsets(&s, 1), offsets(&s, 3)), ((Some(4), Some(4), Some(35)), (Some(0), Some(0), Some(35))));
+}
+
 #[test]
 fn references_follow_structural_edits_and_renames() {
     let mut s = s();
