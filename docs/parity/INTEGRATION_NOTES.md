@@ -71,3 +71,12 @@ Table slicers resolve their source on import, but table slicer export is unsuppo
 
 See Microsoft's [table naming rules](https://support.microsoft.com/en-us/excel/rename-an-excel-table) and [structure reference grammar](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-oe376/bcd72180-31a3-423b-8f83-d224b2286da3). A scan of conventional table parts found no collisions in 1,122 public table workbooks (33,370 eligible XLSX-family rows; 19 unreadable). A second scan of 2,125 public packages with table parts (307 of them with sheet-scoped names) found no table sharing a name with a defined name of either scope. The repair is tested with synthetic packages; how Excel repairs such malformed packages remains unmeasured.
 
+## X21 — XLSX hyperlink kinds
+
+A hyperlink's kind comes from the file structure and the model's `external` flag, never from the target text. On open, a `<hyperlink r:id>` whose relationship has a target is external (with any `location` kept after a `#`: `https://a.example/book.xlsx#Sheet1!A2`); a `location` alone is internal ([ECMA-376 Part 1 §18.3.1.47](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.spreadsheet.hyperlink?view=openxml-3.0.1)). A link read from `location` is internal. Its model text carries a `#` only when the bare text would otherwise classify as external (the scheme and network-path tests navigation's `links::classify` uses, `gridcraft_core::link_scheme` and `is_network_link`): `location="http://a.example"` becomes `#http://a.example`, while `Data!B2`, `'#Data'!A1` and `#NAME?` keep X17's spelling. On save, only an external model link gets a relationship; an internal one writes `location` by X17's rules, so `#http://a.example` saves as `location="http://a.example"` and reopens internal. `://`, `mailto:`, `file:` and UNC prefixes no longer make a link external. Insert › Link still sorts new targets as before (`links_outside`), and `HYPERLINK()` formulas are unchanged.
+
+Workbook JSON written before the `external` flag existed reads every link as internal, so such a URL link now saves to XLSX as a `location`; set the flag (re-insert the link) to keep it external.
+
+A scan of 49,655 public XLSX-family packages (24 unreadable) found 268,581 worksheet hyperlinks in 3,283 packages: no `location` contains `://`, no `location`-only link starts with a URL scheme or network path, and no hyperlink relationship target starts with `#`. The change is tested with synthetic packages; how Excel itself follows a `location` that reads like a URL remains unmeasured.
+
+

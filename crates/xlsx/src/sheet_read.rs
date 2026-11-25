@@ -623,6 +623,19 @@ pub(crate) fn internal_link_location(target: &str) -> String {
     }
 }
 
+/// Model target of a link read from `location` alone. The text is [`internal_link_location`],
+/// with a `#` marker in front only when the bare text would be followed out of the workbook
+/// (`http://a.example` → `#http://a.example`), so following and saving keep it internal.
+fn internal_model_target(location: &str) -> String {
+    let target = internal_link_location(location);
+    let bare = target.trim();
+    if !bare.starts_with('#') && (gridcraft_core::is_network_link(bare) || gridcraft_core::link_scheme(bare).is_some()) {
+        format!("#{target}")
+    } else {
+        target
+    }
+}
+
 fn push_hyperlink(cx: &mut Ctx<'_>, name: &str, h: RawHyperlink<'_>, rels: &HashMap<&str, &Rel>, sheet: &mut Sheet, budget: &mut LinkBudget) -> bool {
     let rel_target = h.rel_id.and_then(|id| rels.get(id)).map(|r| r.target.as_str()).unwrap_or("");
     let location = h.location.filter(|l| !l.is_empty());
@@ -630,13 +643,15 @@ fn push_hyperlink(cx: &mut Ctx<'_>, name: &str, h: RawHyperlink<'_>, rels: &Hash
         cx.warn(format!("sheet \"{name}\": hyperlinks longer than {MAX_HYPERLINK_TARGET} characters were dropped"));
         return true;
     }
+    // The structure decides the kind: a relationship is outside the workbook, a `location` alone
+    // is a place in it, whatever either text looks like.
     let mut target = rel_target.to_string();
     let external = !target.is_empty();
     if let Some(loc) = location {
-        if target.is_empty() {
-            target = internal_link_location(loc);
-        } else {
+        if external {
             target = format!("{target}#{loc}");
+        } else {
+            target = internal_model_target(loc);
         }
     }
     if target.is_empty() {

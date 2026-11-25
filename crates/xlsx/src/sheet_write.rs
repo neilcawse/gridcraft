@@ -677,12 +677,8 @@ fn build_sheet_rules(sheet: &Sheet, features: &mut CraftFeatures, rels: &mut Rel
         if t.is_empty() {
             continue;
         }
-        let external = h.external
-            || t.contains("://")
-            || t.to_ascii_lowercase().starts_with("mailto:")
-            || t.starts_with("\\\\")
-            || t.to_ascii_lowercase().starts_with("file:");
-        let (rel_id, location, display, url) = if external {
+        // The model's flag alone picks a relationship or a `location`; the text never does.
+        let (rel_id, location, display, url) = if h.external {
             let (u, loc) = match t.split_once('#') {
                 Some((u, l)) if !u.is_empty() => (u, Some(l.to_string())),
                 _ => (t, None),

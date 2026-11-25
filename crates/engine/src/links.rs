@@ -9,7 +9,7 @@
 //! external addresses; only the host, after showing the address and getting OK from the user,
 //! opens one through [`crate::Session::open_confirmed_link`], which no command reaches.
 
-use gridcraft_core::{CellError, RangeRef, link_location};
+use gridcraft_core::{CellError, is_network_link, link_location, link_scheme};
 use serde_json::{Value as Json, json};
 
 use crate::{EngineError, Result, Session, UiRequest};
@@ -67,7 +67,7 @@ pub fn classify(target: &str) -> LinkKind {
     if t.chars().any(char::is_control) {
         return LinkKind::Refused("The link contains control characters.".into());
     }
-    if t.starts_with("\\\\") || t.starts_with("//") {
+    if is_network_link(t) {
         return LinkKind::Refused("Links to network locations aren't opened.".into());
     }
     // The scheme test below reads the whole target: `#http://…` stays an in-workbook name.
@@ -82,15 +82,8 @@ pub fn classify(target: &str) -> LinkKind {
             None => LinkKind::Refused("Reference isn't valid.".into()),
         };
     }
-    if RangeRef::parse(t).is_some() {
-        return LinkKind::Internal(place.to_string());
-    }
-    let Some((scheme, rest)) = t.split_once(':') else { return LinkKind::Internal(place.to_string()) };
-    let scheme_like = scheme.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-        && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
-    if !scheme_like {
-        return LinkKind::Internal(place.to_string());
-    }
+    let Some(scheme) = link_scheme(t) else { return LinkKind::Internal(place.to_string()) };
+    let rest = t.get(scheme.len() + 1..).unwrap_or_default();
     let lower = scheme.to_ascii_lowercase();
     if ALLOWED.contains(&lower.as_str()) && !rest.trim().is_empty() {
         LinkKind::External(t.to_string())
@@ -187,6 +180,28 @@ mod tests {
             let kind = classify(&back.sheets[0].hyperlinks[&gridcraft_core::CellRef::new(row, 2)].target);
             assert_eq!(matches!(kind, LinkKind::Internal(_)), internal, "{target:?} -> {kind:?}");
             assert!(internal || kind == LinkKind::Refused("Reference isn't valid.".into()), "{target:?} -> {kind:?}");
+        }
+        Ok(())
+    }
+
+    /// An internal link whose place reads like a URL stays internal through an XLSX save and
+    /// reopen, so following it never hands the text to the system; a web link stays external.
+    #[test]
+    fn url_like_internal_links_stay_internal_through_xlsx() -> Result<()> {
+        let mut wb = gridcraft_model::Workbook::new();
+        let links = [("#http://a.example", false), ("https://a.example/x", true), ("mailto:me@a.example", true)];
+        let sheet = wb.sheet_mut(0).ok_or(EngineError::Other("missing sheet".into()))?;
+        for (row, (target, external)) in (0u32..).zip(links) {
+            sheet
+                .hyperlinks
+                .insert(gridcraft_core::CellRef::new(row, 0), gridcraft_model::Hyperlink { target: target.into(), tooltip: None, external });
+        }
+        let saved = gridcraft_xlsx::write_xlsx(&wb).map_err(|e| EngineError::Other(e.to_string()))?;
+        let (back, _) = gridcraft_xlsx::read_xlsx(&saved).map_err(|e| EngineError::Other(e.to_string()))?;
+        for (row, (target, external)) in (0u32..).zip(links) {
+            let link = &back.sheets[0].hyperlinks[&gridcraft_core::CellRef::new(row, 0)];
+            assert_eq!((link.target.as_str(), link.external), (target, external));
+            assert_eq!(matches!(classify(&link.target), LinkKind::Internal(_)), !external, "{target}");
         }
         Ok(())
     }

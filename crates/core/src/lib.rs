@@ -17,4 +17,7 @@ pub use addr::{
 };
 pub use date::DateSystem;
 pub use region::Region;
-pub use value::{Array, CellError, Value, compare, compare_numbers, compare_text, link_location, number_to_text, sort_compare, text_eq};
+pub use value::{
+    Array, CellError, Value, compare, compare_numbers, compare_text, is_network_link, link_location, link_scheme, number_to_text, sort_compare,
+    text_eq,
+};

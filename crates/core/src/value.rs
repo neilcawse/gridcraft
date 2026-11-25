@@ -107,6 +107,24 @@ pub fn link_location(target: &str) -> &str {
     }
 }
 
+/// Whether a trimmed link target is a network path (`\\host\share`, `//host/share`).
+pub fn is_network_link(target: &str) -> bool {
+    target.starts_with("\\\\") || target.starts_with("//")
+}
+
+/// The URL scheme a trimmed link target starts with (`https` in `https://…`, `mailto`,
+/// `file`, `C` in `C:\…`), or `None` for a reference (`Sheet1!A1:B2`) or text without one.
+/// Following decides by this whether a target leaves the workbook.
+pub fn link_scheme(target: &str) -> Option<&str> {
+    if crate::RangeRef::parse(target).is_some() {
+        return None;
+    }
+    let (scheme, _) = target.split_once(':')?;
+    let scheme_like = scheme.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    scheme_like.then_some(scheme)
+}
+
 impl fmt::Display for CellError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())

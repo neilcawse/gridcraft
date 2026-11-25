@@ -408,6 +408,62 @@ fn hyperlink_to_another_file_stays_external() {
     );
 }
 
+/// The file's structure, not the target text, decides a link's kind: a relationship is external and
+/// a bare `location` is a place in this workbook even when it reads like a URL. Saving follows the
+/// model's flag only, so neither kind turns into the other through a save and reopen.
+#[test]
+fn hyperlink_kind_follows_the_file_structure_not_the_text() {
+    let body = r##"<sheetData/><hyperlinks><hyperlink ref="C1" location="http://a.example"/><hyperlink ref="C2" location="#http://a.example"/>
+      <hyperlink ref="C3" r:id="rId1"/><hyperlink ref="C4" r:id="rId2" location="Sheet1!A2"/><hyperlink ref="C5" r:id="rId3"/>
+      <hyperlink ref="C6" location="Data!B2"/><hyperlink ref="C7" location="mailto:me@a.example"/></hyperlinks>"##;
+    let rel = |id: &str, target: &str| {
+        format!(
+            r#"<Relationship Id="{id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="{target}" TargetMode="External"/>"#
+        )
+    };
+    let sheet_rels = format!(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{}{}{}</Relationships>"#,
+        rel("rId1", "https://a.example/x"),
+        rel("rId2", "https://a.example/book.xlsx"),
+        rel("rId3", "mailto:me@a.example"),
+    );
+    let mut wb = read_xlsx(&minimal(body, &[("xl/worksheets/_rels/sheet1.xml.rels", &sheet_rels)], "", "")).unwrap().0;
+    // Built in the model too: an internal target that reads like a URL keeps its one marker.
+    let link = gridcraft_model::Hyperlink { target: "#http://a.example".into(), tooltip: None, external: false };
+    std::sync::Arc::make_mut(&mut wb.sheets[0]).hyperlinks.insert(at("C8"), link);
+    let model = [
+        ("C1", "#http://a.example", false),
+        ("C2", "#http://a.example", false),
+        ("C3", "https://a.example/x", true),
+        ("C4", "https://a.example/book.xlsx#Sheet1!A2", true),
+        ("C5", "mailto:me@a.example", true),
+        ("C6", "Data!B2", false),
+        ("C7", "#mailto:me@a.example", false),
+        ("C8", "#http://a.example", false),
+    ];
+    let some = |s: &str| Some(s.to_string());
+    let written = vec![
+        ("C1".to_string(), None, some("http://a.example")),
+        ("C2".into(), None, some("http://a.example")),
+        ("C3".into(), some("https://a.example/x"), None),
+        ("C4".into(), some("https://a.example/book.xlsx"), some("Sheet1!A2")),
+        ("C5".into(), some("mailto:me@a.example"), None),
+        ("C6".into(), None, some("Data!B2")),
+        ("C7".into(), None, some("mailto:me@a.example")),
+        ("C8".into(), None, some("http://a.example")),
+    ];
+    for cycle in 0..2 {
+        let links = &wb.sheet(0).unwrap().hyperlinks;
+        for (cell, target, external) in model {
+            let h = &links[&at(cell)];
+            assert_eq!((h.target.as_str(), h.external), (target, external), "{cell}, cycle {cycle}");
+        }
+        let saved = crate::write_xlsx(&wb).unwrap();
+        assert_eq!(written_links(&saved), written, "cycle {cycle}");
+        wb = read_xlsx(&saved).unwrap().0;
+    }
+}
+
 #[test]
 fn drawing_with_picture_and_chart() {
     let png: &[u8] = b"\x89PNG\r\n\x1a\nfakeimagedata";
