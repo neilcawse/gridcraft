@@ -51,7 +51,7 @@ formulas. The observed styles of sampled populated cells moved with those cells.
 | `x25-copy-blank-column-style` | An empty styled source column changes the destination column and its blank cells from yellow/italic to blue/bold. Width is unchanged. | Not sampled |
 | `x25-cut-rows-to-s-a8`, `x25-cut-rows-to-t-a8` | Same destination effect as row copy. Source lines return to default height, lose visible row formatting and no longer contain the moved values. | Destination `A1:I10` / `H10` |
 | `x25-cut-cols-to-s-h1`, `x25-cut-cols-to-t-h1` | Same destination geometry as column copy. Blank destination cells inherit the source blue/bold style. Source widths and blank-cell styles reset, and the moved values are gone. | Destination `A1:J9` / `J8` |
-| `x25-default-row-over-custom`, `x25-default-col-over-custom` | A default source resets the destination size and inherited style. The sampled cleared cell in the destination column reads Normal. | Destination unchanged: `A1:I9` / `H8` |
+| `x25-default-row-over-custom`, `x25-default-col-over-custom` | A default source resets the destination size, and the destination row loses its prior fill. In the column case only one stored destination cell was sampled; it is cleared and reads Normal. | Destination unchanged: `A1:I9` / `H8` |
 | `x25-bare-row-over-untouched`, `x25-absent-row-over-untouched` | Both empty copies leave destination geometry and formatting unchanged. Bare versus absent row has no measured effect other than the different destination address. | Destination `A1:I11` / `H11` and `A1:I12` / `H12`, respectively |
 | `x25-control-a3-b4` | An ordinary rectangle changes cell formatting and content, not line sizes. The aggregate row style readback becomes mixed, which does not establish loss of inherited formatting on untouched cells. | Destination unchanged: `A1:I9` / `H8` |
 | `x25-used-base`, `x25-used-bare-row`, `x25-used-width-col` | Bare row and width-only column do not extend this data rectangle. | `C3:E5` / `E5` |
@@ -65,11 +65,13 @@ gap belongs to [worksheet inspection and navigation](../gaps.md#25-used-workshee
 not the shared bounds for print, export or calculation.
 
 GridCraft transfers size and effective visibility for contiguous whole-line `edit.paste`, and
-transfers inherited row and column styles. An absent source resets those fields. Same-workbook
-Cut resets them on the source and moves its line records as they stand at paste time. If the
-original source sheet is no longer at the recorded index, GridCraft refuses the paste rather
-than clearing another sheet. Full-size explicit ranges and line syntax are equivalent. Line
-and cell edits share one undo entry and line changes respect the sheet's formatting permissions.
+transfers inherited row and column styles. An absent source resets those fields. No blank
+destination cell was sampled under a default source column, so its style reset follows the
+measured cut-source reset rather than a direct readback. Same-workbook Cut resets those fields
+on the source and moves them as they stand at paste time. If the original source sheet is no
+longer at the recorded index, GridCraft refuses the paste rather than clearing another sheet.
+Full-size explicit ranges and line syntax are equivalent. Line and cell edits share one undo
+entry and line changes respect the sheet's formatting permissions.
 
 Zero size demonstrates effective geometry; the probes did not recover `Hidden`, `OutlineLevel`
 or `ShowDetail` values, nor did they save XML. Outline/collapse, thickness and bare markers stay
