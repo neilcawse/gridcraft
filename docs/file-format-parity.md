@@ -54,6 +54,25 @@ not interpreted as ink. This does not implement Office InkML or fix inserted ico
 Command and package tests cover repeated saves and unrelated cell edits; external Excel rendering
 and repair-free opening remain unverified.
 
+Untouched supported worksheet drawings in XLSX and XLSM keep their original `twoCellAnchor`,
+`oneCellAnchor`, or `absoluteAnchor` spelling and placement. This includes the presence of
+`editAs`, signed and out-of-cell marker offsets, exact EMU position and extent, and optional
+`off`, `ext`, `chOff`, and `chExt` in nested group transforms. Saved placement does not depend
+on the host's sheet metrics. This does not correct the in-app display position when automatic
+row heights change after drawing import.
+
+An explicit move, resize, anchor-mode change, or member edit discards the affected source
+placement and regenerates it from editable geometry. A whole-sheet copy keeps placement because
+it copies the same row and column geometry. For row and column insertion/deletion, genuine
+absolute coordinates are independent of the grid. Moving anchors keep their original marker
+offsets when the edit is wholly before their span; their marked lines shift. Edits after the
+span leave placement alone. Intersecting edits and earlier edits to cell-relative `absolute`
+placement regenerate it rather than assuming the old markers still describe the result.
+This conservative policy follows the distinction in ECMA-376 `ST_EditAs` between moving and
+sizing with cells, moving without sizing, and remaining fixed. It is not a claim about which
+anchor spelling Excel chooses after an edit. Separate chart `userShapes` annotations, VML,
+and unsupported drawing objects do not acquire worksheet placement from this path.
+
 Dynamic-array formulas keep their mark on save. A formula read with dynamic-array cell metadata
 (`cm`, the `XLDAPR` record in `xl/metadata.xml`) is written back with it, together with the
 metadata part, even when it returns one value and GridCraft's own shape analysis would not need

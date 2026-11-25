@@ -5313,6 +5313,59 @@ fn object_commands_on_a_grouped_member_act_on_the_group() {
 }
 
 #[test]
+fn source_drawing_placement_shifts_or_drops_by_anchor_mode() {
+    use gridcraft_model::{AnchorMode, DrawingFile, DrawingMarker, DrawingPlacement, DrawingRef};
+    use DrawingPlacement::{Absolute, OneCell, TwoCell};
+    let from = DrawingMarker { col: 1, row: 4, col_off: -22, row_off: 99 };
+    let to = DrawingMarker { col: 2, row: 7, col_off: 23, row_off: -100 };
+    let two = |edit: Option<&str>| TwoCell { from, to, edit_as: edit.map(str::to_owned) };
+    for (mode, placement, retained_before) in [
+        (AnchorMode::MoveAndSize, two(None), true),
+        (AnchorMode::MoveAndSize, two(Some("twoCell")), true),
+        (AnchorMode::MoveOnly, two(Some("oneCell")), true),
+        (AnchorMode::Absolute, two(Some("absolute")), false),
+        (AnchorMode::MoveOnly, OneCell { from, ext: (380_999, 381_111) }, true),
+        (AnchorMode::Absolute, Absolute { pos: (609_600, 762_099), ext: (380_999, 381_111) }, true),
+    ] {
+        let mut s = s();
+        let id = add_image(&mut s, "B5", mode);
+        let r = DrawingRef::Image(id);
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.drawing_files.insert(r, DrawingFile { anchor: sh.images[0].anchor, placement: placement.clone() });
+        sh.drawing_names.insert(r, (67, "Source".into()));
+        sh.drawing_order.insert(r, 3);
+        s.execute("sheet.move", json!({"sheet": 0, "to": 1, "copy": true})).unwrap();
+        let copy = s.doc().unwrap().wb.sheet(1).unwrap();
+        let copied = DrawingRef::Image(copy.images[0].id);
+        assert_ne!(r, copied);
+        assert_eq!(copy.drawing_files[&copied].placement, placement);
+        assert_eq!(copy.drawing_names[&copied], (67, "Source".into()));
+        assert_eq!(copy.drawing_order[&copied], 3);
+
+        let file = |s: &Session| s.doc().unwrap().wb.sheet(0).unwrap().drawing_files.get(&r).cloned();
+        s.execute("home.insertRows", json!({"sheet": 0, "rows": "20:20"})).unwrap();
+        assert_eq!(file(&s).unwrap().placement, placement);
+        s.execute("home.insertRows", json!({"sheet": 0, "rows": "1:1"})).unwrap();
+        assert_eq!(file(&s).is_some(), retained_before);
+        let shift = |mut m: DrawingMarker| { m.row += 1; m };
+        if let Some(f) = file(&s) {
+            let shifted = match placement.clone() {
+                TwoCell { from, to, edit_as } => TwoCell { from: shift(from), to: shift(to), edit_as },
+                OneCell { from, ext } => OneCell { from: shift(from), ext },
+                absolute @ Absolute { .. } => absolute,
+            };
+            assert_eq!(f.placement, shifted);
+            assert_eq!(f.anchor.cell, image_cell(&s, id).unwrap_or(f.anchor.cell));
+        }
+        s.execute("home.deleteRows", json!({"sheet": 0, "rows": "1:1"})).unwrap();
+        assert_eq!(file(&s).map(|f| f.placement), retained_before.then_some(placement.clone()));
+        s.execute("home.deleteRows", json!({"sheet": 0, "rows": "6:6"})).unwrap();
+        assert_eq!(file(&s).is_some(), matches!(placement, Absolute { .. }));
+    }
+}
+
+#[test]
 fn arrange_align_rejects_grouped_members() {
     use gridcraft_model::{AnchorMode, DrawingRef};
     let mut s = s();

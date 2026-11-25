@@ -203,7 +203,7 @@ pub(super) fn read(obj: &El, anchor: Anchor, grouped: bool) -> Option<Shape> {
 
 /// Invalid/native out-of-range data uses the existing rectangle fallback. A successful
 /// result is complete before it is appended, so malformed points never yield half a stroke.
-pub(super) fn write(shape: &Shape, theme: &Theme, id: usize, off: (i64, i64), ext: (i64, i64), rot: i64) -> Option<String> {
+pub(super) fn write(shape: &Shape, theme: &Theme, (id, name): (usize, Option<&str>), off: (i64, i64), ext: (i64, i64), rot: i64) -> Option<String> {
     if shape.kind != ShapeKind::Ink || shape.format.no_line {
         return None;
     }
@@ -237,7 +237,8 @@ pub(super) fn write(shape: &Shape, theme: &Theme, id: usize, off: (i64, i64), ex
     }
     let [r, g, b] = shape.line.resolve(theme)?;
     let mut xml = format!(
-        "<xdr:sp macro=\"\" textlink=\"\"><xdr:nvSpPr><xdr:cNvPr id=\"{id}\" name=\"Ink {id}\"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr>{}<a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:pathLst><a:path w=\"{w}\" h=\"{h}\" fill=\"none\">",
+        "<xdr:sp macro=\"\" textlink=\"\"><xdr:nvSpPr><xdr:cNvPr id=\"{id}\" name=\"{}\"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr>{}<a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:pathLst><a:path w=\"{w}\" h=\"{h}\" fill=\"none\">",
+        name.map_or_else(|| format!("Ink {id}"), super::esc_attr),
         xfrm("a:xfrm", off, ext, rot)
     );
     for (i, (x, y)) in points.iter().enumerate() {

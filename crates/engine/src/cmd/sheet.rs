@@ -142,6 +142,47 @@ fn shift_sheet_features(sh: &mut Sheet, axis: Axis, at: u32, count: u32, insert:
     // Floating objects: snapshot their bottom-right corners against the pre-shift geometry, so a
     // re-fit after the shift measures against the grid the object actually lands on.
     let obj_corners: Vec<(u32, u32, f32, f32)> = sh.object_anchors().map(|a| anchor_corner(sh, a)).collect();
+    let mut drawing_files = std::mem::take(&mut sh.drawing_files);
+    drawing_files.retain(|&r, file| {
+        let Some(a) = sh.raw_drawing_anchor(r).filter(|a| *a == file.anchor) else { return false };
+        let (col, row, _, _) = anchor_corner(sh, &a);
+        let rows = axis == Axis::Rows;
+        let mut span = if rows { (a.cell.row, row) } else { (a.cell.col, col) };
+        if let gridcraft_model::DrawingRef::Group(id) = r {
+            let Some(group) = sh.drawing_group(id) else { return false };
+            if sh.source_group(group).is_none() {
+                return false;
+            }
+            for member in sh.group_contents(id).into_iter().filter_map(|r| sh.raw_drawing_anchor(r)) {
+                if member.mode != a.mode {
+                    return false;
+                }
+                let (col, row, _, _) = anchor_corner(sh, &member);
+                let (start, end) = if rows { (member.cell.row, row) } else { (member.cell.col, col) };
+                span = (span.0.min(start).min(end), span.1.max(start).max(end));
+            }
+        }
+        let span = file.placement.physical_span(rows, span, |line, offset| {
+            let pixels = offset as f64 / 9525.0;
+            if rows {
+                sh.row_at(sh.row_top(line.min(MAX_ROWS - 1)) + pixels)
+            } else {
+                sh.col_at(sh.col_left(line.min(MAX_COLS - 1)) + pixels)
+            }
+        });
+        file.placement.shift_lines(rows, at, count, insert, a.mode, span)
+    });
+    let groups_to_refresh: Vec<_> = drawing_files.keys().filter_map(|r| {
+        let gridcraft_model::DrawingRef::Group(id) = *r else { return None };
+        Some(std::iter::once(r.to_owned()).chain(sh.group_contents(id).into_iter().filter(|r| matches!(r, gridcraft_model::DrawingRef::Group(_)))))
+    }).flatten().collect();
+    for g in &mut sh.groups {
+        if let Some(file) = &mut g.file
+            && !groups_to_refresh.contains(&gridcraft_model::DrawingRef::Group(g.id))
+        {
+            file.edited = true;
+        }
+    }
     // Line info.
     let lines = if axis == Axis::Rows { &mut sh.rows } else { &mut sh.cols };
     let old = std::mem::take(lines);
@@ -193,6 +234,24 @@ fn shift_sheet_features(sh: &mut Sheet, axis: Axis, at: u32, count: u32, insert:
         sh.object_anchors().zip(&obj_corners).map(|(a, &corner)| shift_anchor(sh, *a, corner, axis, at, &map_line)).collect();
     for (a, n) in sh.object_anchors_mut().zip(new_anchors) {
         *a = n;
+    }
+    drawing_files.retain(|&r, file| {
+        let Some(anchor) = sh.raw_drawing_anchor(r) else { return false };
+        file.anchor = anchor;
+        true
+    });
+    sh.drawing_files = drawing_files;
+    for reference in groups_to_refresh {
+        let gridcraft_model::DrawingRef::Group(id) = reference else { continue };
+        let Some(i) = sh.groups.iter().position(|g| g.id == id) else { continue };
+        let Some(mut file) = sh.groups[i].file.take() else { continue };
+        file.anchor = sh.groups[i].anchor;
+        for member in &mut file.members {
+            if let Some(anchor) = sh.raw_drawing_anchor(member.reference) {
+                member.anchor = anchor;
+            }
+        }
+        sh.groups[i].file = Some(file);
     }
     sh.sparklines.retain_mut(|sp| match map_cell(sp.cell) {
         Some(c) => {
@@ -523,6 +582,7 @@ fn move_columns(s: &mut Session, p: &Json) -> Result<Json> {
                     object.cell.col = destination + (object.cell.col - moved_from);
                 }
             }
+            sh.discard_changed_drawing_files();
             for (cell, value) in cells {
                 let dest = CellRef::new(cell.row, destination + (cell.col - moved_from));
                 sh.cells.set(dest, value);

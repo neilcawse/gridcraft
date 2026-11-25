@@ -667,6 +667,78 @@ fn with_drawing(drawing: &str) -> Vec<u8> {
     minimal(r#"<sheetData/><drawing r:id="rId1"/>"#, &[("xl/worksheets/_rels/sheet1.xml.rels", srels), ("xl/drawings/drawing1.xml", drawing)], "", "")
 }
 
+#[test]
+fn drawing_anchor_spelling_survives_metric_changes_and_two_saves() {
+    use crate::XlsxKind;
+    use gridcraft_model::{ObjKind, ObjRef};
+    const NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
+    let marker = |tag, col, col_off, row, row_off| {
+        format!("<xdr:{tag}><xdr:col>{col}</xdr:col><xdr:colOff>{col_off}</xdr:colOff><xdr:row>{row}</xdr:row><xdr:rowOff>{row_off}</xdr:rowOff></xdr:{tag}>")
+    };
+    let from = marker("from", 2, -125987, 3, 990077);
+    let to = marker("to", 9, 2990011, 10, -313117);
+    let placements = [
+        ("twoCellAnchor", "", format!("{from}{to}")),
+        ("twoCellAnchor", " editAs=\"twoCell\"", format!("{from}{to}")),
+        ("twoCellAnchor", " editAs=\"oneCell\"", format!("{from}{to}")),
+        ("twoCellAnchor", " editAs=\"absolute\"", format!("{from}{to}")),
+        ("oneCellAnchor", "", format!("{from}<xdr:ext cx=\"1990333\" cy=\"1770111\"/>")),
+        ("absoluteAnchor", "", "<xdr:pos x=\"-113987\" y=\"2990199\"/><xdr:ext cx=\"1990333\" cy=\"1770111\"/>".into()),
+    ];
+    let mut drawing = format!(r#"<xdr:wsDr xmlns:xdr="{NS}" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">"#);
+    for (i, (tag, attrs, fields)) in placements.iter().enumerate() {
+        let id = 90 - i;
+        drawing.push_str(&format!(r#"<xdr:{tag}{attrs}>{fields}<xdr:sp><xdr:nvSpPr><xdr:cNvPr id="{id}" name="Fixture &amp; {i}"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rect"/></xdr:spPr></xdr:sp><xdr:clientData/></xdr:{tag}>"#));
+    }
+    drawing.push_str("</xdr:wsDr>");
+    let original = with_drawing(&drawing);
+    for kind in [XlsxKind::Workbook, XlsxKind::MacroWorkbook] {
+        let (mut wb, _) = read_xlsx(&original).unwrap();
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.default_col_width = 113.0;
+        sh.default_row_height = 31.0;
+        let read_part = |bytes: &[u8]| {
+            crate::package::Package::open(bytes).unwrap().read_xml("xl/drawings/drawing1.xml").unwrap().unwrap()
+        };
+        let source = read_part(&original);
+        let verify = |bytes: &[u8]| {
+            let part = read_part(bytes);
+            assert_eq!(part.children.len(), placements.len());
+            for (i, (src, out)) in source.children.iter().zip(&part.children).enumerate() {
+                assert_eq!(out.name, src.name);
+                assert_eq!(out.attr("editAs"), src.attr("editAs"));
+                for tag in ["from", "to"] {
+                    for field in ["col", "colOff", "row", "rowOff"] {
+                        let field = |a: &crate::xml::El| a.path(&[tag, field]).map(|e| e.text.clone());
+                        assert_eq!(field(out), field(src));
+                    }
+                }
+                for (tag, attrs) in [("pos", ["x", "y"]), ("ext", ["cx", "cy"])] {
+                    for attr in attrs {
+                        assert_eq!(out.child(tag).and_then(|e| e.attr(attr)), src.child(tag).and_then(|e| e.attr(attr)));
+                    }
+                }
+                let nv = out.path(&["sp", "nvSpPr", "cNvPr"]).unwrap();
+                assert_eq!(nv.attr("id").unwrap().parse::<usize>().unwrap(), 90 - i);
+                assert_eq!(nv.attr("name").unwrap(), format!("Fixture & {i}"));
+            }
+        };
+        let saved = crate::write_xlsx_as(&wb, kind).unwrap();
+        verify(&saved);
+        let (mut wb, _) = read_xlsx(&saved).unwrap();
+        verify(&crate::write_xlsx_as(&wb, kind).unwrap());
+
+        let sh = wb.sheet_mut(0).unwrap();
+        let object = ObjRef::new(ObjKind::Shape, sh.shapes[4].id);
+        let original = sh.object_anchor(object).unwrap();
+        sh.object_anchor_mut(object).unwrap().width += 20.0;
+        *sh.object_anchor_mut(object).unwrap() = original;
+        let edited = read_part(&crate::write_xlsx_as(&wb, kind).unwrap());
+        assert_eq!(edited.children[4].name, "twoCellAnchor", "an edit must not revive the old one-cell encoding");
+        assert_eq!(edited.children[5].name, "absoluteAnchor", "the unrelated object was not edited");
+    }
+}
+
 /// The box of the shape with text `text`.
 fn shape_box(s: &gridcraft_model::Sheet, text: &str) -> (f64, f64, f64, f64) {
     let id = s.shapes.iter().find(|sh| sh.text == text).unwrap().id;
