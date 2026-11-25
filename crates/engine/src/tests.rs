@@ -3014,6 +3014,39 @@ fn lambda_names_keep_their_case_in_calls() {
     assert_eq!(v(&s, "A1"), Value::Number(13.0));
 }
 
+fn assert_builtin_and_lambda_entry(s: &mut Session) {
+    s.execute("cell.set", json!({"cell": "A1", "input": "1"})).unwrap();
+    for (cell, input) in [("B1", "=ISREF(A1)"), ("C1", "=isref(A1)"), ("D1", "=myfn(1)")] {
+        s.execute("cell.set", json!({"cell": cell, "input": input})).unwrap();
+    }
+    assert_eq!(s.execute("cell.get", json!({"cell": "D1"})).unwrap()["formula"], "=MyFn(1)");
+    assert_eq!(v(s, "D1"), Value::Number(2.0));
+    for cell in ["B1", "C1"] {
+        let read = s.execute("cell.get", json!({"cell": cell})).unwrap();
+        assert_eq!((read["formula"].as_str(), v(s, cell)), (Some("=ISREF(A1)"), Value::Bool(true)), "{cell}");
+    }
+}
+
+#[test]
+fn builtin_call_spelling_after_name_edit() {
+    let mut s = s();
+    s.execute("formulas.defineName", json!({"name": "IsRef", "refersTo": "=LAMBDA(x,FALSE)"})).unwrap();
+    s.execute("formulas.defineName", json!({"name": "MyFn", "refersTo": "=LAMBDA(x,x+1)"})).unwrap();
+    assert_builtin_and_lambda_entry(&mut s);
+}
+
+#[test]
+fn builtin_call_spelling_after_name_import() {
+    let mut seed = s();
+    seed.execute("formulas.defineName", json!({"name": "IsRef", "refersTo": "=LAMBDA(x,FALSE)"})).unwrap();
+    seed.execute("formulas.defineName", json!({"name": "MyFn", "refersTo": "=LAMBDA(x,x+1)"})).unwrap();
+    let saved = seed.execute("file.saveBytes", json!({"format": "xlsx"})).unwrap();
+    let mut opened = s();
+    opened.execute("file.open", json!({"name": "names.xlsx", "base64": saved["base64"]})).unwrap();
+    assert!(opened.doc().unwrap().wb.names.iter().any(|n| n.name == "IsRef" && n.formula == "LAMBDA(x,FALSE)"));
+    assert_builtin_and_lambda_entry(&mut opened);
+}
+
 #[test]
 fn sheets() {
     let mut s = s();

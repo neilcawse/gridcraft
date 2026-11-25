@@ -680,10 +680,10 @@ impl Workbook {
             }
         }
     }
-    /// Names of the defined names holding a LAMBDA (callable like functions).
+    /// Defined LAMBDA names eligible for call respelling. Built-ins keep the parser's spelling.
     pub(crate) fn lambda_names(&self) -> Vec<String> {
         let is_lambda = |f: &str| f.trim_start_matches('=').trim_start().get(..7).is_some_and(|p| p.eq_ignore_ascii_case("LAMBDA("));
-        self.names.iter().filter(|n| is_lambda(&n.formula)).map(|n| n.name.clone()).collect()
+        self.names.iter().filter(|n| is_lambda(&n.formula) && !gridcraft_functions::is_known_function(&n.name)).map(|n| n.name.clone()).collect()
     }
     /// Table by name across sheets: (sheet index, table index).
     pub fn table(&self, name: &str) -> Option<(usize, usize)> {

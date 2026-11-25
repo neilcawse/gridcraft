@@ -1564,6 +1564,31 @@ fn let_lambda_parameters_drop_xlpm_on_read() {
     assert_eq!(text("C1").as_deref(), Some("MAP(B1:B2,LAMBDA(v,v+1))"));
 }
 
+#[test]
+fn builtin_call_spelling_survives_xlsx_import() {
+    let mut wb = Workbook::new();
+    for (name, formula) in [("IsRef", "LAMBDA(x,FALSE)"), ("MyFn", "LAMBDA(x,x+1)")] {
+        wb.names.push(DefinedName {
+            name: name.into(),
+            formula: formula.into(),
+            scope: None,
+            comment: String::new(),
+            hidden: false,
+            uid: Default::default(),
+        });
+    }
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.cells.set(at("B1"), Cell::formula(Formula::new("ISREF(A1)")));
+    sh.cells.set(at("C1"), Cell::formula(Formula::new("MYFN(1)")));
+    let bytes = write_xlsx(&wb).unwrap();
+    let (xml, _) = sheet1_xml(&bytes);
+    assert!(xml.contains(">ISREF(A1)</f>"), "{xml}");
+    let (opened, _) = read_xlsx(&bytes).unwrap();
+    let sh = opened.sheet(0).unwrap();
+    assert_eq!(sh.cell(at("C1")).unwrap().formula.as_ref().unwrap().text, "MyFn(1)");
+    assert_eq!(sh.cell(at("B1")).unwrap().formula.as_ref().unwrap().text, "ISREF(A1)");
+}
+
 /// A line break in a table column name (and its header cell) survives; a
 /// leading backslash in a table name is legal and kept.
 #[test]

@@ -1495,6 +1495,26 @@ fn let_lambda_names_ignore_case_in_any_script() {
 }
 
 #[test]
+fn builtin_call_spelling_does_not_change_dispatch() {
+    let mut t = T::new();
+    t.wb.names.push(gridcraft_model::DefinedName {
+        name: "IsRef".into(),
+        scope: None,
+        formula: "LAMBDA(x,FALSE)".into(),
+        comment: String::new(),
+        hidden: false,
+        uid: Default::default(),
+    });
+    t.set("A1", "1");
+    // Bypass the parser's uppercasing: a stored AST can already have the old spelling.
+    let formula = Formula::from_expr(gridcraft_formula::Expr::Call("IsRef".into(), vec![gridcraft_formula::parse("A1").unwrap()]));
+    assert_eq!(formula.text, "IsRef(A1)");
+    t.wb.sheet_mut(0).unwrap().cells.set(c("B1"), Cell::formula(formula));
+    t.calc.cells_changed(&mut t.wb, &[(0, c("B1"))]);
+    assert_eq!(t.get("B1"), Value::Bool(true));
+}
+
+#[test]
 fn functions_given_by_name() {
     let mut t = T::new();
     for (i, (k, v)) in [("a", 1), ("b", -2), ("a", 3)].iter().enumerate() {

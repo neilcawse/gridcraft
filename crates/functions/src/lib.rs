@@ -279,24 +279,30 @@ pub const SPECIAL_FUNCTIONS: &[&str] = &[
 
 /// Whether the worksheet library or the evaluator handles this function name.
 pub fn is_known_function(name: &str) -> bool {
-    SPECIAL_FUNCTIONS.iter().any(|special| special.eq_ignore_ascii_case(name)) || lookup(name).is_some()
+    canonical_function_name(name).is_some()
+}
+
+/// Canonical spelling of a worksheet or evaluator built-in, if it is known.
+pub fn canonical_function_name(name: &str) -> Option<&'static str> {
+    SPECIAL_FUNCTIONS.iter().copied().find(|special| special.eq_ignore_ascii_case(name)).or_else(|| lookup(name).map(|spec| spec.name))
 }
 
 /// Looks a function up by name (case-insensitive; `_xlfn.`- and `_xlws.`-free names). A
 /// `_xludf.` name is user-defined and never found.
 pub fn lookup(name: &str) -> Option<&'static FnSpec> {
-    let mut n = name.trim().to_ascii_uppercase();
-    loop {
-        if let Some(r) = n.strip_prefix("_XLFN.") {
-            n = r.to_string();
-        } else if let Some(r) = n.strip_prefix("_XLWS.") {
-            n = r.to_string();
-        } else {
-            break;
-        }
+    let name = name.trim();
+    let uppercase;
+    let mut n = if name.bytes().any(|b| b.is_ascii_lowercase()) {
+        uppercase = name.to_ascii_uppercase();
+        uppercase.as_str()
+    } else {
+        name
+    };
+    while let Some(rest) = n.strip_prefix("_XLFN.").or_else(|| n.strip_prefix("_XLWS.")) {
+        n = rest;
     }
     let (v, map) = registry();
-    map.get(n.as_str()).and_then(|&i| v.get(i))
+    map.get(n).and_then(|&i| v.get(i))
 }
 
 /// Every registered function.
