@@ -1529,3 +1529,39 @@ fn conditional_format_persists_on_final_page_of_large_multipage_pdf() {
     assert!(streams.first().unwrap().contains("1 0 0 rg"), "page 1 must keep red CF fill");
     assert!(streams.last().unwrap().contains("1 0 0 rg"), "final page {} must keep red CF fill", rendered.pages);
 }
+
+#[test]
+fn full_row_and_full_column_merges_do_not_explode_print_pagination() {
+    // Separate sheets so the full-row and full-column merges do not overlap.
+    let mut wb = Workbook::new();
+    let banner = wb.styles.intern(Style { fill: gridcraft_model::Fill::solid(Color::Rgb(0xDCE6F1)), ..Default::default() });
+    {
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.set_value(CellRef::new(0, 0), Value::text("Title"));
+        sh.set_value(CellRef::new(4, 3), Value::Number(42.0));
+        sh.set_value(CellRef::new(0, 4), Value::text("ColNote"));
+        sh.rows.entry(1).or_default().style = Some(banner);
+        sh.rows.entry(2).or_default().style = Some(banner);
+        // Whole-row merge A2:XFD3.
+        sh.merges.push(RangeRef::rows(1, 2));
+    }
+    {
+        let mut sh = Sheet::new("ColMerge");
+        sh.set_value(CellRef::new(0, 0), Value::text("Title"));
+        sh.set_value(CellRef::new(4, 3), Value::Number(42.0));
+        sh.set_value(CellRef::new(0, 4), Value::text("ColNote"));
+        // Whole-column merge E1:E1048576.
+        sh.merges.push(RangeRef::cols(4, 4));
+        wb.sheets.push(sh.into());
+    }
+
+    let lay_row = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
+    assert_eq!(lay_row.area.end.col, 4, "full-row merge must not expand area to XFD: {:?}", lay_row.area);
+    assert_eq!(lay_row.area.end.row, 4, "full-row merge area row extent: {:?}", lay_row.area);
+    assert_eq!(lay_row.pages.len(), 1, "full-row merge sheet should paginate to 1 page, not explode to MAX_PAGES");
+
+    let lay_col = layout_sheet(&wb, 1, &PrintOptions::default(), None).unwrap();
+    assert_eq!(lay_col.area.end.col, 4, "full-col merge area col extent: {:?}", lay_col.area);
+    assert_eq!(lay_col.area.end.row, 4, "full-col merge must not expand area to 1048576: {:?}", lay_col.area);
+    assert_eq!(lay_col.pages.len(), 1, "full-col merge sheet should paginate to 1 page, not explode to MAX_PAGES");
+}

@@ -1,6 +1,6 @@
 use crate::Arg;
 use crate::util::testutil::*;
-use gridcraft_core::{CellError, DateSystem, Value, date::serial_from_ymd};
+use gridcraft_core::{Array, CellError, DateSystem, Value, date::serial_from_ymd};
 
 fn d(y: i64, m: i64, dd: i64) -> Arg {
     n(serial_from_ymd(DateSystem::D1900, y, m, dd).unwrap())
@@ -181,6 +181,138 @@ fn cash_flows() {
     close(ev("DOLLARFR", vec![n(1.125), n(32.0)]), 1.04);
     is_err(ev("DOLLARDE", vec![n(1.02), n(0.0)]), CellError::Div0);
     is_err(ev("DOLLARDE", vec![n(1.02), n(-1.0)]), CellError::Num);
+}
+
+#[test]
+fn xirr_and_xnpv_follow_excel_coercion_and_date_rules() {
+    let bv = [-10000.0, 2750.0, 4250.0, 3250.0, 2750.0];
+    let bd = [39448.0, 39508.0, 39751.0, 39859.0, 39904.0];
+    let col_vals = |data: Vec<Value>| Value::Array(std::sync::Arc::new(Array::new(data.len(), 1, data).unwrap()));
+    let base_v = || bv.iter().copied().map(Value::Number).collect::<Vec<_>>();
+    let base_d = || bd.iter().copied().map(Value::Number).collect::<Vec<_>>();
+
+    // XIRR: trailing (Empty, Empty), (Empty, date), (0, Empty), and mid (Empty, Empty) match base.
+    for (extra_v, extra_d) in [
+        (Value::Empty, Value::Empty),
+        (Value::Empty, Value::Number(40000.0)),
+        (Value::Number(0.0), Value::Empty),
+        (Value::Empty, Value::Number(39000.0)),
+        (Value::Number(0.0), Value::Number(0.0)),
+        (Value::Number(0.0), Value::Number(1.0)),
+    ] {
+        let mut v = base_v();
+        let mut d = base_d();
+        v.push(extra_v);
+        d.push(extra_d);
+        close_tol(ev("XIRR", vec![rf(col_vals(v.clone())), rf(col_vals(d.clone()))]), 0.3733625352382659, 1e-7);
+        // XNPV rejects any trailing blank cell or date < d0 with #NUM!.
+        is_err(ev("XNPV", vec![n(0.09), rf(col_vals(v)), rf(col_vals(d))]), CellError::Num);
+    }
+
+    // XIRR: numeric text in values and ISO date text in dates coerce; XNPV rejects both with #NUM!.
+    {
+        let mut v = base_v();
+        let mut d = base_d();
+        v.push(Value::text("100"));
+        d.push(Value::Number(40000.0));
+        close_tol(ev("XIRR", vec![rf(col_vals(v.clone())), rf(col_vals(d.clone()))]), 0.3839303553104402, 1e-7);
+        is_err(ev("XNPV", vec![n(0.09), rf(col_vals(v)), rf(col_vals(d))]), CellError::Num);
+    }
+    {
+        let mut v = base_v();
+        let mut d = base_d();
+        v.push(Value::Number(100.0));
+        d.push(Value::text("2009-06-01"));
+        close_tol(ev("XIRR", vec![rf(col_vals(v.clone())), rf(col_vals(d.clone()))]), 0.3842637240886688, 1e-7);
+        is_err(ev("XNPV", vec![n(0.09), rf(col_vals(v)), rf(col_vals(d))]), CellError::Num);
+    }
+
+    // XIRR: non-numeric text (including "", "abc", "-") and booleans return #VALUE! (even with blank value/date).
+    for (extra_v, extra_d) in [
+        (Value::text("abc"), Value::Number(40000.0)),
+        (Value::text(""), Value::Number(40000.0)),
+        (Value::text("-"), Value::Empty),
+        (Value::Bool(true), Value::Number(40000.0)),
+        (Value::Number(100.0), Value::Bool(true)),
+        (Value::Empty, Value::text("abc")),
+        (Value::Number(0.0), Value::text("abc")),
+    ] {
+        let mut v = base_v();
+        let mut d = base_d();
+        v.push(extra_v);
+        d.push(extra_d);
+        is_err(ev("XIRR", vec![rf(col_vals(v.clone())), rf(col_vals(d.clone()))]), CellError::Value);
+        is_err(ev("XNPV", vec![n(0.09), rf(col_vals(v)), rf(col_vals(d))]), CellError::Num);
+    }
+
+    // XIRR: error propagation even when paired with Empty; negative date -> #NUM!; non-zero flow with blank date -> #NUM!.
+    {
+        let mut v = base_v();
+        let mut d = base_d();
+        v.push(Value::Empty);
+        d.push(Value::Error(CellError::NA));
+        is_err(ev("XIRR", vec![rf(col_vals(v.clone())), rf(col_vals(d.clone()))]), CellError::NA);
+        is_err(ev("XNPV", vec![n(0.09), rf(col_vals(v)), rf(col_vals(d))]), CellError::NA);
+    }
+    for (extra_v, extra_d) in [
+        (Value::Empty, Value::Number(-5.0)),
+        (Value::Number(0.0), Value::Number(-5.0)),
+        (Value::Number(100.0), Value::Empty),
+        (Value::Number(100.0), Value::Number(0.0)),
+        (Value::Number(100.0), Value::Number(1.0)),
+    ] {
+        let mut v = base_v();
+        let mut d = base_d();
+        v.push(extra_v);
+        d.push(extra_d);
+        is_err(ev("XIRR", vec![rf(col_vals(v.clone())), rf(col_vals(d.clone()))]), CellError::Num);
+        is_err(ev("XNPV", vec![n(0.09), rf(col_vals(v)), rf(col_vals(d))]), CellError::Num);
+    }
+
+    // XIRR allows dates earlier than dates[0]; XNPV rejects them with #NUM!.
+    {
+        let mut v = base_v();
+        let mut d = base_d();
+        v.push(Value::Number(100.0));
+        d.push(Value::Number(39000.0));
+        close_tol(ev("XIRR", vec![rf(col_vals(v.clone())), rf(col_vals(d.clone()))]), 0.399763959646225, 1e-6);
+        is_err(ev("XNPV", vec![n(0.09), rf(col_vals(v)), rf(col_vals(d))]), CellError::Num);
+    }
+
+    // First element non-numeric: XNPV returns #VALUE! (for Empty/Text/Bool in values[0] or dates[0]);
+    // XIRR returns 2.9802322387695314e-09 when values[0] is 0 or Empty, and #VALUE! for text.
+    for (v0, d0) in [
+        (Value::Empty, Value::Number(39000.0)),
+        (Value::Empty, Value::Number(39600.0)),
+        (Value::Empty, Value::Empty),
+        (Value::Number(0.0), Value::Empty),
+    ] {
+        let mut v = vec![v0];
+        v.extend(base_v());
+        let mut d = vec![d0];
+        d.extend(base_d());
+        close_tol(ev("XIRR", vec![rf(col_vals(v.clone())), rf(col_vals(d.clone()))]), 2.9802322387695314e-09, 1e-15);
+        is_err(ev("XNPV", vec![n(0.09), rf(col_vals(v)), rf(col_vals(d))]), CellError::Value);
+    }
+    {
+        let mut v = vec![Value::Number(0.0)];
+        v.extend(base_v());
+        let mut d = vec![Value::Number(39000.0)];
+        d.extend(base_d());
+        close_tol(ev("XIRR", vec![rf(col_vals(v.clone())), rf(col_vals(d.clone()))]), 2.9802322387695314e-09, 1e-15);
+        close_tol(ev("XNPV", vec![n(0.09), rf(col_vals(v)), rf(col_vals(d))]), 1877.205982260039, 1e-9);
+    }
+    {
+        let mut v = vec![Value::text("x")];
+        v.extend(base_v());
+        let mut d = vec![Value::Number(39000.0)];
+        d.extend(base_d());
+        is_err(ev("XIRR", vec![rf(col_vals(v.clone())), rf(col_vals(d.clone()))]), CellError::Value);
+        is_err(ev("XNPV", vec![n(0.09), rf(col_vals(v)), rf(col_vals(d))]), CellError::Value);
+    }
+
+    // Scalar text value in XIRR returns #VALUE!, not #NUM!.
+    is_err(ev("XIRR", vec![t("abc"), n(39448.0)]), CellError::Value);
 }
 
 #[test]

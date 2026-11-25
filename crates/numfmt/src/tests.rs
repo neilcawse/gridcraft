@@ -1290,3 +1290,40 @@ fn system_long_date_and_time_pseudo_lcids_match_en_us_excel() {
     assert_eq!(sys_out.color, Some(FormatColor::Blue));
     assert_eq!(format_value(&Value::Text("Title".into()), &sys_fmt, S).text, "Title");
 }
+
+#[test]
+fn excel_aaa_and_aaaa_weekday_format_codes() {
+    // Serial 3 = 1900-01-03 (Tuesday); serial 45574.25 = 2024-10-09 06:00 (Wednesday).
+    assert_eq!(f("aaa", 3.0), "Tue");
+    assert_eq!(f("aaaa", 3.0), "Tuesday");
+    assert_eq!(f("AAA", 45574.25), "Wed");
+    assert_eq!(f("AAAA", 45574.25), "Wednesday");
+    assert_eq!(f("aaaaa", 45574.25), "Wednesday");
+    assert_eq!(f("aaaaaaaa", 45574.25), "Wednesday");
+    assert_eq!(f("yyyy-mm-dd (aaa)", 45574.25), "2024-10-09 (Wed)");
+    assert_eq!(f("h:mm:ss aaa", 45574.25), "6:00:00 Wed");
+    assert_eq!(f("aaa h AM/PM", 45574.25), "Wed 6 AM");
+    assert_eq!(f("aaa a/p", 45574.25), "Wed a");
+    assert_eq!(f("aaa am/pm", 45574.25), "Wed AM");
+    assert_eq!(f("\\aaaa", 45574.25), "aWed");
+    assert_eq!(f("aa aaa", 45574.25), "aa Wed");
+    assert!(NumberFormat::parse("aaa").is_date());
+    assert!(NumberFormat::parse("aaaa").is_date());
+    // Fewer than three `a` characters stay literal and do not trigger date formatting.
+    assert!(!NumberFormat::parse("aa").is_date());
+    assert_eq!(f("0\"aaa\"", 7.0), "7aaa");
+    // Mixed-case runs are literal; a trailing case switch ends the same-case run.
+    for lit in ["Aaa", "aaA", "AAa", "aAA", "aAaA"] {
+        assert!(!NumberFormat::parse(lit).is_date(), "{lit} must not parse as date");
+        assert_eq!(f(lit, 45574.25), lit, "{lit} must render literally");
+    }
+    assert_eq!(f("aaaA", 45574.25), "WedA");
+    assert_eq!(f("AAAa", 45574.25), "Weda");
+    // `am/pm` and `a/p` take priority over the final `a`/`A` of an adjacent run.
+    assert_eq!(f("aaam/pm", 45574.25), "aaAM");
+    assert_eq!(f("aaaam/pm", 45574.25), "WedAM");
+    assert_eq!(f("aaaaam/pm", 45574.25), "WednesdayAM");
+    assert_eq!(f("aaa/p", 45574.25), "aaa");
+    assert_eq!(f("aaa/p", 45574.75), "aap");
+    assert_eq!(f("aaaa/p", 45574.75), "Wedp");
+}

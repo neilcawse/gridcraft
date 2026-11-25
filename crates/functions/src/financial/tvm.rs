@@ -1,4 +1,4 @@
-use super::{Arg, CellError, Ctx, R, Value, array_numbers, as_array, flatten, num, num_val, numbers, opt_num, type_arg};
+use super::{Arg, CellError, Ctx, DateSystem, R, Value, array_numbers, as_array, flatten, num, num_val, numbers, opt_num, type_arg};
 
 // ---------------------------------------------------------------------------------------------
 // Time value of money
@@ -314,27 +314,35 @@ pub(super) fn npv(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     num_val(sum)
 }
 
-/// Values and dates for XNPV/XIRR: both must be numeric and of equal length.
-fn dated_flows(values: &Value, dates: &Value) -> R<(Vec<f64>, Vec<f64>)> {
+/// Values and dates for XNPV: every element must be a number (no blanks, text, or booleans).
+/// Excel returns `#VALUE!` if the first value or first date is non-numeric, `#NUM!` if any
+/// subsequent element is non-numeric, lengths differ, or any date precedes `dates[0]` or `0`.
+fn xnpv_flows(values: &Value, dates: &Value) -> R<(Vec<f64>, Vec<f64>)> {
     let va = as_array(values);
     let da = as_array(dates);
-    if va.data.len() != da.data.len() {
+    if va.data.len() != da.data.len() || va.data.is_empty() {
         return Err(CellError::Num);
     }
     let mut v = Vec::with_capacity(va.data.len());
     let mut d = Vec::with_capacity(da.data.len());
-    for (x, y) in va.data.iter().zip(da.data.iter()) {
-        match x {
-            Value::Number(n) => v.push(*n),
-            Value::Error(e) => return Err(*e),
-            _ => return Err(CellError::Value),
+    for (i, (x, y)) in va.data.iter().zip(da.data.iter()).enumerate() {
+        if let Value::Error(e) = x {
+            return Err(*e);
         }
-        match y {
-            Value::Number(n) => d.push(n.trunc()),
-            Value::Error(e) => return Err(*e),
-            Value::Text(_) => d.push(y.to_number()?.trunc()),
-            _ => return Err(CellError::Value),
+        if let Value::Error(e) = y {
+            return Err(*e);
         }
+        let non_num = if i == 0 { CellError::Value } else { CellError::Num };
+        let xv = match x {
+            Value::Number(n) => *n,
+            _ => return Err(non_num),
+        };
+        let dv = match y {
+            Value::Number(n) => n.trunc(),
+            _ => return Err(non_num),
+        };
+        v.push(xv);
+        d.push(dv);
     }
     let d0 = *d.first().ok_or(CellError::Num)?;
     if d.iter().any(|&x| x < d0 || x < 0.0) {
@@ -343,9 +351,50 @@ fn dated_flows(values: &Value, dates: &Value) -> R<(Vec<f64>, Vec<f64>)> {
     Ok((v, d))
 }
 
+/// Coerces one cell in an XIRR `values` or `dates` argument: blanks become `0.0`, numeric/date
+/// text parses in `sys`, errors propagate, and non-numeric text or booleans return `#VALUE!`.
+fn xirr_num(v: &Value, sys: DateSystem) -> R<f64> {
+    match v {
+        Value::Number(n) => Ok(*n),
+        Value::Empty => Ok(0.0),
+        Value::Text(_) => v.to_number_in(sys),
+        Value::Error(e) => Err(*e),
+        _ => Err(CellError::Value),
+    }
+}
+
+/// Values and dates for XIRR: blanks coerce to `0.0` (preserving `dates[0]` at row 0), numeric
+/// and date text coerce via `xirr_num`, booleans and non-numeric text return `#VALUE!`, and
+/// negative dates return `#NUM!`. Unlike XNPV, Excel allows dates earlier than `dates[0]`.
+fn xirr_flows(values: &Value, dates: &Value, sys: DateSystem) -> R<(Vec<f64>, Vec<f64>)> {
+    let va = as_array(values);
+    let da = as_array(dates);
+    if va.data.len() != da.data.len() || va.data.is_empty() {
+        return Err(CellError::Num);
+    }
+    let mut v = Vec::with_capacity(va.data.len());
+    let mut d = Vec::with_capacity(da.data.len());
+    for (x, y) in va.data.iter().zip(da.data.iter()) {
+        if let Value::Error(e) = x {
+            return Err(*e);
+        }
+        if let Value::Error(e) = y {
+            return Err(*e);
+        }
+        let xv = xirr_num(x, sys)?;
+        let dv = xirr_num(y, sys)?.trunc();
+        if dv < 0.0 {
+            return Err(CellError::Num);
+        }
+        v.push(xv);
+        d.push(dv);
+    }
+    Ok((v, d))
+}
+
 fn xnpv_calc(rate: f64, v: &[f64], d: &[f64]) -> f64 {
     let d0 = d.first().copied().unwrap_or(0.0);
-    v.iter().zip(d).map(|(x, t)| x / (1.0 + rate).powf((t - d0) / 365.0)).sum()
+    v.iter().zip(d).map(|(&x, &t)| if x == 0.0 { 0.0 } else { x / (1.0 + rate).powf((t - d0) / 365.0) }).sum()
 }
 
 pub(super) fn xnpv(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
@@ -353,15 +402,20 @@ pub(super) fn xnpv(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     if rate <= -1.0 {
         return Err(CellError::Num);
     }
-    let (v, d) = dated_flows(&a.get(1).ok_or(CellError::Value)?.value, &a.get(2).ok_or(CellError::Value)?.value)?;
+    let (v, d) = xnpv_flows(&a.get(1).ok_or(CellError::Value)?.value, &a.get(2).ok_or(CellError::Value)?.value)?;
     num_val(xnpv_calc(rate, &v, &d))
 }
 
-pub(super) fn xirr(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    let (v, d) = dated_flows(&a.first().ok_or(CellError::Value)?.value, &a.get(1).ok_or(CellError::Value)?.value)?;
+pub(super) fn xirr(a: &[Arg], c: &mut dyn Ctx) -> R<Value> {
+    let (v, d) = xirr_flows(&a.first().ok_or(CellError::Value)?.value, &a.get(1).ok_or(CellError::Value)?.value, c.date_system())?;
     let guess = opt_num(a, 2, 0.1)?;
     if !v.iter().any(|x| *x > 0.0) || !v.iter().any(|x| *x < 0.0) {
         return Err(CellError::Num);
+    }
+    // Excel's XIRR returns `0.1 / 2^25` (`2.9802322387695314e-09`) whenever the first cash flow
+    // is zero or blank (observed in Excel 16.0 across all leading-0/blank cases).
+    if v[0] == 0.0 {
+        return num_val(0.1 / (1u64 << 25) as f64);
     }
     num_val(solve_rate(|r| xnpv_calc(r, &v, &d), guess)?)
 }

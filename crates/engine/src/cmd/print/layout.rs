@@ -407,12 +407,25 @@ fn printable_cells_range(
     for t in &sh.tables {
         extend(t.range);
     }
+    let mut full_merges = Vec::new();
     for m in &sh.merges {
         let anchor_printable = sh.cells.get(m.start).is_some_and(|c| c.has_content())
             || style_is_printable(wb, sh.style_id(m.start))
             || style_is_printable(wb, sh.style_id(m.end));
-        if anchor_printable {
+        if !anchor_printable {
+            continue;
+        }
+        if m.is_full_cols() || m.is_full_rows() {
+            full_merges.push(*m);
+        } else {
             extend(*m);
+        }
+    }
+    if !full_merges.is_empty() {
+        let extent = out.or_else(|| sh.used_range());
+        for m in full_merges {
+            let r = trim_full_merge(extent, m);
+            out = Some(out.map_or(r, |u| u.union(&r)));
         }
     }
     extend_printable_cf_cells(wb, si, sh, cf, cf_budget, &mut out);
@@ -593,13 +606,23 @@ fn page_has_content(
     if sh.tables.iter().any(|t| t.range.intersects(&block)) {
         return true;
     }
-    if sh.merges.iter().any(|m| {
-        m.intersects(&block)
-            && (sh.cells.get(m.start).is_some_and(|c| c.has_content())
-                || style_is_printable(wb, sh.style_id(m.start))
-                || style_is_printable(wb, sh.style_id(m.end)))
-    }) {
-        return true;
+    if !sh.merges.is_empty() {
+        let mut used: Option<Option<RangeRef>> = None;
+        for m in &sh.merges {
+            let eff = if m.is_full_cols() || m.is_full_rows() {
+                let u = *used.get_or_insert_with(|| sh.used_range());
+                trim_full_merge(u, *m)
+            } else {
+                *m
+            };
+            if eff.intersects(&block)
+                && (sh.cells.get(m.start).is_some_and(|c| c.has_content())
+                    || style_is_printable(wb, sh.style_id(m.start))
+                    || style_is_printable(wb, sh.style_id(m.end)))
+            {
+                return true;
+            }
+        }
     }
     if !sh.cond_formats.is_empty() && *cf_budget > 0 {
         let (single_cells, multi_subs) = cf.indexed_ranges(sh, si, Some(block), |r| cf_rule_can_paint(wb, r));
@@ -654,6 +677,25 @@ fn trim_full_used(used: Option<RangeRef>, r: RangeRef) -> RangeRef {
         Some(u) => r.intersection(&RangeRef::new(CellRef::new(0, 0), u.end)).unwrap_or(RangeRef::cell(r.start)),
         None => RangeRef::cell(r.start),
     }
+}
+
+/// Full-row (`A3:XFD4`) and full-column (`A1:A1048576`) merges are clamped along their unbounded
+/// axis to the sheet's used/printable extent so they do not explode pagination to column XFD or
+/// row 1048576.
+fn trim_full_merge(used: Option<RangeRef>, m: RangeRef) -> RangeRef {
+    if !(m.is_full_cols() || m.is_full_rows()) {
+        return m;
+    }
+    let mut r = m;
+    if m.is_full_rows() {
+        let end_col = used.map_or(m.start.col, |u| u.end.col);
+        r.end.col = end_col.max(r.start.col);
+    }
+    if m.is_full_cols() {
+        let end_row = used.map_or(m.start.row, |u| u.end.row);
+        r.end.row = end_row.max(r.start.row);
+    }
+    r
 }
 
 /// Splits `start..=end` into bands whose sizes fit `avail(band_start)`; `breaks` force a new

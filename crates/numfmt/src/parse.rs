@@ -437,16 +437,13 @@ fn tokenize(src: &str) -> Raw {
                 i += 7;
                 continue;
             }
-            'A' | 'a' if starts_with_ci(&cs, i, "am/pm") => {
-                toks.push(Tok::Date(DatePart::AmPm));
-                i += 5;
-                continue;
-            }
-            'A' | 'a' if starts_with_ci(&cs, i, "a/p") => {
-                let p = cs.get(i + 2).copied().unwrap_or('P');
-                toks.push(Tok::Date(DatePart::AP(c, p)));
-                i += 3;
-                continue;
+            'A' | 'a' => {
+                if let Some((part, len)) = tokenize_a_date(&cs, i) {
+                    toks.push(Tok::Date(part));
+                    i += len;
+                    continue;
+                }
+                push_lit(toks, c.encode_utf8(&mut [0; 4]));
             }
             'y' | 'Y' | 'm' | 'M' | 'd' | 'D' | 'h' | 'H' | 's' | 'S' | 'e' | 'E' => {
                 let lc = c.to_ascii_lowercase();
@@ -481,6 +478,27 @@ fn tokenize(src: &str) -> Raw {
         raw.calendar = Calendar::Hijri;
     }
     raw
+}
+
+/// Matches `AM/PM`, `A/P`, and Excel's `aaa`/`aaaa`+ weekday tokens at `cs[i..]`.
+///
+/// Excel requires every character in an `a`/`A` weekday run to share the same case (`aaa`, `AAAA`,
+/// not `Aaa` or `aaA`) and gives a trailing `am/pm` or `a/p` priority over the last `a`/`A` of
+/// the run (`aaam/pm` -> literal `aa` + `AM`, `aaaam/pm` -> `Wed` + `AM`).
+fn tokenize_a_date(cs: &[char], i: usize) -> Option<(DatePart, usize)> {
+    let first = *cs.get(i)?;
+    if starts_with_ci(cs, i, "am/pm") {
+        return Some((DatePart::AmPm, 5));
+    }
+    if starts_with_ci(cs, i, "a/p") {
+        let p = cs.get(i + 2).copied().unwrap_or('P');
+        return Some((DatePart::AP(first, p), 3));
+    }
+    let mut n = cs.get(i..)?.iter().take_while(|&&d| d == first).count();
+    if n > 0 && (starts_with_ci(cs, i + n - 1, "am/pm") || starts_with_ci(cs, i + n - 1, "a/p")) {
+        n -= 1;
+    }
+    (n >= 3).then_some((DatePart::Day(if n == 3 { 3 } else { 4 }), n))
 }
 
 struct RawParts<'a> {
