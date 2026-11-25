@@ -13,7 +13,7 @@ use gridcraft_core::{MAX_COLS, MAX_ROWS};
 
 use crate::group::map_rect;
 use crate::sheet::drawing_reference;
-use crate::{Anchor, AnchorMode, DrawingPlacement, DrawingRef, LineInfo, ObjKind, ObjRef, Sheet};
+use crate::{Anchor, AnchorMode, DrawingPlacement, DrawingRef, LineInfo, ObjKind, ObjRef, ObjectRect, Sheet};
 
 /// Pixels per EMU, for the half-EMU a stored marker can't resolve.
 const PX_PER_EMU: f64 = 1.0 / 9525.0;
@@ -175,13 +175,21 @@ impl Sheet {
     }
 
     /// Moves everything in group `id` from where `from` (its old anchor, measured on `old`)
-    /// put it to `to`, its new anchor on this sheet. The anchors only: stored file placements
-    /// are left for the caller to keep or drop.
+    /// put it to `to`, its new anchor on this sheet, keeping each member's place in the group:
+    /// members are cell-anchored on their own, so lines changing inside the group would move
+    /// them even when the group's anchor stays. A member already in place (within half an EMU)
+    /// keeps its anchor.
+    /// The anchors only: stored file placements are left for the caller to keep or drop.
     fn carry_group(&mut self, id: u32, old: &Sheet, from: &Anchor, to: Anchor) {
         let (from_rect, to_rect) = (old.anchor_rect(from), self.anchor_rect(&to));
+        let same = |a: ObjectRect, b: ObjectRect| [a.x - b.x, a.y - b.y, a.w - b.w, a.h - b.h].iter().all(|d| d.abs() <= PX_PER_EMU / 2.0);
         for m in self.group_contents(id) {
             let Some(a) = self.raw_drawing_anchor(m) else { continue };
-            let next = self.rect_anchor(map_rect(from_rect, to_rect, old.anchor_rect(&a)), a.mode);
+            let target = map_rect(from_rect, to_rect, old.anchor_rect(&a));
+            if same(target, self.anchor_rect(&a)) {
+                continue;
+            }
+            let next = self.rect_anchor(target, a.mode);
             match m {
                 DrawingRef::Group(gid) => {
                     if let Some(g) = self.groups.iter_mut().find(|g| g.id == gid) {
@@ -226,9 +234,8 @@ impl Sheet {
                     if contents.iter().any(|&m| self.raw_drawing_anchor(m).is_some_and(|ma| settled(drawing_obj(m), &ma))) {
                         continue;
                     }
-                    if let Some(next) = follow(before, &new, &a) {
-                        self.carry_group(id, before, &a, next);
-                    }
+                    let next = follow(before, &new, &a).unwrap_or(a);
+                    self.carry_group(id, before, &a, next);
                 }
                 Floating::Drawing(r) => {
                     if let (Some(next), Some(slot)) = (follow(before, &new, &a), self.drawing_anchor_mut(r)) {
@@ -267,18 +274,17 @@ impl Sheet {
         let files: HashSet<DrawingRef> = placed.iter().map(|(r, _)| *r).collect();
         for (r, next) in placed {
             let Some(a) = self.raw_drawing_anchor(r) else { continue };
-            if next != a {
-                match r {
-                    DrawingRef::Group(id) => {
-                        self.carry_group(id, before, &a, next);
-                        self.refresh_group_files(id);
-                    }
-                    leaf => {
-                        if let Some(slot) = self.drawing_anchor_mut(leaf) {
-                            *slot = next;
-                        }
+            match r {
+                DrawingRef::Group(id) => {
+                    self.carry_group(id, before, &a, next);
+                    self.refresh_group_files(id);
+                }
+                leaf if next != a => {
+                    if let Some(slot) = self.drawing_anchor_mut(leaf) {
+                        *slot = next;
                     }
                 }
+                _ => {}
             }
             if let Some(file) = self.drawing_files.get_mut(&r) {
                 file.anchor = next;

@@ -174,32 +174,47 @@ fn a_row_fit_after_a_deletion_sizes_the_shifted_chart() {
     assert_rect(chart_rect(&s), ObjectRect { y: before.y - deleted, h: before.h + grown, ..before }, "after the deletion");
 }
 
-/// A group sizes with its cells as one object: its members scale with it.
-#[test]
-fn a_resized_row_inside_a_group_sizes_the_group_and_its_members() {
+/// Two 40 px pictures at B3 and B6 grouped with `mode`, the group's box around them, and row 4
+/// (between them) grown by 30 px. Returns the group's and the members' boxes before and after.
+fn resize_inside_group(mode: AnchorMode) -> ([ObjectRect; 3], [ObjectRect; 3], f64) {
     let mut s = s();
-    let top = add_image(&mut s, "B3", AnchorMode::MoveAndSize);
-    let bottom = add_image(&mut s, "B6", AnchorMode::MoveAndSize);
-    let id = group_objects(&mut s, vec![DrawingRef::Image(top), DrawingRef::Image(bottom)]);
+    let top = DrawingRef::Image(add_image(&mut s, "B3", mode));
+    let bottom = DrawingRef::Image(add_image(&mut s, "B6", mode));
+    let id = group_objects(&mut s, vec![top, bottom]);
     {
         let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
         let sh = wb.sheet_mut(0).unwrap();
         let anchor = sh.group_anchor(id).unwrap();
         sh.groups.iter_mut().find(|g| g.id == id).unwrap().anchor = anchor;
     }
-    let rect = |s: &Session, r: DrawingRef| s.doc().unwrap().wb.sheet(0).unwrap().drawing_rect(r).unwrap();
-    let group = |s: &Session| {
+    let boxes = |s: &Session| {
         let sh = s.doc().unwrap().wb.sheet(0).unwrap();
-        sh.anchor_rect(&sh.drawing_group(id).unwrap().anchor)
+        [sh.anchor_rect(&sh.drawing_group(id).unwrap().anchor), sh.drawing_rect(top).unwrap(), sh.drawing_rect(bottom).unwrap()]
     };
-    let before = group(&s);
+    let before = boxes(&s);
     let old = f64::from(s.doc().unwrap().wb.sheet(0).unwrap().row_height(3));
     s.execute("home.rowHeight", json!({"rows": "4:4", "height": old + 30.0})).unwrap();
     let grown = f64::from(s.doc().unwrap().wb.sheet(0).unwrap().row_height(3)) - old;
-    let after = group(&s);
+    assert!(grown > 20.0);
+    (before, boxes(&s), grown)
+}
+
+/// A group sizes with its cells as one object: its members scale with it.
+#[test]
+fn a_resized_row_inside_a_group_sizes_the_group_and_its_members() {
+    let ([before, ..], [after, t, b], grown) = resize_inside_group(AnchorMode::MoveAndSize);
     assert_rect(after, ObjectRect { h: before.h + grown, ..before }, "group");
-    let (t, b) = (rect(&s, DrawingRef::Image(top)), rect(&s, DrawingRef::Image(bottom)));
     assert!((t.y - after.y).abs() < 1e-3 && ((b.y + b.h) - (after.y + after.h)).abs() < 1e-3, "members span the group: {t:?} {b:?} {after:?}");
     let scale = after.h / before.h;
     assert!((t.h - 40.0 * scale).abs() < 1e-3 && (b.h - 40.0 * scale).abs() < 1e-3, "members scale with the group");
+}
+
+/// A "move but don't size" group keeps its size over a grown row, and its members keep their
+/// places in it, though each is anchored to a cell of its own.
+#[test]
+fn a_resized_row_inside_a_move_only_group_keeps_the_group_and_its_members() {
+    let (before, after, _) = resize_inside_group(AnchorMode::MoveOnly);
+    for (what, (got, want)) in ["group", "top member", "bottom member"].into_iter().zip(after.into_iter().zip(before)) {
+        assert_rect(got, want, what);
+    }
 }
