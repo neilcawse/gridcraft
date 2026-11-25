@@ -170,13 +170,19 @@ pub fn normalize_function_name(name: &str) -> String {
 /// Trim-reference mode for a raw XLSX compatibility function token, before name normalization.
 pub fn file_trim_mode(spelling: &str) -> Option<TrimMode> {
     let prefix = "_xlfn.";
-    let (head, mode) = spelling.split_at_checked(prefix.len())?;
+    let (head, name) = spelling.split_at_checked(prefix.len())?;
     if !head.eq_ignore_ascii_case(prefix) {
         return None;
     }
+    trim_function_mode(name)
+}
+
+/// Trim-reference mode for a `_TRO_*` function name without its `_xlfn.` prefix, for readers
+/// whose source format drops or replaces that prefix (`.xls` names, ODS vendor prefixes).
+pub fn trim_function_mode(name: &str) -> Option<TrimMode> {
     [("_TRO_ALL", TrimMode::All), ("_TRO_LEADING", TrimMode::Leading), ("_TRO_TRAILING", TrimMode::Trailing)]
         .into_iter()
-        .find_map(|(name, mode_kind)| mode.eq_ignore_ascii_case(name).then_some(mode_kind))
+        .find_map(|(trim, mode)| name.eq_ignore_ascii_case(trim).then_some(mode))
 }
 
 impl Parser {

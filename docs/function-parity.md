@@ -188,7 +188,9 @@ Other names starting with `_xl` (`_xlBudget`) and table column labels containing
 prefixes and items above are matched in any letter case.
 Only `_xlfn._TRO_*` calls are read as trim references; bare `_TRO_*` calls resolve as ordinary
 names and keep their imported spelling in FORMULATEXT. The writer still uses `_xlfn.TRIMRANGE`
-for trim references.
+for trim references. An `.xls` import, whose reader drops the `_xlfn.` prefix, reads a `_TRO_*`
+call as a trim reference unless the workbook defines that name; ODS keeps the prefix of
+`COM.MICROSOFT._TRO_*` and `_xlfn._TRO_*` calls.
 
 ## Revision history
 

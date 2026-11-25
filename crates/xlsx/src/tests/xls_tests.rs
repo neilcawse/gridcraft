@@ -613,6 +613,45 @@ fn formulas_using_a_skipped_name_keep_their_saved_results() {
 }
 
 #[test]
+fn trim_reference_calls_keep_their_meaning_without_the_xlfn_prefix() {
+    // craft-xls gives a newer function called by name (PtgFuncVar iftab 255 over a PtgName,
+    // [MS-XLS] 2.5.198.63) without its `_xlfn.` prefix. Lbl 1 is the hidden future-function
+    // name `_xlfn._TRO_ALL` (fFutureFunction, no formula), Lbl 2 a workbook name `_TRO_LEADING`,
+    // Lbl 3 `Trimmed` = `_xlfn._TRO_ALL(Sheet1!$A$1:$E$10)`.
+    let lbl = |flags: u16, name: &str, rgce: &[u8]| {
+        rec(0x0018, &cat(&[&u16s(&[flags]), &[0, name.len() as u8], &u16s(&[rgce.len() as u16, 0, 0]), &[0; 4], &[0], name.as_bytes(), rgce]))
+    };
+    let call = |name: u32, args: &[u8]| cat(&[&[0x23], &name.to_le_bytes(), args, &[0x22, 2], &0x00FFu16.to_le_bytes()]);
+    let area3d = cat(&[&[0x3B], &0u16.to_le_bytes(), &u16s(&[0, 9, 0, 4])]);
+    let boundsheet = |pos: u32| rec(0x0085, &cat(&[&pos.to_le_bytes(), &[0, 0, 6, 0], b"Sheet1"]));
+    let globals = |pos: u32| {
+        cat(&[
+            &bof(0x0005),
+            &boundsheet(pos),
+            &rec(0x01AE, &u16s(&[1, 0x0401])),
+            &rec(0x0017, &cat(&[&u16s(&[1]), &u16s(&[0, 0, 0])])),
+            &lbl(0x1001, "_xlfn._TRO_ALL", &[]),
+            &lbl(0, "_TRO_LEADING", &ptg_int(5)),
+            &lbl(0, "Trimmed", &call(1, &area3d)),
+            &eof(),
+        ])
+    };
+    let area = cat(&[&[0x25], &u16s(&[0, 9, 0, 4])]);
+    let sheet = cat(&[
+        &bof(0x0010),
+        &formula(0, 6, num(3.0), &cat(&[&call(1, &area), &[0x41], &76u16.to_le_bytes()])),
+        &formula(1, 6, num(5.0), &call(2, &ptg_int(41))),
+        &eof(),
+    ]);
+    let pos = globals(0).len() as u32;
+    let (wb, _) = read_xls(&compound("Workbook", &cat(&[&globals(pos), &sheet]))).unwrap();
+    assert_eq!(ftext(&wb, "G1").as_deref(), Some("ROWS($A$1.:.$E$10)"));
+    assert_eq!(ftext(&wb, "G2").as_deref(), Some("_TRO_LEADING(41)"));
+    let trimmed = wb.names.iter().find(|n| n.name == "Trimmed").map(|n| n.formula.as_str());
+    assert_eq!(trimmed, Some("Sheet1!$A$1.:.$E$10"));
+}
+
+#[test]
 fn reads_iterative_calculation_settings() {
     // CalcMode, CalcCount, CalcIter and CalcDelta repeat in every worksheet substream; here only
     // the first sheet carries them, so the sheet after it must not reset them to the defaults.
