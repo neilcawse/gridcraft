@@ -7565,6 +7565,86 @@ fn whole_column_paste_copies_hidden_geometry_and_cell_style_to_another_sheet() {
 }
 
 #[test]
+fn whole_column_copy_transfers_style_without_stored_cells() {
+    let mut s = s();
+    s.execute("home.insertSheet", json!({"name": "Destination"})).unwrap();
+    let (bold, italic) = whole_column_style_fixture(&mut s, 1);
+    s.execute("edit.copy", json!({"sheet": "Sheet1", "range": "C:C"})).unwrap();
+    s.execute("selection.set", json!({"range": "H:H"})).unwrap();
+    s.execute("edit.paste", json!({})).unwrap();
+    let wb = &s.doc().unwrap().wb;
+    assert_blank_column_style(wb.sheet(1).unwrap(), 7, &[0, 7, 39], bold);
+    assert_blank_column_style(wb.sheet(0).unwrap(), 2, &[0, 7, 39], bold);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_blank_column_style(s.doc().unwrap().wb.sheet(1).unwrap(), 7, &[0, 7, 39], italic);
+}
+
+fn check_whole_column_cut_style(cross_sheet: bool) {
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "C1", "input": "move me"})).unwrap();
+    if cross_sheet {
+        s.execute("home.insertSheet", json!({"name": "Destination"})).unwrap();
+    }
+    let target = usize::from(cross_sheet);
+    let (bold, _) = whole_column_style_fixture(&mut s, target);
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    wb.sheet_mut(0).unwrap().set_style(CellRef::new(0, 2), bold);
+    s.execute("edit.cut", json!({"sheet": "Sheet1", "range": "C:D"})).unwrap();
+    s.execute("edit.paste", json!({"at": "H1"})).unwrap();
+    assert_eq!(v(&s, "H1"), Value::from("move me"));
+    let wb = &s.doc().unwrap().wb;
+    assert_blank_column_style(wb.sheet(0).unwrap(), 2, &[0, 39], Default::default());
+    assert_blank_column_style(wb.sheet(target).unwrap(), 7, &[39], bold);
+}
+
+#[test]
+fn whole_column_cut_moves_inherited_style_on_same_sheet() {
+    check_whole_column_cut_style(false);
+}
+
+#[test]
+fn whole_column_cut_moves_inherited_style_to_another_sheet() {
+    check_whole_column_cut_style(true);
+}
+
+#[test]
+fn whole_column_copy_from_unstyled_source_resets_inherited_style() {
+    let mut s = s();
+    s.execute("home.insertSheet", json!({"name": "Destination"})).unwrap();
+    let (_, italic) = whole_column_style_fixture(&mut s, 1);
+    s.execute("cell.set", json!({"cell": "H1", "input": "replace me"})).unwrap();
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    wb.sheet_mut(1).unwrap().set_style(CellRef::new(0, 7), italic);
+    s.execute("edit.copy", json!({"sheet": "Sheet1", "range": "F:F"})).unwrap();
+    s.execute("selection.set", json!({"range": "H:H"})).unwrap();
+    s.execute("edit.paste", json!({})).unwrap();
+    assert_blank_column_style(s.doc().unwrap().wb.sheet(1).unwrap(), 7, &[0, 39], Default::default());
+}
+
+fn whole_column_style_fixture(s: &mut Session, target: usize) -> (gridcraft_model::StyleId, gridcraft_model::StyleId) {
+    use gridcraft_model::{LineInfo, Style};
+
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let mut bold = Style::default();
+    bold.font.bold = true;
+    let bold = wb.styles.intern(bold);
+    let mut italic = Style::default();
+    italic.font.italic = true;
+    let italic = wb.styles.intern(italic);
+    wb.sheet_mut(0).unwrap().cols.insert(2, LineInfo { style: Some(bold), ..Default::default() });
+    wb.sheet_mut(target).unwrap().cols.insert(7, LineInfo { style: Some(italic), ..Default::default() });
+    (bold, italic)
+}
+
+fn assert_blank_column_style(sh: &gridcraft_model::Sheet, col: u32, rows: &[u32], expected: gridcraft_model::StyleId) {
+    for &row in rows {
+        let cell = CellRef::new(row, col);
+        assert!(sh.cell(cell).is_none(), "{} must be unstored", cell.a1());
+        assert_eq!(sh.style_id(cell), expected, "{} must inherit its column style", cell.a1());
+    }
+}
+
+#[test]
 fn ordinary_range_paste_keeps_destination_line_sizes() {
     use gridcraft_model::LineInfo;
 

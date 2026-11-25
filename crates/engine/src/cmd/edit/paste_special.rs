@@ -503,20 +503,15 @@ impl PasteLineAxis {
                 custom: new.custom,
                 saved_size: new.saved_size,
                 saved_col_flags: new.saved_col_flags,
-                style: match self {
-                    Self::Rows => new.style,
-                    Self::Columns => old.style,
-                },
+                style: new.style,
                 ..old
             };
-            if info != old || (matches!(self, Self::Rows) && info.style.is_some()) {
+            if info != old || info.style.is_some() {
                 changes.push((i, old, info));
             }
         }
         changes.retain_mut(|(_, old, info)| {
-            if matches!(self, Self::Rows) {
-                info.style = info.style.map(|id| map_style(id, &mut cx.wb));
-            }
+            info.style = info.style.map(|id| map_style(id, &mut cx.wb));
             *info != *old
         });
         if changes.is_empty() {

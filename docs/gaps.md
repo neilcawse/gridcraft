@@ -217,15 +217,15 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
   A separate reported extent for inspection and navigation would avoid changing those work bounds.
 - Whole-line Paste Special (including All), Insert Copied Cells, drag-and-drop and filtered or
   packed paste retain their previous behavior; the X25 probes measured direct Copy/Cut, not these
-  paths. Whole-column inherited style is unchanged because the line readbacks were mixed and
-  did not establish blank-cell formatting. In both column-cut probes, the source cell `C1`
-  loses bold in Excel but stays bold in GridCraft. Hidden/outline/show-detail and saved XML flags
-  were not recovered; a size of zero established only effective geometry.
+  paths. Ordinary whole-column Paste All transfers inherited column styles, as verified on
+  blank cells. Hidden/outline/show-detail and saved XML flags were not recovered; a size of zero
+  established only effective geometry.
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-25 | minor | §25: transfer and reset inherited column styles on ordinary whole-column paste; verify formatting on blank cells. |
 | 2026-11-25 | minor | §25: copy and cut whole-line geometry and inherited row style on ordinary paste; record the remaining extent and Paste Special gaps. |
 | 2026-11-02 | minor | §17: equations (Insert › Equation, LaTeX source, gallery, editor) |
 | 2026-11-02 | minor | §13: Solver Sensitivity report: shadow prices, reduced costs and allowable ranges for Simplex LP; Lagrange multipliers and reduced gradients for GRG Nonlinear |
