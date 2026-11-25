@@ -183,8 +183,9 @@ a file-only spelling the formula bar shows otherwise (`Table1[[#This Row],[Col]]
 of a shared formula after its first. Evaluation and XLSX output use canonical text. The
 layout is dropped when an edit changes the expression (a fill or move that shifts
 references, a sheet or name rename) and when different text is entered.
-Names starting with `_xl` and table column labels containing an escaped `'#This Row` are not
-file-only tokens and keep their imported spelling.
+Other names starting with `_xl` (`_xlBudget`) and table column labels containing an escaped
+`'#This Row` are not file-only tokens and keep their imported spelling; the compatibility
+prefixes and items above are matched in any letter case.
 
 ## Revision history
 
