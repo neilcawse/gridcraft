@@ -75,9 +75,8 @@ impl<'a> SheetKept<'a> {
         if self.vml().is_none() {
             let ids: HashSet<String> = used.iter().flat_map(|f| relids_in(&f.xml)).collect();
             let rels: Vec<PreservedRel> = nf.rels.iter().filter(|r| ids.contains(&r.id)).cloned().collect();
-            let needed: HashSet<String> = rels.iter().flat_map(|r| reachable_in(&nf.parts, r)).collect();
-            let parts: Vec<PreservedPart> = nf.parts.iter().filter(|q| needed.contains(&normalize(&q.name))).cloned().collect();
-            let names = write_parts(out, &parts);
+            let needed = reachable_in(&nf.parts, rels.iter());
+            let names = write_parts(out, nf.parts.iter().filter(|q| needed.contains(&normalize(&q.name))));
             out.part(&rels_part_name(name), None, part_rels_xml(&rels, &names).into_bytes());
         }
         text

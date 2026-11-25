@@ -127,11 +127,20 @@ fn chart_shapes_part_goes_back_with_its_chart() {
     assert_eq!(written_chart_shapes(&u2).map(|(_, x)| x), Some(shapes));
 }
 
-/// No shapes part is left in the package: no part is a chart's shapes part, by content type or
-/// by content.
-fn assert_no_shapes_part(u: &Unpacked) {
-    assert!(!u.text("[Content_Types].xml").contains("chartshapes+xml"), "a content type for a shapes part");
-    assert!(!u.parts.values().any(|v| v.windows(15).any(|w| w == b"<c:userShapes x")), "an orphan shapes part");
+fn assert_no_shapes_part(u: &Unpacked, kept_part: &str) {
+    let types = u.text("[Content_Types].xml");
+    assert!(!types.contains("chartshapes+xml"), "a content type for a shapes part");
+    assert!(!types.contains(&format!("PartName=\"/{kept_part}\"")), "an orphan content type override for {kept_part}");
+    assert!(!u.parts.contains_key(kept_part), "an orphan shapes part: {kept_part}");
+}
+
+fn assert_reopened_chart_objects(bytes: &[u8], charts: usize, text: &str) {
+    let (wb, _) = read_xlsx(bytes).unwrap();
+    let sheet = wb.sheet(0).unwrap();
+    assert_eq!((sheet.charts.len(), sheet.shapes.len(), sheet.images.len()), (charts, 1, 1));
+    assert_eq!(sheet.shapes[0].text, text);
+    assert_eq!(sheet.images[0].alt, "ChartBadge");
+    assert_eq!(sheet.images[0].data.as_slice(), PNG);
 }
 
 /// How many times `s` is in `x`.
@@ -143,27 +152,68 @@ fn count(x: &str, s: &str) -> usize {
 fn chart_shapes_become_sheet_shapes_once_the_chart_is_gone() {
     let (bytes, _) = chart_package();
     let (mut wb, _) = read_xlsx(&bytes).unwrap();
+    let (part, _) = written_chart_shapes(&Unpacked::new(&write_xlsx(&wb).unwrap())).unwrap();
     Arc::make_mut(&mut wb.sheets[0]).charts.clear();
-    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    let out = write_xlsx(&wb).unwrap();
+    let u = Unpacked::new(&out);
     u.assert_valid();
     assert!(written_chart_shapes(&u).is_none());
-    assert_no_shapes_part(&u);
+    assert_no_shapes_part(&u, &part);
     let dx = u.text(&written_drawing(&u));
     assert_eq!((count(&dx, "<xdr:sp>") + count(&dx, "<xdr:sp "), count(&dx, "<xdr:pic>") + count(&dx, "<xdr:pic ")), (1, 1), "{dx}");
     assert_eq!((count(&dx, "Peak load"), count(&dx, "ChartBadge")), (1, 1), "the shapes show on the sheet once: {dx}");
+    assert_reopened_chart_objects(&out, 0, "Peak load");
 }
 
 #[test]
 fn edited_chart_shapes_are_written_as_they_show() {
     let (bytes, _) = chart_package();
     let (mut wb, _) = read_xlsx(&bytes).unwrap();
+    let (part, _) = written_chart_shapes(&Unpacked::new(&write_xlsx(&wb).unwrap())).unwrap();
     Arc::make_mut(&mut wb.sheets[0]).shapes[0].text = "Edited".into();
-    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    let out = write_xlsx(&wb).unwrap();
+    let u = Unpacked::new(&out);
     u.assert_valid();
     assert!(written_chart_shapes(&u).is_none(), "the kept part no longer describes the shapes");
-    assert_no_shapes_part(&u);
+    assert_no_shapes_part(&u, &part);
     let dx = u.text(&written_drawing(&u));
     assert_eq!((count(&dx, "Edited"), count(&dx, "Peak load"), count(&dx, "ChartBadge")), (1, 0, 1), "{dx}");
+    assert_reopened_chart_objects(&out, 1, "Edited");
+}
+
+#[test]
+fn a_new_chart_cannot_take_a_deleted_charts_annotation_part() {
+    let (bytes, _) = chart_package();
+    let (mut wb, _) = read_xlsx(&bytes).unwrap();
+    let (part, _) = written_chart_shapes(&Unpacked::new(&write_xlsx(&wb).unwrap())).unwrap();
+    let sheet = Arc::make_mut(&mut wb.sheets[0]);
+    let old = sheet.charts.remove(0);
+    // A live object at the top of the id space makes the allocator reuse gaps below it.
+    sheet.shapes.push(gridcraft_model::Shape { id: u32::MAX, ..sheet.shapes[0].clone() });
+    let id = wb.next_object_id();
+    Arc::make_mut(&mut wb.sheets[0]).charts.push(gridcraft_model::Chart { id, ..old });
+    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    u.assert_valid();
+    assert!(written_chart_shapes(&u).is_none(), "the replacement chart inherited the deleted chart's annotations");
+    assert_no_shapes_part(&u, &part);
+    assert_eq!(wb.sheet(0).unwrap().shapes[1].id, u32::MAX);
+}
+
+#[test]
+fn an_equal_replacement_annotation_is_written_as_a_sheet_image() {
+    let (bytes, _) = chart_package();
+    let (mut wb, _) = read_xlsx(&bytes).unwrap();
+    let (part, _) = written_chart_shapes(&Unpacked::new(&write_xlsx(&wb).unwrap())).unwrap();
+    // The picture originally had the highest id, so deleting it exposes that id to reuse.
+    let old = Arc::make_mut(&mut wb.sheets[0]).images.remove(0);
+    let id = wb.next_object_id();
+    Arc::make_mut(&mut wb.sheets[0]).images.push(gridcraft_model::Image { id, ..old });
+    let out = write_xlsx(&wb).unwrap();
+    let u = Unpacked::new(&out);
+    u.assert_valid();
+    assert!(written_chart_shapes(&u).is_none(), "the replacement picture took the original annotation's place");
+    assert_no_shapes_part(&u, &part);
+    assert_reopened_chart_objects(&out, 1, "Peak load");
 }
 
 // ---------------------------------------------------------------- object hyperlinks
@@ -229,6 +279,7 @@ fn picture_and_shape_hyperlinks_survive_a_round_trip() {
     assert_eq!(ids.len(), ids.iter().collect::<HashSet<_>>().len(), "duplicate ids: {ids:?}");
     // A second round trip keeps them too.
     let (again, _) = read_xlsx(&out).unwrap();
+    assert_linked_objects(again.sheet(0).unwrap(), "Go", "Logo");
     let u2 = Unpacked::new(&write_xlsx(&again).unwrap());
     let d2 = written_drawing(&u2);
     assert_eq!(link_of(&u2, &d2, LOGO), Some(("https://example.com/home".into(), true)));
@@ -239,29 +290,39 @@ fn picture_and_shape_hyperlinks_survive_a_round_trip() {
 fn a_deleted_picture_takes_its_hyperlink_with_it() {
     let (mut wb, _) = read_xlsx(&linked_package()).unwrap();
     Arc::make_mut(&mut wb.sheets[0]).images.clear();
-    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    let out = write_xlsx(&wb).unwrap();
+    let u = Unpacked::new(&out);
     let drawing = written_drawing(&u);
     assert_eq!(link_of(&u, &drawing, GO), Some(("#Data!A2".into(), false)));
     let links: Vec<_> = raw_rels(&u, &drawing).into_iter().filter(|r| r.1.ends_with("/hyperlink")).collect();
     assert_eq!(links.len(), 1, "{links:?}");
+    let (again, _) = read_xlsx(&out).unwrap();
+    let sheet = again.sheet(0).unwrap();
+    assert!(sheet.images.is_empty());
+    assert_eq!(sheet.shapes[0].text, "Go");
 }
 
 #[test]
 fn a_new_object_never_gets_a_deleted_objects_hyperlink() {
     let (mut wb, _) = read_xlsx(&linked_package()).unwrap();
+    let image_id = wb.sheet(0).unwrap().images[0].id;
     let old = Arc::make_mut(&mut wb.sheets[0]).shapes.remove(0);
     // A new shape like the deleted one in every way but its id: the id the model gives a new
     // object is never one a kept hyperlink is bound to.
     let id = wb.next_object_id();
     assert_ne!(id, old.id);
     Arc::make_mut(&mut wb.sheets[0]).shapes.push(gridcraft_model::Shape { id, ..old });
-    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    let out = write_xlsx(&wb).unwrap();
+    let u = Unpacked::new(&out);
     u.assert_valid();
     let drawing = written_drawing(&u);
     assert_eq!(link_of(&u, &drawing, GO), None, "{}", u.text(&drawing));
     assert!(!raw_rels(&u, &drawing).iter().any(|r| r.2 == "#Data!A2"), "no relationship is left for the dropped link");
     // The picture keeps its own.
     assert_eq!(link_of(&u, &drawing, LOGO), Some(("https://example.com/home".into(), true)));
+    assert_eq!(wb.sheet(0).unwrap().images[0].id, image_id);
+    let (again, _) = read_xlsx(&out).unwrap();
+    assert_linked_objects(again.sheet(0).unwrap(), "Go", "Logo");
 }
 
 #[test]
@@ -272,18 +333,36 @@ fn edited_objects_keep_their_hyperlinks_and_undo_restores_a_deleted_ones() {
     sheet.shapes[0].text = "Edited".into();
     sheet.shapes[0].anchor.cell = gridcraft_core::CellRef::new(20, 20);
     sheet.images[0].alt = "New logo".into();
-    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    let out = write_xlsx(&wb).unwrap();
+    let u = Unpacked::new(&out);
     u.assert_valid();
     let drawing = written_drawing(&u);
     assert_eq!(link_of(&u, &drawing, "<a:t>Edited</a:t>"), Some(("#Data!A2".into(), false)), "{}", u.text(&drawing));
     assert_eq!(link_of(&u, &drawing, "descr=\"New logo\""), Some(("https://example.com/home".into(), true)));
+    let (again, _) = read_xlsx(&out).unwrap();
+    let sheet = again.sheet(0).unwrap();
+    assert_linked_objects(sheet, "Edited", "New logo");
+    assert_eq!(sheet.shapes[0].anchor.cell, gridcraft_core::CellRef::new(20, 20));
     // Deleted, then back as it was (what undo does): the link comes back with it.
     let mut wb = read.clone();
     Arc::make_mut(&mut wb.sheets[0]).shapes.clear();
-    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    let out = write_xlsx(&wb).unwrap();
+    let u = Unpacked::new(&out);
     assert!(!u.text(&written_drawing(&u)).contains(GO));
-    let u = Unpacked::new(&write_xlsx(&read).unwrap());
+    let (again, _) = read_xlsx(&out).unwrap();
+    assert!(again.sheet(0).unwrap().shapes.is_empty());
+    let out = write_xlsx(&read).unwrap();
+    let u = Unpacked::new(&out);
     assert_eq!(link_of(&u, &written_drawing(&u), GO), Some(("#Data!A2".into(), false)));
+    let (again, _) = read_xlsx(&out).unwrap();
+    assert_linked_objects(again.sheet(0).unwrap(), "Go", "Logo");
+}
+
+fn assert_linked_objects(sheet: &gridcraft_model::Sheet, text: &str, alt: &str) {
+    assert_eq!((sheet.shapes.len(), sheet.images.len()), (1, 1));
+    assert_eq!(sheet.shapes[0].text, text);
+    assert_eq!(sheet.images[0].alt, alt);
+    assert_eq!(sheet.images[0].data.as_slice(), PNG);
 }
 
 /// `bytes` with part `name` holding `data`.
@@ -292,6 +371,59 @@ fn with_part(bytes: &[u8], name: &str, data: &str) -> Vec<u8> {
     parts.insert(name.to_string(), data.as_bytes().to_vec());
     let list: Vec<(&str, &[u8])> = parts.iter().map(|(k, v)| (k.as_str(), v.as_slice())).collect();
     make_zip(&list)
+}
+
+#[test]
+fn deleting_a_link_writes_no_orphan_sound_part() {
+    let input = Unpacked::new(&linked_package());
+    let drawing = "xl/drawings/drawing1.xml";
+    let rel_part = "xl/drawings/_rels/drawing1.xml.rels";
+    let sound = "xl/media/chime.wav";
+    let wave = b"RIFF\x24\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x40\x1f\0\0\x40\x1f\0\0\x01\0\x08\0data\0\0\0\0";
+    let drawing_xml = input
+        .text(drawing)
+        .replace("<a:hlinkClick r:id=\"rId3\"/>", "<a:hlinkClick r:id=\"rId3\"><a:snd r:embed=\"rId4\" name=\"Chime\"/></a:hlinkClick>");
+    let shared_drawing = drawing_xml.replace(
+        "<a:hlinkClick r:id=\"rId2\" tooltip=\"Home\"/>",
+        "<a:hlinkClick r:id=\"rId2\" tooltip=\"Home\"><a:snd r:embed=\"rId4\" name=\"Chime\"/></a:hlinkClick>",
+    );
+    let rel_xml = input
+        .text(rel_part)
+        .replace("</Relationships>", &format!("<Relationship Id=\"rId4\" Type=\"{NS_R}/audio\" Target=\"../media/chime.wav\"/></Relationships>"));
+    let types = input.text("[Content_Types].xml").replace("</Types>", "<Default Extension=\"wav\" ContentType=\"audio/wav\"/></Types>");
+    let mut files = input.parts;
+    files.insert(drawing.into(), drawing_xml.into_bytes());
+    files.insert(rel_part.into(), rel_xml.into_bytes());
+    files.insert(sound.into(), wave.to_vec());
+    files.insert("[Content_Types].xml".into(), types.into_bytes());
+    let parts: Vec<_> = files.iter().map(|(k, v)| (k.as_str(), v.as_slice())).collect();
+    let (mut wb, _) = read_xlsx(&make_zip(&parts)).unwrap();
+    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    let drawing = written_drawing(&u);
+    let id = attr_of(&u.text(&drawing), "a:snd", "r:embed");
+    let (_, target) = u.target(&drawing, &id);
+    assert_eq!(u.parts[&target], wave);
+    // If the picture also uses the sound, deleting the shape must not drop the shared part.
+    let shared = with_part(&make_zip(&parts), "xl/drawings/drawing1.xml", &shared_drawing);
+    let (mut shared, _) = read_xlsx(&shared).unwrap();
+    Arc::make_mut(&mut shared.sheets[0]).shapes.clear();
+    let shared = Unpacked::new(&write_xlsx(&shared).unwrap());
+    shared.assert_valid();
+    let drawing = written_drawing(&shared);
+    let id = attr_of(&shared.text(&drawing), "a:snd", "r:embed");
+    let (_, target) = shared.target(&drawing, &id);
+    assert_eq!(shared.parts[&target], wave);
+    assert_eq!(shared.find(wave).len(), 1);
+
+    Arc::make_mut(&mut wb.sheets[0]).shapes.clear();
+    let out = write_xlsx(&wb).unwrap();
+    let u = Unpacked::new(&out);
+    u.assert_valid();
+    assert!(u.find(wave).is_empty(), "the deleted hyperlink left its audio in the saved file");
+    assert!(!u.text("[Content_Types].xml").contains("audio/wav"));
+    let (again, _) = read_xlsx(&out).unwrap();
+    assert_eq!(again.sheet(0).unwrap().images[0].alt, "Logo");
+    assert_eq!(link_of(&u, &written_drawing(&u), LOGO), Some(("https://example.com/home".into(), true)));
 }
 
 #[test]
@@ -305,11 +437,19 @@ fn a_place_link_in_external_mode_is_checked_too() {
     assert_eq!(link_of(&u, &written_drawing(&u), GO), Some(("#Data!A2".into(), true)), "kept while Data is there");
     let mut wb = wb;
     Arc::make_mut(&mut wb.sheets[0]).name = "Renamed".into();
-    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    let (out, report) = crate::write_xlsx_named_with(&wb, crate::XlsxKind::Workbook, "drawing.xlsx", crate::FunctionInfo::default()).unwrap();
+    assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+    assert!(report.warnings[0].contains("#Data!A2"));
+    let u = Unpacked::new(&out);
+    u.assert_valid();
     let sheet = sheet_part(&u, "Renamed");
     let drawing = u.rels(&sheet).into_iter().find(|r| r.1.ends_with("/drawing")).unwrap().2;
     assert_eq!(link_of(&u, &drawing, GO), None);
     assert!(!raw_rels(&u, &drawing).iter().any(|r| r.2.starts_with('#')));
+    let (again, _) = read_xlsx(&out).unwrap();
+    let sheet = again.sheet(0).unwrap();
+    assert_eq!(sheet.name, "Renamed");
+    assert_linked_objects(sheet, "Go", "Logo");
 }
 
 #[test]
@@ -328,9 +468,14 @@ fn a_link_to_a_sheets_name_needs_that_sheets_name() {
     // The sheet's name deleted, the workbook's same-named one still there: the link is left out.
     let mut wb = wb;
     wb.names.retain(|n| n.scope.is_none());
-    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    let out = write_xlsx(&wb).unwrap();
+    let u = Unpacked::new(&out);
     u.assert_valid();
     assert_eq!(link_of(&u, &written_drawing(&u), GO), None);
+    let (again, _) = read_xlsx(&out).unwrap();
+    assert_linked_objects(again.sheet(0).unwrap(), "Go", "Logo");
+    assert_eq!(again.names.len(), 1);
+    assert!(again.names[0].scope.is_none());
 }
 
 #[test]
@@ -341,7 +486,8 @@ fn a_click_link_survives_a_hover_link_without_its_relationship() {
         );
         let bytes = package(&anchor(6, &sp), &[("rId3", "hyperlink", "#Data!A2")], &[], &[]);
         let (wb, report) = read_xlsx(&bytes).unwrap();
-        let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+        let out = write_xlsx(&wb).unwrap();
+        let u = Unpacked::new(&out);
         u.assert_valid();
         let drawing = written_drawing(&u);
         let dx = u.text(&drawing);
@@ -350,6 +496,8 @@ fn a_click_link_survives_a_hover_link_without_its_relationship() {
         let id = attr_of(&dx, good, "r:id");
         let r = raw_rels(&u, &drawing).into_iter().find(|r| r.0 == id).unwrap_or_else(|| panic!("{dx}"));
         assert_eq!(r.2, "#Data!A2", "the {kept} link is kept: {:?}", report.warnings);
+        let (again, _) = read_xlsx(&out).unwrap();
+        assert_eq!(again.sheet(0).unwrap().shapes[0].text, "Go");
     }
 }
 
@@ -357,13 +505,18 @@ fn a_click_link_survives_a_hover_link_without_its_relationship() {
 fn a_link_to_a_renamed_sheet_is_left_out() {
     let (mut wb, _) = read_xlsx(&linked_package()).unwrap();
     Arc::make_mut(&mut wb.sheets[0]).name = "Renamed".into();
-    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    let out = write_xlsx(&wb).unwrap();
+    let u = Unpacked::new(&out);
     u.assert_valid();
     let sheet = sheet_part(&u, "Renamed");
     let drawing = u.rels(&sheet).into_iter().find(|r| r.1.ends_with("/drawing")).unwrap().2;
     assert_eq!(link_of(&u, &drawing, GO), None, "the link no longer leads anywhere");
     assert!(!raw_rels(&u, &drawing).iter().any(|r| r.2.starts_with('#')));
     assert_eq!(link_of(&u, &drawing, LOGO), Some(("https://example.com/home".into(), true)));
+    let (again, _) = read_xlsx(&out).unwrap();
+    let sheet = again.sheet(0).unwrap();
+    assert_eq!(sheet.name, "Renamed");
+    assert_linked_objects(sheet, "Go", "Logo");
 }
 
 #[test]
@@ -384,7 +537,8 @@ fn grouped_links_and_click_and_hover_go_back_on_their_own() {
         &[],
     );
     let (wb, report) = read_xlsx(&bytes).unwrap();
-    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    let out = write_xlsx(&wb).unwrap();
+    let u = Unpacked::new(&out);
     u.assert_valid();
     let drawing = written_drawing(&u);
     let dx = u.text(&drawing);
@@ -394,6 +548,11 @@ fn grouped_links_and_click_and_hover_go_back_on_their_own() {
     let hover = attr_of(&dx[at..], "a:hlinkHover", "r:id");
     let r = raw_rels(&u, &drawing).into_iter().find(|r| r.0 == hover).unwrap_or_else(|| panic!("dangling {hover}"));
     assert_eq!((r.2.as_str(), r.3), ("https://example.com/home", true));
+    let (again, _) = read_xlsx(&out).unwrap();
+    let sheet = again.sheet(0).unwrap();
+    assert_eq!((sheet.groups.len(), sheet.shapes.len(), sheet.images.len()), (1, 2, 1));
+    assert_eq!(sheet.shapes.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(), ["Go", "Other"]);
+    assert_eq!(sheet.images[0].alt, "Logo");
 }
 
 /// What marks the picture and the shape in the written drawing.

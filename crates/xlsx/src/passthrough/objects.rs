@@ -11,7 +11,7 @@
 
 use super::read::{KeptReader, map_rel_ids, raw_rels};
 use super::rebase::SheetKept;
-use super::write::{NameMap, remap, write_parts};
+use super::write::{NameMap, reachable_in, remap, write_parts};
 use super::{HashMap, HashSet, MAX_META, Out, Preserved, PreservedRel, Rels, Sheet, Workbook, normalize, rels_part_name, xml};
 use crate::drawing::{ChartShapesIn, ObjectLinkIn};
 use crate::read::Ctx;
@@ -200,7 +200,14 @@ impl DrawingKept<'_> {
         if live.is_empty() {
             return found;
         }
-        let names: NameMap = write_parts(out, &kept.parts);
+        let names: NameMap = if kept.parts.is_empty() {
+            NameMap::new()
+        } else {
+            let used: HashSet<&str> = live.iter().flat_map(|(_, ids)| ids.iter().map(String::as_str)).collect();
+            let roots = kept.rels.iter().filter(|r| !r.external && !r.target.starts_with('#') && used.contains(r.id.as_str()));
+            let needed = reachable_in(&kept.parts, roots);
+            write_parts(out, kept.parts.iter().filter(|p| needed.contains(&normalize(&p.name))))
+        };
         let mut ids: HashMap<String, String> = HashMap::new();
         for (link, used) in live {
             for old in used {

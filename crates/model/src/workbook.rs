@@ -647,6 +647,13 @@ impl Workbook {
                         | crate::DrawingRef::Group(id)) = l.object;
                         id
                     }))
+                    // Chart annotation snapshots, like links, refer to the original objects.
+                    .chain(
+                        s.preserved
+                            .iter()
+                            .flat_map(|p| p.chart_shapes.iter())
+                            .flat_map(|cs| std::iter::once(cs.chart).chain(cs.shapes.iter().map(|o| o.id)).chain(cs.images.iter().map(|o| o.id))),
+                    )
             })
             .collect();
         used.sort_unstable();
