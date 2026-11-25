@@ -7822,7 +7822,14 @@ fn whole_row_cut_paste_refuses_a_replaced_source_index() {
     s.execute("cell.set", json!({"cell": "A3", "input": "keep me"})).unwrap();
     s.execute("home.rowHeight", json!({"rows": "3:3", "height": 50})).unwrap();
 
-    assert!(s.execute("edit.paste", json!({"at": "A8"})).is_err());
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let mut style = gridcraft_model::Style::default();
+    style.protection.locked = false;
+    let unlocked = wb.styles.intern(style);
+    let sh = wb.sheet_mut(wb.active_sheet()).unwrap();
+    sh.rows.get_mut(&2).unwrap().style = Some(unlocked);
+    sh.protection = Some(gridcraft_model::SheetProtection { format_rows: true, ..Default::default() });
+    assert_line_edit_refused(&mut s, "edit.paste", json!({"at": "A8"}), "source sheet for this cut has moved or been deleted");
     assert_eq!(v(&s, "A3"), Value::from("keep me"));
     assert_eq!(v(&s, "A8"), Value::Empty);
     let wb = &s.doc().unwrap().wb;
@@ -8070,8 +8077,8 @@ fn whole_row_autofill_upward_and_without_formatting() {
     assert_eq!([sh.row_height(0), sh.row_height(1)], [40., 38. * 4. / 3.]);
 }
 
-/// Inferred: a whole column repeats its width and style. One column of extension is the
-/// smallest command-level case: the cell fill still visits the full grid height.
+/// Inferred: a whole column repeats its width and style, and an absent source
+/// column restores the defaults when it replaces custom geometry.
 #[test]
 fn whole_column_autofill_repeats_source_column_formatting() {
     use gridcraft_model::{LineInfo, Style};
@@ -8084,17 +8091,19 @@ fn whole_column_autofill_repeats_source_column_formatting() {
     let bold = wb.styles.intern(bold);
     let sh = wb.sheet_mut(0).unwrap();
     sh.cols.insert(1, LineInfo { size: Some(123.), style: Some(bold), ..Default::default() });
-    sh.cols.insert(2, LineInfo { size: Some(45.), ..Default::default() });
-    s.execute("edit.autoFill", json!({"source": "B:B", "target": "B:C"})).unwrap();
+    sh.cols.insert(3, LineInfo { size: Some(45.), ..Default::default() });
+    sh.cols.insert(4, LineInfo { size: Some(55.), style: Some(bold), ..Default::default() });
+    s.execute("edit.autoFill", json!({"source": "B:C", "target": "B:E"})).unwrap();
     let sh = s.doc().unwrap().wb.sheet(0).unwrap();
-    assert_eq!(sh.col_width(2), 123.);
-    assert_eq!(sh.style_id(CellRef::parse("C10").unwrap()), bold);
-    assert_eq!(v(&s, "C1"), Value::Number(1.));
+    assert_eq!([sh.col_width(3), sh.col_width(4)], [123., sh.default_col_width]);
+    assert_eq!([sh.cols.get(&3).and_then(|l| l.style), sh.cols.get(&4).and_then(|l| l.style)], [Some(bold), None]);
+    assert_eq!(sh.style_id(CellRef::parse("D10").unwrap()), bold);
+    assert_eq!(v(&s, "D1"), Value::Number(1.));
     s.execute("edit.undo", json!({})).unwrap();
     let sh = s.doc().unwrap().wb.sheet(0).unwrap();
-    assert_eq!(sh.col_width(2), 45.);
-    assert_eq!(sh.cols.get(&2).and_then(|l| l.style), None);
-    assert_eq!(v(&s, "C1"), Value::Empty);
+    assert_eq!([sh.col_width(3), sh.col_width(4)], [45., 55.]);
+    assert_eq!([sh.cols.get(&3).and_then(|l| l.style), sh.cols.get(&4).and_then(|l| l.style)], [None, Some(bold)]);
+    assert_eq!(v(&s, "D1"), Value::Empty);
     assert_line_edit_refused(&mut s, "edit.autoFill", json!({"source": "B:B", "target": "B:F"}), "range too large");
 }
 

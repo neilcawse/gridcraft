@@ -184,7 +184,7 @@ fn fill_impl(
             match mode {
                 FillMode::Formats => {
                     let mut existing = sh.cell(*t).cloned().unwrap_or_default();
-                    existing.style = if whole_line && scell.is_none() && existing.has_content() { sh.style_id(sc) } else { cell.style };
+                    existing.style = format_fill_style(sh, sc, scell.as_ref(), &existing, whole_line);
                     writes.push((*t, Some(existing)));
                     continue;
                 }
@@ -228,6 +228,14 @@ fn fill_impl(
         cx.touch(sheet, c);
     }
     Ok(())
+}
+
+fn format_fill_style(sh: &gridcraft_model::Sheet, at: CellRef, source: Option<&Cell>, dest: &Cell, whole_line: bool) -> gridcraft_model::StyleId {
+    match source {
+        Some(cell) => cell.style,
+        None if whole_line && dest.has_content() => sh.style_id(at),
+        None => Default::default(),
+    }
 }
 
 #[derive(Clone, Debug)]
