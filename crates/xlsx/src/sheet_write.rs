@@ -690,7 +690,7 @@ fn build_sheet_rules(sheet: &Sheet, features: &mut CraftFeatures, rels: &mut Rel
             let id = rels.add_external("hyperlink", u);
             (Some(id), loc, None, Some(u.to_string()))
         } else {
-            let loc = t.trim_start_matches('#').to_string();
+            let loc = if t.starts_with('#') && CellError::parse(t).is_none() { t.trim_start_matches('#') } else { t }.to_string();
             (None, Some(loc.clone()), Some(loc), None)
         };
         features.hyperlinks.push(CraftHyperlink {

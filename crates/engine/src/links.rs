@@ -9,7 +9,7 @@
 //! external addresses; only the host, after showing the address and getting OK from the user,
 //! opens one through [`crate::Session::open_confirmed_link`], which no command reaches.
 
-use gridcraft_core::RangeRef;
+use gridcraft_core::{CellError, RangeRef};
 use serde_json::{Value as Json, json};
 
 use crate::{EngineError, Result, Session, UiRequest};
@@ -69,6 +69,10 @@ pub fn classify(target: &str) -> LinkKind {
     if t.starts_with("\\\\") || t.starts_with("//") {
         return LinkKind::Refused("Links to network locations aren't opened.".into());
     }
+    // A broken link location is not a `#`-prefixed name (e.g. NAME? is a valid name).
+    if t.starts_with('#') && CellError::parse(t).is_some() {
+        return LinkKind::Refused("Reference isn't valid.".into());
+    }
     if RangeRef::parse(t).is_some() {
         return LinkKind::Internal(t.to_string());
     }
@@ -120,6 +124,13 @@ mod tests {
     fn references_stay_internal() {
         for r in ["Sheet2!A1", "'My Sheet'!B2:C3", "A1:B2", "#Sheet1!A1", "Total", "", "   "] {
             assert!(matches!(classify(r), LinkKind::Internal(_)), "{r:?} -> {:?}", classify(r));
+        }
+    }
+
+    #[test]
+    fn error_locations_cannot_be_followed_as_names() {
+        for r in ["#NAME?", "#REF!"] {
+            assert_eq!(classify(r), LinkKind::Refused("Reference isn't valid.".into()));
         }
     }
 }

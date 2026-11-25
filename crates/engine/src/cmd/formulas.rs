@@ -347,8 +347,8 @@ fn define_name(s: &mut Session, p: &Json) -> Result<Json> {
     // A new spelling may not collide with a table. A name that already has the spelling (from a
     // file or an earlier version) can still be edited or defined over: that adds no collision.
     let keeps_spelling = match str_param(p, "oldName") {
-        Some(old) => gridcraft_formula::same_name(old, &name),
-        None => d.wb.names.iter().any(|n| n.scope == scope && gridcraft_formula::same_name(&n.name, &name)),
+        Some(old) => old.eq_ignore_ascii_case(&name),
+        None => d.wb.name_in_scope(&name, scope).is_some(),
     };
     if !keeps_spelling && table_uses_name(&d.wb, &name) {
         return Err(EngineError::Other(format!("A table already uses the name \"{name}\". Enter a unique name.")));
@@ -1040,6 +1040,36 @@ mod tests {
         let wb = &s.doc()?.wb;
         assert_eq!(wb.names.len(), 1);
         assert_eq!((wb.names[0].name.as_str(), wb.names[0].formula.as_str(), wb.names[0].scope), ("DATAROWS", "3", None));
+        s.execute("formulas.defineName", json!({"name": "DATAROWS", "oldName": "DATAROWS", "scope": "Sheet1", "refersTo": "=4"}))?;
+        assert_eq!(s.doc()?.wb.name_in_scope("DATAROWS", Some(0)).map(|n| n.formula.as_str()), Some("4"));
+        s.execute("edit.undo", json!({}))?;
+        assert_eq!(s.doc()?.wb.name_in_scope("DATAROWS", None).map(|n| n.formula.as_str()), Some("3"));
+        s.execute("edit.redo", json!({}))?;
+        assert_eq!(s.doc()?.wb.name_in_scope("DATAROWS", Some(0)).map(|n| n.formula.as_str()), Some("4"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_fold_equivalent_name_is_not_an_existing_definition() -> Result<()> {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("range.setValues", json!({"range": "A1:A2", "values": [["Header"], [1]]}))?;
+        s.execute("insert.table", json!({"range": "A1:A2", "name": "Größe"}))?;
+        std::sync::Arc::make_mut(&mut s.doc_mut()?.wb).names.push(DefinedName {
+            name: "Größe".into(),
+            scope: None,
+            formula: "1".into(),
+            comment: String::new(),
+            hidden: false,
+            uid: Default::default(),
+        });
+        for params in [json!({"name": "GRÖSSE", "refersTo": "=2"}), json!({"name": "GRÖSSE", "oldName": "Größe", "refersTo": "=2"})] {
+            let refused = s.execute("formulas.defineName", params);
+            assert!(matches!(refused, Err(e) if e.to_string() == "A table already uses the name \"GRÖSSE\". Enter a unique name."));
+        }
+        let wb = &s.doc()?.wb;
+        assert_eq!(wb.names.len(), 1);
+        assert_eq!(wb.name_in_scope("Größe", None).map(|n| n.formula.as_str()), Some("1"));
         Ok(())
     }
 

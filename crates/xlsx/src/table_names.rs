@@ -75,13 +75,14 @@ pub(crate) fn repair(wb: &mut Cow<'_, Workbook>, extra_names: impl IntoIterator<
             first.entry(table.name.to_ascii_lowercase()).or_insert((si, ti));
         }
     }
+    let repaired_names = renamed.values().map(|n| n.to_ascii_lowercase()).collect();
     // Lookups must see every original name, even when the first duplicate is renamed too.
     let original;
     let target = match wb {
         Cow::Borrowed(book) => {
             let original = *book;
             let mut repaired = original.clone();
-            Rewrite { original, renamed, first }.apply(&mut repaired);
+            Rewrite { original, renamed, first, repaired_names }.apply(&mut repaired);
             *wb = Cow::Owned(repaired);
             return;
         }
@@ -90,13 +91,14 @@ pub(crate) fn repair(wb: &mut Cow<'_, Workbook>, extra_names: impl IntoIterator<
             book
         }
     };
-    Rewrite { original: &original, renamed, first }.apply(target);
+    Rewrite { original: &original, renamed, first, repaired_names }.apply(target);
 }
 
 struct Rewrite<'a> {
     original: &'a Workbook,
     renamed: HashMap<Position, String>,
     first: HashMap<String, Position>,
+    repaired_names: HashSet<String>,
 }
 
 impl Rewrite<'_> {
@@ -128,7 +130,11 @@ impl Rewrite<'_> {
     }
 
     fn captures(&self, bare: &str) -> bool {
-        self.renamed.values().any(|name| name.eq_ignore_ascii_case(bare))
+        if bare.bytes().any(|b| b.is_ascii_uppercase()) {
+            self.repaired_names.contains(&bare.to_ascii_lowercase())
+        } else {
+            self.repaired_names.contains(bare)
+        }
     }
 
     fn replacement(&self, n: &str, structured: bool, sheet: usize, owner: Option<Position>, env: &[String]) -> Option<Expr> {
@@ -165,11 +171,17 @@ impl Rewrite<'_> {
         rewrite_table_tokens(e, &|n, structured, env| self.replacement(n, structured, sheet, owner, env))
     }
 
-    fn text(&self, text: &mut String, sheet: usize, owner: Option<Position>) {
-        let Ok(mut expr) = gridcraft_formula::parse_name(text) else { return };
-        if self.expression(&mut expr, sheet, owner) {
+    fn rewritten_text(&self, text: &str, sheet: usize, owner: Option<Position>) -> Option<String> {
+        let mut expr = gridcraft_formula::parse_name(text).ok()?;
+        self.expression(&mut expr, sheet, owner).then(|| {
             let prefix = if text.trim_start().starts_with('=') { "=" } else { "" };
-            *text = format!("{prefix}{}", gridcraft_formula::print(&expr));
+            format!("{prefix}{}", gridcraft_formula::print(&expr))
+        })
+    }
+
+    fn text(&self, text: &mut String, sheet: usize, owner: Option<Position>) {
+        if let Some(new) = self.rewritten_text(text, sheet, owner) {
+            *text = new;
         }
     }
 
@@ -251,7 +263,7 @@ impl Rewrite<'_> {
                     {
                         if self.table(&r.table).is_some() {
                             text(n);
-                        } else if self.renamed.values().any(|name| name.eq_ignore_ascii_case(&r.table)) {
+                        } else if self.captures(&r.table) {
                             // An unbound lookalike must not become a reference just because a
                             // repaired table takes its spelling (or increase ChartEx's alias count).
                             *n = format!("\"{}\"", n.replace('"', "\"\""));
@@ -260,7 +272,12 @@ impl Rewrite<'_> {
                 }
             }
             for link in sheet.hyperlinks.values_mut().filter(|l| !l.external) {
-                text(&mut link.target);
+                // A leading `#` can mark an in-workbook destination rather than a formula error.
+                let target = link.target.trim();
+                let target = if target.starts_with('#') && CellError::parse(target).is_none() { target.trim_start_matches('#') } else { target };
+                if let Some(new) = self.rewritten_text(target, si, None) {
+                    link.target = new;
+                }
             }
             for sparkline in &mut sheet.sparklines {
                 text(&mut sparkline.source);

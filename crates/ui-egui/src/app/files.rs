@@ -111,7 +111,9 @@ impl SheetApp {
         if autosave_due {
             self.grid.last_autosave = now;
             self.store_view_state();
-            let _ = self.session.run("file.save", json!({}));
+            if let Ok(result) = self.session.run("file.save", json!({})) {
+                self.show_save_warnings(&result);
+            }
         } else if self.ui.autosave && dirty_xlsx {
             // Keep checking even when no input arrives while the window is hidden.
             ctx.request_repaint_after(std::time::Duration::from_secs(2));

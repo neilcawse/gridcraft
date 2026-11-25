@@ -588,9 +588,32 @@ fn a_reference_to_no_table_is_not_captured_by_a_repaired_name() -> Result<(), Bo
     let sh = Arc::make_mut(&mut wb.sheets[0]);
     sh.tables.push(table("Sale?", 0));
     sh.tables.push(table("Sale?", 3));
-    for (row, f) in [(6, "SUM(Sale__2[Value])"), (7, "COUNT(SALE__2)"), (8, "SUM(Sale?[Value])")] {
+    for (row, f) in [
+        (6, "SUM(Sale__2[Value])"),
+        (7, "COUNT(SALE__2)"),
+        (8, "SUM(Sale?[Value])"),
+        (9, "LET(Sale__2,7,Sale__2)"),
+        (10, "LAMBDA(Sale__2,Sale__2)(7)"),
+    ] {
         sh.set_cell(CellRef::new(row, 0), Cell::formula(Formula::new(f)));
     }
+    for (row, target) in [(6, "Sale__2[Value]"), (7, "#Sale__2"), (8, "#Sale?[Value]")] {
+        sh.hyperlinks.insert(CellRef::new(row, 1), Hyperlink { target: target.into(), tooltip: None, external: false });
+    }
+    sh.tables[0].columns[0].formula = Some("Sale__2[Value]".into());
+    sh.tables[0].columns[0].totals = TotalsFn::Custom;
+    sh.tables[0].columns[0].totals_label = Some("SUM(Sale__2[Value])".into());
+    let ranges = vec![RangeRef::cell(CellRef::new(6, 2))];
+    sh.cond_formats.push(CondFormat {
+        ranges: ranges.clone(),
+        rule: CfRule::Expression { formula: "Sale__2[Value]".into(), style: Box::default() },
+        priority: 1,
+        stop_if_true: false,
+    });
+    sh.validations.push(Validation { ranges, kind: ValidationKind::List, f1: "Sale__2[Value]".into(), ..Default::default() });
+    let series = Series { name: None, categories: Some("Sale__2[Value]".into()), values: "Sale__2[Value]".into(), ..Default::default() };
+    sh.charts.push(chart(1, ChartKind::Waterfall, series.clone()));
+    sh.charts.push(chart(2, ChartKind::Bubble, Series { bubble_sizes: Some("Sale__2[Value]".into()), ..series }));
     wb.names.push(DefinedName {
         name: "Dangling".into(),
         scope: None,
@@ -601,13 +624,34 @@ fn a_reference_to_no_table_is_not_captured_by_a_repaired_name() -> Result<(), Bo
     });
     let mut back = wb;
     for cycle in 0..2 {
-        (back, _) = read_xlsx(&write_xlsx(&back)?)?;
+        let saved = write_xlsx(&back)?;
+        let table_xml = xml(&saved, "xl/tables/table1.xml")?;
+        assert!(table_xml.contains("<calculatedColumnFormula>#REF!</calculatedColumnFormula>"));
+        assert!(table_xml.contains("<totalsRowFormula>SUM(#REF!)</totalsRowFormula>"));
+        (back, _) = read_xlsx(&saved)?;
         let names: Vec<_> = back.sheets[0].tables.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, ["Sale_", "Sale__2"], "cycle {cycle}");
-        for (row, f) in [(6, "SUM(#REF!)"), (7, "COUNT(#NAME?)"), (8, "SUM(Sale_[Value])")] {
+        for (row, f) in
+            [(6, "SUM(#REF!)"), (7, "COUNT(#NAME?)"), (8, "SUM(Sale_[Value])"), (9, "LET(Sale__2,7,Sale__2)"), (10, "LAMBDA(Sale__2,Sale__2)(7)")]
+        {
             let text = back.sheets[0].cell(CellRef::new(row, 0)).and_then(|c| c.formula.as_ref()).map(|f| f.text.as_str());
             assert_eq!(text, Some(f), "cycle {cycle}");
         }
+        let sh = &back.sheets[0];
+        for (row, target) in [(6, "#REF!"), (7, "#NAME?"), (8, "Sale_[Value]")] {
+            assert_eq!(sh.hyperlinks.get(&CellRef::new(row, 1)).map(|h| (h.target.as_str(), h.external)), Some((target, false)));
+        }
+        assert!(matches!(&sh.cond_formats[0].rule, CfRule::Expression { formula, .. } if formula == "#REF!"));
+        assert_eq!(sh.validations[0].f1, "=#REF!");
+        for ch in &sh.charts {
+            let series = &ch.series[0];
+            assert_eq!(series.values, "#REF!");
+            assert_eq!(series.categories.as_deref(), Some("#REF!"));
+            if ch.kind == ChartKind::Bubble {
+                assert_eq!(series.bubble_sizes.as_deref(), Some("#REF!"));
+            }
+        }
+        assert_eq!(sh.charts.len(), 2);
         assert_eq!(back.name("Dangling", 0).map(|n| n.formula.as_str()), Some("#REF!"), "cycle {cycle}");
     }
     Ok(())
