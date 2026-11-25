@@ -266,6 +266,27 @@ fn a_sort_that_keeps_the_editable_anchor_does_not_reuse_stale_markers_during_fit
     assert_rect(chart_rect(&s), ObjectRect { y: sh.row_top(1), ..before }, "the fit above the chart only moves it");
 }
 
+/// Saved markers that still describe a sorted chart on the sorted grid carry into the row fit
+/// after the sort. Rows 3 and 4 (all of standard height) trade places, carrying unfitted 36 pt
+/// text into row 4. The end marker names row 4, its 50 px offset reaching past that row, so the
+/// chart keeps its height when row 4 grows to fit (the drawn corner alone would put the end in
+/// row 6 and grow the chart).
+#[test]
+fn a_sort_keeps_valid_named_markers_for_the_row_fit() {
+    let mut s = chart_with_named_end_row(3, 50 * 9525, &[]);
+    s.execute("range.setValues", json!({"range": "A3", "values": [[4], [3]]})).unwrap();
+    {
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let large = wb.styles.derive(StyleId::DEFAULT, |st| st.font.size = 36.0);
+        wb.sheet_mut(0).unwrap().set_style(CellRef::new(2, 0), large);
+    }
+    let before = chart_rect(&s);
+    let old = s.doc().unwrap().wb.sheet(0).unwrap().row_height(3);
+    s.execute("data.sort", json!({"range": "A1:D4", "header": false, "keys": [{"column": "A"}]})).unwrap();
+    assert!(s.doc().unwrap().wb.sheet(0).unwrap().row_height(3) > old + 20.0, "row 4 fits after the sort");
+    assert_rect(chart_rect(&s), before, "the end marker stays 50 px into row 4");
+}
+
 /// The row fit after a deletion re-measures the chart against the remapped rows.
 #[test]
 fn a_row_fit_after_a_deletion_sizes_the_shifted_chart() {
