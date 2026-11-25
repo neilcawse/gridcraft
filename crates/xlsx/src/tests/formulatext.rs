@@ -43,6 +43,48 @@ fn imported_formulatext_keeps_layout_and_displays_compatibility_operators() {
 }
 
 #[test]
+fn imported_formulatext_distinguishes_file_tokens_from_user_spellings() -> Result<(), Box<dyn std::error::Error>> {
+    let body = r#"<sheetData><row r="1">
+        <c r="A1" cm="1"><f>_xlBudget + 1</f><v>0</v></c>
+        <c r="B1" cm="1"><f>_xlLambda(A2) + 1</f><v>0</v></c>
+        <c r="C1" cm="1"><f>_xlfn.SINGLE(+A2:A4)</f><v>0</v></c>
+        <c r="D1" cm="1"><f>_xlfn.SINGLE(( - A2))</f><v>0</v></c>
+        <c r="E1" cm="1"><f>[#This Row] + 1</f><v>0</v></c>
+        <c r="F1" cm="1"><f>T['#This Row] + 1</f><v>0</v></c>
+        <c r="G1" cm="1"><f>_xlfn.SINGLE(A2)+</f><v>0</v></c>
+        <c r="H1" cm="1"><f>T[@['#This Row]] + 1</f><v>0</v></c>
+        <c r="I1" cm="1"><f>_xlfn.LET(_xlpm._TRO_CUSTOM, _xlfn.LAMBDA(_xlpm.x, _xlpm.x), _xlpm._TRO_CUSTOM(A2))</f><v>0</v></c>
+        <c r="J1" cm="1"><f>T[Prior '#This Row] + 1</f><v>0</v></c>
+    </row></sheetData>"#;
+    let names = r#"<definedNames><definedName name="_xlBudget">3</definedName><definedName name="_XLLAMBDA">_xlfn.LAMBDA(_xlpm.x,_xlpm.x)</definedName></definedNames>"#;
+    let (wb, _) = crate::read_xlsx(&super::minimal(body, &[], "", names))?;
+    let sheet = wb.sheet(0).ok_or("missing test sheet")?;
+    let mut mismatches = Vec::new();
+    for (cell, expected) in [
+        ("A1", "_xlBudget + 1"),
+        ("B1", "_xlLambda(A2) + 1"),
+        ("C1", "@+A2:A4"),
+        ("D1", "@( - A2)"),
+        ("E1", "[@]+1"),
+        ("F1", "T['#This Row] + 1"),
+        ("G1", "_xlfn.SINGLE(A2)+"),
+        ("H1", "T[@['#This Row]] + 1"),
+        ("I1", "LET(_TRO_CUSTOM, LAMBDA(x, x), _TRO_CUSTOM(A2))"),
+        ("J1", "T[Prior '#This Row] + 1"),
+    ] {
+        let at = CellRef::parse(cell).ok_or("invalid test address")?;
+        let f = sheet.cell(at).and_then(|c| c.formula.as_deref()).ok_or("missing imported formula")?;
+        let actual = f.display_text.as_deref().unwrap_or(&f.text);
+        if actual != expected {
+            mismatches.push((cell, actual.as_str(), expected));
+        }
+        assert_eq!(f.expr.is_none(), cell == "G1", "{cell}");
+    }
+    assert!(mismatches.is_empty(), "(cell, actual, expected): {mismatches:?}");
+    Ok(())
+}
+
+#[test]
 fn imported_base_column_width_is_distinct_from_geometry() {
     for (attrs, expected) in [("", Some(10)), (r#" defaultColWidth="12""#, None)] {
         let body = format!(r#"<sheetFormatPr baseColWidth="10"{attrs}/><sheetData/>"#);

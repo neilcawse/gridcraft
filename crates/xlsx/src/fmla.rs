@@ -166,7 +166,11 @@ pub fn from_file(text: &str) -> String {
 /// formula holding a file-only spelling the formula bar shows otherwise (`[#This Row]`,
 /// `_xleta.SUM`, `_xludf.`, `_xlfn._TRO_ALL(…)`) keeps the canonical text instead.
 pub(crate) fn formula_bar_text(text: &str, canonical: &str) -> Option<String> {
-    use gridcraft_formula::lexer::{Tok, tokenize};
+    use gridcraft_formula::{
+        StructItem,
+        lexer::{Tok, tokenize},
+        parser::parse_struct,
+    };
 
     let body = text.strip_prefix('=').unwrap_or(text);
     if body == canonical {
@@ -201,11 +205,13 @@ pub(crate) fn formula_bar_text(text: &str, canonical: &str) -> Option<String> {
                     edits.push((t.start, t.end, if spill { "" } else { "@" }));
                     stack.push(Some((open, spill, false)));
                 } else {
-                    match name.or_else(|| unprefix(spelling, PARAM_PREFIX)) {
-                        Some(name) if unprefix(name, "_TRO_").is_some() => return None,
-                        Some(name) => edits.push((t.start, t.end - 1, name)),
-                        None if unprefix(spelling, "_xl").is_some() => return None,
-                        None => {}
+                    if unprefix(spelling, "_xludf.").is_some()
+                        || name.is_some_and(|n| ["_TRO_ALL", "_TRO_LEADING", "_TRO_TRAILING"].iter().any(|mode| n.eq_ignore_ascii_case(mode)))
+                    {
+                        return None;
+                    }
+                    if let Some(name) = name.or_else(|| unprefix(spelling, PARAM_PREFIX)) {
+                        edits.push((t.start, t.end - 1, name));
                     }
                     stack.push(None);
                 }
@@ -229,11 +235,17 @@ pub(crate) fn formula_bar_text(text: &str, canonical: &str) -> Option<String> {
             Tok::RBrace => in_array = in_array.saturating_sub(1),
             Tok::Word(word) => match unprefix(word, PARAM_PREFIX) {
                 Some(name) => edits.push((t.start, t.end, name)),
-                None if unprefix(word, "_xl").is_some() => return None,
+                None if unprefix(word, "_xleta.").is_some() => return None,
                 None => {}
             },
-            // Files spell `[@Col]` as `[[#This Row],[Col]]`.
-            Tok::Struct(spec) if spec.to_ascii_lowercase().contains("#this row") => return None,
+            // An escaped `'#This Row` in a column label is not the file-only item.
+            Tok::Struct(spec)
+                if !spec.trim_start().starts_with('@')
+                    && spec.as_bytes().windows(b"#this row".len()).any(|w| w.eq_ignore_ascii_case(b"#this row"))
+                    && parse_struct("", spec).is_ok_and(|r| r.specifiers.contains(&StructItem::ThisRow)) =>
+            {
+                return None;
+            }
             Tok::Op(op) if in_array == 0 => {
                 if let Some(Some((open, spill, group))) = stack.last_mut() {
                     // A leading sign follows `@` directly (Excel shows `@-A1:A3`); a binary
