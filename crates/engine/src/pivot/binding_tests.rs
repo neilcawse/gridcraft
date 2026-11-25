@@ -805,6 +805,24 @@ fn table_rename_follows_unbound_pivot_table_sources() {
 }
 
 #[test]
+fn table_rename_follows_a_pivot_rebound_to_the_table_that_took_its_place() {
+    let mut wb = book("rData", false);
+    Arc::make_mut(&mut wb.sheets[1]).tables.push(kv_table("Sales"));
+    let binding = wb.bind_pivot_source("Sales", REPORT);
+    let pt = &mut Arc::make_mut(&mut wb.sheets[REPORT]).pivots[0];
+    pt.source = "Sales".into();
+    pt.binding = binding;
+    // The bound table is gone; another of the same name took its place.
+    Arc::make_mut(&mut wb.sheets[1]).tables[0].uid = gridcraft_model::DefinitionUid::fresh();
+    assert!(wb.pivot_source(&wb.sheets[REPORT].pivots[0], REPORT).is_ok_and(|found| found.rebound.is_some()));
+    let check = |wb: &Workbook, table: &str| {
+        assert_eq!(wb.sheets[REPORT].pivots[0].source, table);
+        assert_eq!(total(&mut wb.clone()), Ok(FROM_DATA));
+    };
+    check_table_rename(rename_session(wb), check);
+}
+
+#[test]
 fn a_bare_name_is_saved_before_a_range_so_the_binding_stays_live() {
     let wb = reopened(&book("Data!rData", true));
     for rebuilt in [false, true] {

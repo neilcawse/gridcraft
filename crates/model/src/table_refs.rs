@@ -6,8 +6,8 @@ use std::sync::Arc;
 use gridcraft_core::{CellRef, link_location, quote_sheet, split_sheet};
 use gridcraft_formula::{Expr, StructRef, same_name};
 
-use crate::workbook::rewrite_table_tokens;
-use crate::{BindingKind, CfRule, CfValueKind, Formula, PivotTable, Sheet, SlicerSource, TotalsFn, Workbook};
+use crate::workbook::{rewrite_table_tokens, spell_calls};
+use crate::{CfRule, CfValueKind, Formula, PivotSource, PivotTable, Sheet, SlicerSource, TotalsFn, Workbook};
 
 pub type TablePosition = (usize, usize);
 
@@ -19,12 +19,14 @@ pub struct TableRename<'a> {
     old: &'a str,
     new: &'a str,
     first: bool,
+    /// LAMBDA names, as the workbook spells them.
+    lambdas: Vec<String>,
 }
 
 impl<'a> TableRename<'a> {
     pub fn new(wb: &'a Workbook, at: TablePosition, new: &'a str) -> Option<Self> {
         let old = wb.sheets.get(at.0)?.tables.get(at.1)?.name.as_str();
-        (old != new).then(|| Self { wb, at, old, new, first: wb.table(old) == Some(at) })
+        (old != new).then(|| Self { wb, at, old, new, first: wb.table(old) == Some(at), lambdas: wb.lambda_names() })
     }
 
     pub fn apply(&self, wb: &mut Workbook) {
@@ -77,22 +79,20 @@ impl TableRefRewrite for TableRename<'_> {
         })
     }
 
-    fn pivot(&self, pivot: &PivotTable, _sheet: usize) -> Option<(String, &str)> {
-        let text = &pivot.source;
-        let qualified = if let Some(binding) = pivot.binding.0.as_ref().filter(|binding| binding.text == *text) {
-            if !matches!(binding.kind, BindingKind::Table | BindingKind::SheetTable(_))
-                || binding.def.get() != self.wb.sheets[self.at.0].tables[self.at.1].uid.get()
-            {
-                return None;
-            }
-            split_sheet(text).0
-        } else if !pivot.binding.unresolved(text) && self.might_change(text.trim().trim_start_matches('=').trim(), None) {
-            None
-        } else {
-            return None;
+    fn pivot(&self, pivot: &PivotTable, sheet: usize) -> Option<(String, &str)> {
+        // What the PivotTable reads: its bound table, the same-kind one that took a gone binding's
+        // place, or for unbound text the table that the text names first.
+        let qualified = match self.wb.pivot_source(pivot, sheet).ok()?.source {
+            PivotSource::Table { sheet, table } if (sheet, table) == self.at => split_sheet(&pivot.source).0,
+            PivotSource::Text(text) if !pivot.binding.unresolved(text) && self.might_change(text.trim().trim_start_matches('=').trim(), None) => None,
+            _ => return None,
         };
         let source = qualified.map_or_else(|| self.new.into(), |sheet| format!("{}!{}", quote_sheet(&sheet), self.new));
         Some((source, self.new))
+    }
+
+    fn respell(&self, expr: Expr) -> Expr {
+        spell_calls(expr, &self.lambdas)
     }
 
     fn keep_link_marker(&self) -> bool {
@@ -123,10 +123,19 @@ pub trait TableRefRewrite {
     fn keep_link_marker(&self) -> bool {
         false
     }
+    /// Respell user function calls, which the parser upper-cases (`Double(…)`), in an expression
+    /// this rewrite changed. File repair leaves that to the reader's later pass over every formula.
+    fn respell(&self, expr: Expr) -> Expr {
+        expr
+    }
 }
 
 pub fn expression(rewrite: &impl TableRefRewrite, expr: &mut Expr, sheet: usize, owner: Option<TablePosition>) -> bool {
-    rewrite_table_tokens(expr, &|name, structured, env| rewrite.replacement(name, structured, sheet, owner, env))
+    let changed = rewrite_table_tokens(expr, &|name, structured, env| rewrite.replacement(name, structured, sheet, owner, env));
+    if changed {
+        *expr = rewrite.respell(std::mem::replace(expr, Expr::Missing));
+    }
+    changed
 }
 
 fn rewritten_text(rewrite: &impl TableRefRewrite, text: &str, sheet: usize, owner: Option<TablePosition>) -> Option<String> {
@@ -358,5 +367,91 @@ fn conditional_format(rule: &CfRule, text: impl Fn(&str) -> Option<String>) -> O
             Some(CfRule::IconSet { set: set.clone(), thresholds: out?, reverse: *reverse, show_value: *show_value })
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gridcraft_core::RangeRef;
+
+    use super::*;
+    use crate::{Cell, CondFormat, DefinedName, Table, TableColumn, Validation};
+
+    fn book() -> Workbook {
+        let mut wb = Workbook::new();
+        let col = |n: &str| TableColumn { name: n.into(), totals: TotalsFn::None, totals_label: None, formula: None, unique_name: None, xml: None };
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.name = "Data".into();
+        sh.tables.push(Table {
+            id: 1,
+            name: "Sales".into(),
+            range: RangeRef::parse("A1:C3").unwrap(),
+            header_row: true,
+            totals_row: false,
+            columns: vec![col("V"), col("Q'ty [#]"), col("A B")],
+            style: String::new(),
+            banded_rows: false,
+            banded_cols: false,
+            first_col: false,
+            last_col: false,
+            filter_button: true,
+            filter: vec![],
+            table_type: None,
+            connection_id: None,
+            uid: Default::default(),
+        });
+        wb
+    }
+
+    fn name(name: &str, formula: &str) -> DefinedName {
+        DefinedName { name: name.into(), scope: None, formula: formula.into(), comment: String::new(), hidden: false, uid: Default::default() }
+    }
+
+    /// Defined names keep their escapes, binders, literals and LAMBDA call spelling; only the
+    /// table token changes, whatever its case.
+    #[test]
+    fn rename_rewrites_only_table_tokens_in_defined_names() {
+        let cases = [
+            ("SUM(Sales[V])", "SUM(Renamed[V])"),
+            ("Sales[[#Headers],[A B]]", "Renamed[[#Headers],[A B]]"),
+            ("Sales[#All]", "Renamed[#All]"),
+            ("Sales[@[A B]]", "Renamed[@[A B]]"),
+            ("Sales[[#This Row],[Q''ty '['#']]]", "Renamed[@[Q''ty '['#']]]"),
+            ("\"Sales[V]\"&INDIRECT(\"Sales\")", "\"Sales[V]\"&INDIRECT(\"Sales\")"),
+            ("LET(Renamed,1,SUM(Sales)+Renamed)", "LET(Renamed,1,SUM(Renamed[])+Renamed)"),
+            ("LAMBDA(sales,sales+SUM(SALES[v]))", "LAMBDA(sales,sales+SUM(Renamed[v]))"),
+            ("ROWS(sales)+ROWS(Sales_1)", "ROWS(Renamed)+ROWS(Sales_1)"),
+            ("ROWS(Data!Sales)", "ROWS(Data!Renamed)"),
+            ("Double(SUM(Sales[V]))", "Double(SUM(Renamed[V]))"),
+        ];
+        let mut wb = book();
+        wb.names.push(name("Double", "LAMBDA(x,x*2)"));
+        wb.names.extend(cases.iter().enumerate().map(|(i, (f, _))| name(&format!("n{i}"), f)));
+        wb.rename_table(0, 0, "Renamed");
+        for (i, (before, after)) in cases.iter().enumerate() {
+            assert_eq!(wb.names[i + 1].formula, *after, "{before}");
+        }
+    }
+
+    /// The interim X22 gate: interactive rename leaves formula objects as they are until Excel
+    /// is measured, while cell formulas follow.
+    #[test]
+    fn rename_leaves_gated_formula_objects_alone() {
+        let mut wb = book();
+        let at = CellRef::new(5, 5);
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.set_cell(at, Cell::formula(Formula::new("SUM(Sales[V])")));
+        sh.cond_formats.push(CondFormat {
+            ranges: vec![RangeRef::parse("A2:A3").unwrap()],
+            rule: CfRule::Expression { formula: "SUM(Sales[V])>0".into(), style: Box::default() },
+            priority: 1,
+            stop_if_true: false,
+        });
+        sh.validations.push(Validation { f1: "SUM(Sales[V])".into(), ..Default::default() });
+        wb.rename_table(0, 0, "Renamed");
+        let sh = &wb.sheets[0];
+        assert_eq!(sh.cell(at).and_then(|c| c.formula.as_ref()).map(|f| f.text.as_str()), Some("SUM(Renamed[V])"));
+        assert!(matches!(&sh.cond_formats[0].rule, CfRule::Expression { formula, .. } if formula == "SUM(Sales[V])>0"));
+        assert_eq!(sh.validations[0].f1, "SUM(Sales[V])");
     }
 }

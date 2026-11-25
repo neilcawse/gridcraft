@@ -681,7 +681,7 @@ impl Workbook {
         }
     }
     /// Names of the defined names holding a LAMBDA (callable like functions).
-    fn lambda_names(&self) -> Vec<String> {
+    pub(crate) fn lambda_names(&self) -> Vec<String> {
         let is_lambda = |f: &str| f.trim_start_matches('=').trim_start().get(..7).is_some_and(|p| p.eq_ignore_ascii_case("LAMBDA("));
         self.names.iter().filter(|n| is_lambda(&n.formula)).map(|n| n.name.clone()).collect()
     }
@@ -806,7 +806,7 @@ impl Workbook {
 }
 
 /// Calls of the names in `lambdas` spelled as the names are.
-fn spell_calls(e: Expr, lambdas: &[String]) -> Expr {
+pub(crate) fn spell_calls(e: Expr, lambdas: &[String]) -> Expr {
     if lambdas.is_empty() {
         return e;
     }
