@@ -515,14 +515,42 @@ fn permutationa(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     num_val(n.powf(k))
 }
 
-fn integer_args(a: &[Arg]) -> R<Vec<u64>> {
-    let v = numbers(a)?;
-    v.iter()
-        .map(|x| {
-            let t = x.trunc();
-            if !(0.0..9.007_199_254_740_992e15).contains(x) { Err(CellError::Num) } else { Ok(t as u64) }
-        })
-        .collect()
+const INTEGER_LIMIT: u64 = 1 << 53;
+
+fn fold_integers(a: &[Arg], c: &dyn Ctx, mut acc: u64, fold: impl Fn(u64, u64) -> u64) -> R<Value> {
+    if a.first().is_some_and(|x| matches!(x.value, Value::Empty) && !x.from_ref && !x.blank_value) {
+        return Err(CellError::NA);
+    }
+    let mut seen = false;
+    let mut overflow = false;
+    for arg in a {
+        let (values, collection) = match &arg.value {
+            Value::Array(arr) => (arr.data.as_slice(), true),
+            Value::Empty => continue,
+            v => (std::slice::from_ref(v), arg.from_ref),
+        };
+        for v in values {
+            if collection && matches!(v, Value::Bool(_)) {
+                return Err(CellError::Value);
+            }
+            let x = v.to_number_in(c.date_system())?;
+            if !(0.0..INTEGER_LIMIT as f64).contains(&x) {
+                return Err(CellError::Num);
+            }
+            seen = true;
+            if !overflow {
+                acc = fold(acc, x.trunc() as u64);
+                overflow = acc >= INTEGER_LIMIT;
+            }
+        }
+    }
+    if overflow {
+        Err(CellError::Num)
+    } else if !seen {
+        Err(CellError::Value)
+    } else {
+        num_val(acc as f64)
+    }
 }
 fn gcd2(mut a: u64, mut b: u64) -> u64 {
     while b != 0 {
@@ -532,25 +560,11 @@ fn gcd2(mut a: u64, mut b: u64) -> u64 {
     }
     a
 }
-fn gcd(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    let v = integer_args(a)?;
-    num_val(v.iter().fold(0u64, |acc, &x| gcd2(acc, x)) as f64)
+fn gcd(a: &[Arg], c: &mut dyn Ctx) -> R<Value> {
+    fold_integers(a, c, 0, gcd2)
 }
-fn lcm(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    let v = integer_args(a)?;
-    let mut acc = 1f64;
-    for &x in &v {
-        if x == 0 {
-            return Ok(Value::Number(0.0));
-        }
-        let accu = acc as u64;
-        let g = gcd2(accu, x);
-        acc = acc / g as f64 * x as f64;
-        if acc >= 9.007_199_254_740_992e15 {
-            return Err(CellError::Num);
-        }
-    }
-    num_val(acc)
+fn lcm(a: &[Arg], c: &mut dyn Ctx) -> R<Value> {
+    fold_integers(a, c, 1, |acc, x| if acc == 0 || x == 0 { 0 } else { (acc / gcd2(acc, x)).saturating_mul(x) })
 }
 fn multinomial(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     let v = numbers(a)?;

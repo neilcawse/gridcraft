@@ -14,6 +14,12 @@ use crate::style::StyleId;
 #[serde(from = "SavedFormula")]
 pub struct Formula {
     pub text: String,
+    /// Imported formula-bar spelling, only when it differs from canonical text.
+    /// A rewrite that changes the expression discards it rather than trying to preserve the
+    /// original layout. Boxed twice so the common `None` costs one pointer, keeping a formula
+    /// in the same allocation size class it had without this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_text: Option<Box<String>>,
     #[serde(skip)]
     pub expr: Option<Arc<Expr>>,
     /// Legacy array formula (Ctrl+Shift+Enter) covering this range; the formula lives in the
@@ -39,15 +45,16 @@ impl Formula {
         let body = text.strip_prefix('=').unwrap_or(text);
         match gridcraft_formula::parse(body) {
             Ok(e) => Formula::from_expr(e),
-            Err(_) => Formula { text: body.to_string(), expr: None, array: None, legacy: false, dynamic: false },
+            Err(_) => Formula { text: body.to_string(), display_text: None, expr: None, array: None, legacy: false, dynamic: false },
         }
     }
     pub fn from_expr(e: Expr) -> Formula {
-        Formula { text: gridcraft_formula::print(&e), expr: Some(Arc::new(e)), array: None, legacy: false, dynamic: false }
+        Formula { text: gridcraft_formula::print(&e), display_text: None, expr: Some(Arc::new(e)), array: None, legacy: false, dynamic: false }
     }
     /// This formula with `e` as its expression (moved, copied or adjusted). It stays legacy/dynamic if it was; `array` is the caller's to set.
     pub fn rewritten(&self, e: Expr) -> Formula {
-        Formula { legacy: self.legacy, dynamic: self.dynamic, ..Formula::from_expr(e) }
+        let display_text = self.display_text.as_ref().filter(|_| self.with_expr(|old| old == &e) == Some(true)).cloned();
+        Formula { display_text, legacy: self.legacy, dynamic: self.dynamic, ..Formula::from_expr(e) }
     }
     /// The parsed expression, re-parsing when no tree is cached.
     pub fn expr(&self) -> Option<Expr> {
@@ -76,6 +83,8 @@ impl Formula {
 #[derive(Deserialize)]
 struct SavedFormula {
     text: String,
+    #[serde(default)]
+    display_text: Option<String>,
     array: Option<RangeRef>,
     #[serde(default)]
     legacy: bool,
@@ -86,7 +95,7 @@ struct SavedFormula {
 impl From<SavedFormula> for Formula {
     fn from(f: SavedFormula) -> Formula {
         let expr = gridcraft_formula::parse(&f.text).ok().map(Arc::new);
-        Formula { text: f.text, expr, array: f.array, legacy: f.legacy, dynamic: f.dynamic }
+        Formula { text: f.text, display_text: f.display_text.map(Box::new), expr, array: f.array, legacy: f.legacy, dynamic: f.dynamic }
     }
 }
 
@@ -167,6 +176,18 @@ impl Cell {
 mod tests {
     use super::*;
     use gridcraft_core::CellRef;
+
+    #[test]
+    fn imported_formula_bar_text_is_optional_in_json() -> Result<(), serde_json::Error> {
+        let mut f = Formula::new("A1+2");
+        assert!(serde_json::to_value(&f)?.get("display_text").is_none());
+        f.display_text = Some(Box::new("A1 + 2".into()));
+        let restored: Formula = serde_json::from_value(serde_json::to_value(&f)?)?;
+        assert_eq!(restored, f);
+        let old: Formula = serde_json::from_str(r#"{"text":"A1+2","array":null}"#)?;
+        assert_eq!(old.display_text, None);
+        Ok(())
+    }
 
     #[test]
     fn formulas_read_from_json_keep_their_text_and_cache_the_tree() -> Result<(), serde_json::Error> {

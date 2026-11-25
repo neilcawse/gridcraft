@@ -58,7 +58,11 @@ fn concatenate(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
 fn concat(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     let mut out = String::new();
     for x in a {
-        for v in as_array(&x.value).iter() {
+        let values = match &x.value {
+            Value::Array(arr) => arr.data.as_slice(),
+            v => std::slice::from_ref(v),
+        };
+        for v in values {
             push_capped(&mut out, &piece(v)?)?;
         }
     }
@@ -1207,6 +1211,10 @@ mod tests {
         is_text(ev("TEXTJOIN", vec![t("-"), b(false), av(arr(vec![vec![tv("a"), tv(""), tv("b")]]))]), "a--b");
         is_text(ev("TEXTJOIN", vec![av(row_t(&[",", ";"])), b(true), t("a"), t("b"), t("c")]), "a,b;c");
         is_err(ev("CONCAT", vec![t("a"), e(CellError::NA)]), CellError::NA);
+        let almost = "a".repeat(crate::util::MAX_TEXT - 1);
+        let range = rf(row_t(&["", &almost]));
+        is_text(ev("CONCAT", vec![range.clone(), t("b")]), &format!("{almost}b"));
+        is_err(ev("CONCAT", vec![range, t("bb")]), CellError::Value);
         // Lifting: CONCATENATE over an array.
         assert_eq!(rows_of(&ev("CONCATENATE", vec![av(row_t(&["a", "b"])), t("x")])), vec![vec![tv("ax"), tv("bx")]]);
     }

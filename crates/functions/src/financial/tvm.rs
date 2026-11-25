@@ -314,8 +314,9 @@ pub(super) fn npv(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     num_val(sum)
 }
 
-/// Values and dates for XNPV/XIRR: both must be numeric and of equal length.
-fn dated_flows(values: &Value, dates: &Value) -> R<(Vec<f64>, Vec<f64>)> {
+/// Values and dates must have equal length. XIRR counts blank flows as zero, keeping
+/// their dates in the schedule; XNPV requires numeric flows.
+fn dated_flows(values: &Value, dates: &Value, blank_flow_is_zero: bool) -> R<(Vec<f64>, Vec<f64>)> {
     let va = as_array(values);
     let da = as_array(dates);
     if va.data.len() != da.data.len() {
@@ -326,6 +327,7 @@ fn dated_flows(values: &Value, dates: &Value) -> R<(Vec<f64>, Vec<f64>)> {
     for (x, y) in va.data.iter().zip(da.data.iter()) {
         match x {
             Value::Number(n) => v.push(*n),
+            Value::Empty if blank_flow_is_zero => v.push(0.0),
             Value::Error(e) => return Err(*e),
             _ => return Err(CellError::Value),
         }
@@ -353,12 +355,12 @@ pub(super) fn xnpv(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     if rate <= -1.0 {
         return Err(CellError::Num);
     }
-    let (v, d) = dated_flows(&a.get(1).ok_or(CellError::Value)?.value, &a.get(2).ok_or(CellError::Value)?.value)?;
+    let (v, d) = dated_flows(&a.get(1).ok_or(CellError::Value)?.value, &a.get(2).ok_or(CellError::Value)?.value, false)?;
     num_val(xnpv_calc(rate, &v, &d))
 }
 
 pub(super) fn xirr(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
-    let (v, d) = dated_flows(&a.first().ok_or(CellError::Value)?.value, &a.get(1).ok_or(CellError::Value)?.value)?;
+    let (v, d) = dated_flows(&a.first().ok_or(CellError::Value)?.value, &a.get(1).ok_or(CellError::Value)?.value, true)?;
     let guess = opt_num(a, 2, 0.1)?;
     if !v.iter().any(|x| *x > 0.0) || !v.iter().any(|x| *x < 0.0) {
         return Err(CellError::Num);

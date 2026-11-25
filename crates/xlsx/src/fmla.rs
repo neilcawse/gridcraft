@@ -161,6 +161,120 @@ pub fn from_file(text: &str) -> String {
     }
 }
 
+/// Excel stores some formula-bar operators and names as compatibility functions. Preserve the
+/// surrounding source layout, but only change actual tokens, not literals or sheet names. A
+/// formula holding a file-only spelling the formula bar shows otherwise (`[#This Row]`,
+/// `_xleta.SUM`, `_xludf.`, `_xlfn._TRO_ALL(…)`) keeps the canonical text instead.
+pub(crate) fn formula_bar_text(text: &str, canonical: &str) -> Option<String> {
+    use gridcraft_formula::{
+        StructItem,
+        lexer::{Tok, tokenize},
+        parser::parse_struct,
+    };
+
+    let body = text.strip_prefix('=').unwrap_or(text);
+    if body == canonical {
+        return None;
+    }
+    let tokens = tokenize(body).ok()?;
+    // Only keep rewrite slots for prefixed tokens and their closing parentheses. A stack also
+    // tracks ordinary parentheses so that we never take a nested call's `)` for the wrapper's.
+    let mut edits = Vec::new();
+    let mut stack = Vec::new();
+    let mut in_array = 0_usize;
+    let mut previous_end = 0;
+    for t in &tokens {
+        let prev = previous_end;
+        if t.tok != Tok::Space {
+            previous_end = t.end;
+        }
+        match &t.tok {
+            Tok::Func(spelling) => {
+                let name = ["_xlfn._xlws.", "_xlfn.", "_xlws."].iter().find_map(|p| unprefix(spelling, p));
+                let wrapper = name.and_then(|name| {
+                    if name.eq_ignore_ascii_case("SINGLE") {
+                        Some(false)
+                    } else if name.eq_ignore_ascii_case("ANCHORARRAY") {
+                        Some(true)
+                    } else {
+                        None
+                    }
+                });
+                if let Some(spill) = wrapper {
+                    let open = edits.len();
+                    edits.push((t.start, t.end, if spill { "" } else { "@" }));
+                    stack.push(Some((open, spill, false)));
+                } else {
+                    if unprefix(spelling, "_xludf.").is_some()
+                        || name.is_some_and(|n| ["_TRO_ALL", "_TRO_LEADING", "_TRO_TRAILING"].iter().any(|mode| n.eq_ignore_ascii_case(mode)))
+                    {
+                        return None;
+                    }
+                    if let Some(name) = name.or_else(|| unprefix(spelling, PARAM_PREFIX)) {
+                        edits.push((t.start, t.end - 1, name));
+                    }
+                    stack.push(None);
+                }
+            }
+            Tok::LParen => stack.push(None),
+            Tok::RParen => {
+                if let Some((open, spill, group)) = stack.pop().flatten() {
+                    if group {
+                        edits[open].2 = if spill { "(" } else { "@(" };
+                    }
+                    let close = match (spill, group) {
+                        (true, true) => ")#",
+                        (true, false) => "#",
+                        (false, true) => ")",
+                        (false, false) => "",
+                    };
+                    edits.push((t.start, t.end, close));
+                }
+            }
+            Tok::LBrace => in_array += 1,
+            Tok::RBrace => in_array = in_array.saturating_sub(1),
+            Tok::Word(word) => match unprefix(word, PARAM_PREFIX) {
+                Some(name) => edits.push((t.start, t.end, name)),
+                None if unprefix(word, "_xleta.").is_some() => return None,
+                None => {}
+            },
+            // An escaped `'#This Row` in a column label is not the file-only item.
+            Tok::Struct(spec)
+                if !spec.trim_start().starts_with('@')
+                    && spec.as_bytes().windows(b"#this row".len()).any(|w| w.eq_ignore_ascii_case(b"#this row"))
+                    && parse_struct("", spec).is_ok_and(|r| r.specifiers.contains(&StructItem::ThisRow)) =>
+            {
+                return None;
+            }
+            Tok::Op(op) if in_array == 0 => {
+                if let Some(Some((open, spill, group))) = stack.last_mut() {
+                    // A leading sign follows `@` directly (Excel shows `@-A1:A3`); a binary
+                    // operand needs grouping.
+                    *group |= *spill || !matches!(*op, "+" | "-") || prev != edits[*open].1;
+                }
+            }
+            Tok::Comma if in_array == 0 && stack.last().is_some_and(Option::is_some) => return None,
+            _ => {}
+        }
+    }
+    if !stack.is_empty() {
+        return None;
+    }
+    let mut display = String::with_capacity(body.len());
+    let mut pos = 0;
+    for (start, end, replacement) in edits {
+        display.push_str(&body[pos..start]);
+        display.push_str(replacement);
+        pos = end;
+    }
+    display.push_str(&body[pos..]);
+    (display != canonical).then_some(display)
+}
+
+fn unprefix<'a>(word: &'a str, prefix: &str) -> Option<&'a str> {
+    word.get(..prefix.len())?.eq_ignore_ascii_case(prefix).then(|| &word[prefix.len()..])
+}
+
 /// `e` with Excel's `_xlpm.` prefix dropped from LET/LAMBDA parameter names: the model's spelling.
 pub(crate) fn strip_param_prefixes(e: Expr) -> Expr {
     e.map(&mut |x| match x {

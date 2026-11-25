@@ -274,6 +274,7 @@ pub(super) fn cell_set(s: &mut Session, p: &Json) -> Result<Json> {
             }
             let mut cell = input_to_cell(&input, sheet, range.start, &mut cx.wb)?.unwrap_or_default();
             if let Some(f) = cell.formula.as_mut() {
+                keep_identical_display_text(&cx.wb, sheet, range.start, &input, f);
                 std::sync::Arc::make_mut(f).array = Some(range);
             }
             let sh = cx.sheet_mut(sheet)?;
@@ -288,7 +289,10 @@ pub(super) fn cell_set(s: &mut Session, p: &Json) -> Result<Json> {
             cx.touch(sheet, range.start);
             return Ok(Json::Null);
         }
-        let cell = input_to_cell(&input, sheet, at, &mut cx.wb)?;
+        let mut cell = input_to_cell(&input, sheet, at, &mut cx.wb)?;
+        if let Some(f) = cell.as_mut().and_then(|c| c.formula.as_mut()) {
+            keep_identical_display_text(&cx.wb, sheet, at, &input, f);
+        }
         let sh = cx.sheet_mut(sheet)?;
         match cell {
             Some(c) => sh.set_cell(at, c),
@@ -302,6 +306,16 @@ pub(super) fn cell_set(s: &mut Session, p: &Json) -> Result<Json> {
     })?;
     let v = s.doc()?.wb.sheet(sheet).map(|sh| sh.value(at)).unwrap_or_default();
     Ok(json!({"cell": at.a1(), "value": v.display()}))
+}
+
+fn keep_identical_display_text(wb: &gridcraft_model::Workbook, sheet: usize, at: CellRef, input: &str, formula: &mut std::sync::Arc<Formula>) {
+    let Some(old) = wb.sheet(sheet).and_then(|s| s.cell(at)).and_then(|c| c.formula.as_deref()) else { return };
+    if let Some(display) = &old.display_text
+        && input.strip_prefix('=') == Some(display.as_str())
+        && old.text == formula.text
+    {
+        std::sync::Arc::make_mut(formula).display_text = Some(display.clone());
+    }
 }
 
 pub(crate) fn json_to_input(v: &Json) -> String {
