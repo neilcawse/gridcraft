@@ -151,6 +151,19 @@ pub struct Clipboard {
     pub trust: Trust,
 }
 
+impl Clipboard {
+    /// A cut moves its cells out of the source sheet as it is now, found by index. Inserting,
+    /// deleting or moving sheets can leave that index on another sheet or none, so the cut is
+    /// refused rather than taken from whatever sheet is there.
+    pub(crate) fn check_cut_source(&self, wb: &Workbook) -> Result<()> {
+        let uid = |wb: &Workbook| wb.sheets.get(self.sheet).map(|sh| sh.uid.get());
+        match uid(wb) {
+            Some(live) if Some(live) == uid(&self.wb) => Ok(()),
+            _ => Err(EngineError::Other("The source sheet for this cut has moved or been deleted. Cut it again to paste.".into())),
+        }
+    }
+}
+
 /// Whether a document's active content (macros) may run without asking the person first. There
 /// is no default: whoever makes a document says where it came from ([`DocState::new`]), so a new
 /// way of building one from bytes can't come out trusted by omission.

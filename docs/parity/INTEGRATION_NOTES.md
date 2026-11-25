@@ -78,3 +78,17 @@ probes, the source cell `C1` loses bold in Excel but stays bold in GridCraft; th
 cell-level gap does not establish a column-line rule. Paste Special (including All), the system
 clipboard, drag-and-drop, Insert Copied Cells, filtered and packed copies, and tiled pastes were
 not measured and retain their previous behavior.
+
+## X29 — Cut source sheet identity
+
+A pending Cut records its source sheet by position. Inserting a sheet before it, deleting it or
+moving it can leave another sheet at that position. Paste, Insert Cut Cells and the whole-line
+paste of X25 now compare the sheet there with the one that was cut. If they differ, the command
+is refused before anything changes, and the cut stays pending; cutting again works. Sheets
+added after the source, and renames, leave the cut valid. After a rename, references to the moved
+cells follow them under the sheet's new name.
+
+Whether Excel cancels cut mode when a sheet is inserted, deleted, moved or renamed is unmeasured.
+Refusing is the conservative choice; it never moves cells from a sheet the person did not cut.
+Copy is unaffected, because it pastes from the snapshot taken when copying. Drag-and-drop cuts and
+pastes in one step, so no sheet change can come between them.
