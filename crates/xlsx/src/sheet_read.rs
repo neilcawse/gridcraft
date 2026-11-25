@@ -271,10 +271,6 @@ pub fn read_sheet(cx: &mut Ctx<'_>, part: &str, name: &str) -> Result<(Sheet, cr
     Ok((sheet, read_controls))
 }
 
-fn triggers_mac_row_fit(sheet: &Sheet, row: u32, info: &LineInfo) -> bool {
-    info.saved_size.is_some() && sheet.row_has_content(row)
-}
-
 fn apply_craft_sheet_part(
     cx: &mut Ctx<'_>,
     sp: &CraftSheetPart,
@@ -296,14 +292,18 @@ fn apply_craft_sheet_part(
     if let Some(ht) = height {
         match sheet.geometry {
             gridcraft_model::Geometry::Legacy if ht > 0.0 && ht.is_finite() => sheet.default_row_height = pt_to_px(ht),
-            gridcraft_model::Geometry::Mac { .. } if custom == Some(true) => sheet.default_row_height = sheet.geometry.custom_height_px(ht),
+            gridcraft_model::Geometry::Mac { .. } if custom == Some(true) && ht > 0.0 && ht.is_finite() => {
+                sheet.default_row_height = sheet.geometry.custom_height_px(ht);
+            }
             _ => {}
         }
     }
-    let fit_populated_rows = sheet.geometry != gridcraft_model::Geometry::Legacy
+    // H5: any saved row `ht`, with or without cells or `customHeight`, at any value, switches a
+    // custom sheet default to fitting its automatic rows.
+    let fit_automatic_rows = sheet.geometry != gridcraft_model::Geometry::Legacy
         && custom == Some(true)
         && height.is_some()
-        && sheet.rows.iter().any(|(&row, info)| triggers_mac_row_fit(sheet, row, info));
+        && sheet.rows.values().any(|info| info.saved_size.is_some());
     sheet.saved_geometry = Some(gridcraft_model::SavedSheetGeometry {
         has_format: format.is_some(),
         base_col_width: base,
@@ -312,7 +312,7 @@ fn apply_craft_sheet_part(
         custom_height: custom,
         original_width_px: sheet.default_col_width,
         original_height_px: sheet.default_row_height,
-        fit_populated_rows,
+        fit_automatic_rows,
     });
     let cols_blocks = sp.root.children.iter().filter(|n| matches!(n, craft_xml::Node::El(e) if e.name == "cols")).count();
     if cols_blocks > 1 {

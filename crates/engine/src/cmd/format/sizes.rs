@@ -101,11 +101,7 @@ pub(super) fn col_width(s: &mut Session, p: &Json) -> Result<Json> {
             }
             match geometry {
                 gridcraft_model::Geometry::Legacy => chars_to_points(c),
-                gridcraft_model::Geometry::Mac { digit_pt } => {
-                    let d = f64::from(digit_pt.max(1));
-                    let points = if c < 1.0 { c * (d + 5.0) } else { c * d + 5.0 };
-                    points.round() * (4.0 / 3.0)
-                }
+                gridcraft_model::Geometry::Mac { digit_pt } => gridcraft_model::Geometry::mac_chars_px(digit_pt, c),
             }
         }
         _ => return Err(bad("home.columnWidth", "missing `width` (pixels) or `chars`")),

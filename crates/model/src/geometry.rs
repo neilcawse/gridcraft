@@ -21,9 +21,10 @@ pub struct SavedSheetGeometry {
     pub custom_height: Option<bool>,
     pub original_width_px: f32,
     pub original_height_px: f32,
-    /// A saved height on a populated row turns on font-based fitting despite a custom sheet default.
+    /// Any saved row height switches automatic rows from a custom sheet default to fitting:
+    /// populated rows fit their content, cell-less rows with a saved height the Normal height.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub fit_populated_rows: bool,
+    pub fit_automatic_rows: bool,
 }
 
 impl Geometry {
@@ -48,14 +49,27 @@ impl Geometry {
         } else {
             &[]
         };
-        let digit_pt = measured.iter().find_map(|&(size, digit)| (font.size == f32::from(size)).then_some(digit));
-        Self::Mac {
-            digit_pt: digit_pt.unwrap_or_else(|| {
-                // Unmeasured families and sizes use an estimate, not a measured glyph advance.
-                let em = if font.name.eq_ignore_ascii_case("Times New Roman") { 0.50 } else { 0.56 };
-                ((font.size * em).round() as u8).max(1)
-            }),
-        }
+        let size = font.size;
+        let i = measured.partition_point(|&(s, _)| f32::from(s) < size);
+        // Unmeasured sizes are estimates, not measured glyph advances: linear between the family's
+        // neighbouring measurements, else its nearest measured digit-to-size ratio. Families
+        // without measurements use an em fraction.
+        let estimate = match (i.checked_sub(1).and_then(|j| measured.get(j)), measured.get(i)) {
+            (_, Some(&(s, d))) if f32::from(s) == size => f32::from(d),
+            (Some(&(s0, d0)), Some(&(s1, d1))) => {
+                f32::from(d0) + (size - f32::from(s0)) * (f32::from(d1) - f32::from(d0)) / (f32::from(s1) - f32::from(s0))
+            }
+            (Some(&(s, d)), None) | (None, Some(&(s, d))) => size * f32::from(d) / f32::from(s),
+            (None, None) => size * 0.56,
+        };
+        Self::Mac { digit_pt: (estimate.round() as u8).max(1) }
+    }
+
+    /// Layout pixels for a Column Width dialog value in characters: W3 inverted, in whole points.
+    pub fn mac_chars_px(digit_pt: u8, chars: f64) -> f64 {
+        let (d, p) = mac_digit_and_padding(digit_pt);
+        let points = if chars < 1.0 { chars * (d + p) } else { chars * d + p };
+        points.round() * (4.0 / 3.0)
     }
 
     pub fn stored_width_px(self, width: f64) -> f32 {
@@ -262,12 +276,40 @@ mod tests {
             ("Times New Roman", 35., 18, 44.),
             ("Times New Roman", 40., 20, 50.),
             ("Times New Roman", 72., 36, 89.),
-            ("Aptos Narrow", 16., 9, 22.),
-            ("MS PGothic", 32., 18, 38.),
+            ("Aptos Narrow", 16., 8, 22.),
+            ("MS PGothic", 32., 16, 38.),
         ] {
             let font = Font { name: name.into(), size, ..Font::default() };
             assert_eq!(Geometry::mac(&font), Geometry::Mac { digit_pt });
             assert_eq!(mac_line_height_pt(&font), height);
         }
+    }
+
+    #[test]
+    fn unmeasured_sizes_follow_their_family_measurements() {
+        // Estimates, not measurements: Calibri digits measure half the size from 10 to 34 pt.
+        for (name, size, digit_pt) in [
+            ("Calibri", 16., 8),
+            ("Calibri", 20., 10),
+            ("Calibri", 22., 11),
+            ("Calibri", 28., 14),
+            ("Calibri", 40., 20),
+            ("Arial", 9., 5),
+            ("Verdana", 10., 6),
+        ] {
+            let font = Font { name: name.into(), size, ..Font::default() };
+            assert_eq!(Geometry::mac(&font), Geometry::Mac { digit_pt }, "{name} {size}");
+        }
+    }
+
+    #[test]
+    fn character_input_inverts_stepped_padding() {
+        // W3 inverted: 8 characters read back as 8 at every padding step.
+        for (digit_pt, padding) in [(3, 3), (4, 3), (6, 5), (9, 7), (12, 7), (13, 9), (17, 11)] {
+            let px = Geometry::mac_chars_px(digit_pt, 8.0);
+            assert_eq!(px, f64::from(8 * u16::from(digit_pt) + padding) * (4.0 / 3.0), "{digit_pt}");
+            assert_eq!(Geometry::Mac { digit_pt }.width_chars(f64::from(px as f32)), 8.0);
+        }
+        assert_eq!(Geometry::mac_chars_px(4, 0.5), 4.0 * (4.0 / 3.0));
     }
 }

@@ -6599,6 +6599,19 @@ fn mac_resize_replaces_saved_xlsx_dimensions() {
 }
 
 #[test]
+fn mac_character_widths_use_the_stepped_padding() {
+    // W3: 8 characters are 8d + p points, with p = 3 at d = 4 and 7 at d = 9.
+    for (digit_pt, points) in [(4u8, 35.0), (9, 79.0)] {
+        let mut s = s();
+        std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap().geometry = gridcraft_model::Geometry::Mac { digit_pt };
+        s.execute("home.columnWidth", json!({"cols": "A:A", "chars": 8})).unwrap();
+        let sh = s.doc().unwrap().wb.active().unwrap();
+        assert_eq!(sh.col_width(0), (points * (4.0 / 3.0)) as f32, "d = {digit_pt}");
+        assert_eq!(sh.geometry.width_chars(f64::from(sh.col_width(0))), 8.0);
+    }
+}
+
+#[test]
 fn row_height_and_column_width_take_pixels_or_excel_units() {
     // `height` and `width` are pixels at 96 dpi (the model's unit); `points` and `chars` are
     // Excel's units, those of its Row Height and Column Width dialogs. A row is saved in points.

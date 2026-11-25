@@ -106,7 +106,8 @@ fn fit_imported_rows(wb: &mut Workbook) {
         let mut rows: Vec<u32> = sh.cells.iter().map(|(c, _)| c.row).collect();
         let mac = sh.geometry != gridcraft_model::Geometry::Legacy;
         if mac {
-            rows.extend(sh.rows.iter().filter(|(_, info)| info.thick_edges != (false, false)).map(|(&row, _)| row));
+            // Cell-less row elements also fit: saved heights (H5) and thick edges (H10).
+            rows.extend(sh.rows.keys().copied());
         }
         rows.sort_unstable();
         rows.dedup();
@@ -117,14 +118,17 @@ fn fit_imported_rows(wb: &mut Workbook) {
                 crate::cmd::fit_row_height(wb, si, row, &mut sweep);
                 continue;
             }
-            let before = wb.sheet(si).and_then(|sh| sh.rows.get(&row)).and_then(|i| i.size);
+            let before = wb.sheet(si).and_then(|sh| sh.rows.get(&row)).map(|i| (i.size, i.saved_size));
             crate::cmd::fit_row_height(wb, si, row, &mut sweep);
-            let Some(before) = before else { continue };
+            let Some((Some(before), saved)) = before else { continue };
             let after = wb.sheet(si).and_then(|sh| sh.rows.get(&row)).and_then(|i| i.size);
             if after.is_none_or(|a| before > a + 0.5)
                 && let Some(sh) = wb.sheet_mut(si)
             {
-                sh.rows.entry(row).or_default().size = Some(before);
+                // The saved height is shown again, so it is still the one to save.
+                let e = sh.rows.entry(row).or_default();
+                e.size = Some(before);
+                e.saved_size = saved;
             }
         }
         left = sweep.left();

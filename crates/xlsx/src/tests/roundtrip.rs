@@ -890,17 +890,37 @@ fn mac_width_font_and_default_cell_font_survive_save_and_reopen() {
 }
 
 #[test]
-fn mac_custom_sheet_height_switch_requires_saved_height_on_a_populated_row() {
-    for (attrs, switches) in [("", false), (r#" ht="30.75""#, true), (r#" customHeight="0""#, false), (r#" ht="30.75" customHeight="0""#, true)] {
+fn mac_custom_sheet_height_switch_follows_any_saved_row_height() {
+    // H5 (measured): any `<row ht>` switches, with or without valued cells or `customHeight`, at
+    // any value; `customHeight="0"` or row flags alone do not.
+    for (first, other, switches) in [
+        ("", "", false),
+        (r#" ht="30.75""#, "", true),
+        (r#" customHeight="0""#, "", false),
+        (r#" ht="30.75" customHeight="0""#, "", true),
+        ("", r#"<row r="3" ht="30.75"/>"#, true),
+        ("", r#"<row r="3" ht="21"/>"#, true),
+        ("", r#"<row r="3" ht="15"/>"#, true),
+        ("", r#"<row r="3" ht="30.75" customHeight="1"/>"#, true),
+        ("", r#"<row r="3" thickBot="1"/>"#, false),
+    ] {
         let body = format!(
             r#"<sheetFormatPr defaultRowHeight="21.75" customHeight="1"/>
-          <sheetData><row r="1"{attrs}><c r="A1"><f>1</f></c></row><row r="3" ht="31.25" thickBot="1"/></sheetData>"#
+          <sheetData><row r="1"{first}><c r="A1"><v>1</v></c></row>{other}</sheetData>"#
         );
         let bytes = super::minimal(&body, &[], "", "");
         let wb = crate::read::read_xlsx(&bytes, crate::ReadOptions::default(), Geometry::mac).unwrap().0;
-        let saved = &wb.sheets[0].saved_geometry.unwrap();
-        assert_eq!(saved.fit_populated_rows, switches, "{attrs}");
+        let sheet = &wb.sheets[0];
+        assert_eq!(sheet.saved_geometry.unwrap().fit_automatic_rows, switches, "{first} {other}");
+        assert_eq!(sheet.default_row_height, 28.0, "floor(21.75) pt");
     }
+}
+
+#[test]
+fn mac_ignores_a_non_positive_custom_sheet_default() {
+    let body = r#"<sheetFormatPr defaultRowHeight="0" customHeight="1"/><sheetData/>"#;
+    let wb = crate::read::read_xlsx(&super::minimal(body, &[], "", ""), crate::ReadOptions::default(), Geometry::mac).unwrap().0;
+    assert_eq!(wb.sheets[0].default_row_height, 20.0, "Calibri 11 Normal row");
 }
 
 #[test]

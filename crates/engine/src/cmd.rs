@@ -910,8 +910,13 @@ impl MergeSweep {
     }
 }
 
-fn mac_fits_populated_row(sh: &gridcraft_model::Sheet, row: u32) -> bool {
-    sh.saved_geometry.is_some_and(|g| g.fit_populated_rows) && sh.row_has_content(row)
+/// H5 on a triggered sheet: every automatic row element fits (populated, cell-less with a saved
+/// `ht`, or with valueless styled cells); row numbers without a `<row>` keep the sheet default.
+fn mac_fits_automatic_row(sh: &gridcraft_model::Sheet, row: u32) -> bool {
+    sh.saved_geometry.is_some_and(|g| g.fit_automatic_rows)
+        // An entry holding only a fitted size is this function's own, not a saved `<row>`.
+        && (sh.rows.get(&row).is_some_and(|info| gridcraft_model::LineInfo { size: None, ..*info } != gridcraft_model::LineInfo::default())
+            || sh.row_has_cells(row))
 }
 
 /// [`auto_row_height`] with the sheet's merges taken from `sweep`.
@@ -930,7 +935,7 @@ pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut
     let default = sh.default_row_height;
     // Rows that inherit the sheet height must also discard any previous fit.
     let plain = if custom_sheet_height {
-        !mac_fits_populated_row(sh, row)
+        !mac_fits_automatic_row(sh, row)
     } else {
         !mac && sh.cells.row(row, 0, gridcraft_core::MAX_COLS - 1).all(|(_, cell)| {
             let st = wb.styles.get(cell.style);
@@ -943,6 +948,10 @@ pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut
             && let Some(e) = shm.rows.get_mut(&row)
         {
             e.size = None;
+            // A legacy reader honours an automatic `ht`: keep it only while it is the height shown.
+            if !mac {
+                e.saved_size = None;
+            }
             if *e == gridcraft_model::LineInfo::default() {
                 shm.rows.remove(&row);
             }
@@ -954,6 +963,15 @@ pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut
     } else {
         default
     };
+    // Excel for Mac fits a cell-less row to its row format (`customFormat` row `s`), and any
+    // styled cell, valued or not, to its font. Which wins when both apply is unmeasured: a row
+    // with cells fits to its cells only.
+    if mac
+        && let Some(style) = sh.rows.get(&row).and_then(|i| i.style)
+        && !sh.row_has_cells(row)
+    {
+        need = need.max((gridcraft_model::geometry::mac_line_height_pt(&wb.styles.get(style).font) * (4.0 / 3.0)).min(546.0));
+    }
     // The cell loop must not rescan every merge per cell: the merges touching this row are
     // picked out once, and per cell the candidates are re-checked (normally none or a couple;
     // a sheet with many merges and many saved columns would otherwise scan all of them per
@@ -968,9 +986,6 @@ pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut
         }
         // Merged cells never auto-fit their rows, like Excel (column autofit skips them too).
         if row_merges.iter().any(|m| m.contains(CellRef::new(row, c))) {
-            continue;
-        }
-        if mac && !cell.has_content() && !sh.cell_pictures.contains_key(&CellRef::new(row, c)) {
             continue;
         }
         let st = wb.styles.get(cell.style);
@@ -994,7 +1009,8 @@ pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut
         }
         let h = if mac {
             let points = gridcraft_model::geometry::mac_line_height_pt(&st.font);
-            let points = if st.align.wrap { (points + 1.0) * lines } else { points };
+            let text = !cell.value.is_empty() || cell.formula.is_some();
+            let points = if st.align.wrap && text { (points + 1.0) * lines } else { points };
             points * (4.0 / 3.0)
         } else if lines > 1.0 {
             (size * 96.0 / 72.0 * 1.22 * lines + 5.0).ceil()
@@ -1009,7 +1025,11 @@ pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut
     }
     let Some(shm) = wb.sheet_mut(si) else { return };
     let e = shm.rows.entry(row).or_default();
-    e.size = if (need - default).abs() < 0.5 { None } else { Some(need) };
+    let fitted = if (need - default).abs() < 0.5 { None } else { Some(need) };
+    if !mac && e.size != fitted {
+        e.saved_size = None;
+    }
+    e.size = fitted;
     if *e == gridcraft_model::LineInfo::default() {
         shm.rows.remove(&row);
     }

@@ -1,33 +1,88 @@
 use super::*;
 
 #[test]
-fn mac_imported_custom_default_fits_only_populated_automatic_rows() {
+fn mac_imported_custom_default_fits_every_automatic_row_element() {
+    // H5 (measured) on a triggered sheet with floor(21.75) = 21 pt: every automatic row element
+    // reads its autofit (a populated row, a cell-less `<row ht>` and a valueless bold cell all
+    // fit), custom rows floor their `ht`, and row numbers without a `<row>` keep the floor.
     use gridcraft_core::Value;
     use gridcraft_model::{Geometry, LineInfo, SavedSheetGeometry, StyleId};
 
     let mut wb = Workbook::new();
     let large = wb.styles.derive(StyleId::DEFAULT, |s| s.font.size = 36.0);
+    let bold = wb.styles.derive(StyleId::DEFAULT, |s| s.font.bold = true);
     let sh = wb.sheet_mut(0).unwrap();
     sh.geometry = Geometry::Mac { digit_pt: 6 };
     sh.default_row_height = 28.0;
     sh.saved_geometry =
-        Some(SavedSheetGeometry { custom_height: Some(true), default_row_height: Some(21.75), fit_populated_rows: true, ..Default::default() });
+        Some(SavedSheetGeometry { custom_height: Some(true), default_row_height: Some(21.75), fit_automatic_rows: true, ..Default::default() });
     sh.set_value(CellRef::new(0, 0), Value::number(1.));
-    sh.set_style(CellRef::new(1, 0), large);
-    sh.rows.insert(1, LineInfo { saved_size: Some(31.25), thick_edges: (true, true), ..Default::default() });
+    sh.rows.insert(1, LineInfo { saved_size: Some(30.75), ..Default::default() });
+    sh.set_style(CellRef::new(2, 0), bold);
     sh.set_value(CellRef::new(3, 0), Value::number(2.));
     sh.set_style(CellRef::new(3, 0), large);
     sh.set_value(CellRef::new(4, 0), Value::number(3.));
     sh.rows.insert(4, LineInfo { custom: true, size: Some(16.), saved_size: Some(12.75), ..Default::default() });
+    sh.rows.insert(6, LineInfo { custom: true, size: Some(40.), saved_size: Some(30.75), ..Default::default() });
     fit_imported_rows(&mut wb);
     let sh = wb.sheet(0).unwrap();
-    assert_eq!([0, 1, 2, 3, 4].map(|r| sh.row_height(r)), [20., 28., 28., 47. * (4.0 / 3.0), 16.]);
-    assert_eq!(sh.rows[&1].saved_size, Some(31.25));
+    assert_eq!([0, 1, 2, 3, 4, 5, 6, 7].map(|r| sh.row_height(r)), [20., 20., 20., 47. * (4.0 / 3.0), 16., 28., 40., 28.]);
+    assert_eq!(sh.rows[&1].saved_size, Some(30.75));
     assert_eq!(sh.rows[&4].saved_size, Some(12.75));
 
-    wb.sheet_mut(0).unwrap().set_value(CellRef::new(3, 0), Value::Empty);
-    crate::cmd::auto_row_height(&mut wb, 0, 3);
-    assert_eq!(wb.sheet(0).unwrap().row_height(3), 28.);
+    // Without its only cell the row has no `<row>` left to save, so it keeps the floor.
+    wb.sheet_mut(0).unwrap().set_value(CellRef::new(0, 0), Value::Empty);
+    crate::cmd::auto_row_height(&mut wb, 0, 0);
+    assert_eq!(wb.sheet(0).unwrap().row_height(0), 28.);
+}
+
+#[test]
+fn mac_empty_rows_fit_their_row_format_and_valueless_cells() {
+    // Measured: a cell-less row with a 36 pt row format, and a row whose only cell is a
+    // valueless 36 pt cell, read the Calibri 36 autofit (47 pt) without a custom sheet default
+    // and on a triggered one (where a row-format row saving `ht` triggers and fits too), and
+    // the floor (21 pt) on an untriggered custom default.
+    use gridcraft_model::{Geometry, LineInfo, SavedSheetGeometry, StyleId};
+
+    let tall = 47. * (4.0 / 3.0);
+    for (saved, triggered_by_row, expected) in [(None, false, tall), (Some(false), false, 28.), (Some(true), false, tall), (Some(true), true, tall)] {
+        let mut wb = Workbook::new();
+        let large = wb.styles.derive(StyleId::DEFAULT, |s| s.font.size = 36.0);
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.geometry = Geometry::Mac { digit_pt: 6 };
+        if let Some(fit) = saved {
+            sh.default_row_height = 28.0;
+            sh.saved_geometry = Some(SavedSheetGeometry {
+                custom_height: Some(true),
+                default_row_height: Some(21.75),
+                fit_automatic_rows: fit,
+                ..Default::default()
+            });
+        }
+        let ht = triggered_by_row.then_some(30.75);
+        sh.rows.insert(1, LineInfo { style: Some(large), saved_size: ht, ..Default::default() });
+        sh.set_style(CellRef::new(3, 2), large);
+        fit_imported_rows(&mut wb);
+        let sh = wb.sheet(0).unwrap();
+        assert_eq!([sh.row_height(1), sh.row_height(3)], [expected; 2], "{saved:?} {triggered_by_row}");
+    }
+}
+
+#[test]
+fn legacy_saved_automatic_height_is_kept_only_while_shown() {
+    use gridcraft_core::Value;
+    use gridcraft_model::LineInfo;
+
+    let mut wb = Workbook::new();
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.set_value(CellRef::new(0, 0), Value::number(1.));
+    sh.rows.insert(0, LineInfo { size: Some(40.), saved_size: Some(30.), ..Default::default() });
+    // Opening is grow-only: the taller saved row is shown, and saved, unchanged.
+    fit_imported_rows(&mut wb);
+    assert_eq!(wb.sheet(0).unwrap().rows[&0], LineInfo { size: Some(40.), saved_size: Some(30.), ..Default::default() });
+    // A later fit shrinks it; saving the old `ht` would reopen a row the user no longer sees.
+    crate::cmd::auto_row_height(&mut wb, 0, 0);
+    assert_eq!(wb.sheet(0).unwrap().rows.get(&0), None);
 }
 
 fn book(rtl: bool, cells: &[(&str, gridcraft_core::Value, gridcraft_model::HAlign)]) -> Workbook {

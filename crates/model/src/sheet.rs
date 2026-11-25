@@ -572,9 +572,9 @@ impl Sheet {
     pub fn is_col_hidden(&self, col: u32) -> bool {
         self.cols.get(&col).is_some_and(|line| line.hidden || (self.geometry != crate::Geometry::Legacy && line.size == Some(0.0)))
     }
-    /// Whether the row holds a value, formula, Python cell or static cell picture.
-    pub fn row_has_content(&self, row: u32) -> bool {
-        self.cells.row(row, 0, gridcraft_core::MAX_COLS - 1).any(|(_, cell)| cell.has_content())
+    /// Whether the row stores any cell, styled blanks included, or a cell picture.
+    pub fn row_has_cells(&self, row: u32) -> bool {
+        self.cells.row(row, 0, gridcraft_core::MAX_COLS - 1).next().is_some()
             || self.cell_pictures.range(CellRef::new(row, 0)..=CellRef::new(row, gridcraft_core::MAX_COLS - 1)).next().is_some()
     }
 
