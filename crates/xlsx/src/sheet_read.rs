@@ -289,31 +289,27 @@ fn apply_craft_sheet_part(
     let height = format.and_then(|f| f.default_row_height);
     let custom = format.and_then(|f| f.custom_height);
     sheet.default_col_width = sheet.geometry.inherited_width_px(format.is_some(), base, width);
-    if let Some(ht) = height {
-        match sheet.geometry {
-            gridcraft_model::Geometry::Legacy if ht > 0.0 && ht.is_finite() => sheet.default_row_height = pt_to_px(ht),
-            gridcraft_model::Geometry::Mac { .. } if custom == Some(true) && ht > 0.0 && ht.is_finite() => {
-                sheet.default_row_height = sheet.geometry.custom_height_px(ht);
-            }
-            _ => {}
-        }
-    }
-    // H5: any saved row `ht`, with or without cells or `customHeight`, at any value, switches a
-    // custom sheet default to fitting its automatic rows.
-    let fit_automatic_rows = sheet.geometry != gridcraft_model::Geometry::Legacy
-        && custom == Some(true)
-        && height.is_some()
-        && sheet.rows.values().any(|info| info.saved_size.is_some());
-    sheet.saved_geometry = Some(gridcraft_model::SavedSheetGeometry {
+    let mut saved = gridcraft_model::SavedSheetGeometry {
         has_format: format.is_some(),
         base_col_width: base,
         default_col_width: width,
         default_row_height: height,
         custom_height: custom,
         original_width_px: sheet.default_col_width,
-        original_height_px: sheet.default_row_height,
-        fit_automatic_rows,
-    });
+        ..Default::default()
+    };
+    if sheet.geometry == gridcraft_model::Geometry::Legacy {
+        if let Some(ht) = height.filter(|h| h.is_finite() && *h > 0.0) {
+            sheet.default_row_height = pt_to_px(ht);
+        }
+    } else if let Some(ht) = saved.effective_custom_row_height_pt() {
+        sheet.default_row_height = sheet.geometry.custom_height_px(ht);
+        // H5: any saved row `ht`, regardless of value, contents or `customHeight`,
+        // switches a custom sheet default to fitting its automatic rows.
+        saved.fit_automatic_rows = sheet.rows.values().any(|info| info.saved_size.is_some());
+    }
+    saved.original_height_px = sheet.default_row_height;
+    sheet.saved_geometry = Some(saved);
     let cols_blocks = sp.root.children.iter().filter(|n| matches!(n, craft_xml::Node::El(e) if e.name == "cols")).count();
     if cols_blocks > 1 {
         apply_xml_cols(cx, sp, sheet)?;

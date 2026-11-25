@@ -120,14 +120,17 @@ fn fit_imported_rows(wb: &mut Workbook) {
             }
             let before = wb.sheet(si).and_then(|sh| sh.rows.get(&row)).map(|i| (i.size, i.saved_size));
             crate::cmd::fit_row_height(wb, si, row, &mut sweep);
-            let Some((Some(before), saved)) = before else { continue };
+            let Some((before, saved)) = before else { continue };
             let after = wb.sheet(si).and_then(|sh| sh.rows.get(&row)).and_then(|i| i.size);
-            if after.is_none_or(|a| before > a + 0.5)
+            let keep_before = before.is_some_and(|b| after.is_none_or(|a| b > a + 0.5));
+            if (keep_before || saved.is_some())
                 && let Some(sh) = wb.sheet_mut(si)
             {
-                // The saved height is shown again, so it is still the one to save.
                 let e = sh.rows.entry(row).or_default();
-                e.size = Some(before);
+                if keep_before {
+                    e.size = before;
+                }
+                // Open may grow the layout, but only an edit invalidates the imported `ht`.
                 e.saved_size = saved;
             }
         }

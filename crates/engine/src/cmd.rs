@@ -910,8 +910,8 @@ impl MergeSweep {
     }
 }
 
-/// H5 on a triggered sheet: every automatic row element fits (populated, cell-less with a saved
-/// `ht`, or with valueless styled cells); row numbers without a `<row>` keep the sheet default.
+/// On a triggered sheet, fit automatic rows with cells or serializable row metadata.
+/// Absent rows (including bare rows dropped by the reader) keep the sheet default.
 fn mac_fits_automatic_row(sh: &gridcraft_model::Sheet, row: u32) -> bool {
     sh.saved_geometry.is_some_and(|g| g.fit_automatic_rows)
         // An entry holding only a fitted size is this function's own, not a saved `<row>`.
@@ -930,7 +930,7 @@ pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut
         return;
     }
     let mac = sh.geometry != gridcraft_model::Geometry::Legacy;
-    let custom_sheet_height = mac && sh.saved_geometry.is_some_and(|g| g.custom_height == Some(true) && g.default_row_height.is_some());
+    let custom_sheet_height = mac && sh.saved_geometry.and_then(|g| g.effective_custom_row_height_pt()).is_some();
     let edges = sh.rows.get(&row).map_or(0, |i| u8::from(i.thick_edges.0) + u8::from(i.thick_edges.1));
     let default = sh.default_row_height;
     // Rows that inherit the sheet height must also discard any previous fit.
@@ -948,7 +948,7 @@ pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut
             && let Some(e) = shm.rows.get_mut(&row)
         {
             e.size = None;
-            // A legacy reader honours an automatic `ht`: keep it only while it is the height shown.
+            // A Legacy edit must not save the old `ht` after changing the displayed height.
             if !mac {
                 e.saved_size = None;
             }

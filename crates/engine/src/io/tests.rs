@@ -34,6 +34,14 @@ fn mac_imported_custom_default_fits_every_automatic_row_element() {
     wb.sheet_mut(0).unwrap().set_value(CellRef::new(0, 0), Value::Empty);
     crate::cmd::auto_row_height(&mut wb, 0, 0);
     assert_eq!(wb.sheet(0).unwrap().row_height(0), 28.);
+
+    // Clearing a valued cell with a nondefault style leaves a styled blank that still fits.
+    let styled = CellRef::new(3, 0);
+    wb.sheet_mut(0).unwrap().set_value(styled, Value::Empty);
+    crate::cmd::auto_row_height(&mut wb, 0, styled.row);
+    let sh = wb.sheet(0).unwrap();
+    assert_eq!(sh.cells.get(styled).unwrap().style, large);
+    assert_eq!(sh.row_height(styled.row), 47. * (4.0 / 3.0));
 }
 
 #[test]
@@ -83,6 +91,48 @@ fn legacy_saved_automatic_height_is_kept_only_while_shown() {
     // A later fit shrinks it; saving the old `ht` would reopen a row the user no longer sees.
     crate::cmd::auto_row_height(&mut wb, 0, 0);
     assert_eq!(wb.sheet(0).unwrap().rows.get(&0), None);
+}
+
+#[test]
+fn legacy_open_save_keeps_original_automatic_heights_after_growing_rows() {
+    use gridcraft_core::Value;
+    use gridcraft_model::{Geometry, LineInfo, StyleId};
+
+    let mut wb = Workbook::new();
+    let large = wb.styles.derive(StyleId::DEFAULT, |s| s.font.size = 36.0);
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.geometry = Geometry::Legacy;
+    for (r, size, saved) in [(0, None, 15.125), (1, Some(28.0), 21.125)] {
+        let cell = CellRef::new(r, 0);
+        sh.set_value(cell, Value::number(1.0));
+        sh.set_style(cell, large);
+        sh.rows.insert(r, LineInfo { size, saved_size: Some(saved), ..Default::default() });
+    }
+    fit_imported_rows(&mut wb);
+    let sh = wb.sheet(0).unwrap();
+    assert!(sh.row_height(0) > 28.0 && sh.row_height(1) > 28.0);
+
+    let bytes = save_bytes(&wb, "saved.xlsx").unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("xl/worksheets/sheet1.xml").unwrap(), &mut xml).unwrap();
+    for ht in ["15.125", "21.125"] {
+        assert!(xml.contains(&format!(r#"ht="{ht}""#)), "{xml}");
+    }
+}
+
+#[test]
+fn mac_invalid_custom_default_does_not_suppress_automatic_row_fit() {
+    use gridcraft_model::{Geometry, SavedSheetGeometry, StyleId};
+
+    let mut wb = Workbook::new();
+    let large = wb.styles.derive(StyleId::DEFAULT, |s| s.font.size = 36.0);
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.geometry = Geometry::Mac { digit_pt: 6 };
+    sh.saved_geometry = Some(SavedSheetGeometry { custom_height: Some(true), default_row_height: Some(0.0), ..Default::default() });
+    sh.set_style(CellRef::new(0, 0), large);
+    fit_imported_rows(&mut wb);
+    assert_eq!(wb.sheet(0).unwrap().row_height(0), 47. * (4.0 / 3.0));
 }
 
 fn book(rtl: bool, cells: &[(&str, gridcraft_core::Value, gridcraft_model::HAlign)]) -> Workbook {

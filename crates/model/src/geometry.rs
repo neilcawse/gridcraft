@@ -21,10 +21,17 @@ pub struct SavedSheetGeometry {
     pub custom_height: Option<bool>,
     pub original_width_px: f32,
     pub original_height_px: f32,
-    /// Any saved row height switches automatic rows from a custom sheet default to fitting:
-    /// populated rows fit their content, cell-less rows with a saved height the Normal height.
+    /// Any saved row height switches a valid custom sheet default to autofit for
+    /// automatic rows containing cells or serializable row metadata.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fit_automatic_rows: bool,
+}
+
+impl SavedSheetGeometry {
+    /// The positive finite custom sheet height, before Mac point snapping.
+    pub fn effective_custom_row_height_pt(self) -> Option<f64> {
+        self.default_row_height.filter(|h| self.custom_height == Some(true) && h.is_finite() && *h > 0.0)
+    }
 }
 
 impl Geometry {
