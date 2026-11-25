@@ -654,9 +654,13 @@ impl<'h> Evaluator<'h> {
     /// shape and the comparison is `FALSE` on `Value::Empty` (so every trailing blank cell beyond
     /// the sheets' used ranges divides by `FALSE` = `0`, producing `#DIV/0!` which `skip_errors`
     /// discards). Only matched positions inside the used range are read from `num`, avoiding
-    /// intermediate array allocations and suffix-range cache churn.
+    /// intermediate array allocations and suffix-range cache churn. Not on a transition sheet,
+    /// whose operators read text as 0 and compare blanks and empty text differently.
     fn eval_aggregate_filtered_div(&mut self, e: &Expr) -> Option<Value> {
         use gridcraft_formula::BinOp;
+        if self.transition {
+            return None;
+        }
         let Expr::Binary(BinOp::Div, num_expr, den_expr) = e else { return None };
         let mut inner = den_expr.as_ref();
         while let Expr::Paren(p) = inner {

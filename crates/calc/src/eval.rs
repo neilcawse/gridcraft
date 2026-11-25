@@ -203,6 +203,10 @@ pub struct Evaluator<'h> {
     pub host: &'h mut dyn Host,
     pub sheet: usize,
     pub at: CellRef,
+    /// The formula's own worksheet has transition formula evaluation on. Fixed at construction:
+    /// `sheet` moves to a defined name's scope while the name is evaluated, but the setting
+    /// belongs to the sheet that holds the formula.
+    transition: bool,
     env: Vec<(String, Ev)>,
     depth: usize,
     /// LAMBDA calls in progress.
@@ -266,10 +270,12 @@ impl Ctx for FnCtx<'_, '_> {
                 _ => None,
             })
             .collect();
+        let transition = self.ev.host.workbook().sheet(area.sheet).is_some_and(|s| s.transition_evaluation);
         let mut ev = Evaluator {
             host: &mut *self.ev.host,
             sheet: area.sheet,
             at,
+            transition,
             env,
             depth: self.ev.depth,
             calls: self.ev.calls,
@@ -310,10 +316,12 @@ impl Ctx for FnCtx<'_, '_> {
 
 impl<'h> Evaluator<'h> {
     pub fn new(host: &'h mut dyn Host, sheet: usize, at: CellRef) -> Self {
+        let transition = host.workbook().sheet(sheet).is_some_and(|s| s.transition_evaluation);
         Evaluator {
             host,
             sheet,
             at,
+            transition,
             env: Vec::new(),
             depth: 0,
             calls: 0,
@@ -712,8 +720,7 @@ impl<'h> Evaluator<'h> {
             }
         };
         let v = self.value(x);
-        let wb = self.host.workbook();
-        Ev::V(map_unary(&v, &numeric, wb.date_system, wb.sheet(self.sheet).is_some_and(|s| s.transition_evaluation)))
+        Ev::V(map_unary(&v, &numeric, self.host.workbook().date_system, self.transition))
     }
 
     fn implicit_intersect(&self, a: &Area) -> Option<CellRef> {
@@ -810,9 +817,8 @@ impl<'h> Evaluator<'h> {
                     rest.push((*o, r.as_ref()));
                     left = l.as_ref();
                 }
-                let wb = self.host.workbook();
-                let sys = wb.date_system;
-                let transition = wb.sheet(self.sheet).is_some_and(|s| s.transition_evaluation);
+                let sys = self.host.workbook().date_system;
+                let transition = self.transition;
                 let mut acc = self.value(left);
                 while let Some((o, r)) = rest.pop() {
                     let y = self.value(r);

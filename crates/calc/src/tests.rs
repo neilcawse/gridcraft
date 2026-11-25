@@ -63,10 +63,10 @@ fn transition_arithmetic_uses_the_formula_worksheet() {
     let mut t = T::new();
     t.wb.sheets.push(std::sync::Arc::new(gridcraft_model::Sheet::new("Ordinary")));
     t.wb.sheet_mut(0).unwrap().transition_evaluation = true;
-    t.wb.sheet_mut(1).unwrap().cells.set(c("A1"), Cell::value(Value::text("n/a")));
+    t.wb.sheet_mut(1).unwrap().cells.set(c("A1"), Cell::value(Value::text("text")));
     t.wb.sheet_mut(1).unwrap().cells.set(c("B1"), Cell::formula(Formula::new("=Sheet1!A1+2")));
     t.wb.sheet_mut(1).unwrap().cells.set(c("C1"), Cell::formula(Formula::new("=ROUND(SUM(Sheet1!B1:C1),2)")));
-    t.set("A1", "n/a");
+    t.set("A1", "text");
     t.set("B1", "=4+(Ordinary!A1-2)/2");
     t.set("C1", "=SUM({\"-\",2}+1)");
     t.set("D1", "=7+\"comment\"/2");
@@ -79,7 +79,7 @@ fn transition_arithmetic_uses_the_formula_worksheet() {
     assert_eq!((t.num("B1"), t.num("C1"), t.num("D1"), t.num("H1")), (3.0, 4.0, 7.0, 2.0));
     assert_eq!(t.get("E1"), Value::Error(CellError::Div0));
     assert_eq!(t.get("F1"), Value::Error(CellError::NA));
-    assert_eq!(t.get("G1"), Value::text("n/a!"));
+    assert_eq!(t.get("G1"), Value::text("text!"));
     assert_eq!(t.wb.sheet(1).unwrap().value(c("B1")), Value::Error(CellError::Value));
     assert_eq!(t.wb.sheet(1).unwrap().value(c("C1")), Value::number(7.0));
 }
@@ -90,17 +90,60 @@ fn transition_comparisons_coerce_blank_and_empty_text() {
         let mut t = T::new();
         t.wb.sheet_mut(0).unwrap().transition_evaluation = transition;
         t.set("A2", "=\"\"");
-        t.set("B1", "=IF(A1=\" \",190.75,0)");
+        t.set("B1", "=IF(A1=\" \",12.5,0)");
         t.set("B2", "=IF(0=A2,\"\",4)");
         t.set("B3", "=\"abc\"=0");
         t.set("B4", "=\"\"=\" \"");
         t.set("B5", "=A1=#N/A");
-        assert_eq!(t.num("B1"), if transition { 190.75 } else { 0.0 });
+        assert_eq!(t.num("B1"), if transition { 12.5 } else { 0.0 });
         assert_eq!(t.get("B2"), if transition { Value::text("") } else { Value::number(4.0) });
         assert_eq!(t.get("B3"), Value::Bool(false));
         assert_eq!(t.get("B4"), Value::Bool(false));
         assert_eq!(t.get("B5"), Value::Error(CellError::NA));
     }
+}
+
+#[test]
+fn transition_arithmetic_in_a_sheet_scoped_name_follows_the_formula_worksheet() {
+    let mut t = T::new();
+    t.wb.sheets.push(std::sync::Arc::new(gridcraft_model::Sheet::new("Ordinary")));
+    t.wb.sheet_mut(0).unwrap().transition_evaluation = true;
+    for (name, scope) in [("Flagged", Some(0)), ("Plain", Some(1)), ("Book", None)] {
+        t.wb.names.push(gridcraft_model::DefinedName {
+            name: name.into(),
+            scope,
+            formula: "\"text\"+2".into(),
+            comment: String::new(),
+            hidden: false,
+        });
+    }
+    let ordinary = t.wb.sheet_mut(1).unwrap();
+    ordinary.cells.set(c("A1"), Cell::formula(Formula::new("=Sheet1!Flagged")));
+    ordinary.cells.set(c("A2"), Cell::formula(Formula::new("=Plain")));
+    ordinary.cells.set(c("A3"), Cell::formula(Formula::new("=Book")));
+    t.set("A1", "=Flagged");
+    t.set("A2", "=Ordinary!Plain");
+    t.set("A3", "=Book");
+    t.calc.recalc_all(&mut t.wb);
+
+    // The worksheet holding the formula decides, not the sheet the name is scoped to.
+    assert_eq!((t.num("A1"), t.num("A2"), t.num("A3")), (2.0, 2.0, 2.0));
+    for at in ["A1", "A2", "A3"] {
+        assert_eq!(t.wb.sheet(1).unwrap().value(c(at)), Value::Error(CellError::Value), "Ordinary!{at}");
+    }
+}
+
+#[test]
+fn transition_arithmetic_applies_to_aggregate_filtered_division() {
+    let mut t = T::new();
+    t.wb.sheet_mut(0).unwrap().transition_evaluation = true;
+    for (at, input) in [("A1", "5"), ("A2", "text"), ("A3", "7"), ("B1", "y"), ("B2", "y"), ("B3", "y")] {
+        t.set(at, input);
+    }
+    t.set("C1", "=AGGREGATE(2,6,A1:A3/(B1:B3=\"y\"))");
+    t.set("C2", "=COUNT(A1:A3/(B1:B3=\"y\"))");
+    // Text divided by TRUE is 0 on a transition sheet, so it counts, as it does outside AGGREGATE.
+    assert_eq!((t.num("C1"), t.num("C2")), (3.0, 3.0));
 }
 
 #[test]
