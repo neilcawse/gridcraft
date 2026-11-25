@@ -673,7 +673,9 @@ fn drawing_anchor_spelling_survives_metric_changes_and_two_saves() {
     use gridcraft_model::{ObjKind, ObjRef};
     const NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
     let marker = |tag, col, col_off, row, row_off| {
-        format!("<xdr:{tag}><xdr:col>{col}</xdr:col><xdr:colOff>{col_off}</xdr:colOff><xdr:row>{row}</xdr:row><xdr:rowOff>{row_off}</xdr:rowOff></xdr:{tag}>")
+        format!(
+            "<xdr:{tag}><xdr:col>{col}</xdr:col><xdr:colOff>{col_off}</xdr:colOff><xdr:row>{row}</xdr:row><xdr:rowOff>{row_off}</xdr:rowOff></xdr:{tag}>"
+        )
     };
     let from = marker("from", 2, -125987, 3, 990077);
     let to = marker("to", 9, 2990011, 10, -313117);
@@ -697,9 +699,7 @@ fn drawing_anchor_spelling_survives_metric_changes_and_two_saves() {
         let sh = wb.sheet_mut(0).unwrap();
         sh.default_col_width = 113.0;
         sh.default_row_height = 31.0;
-        let read_part = |bytes: &[u8]| {
-            crate::package::Package::open(bytes).unwrap().read_xml("xl/drawings/drawing1.xml").unwrap().unwrap()
-        };
+        let read_part = |bytes: &[u8]| crate::package::Package::open(bytes).unwrap().read_xml("xl/drawings/drawing1.xml").unwrap().unwrap();
         let source = read_part(&original);
         let verify = |bytes: &[u8]| {
             let part = read_part(bytes);
@@ -737,6 +737,61 @@ fn drawing_anchor_spelling_survives_metric_changes_and_two_saves() {
         assert_eq!(edited.children[4].name, "twoCellAnchor", "an edit must not revive the old one-cell encoding");
         assert_eq!(edited.children[5].name, "absoluteAnchor", "the unrelated object was not edited");
     }
+}
+
+#[test]
+fn drawing_anchor_preserves_nested_transform_presence_and_precision() {
+    use gridcraft_model::{ObjKind, ObjRef};
+    let drawing = r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+      <xdr:oneCellAnchor><xdr:from><xdr:col>2</xdr:col><xdr:colOff>-117</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>771113</xdr:rowOff></xdr:from><xdr:ext cx="1990333" cy="1770111"/>
+        <xdr:grpSp><xdr:nvGrpSpPr><xdr:cNvPr id="8" name="Outer"/><xdr:cNvGrpSpPr/></xdr:nvGrpSpPr>
+          <xdr:grpSpPr><a:xfrm><a:off x="-3" y="75"/><a:ext cx="1990333" cy="1770111"/></a:xfrm></xdr:grpSpPr>
+          <xdr:grpSp><xdr:nvGrpSpPr><xdr:cNvPr id="21" name="Inner"/><xdr:cNvGrpSpPr/></xdr:nvGrpSpPr>
+            <xdr:grpSpPr><a:xfrm><a:off x="1234" y="5678"/><a:ext cx="1340000" cy="989911"/><a:chOff x="-9007199254740993" y="-147"/><a:chExt cx="9007199254740993" cy="2325011"/></a:xfrm></xdr:grpSpPr>
+            <xdr:sp><xdr:nvSpPr><xdr:cNvPr id="9" name="Leaf"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:xfrm><a:off x="-8507199254740993" y="100"/><a:ext cx="3000000000000000" cy="1000011"/></a:xfrm><a:prstGeom prst="rect"/></xdr:spPr></xdr:sp>
+          </xdr:grpSp>
+        </xdr:grpSp><xdr:clientData/></xdr:oneCellAnchor>
+    </xdr:wsDr>"#;
+    let read_part = |bytes: &[u8]| crate::package::Package::open(bytes).unwrap().read_xml("xl/drawings/drawing1.xml").unwrap().unwrap();
+    let bytes = with_drawing(drawing);
+    let source = read_part(&bytes);
+    let exact = |bytes: &[u8]| {
+        let part = read_part(bytes);
+        assert_eq!(part.children[0].name, "oneCellAnchor");
+        let mut want = source.children[0].child("grpSp").unwrap();
+        let mut actual = part.children[0].child("grpSp").unwrap();
+        for depth in 0..2 {
+            let wx = want.path(&["grpSpPr", "xfrm"]).unwrap();
+            let ax = actual.path(&["grpSpPr", "xfrm"]).unwrap();
+            for tag in ["off", "ext", "chOff", "chExt"] {
+                assert_eq!(ax.child(tag).map(|_| xfrm_at(ax, tag)), wx.child(tag).map(|_| xfrm_at(wx, tag)), "{tag}");
+            }
+            let nv = |e: &crate::xml::El| e.path(&["nvGrpSpPr", "cNvPr"]).unwrap().attr_u32("id");
+            assert_eq!(nv(actual), nv(want));
+            if depth == 0 {
+                (want, actual) = (want.child("grpSp").unwrap(), actual.child("grpSp").unwrap());
+            }
+        }
+    };
+    let (mut wb, _) = read_xlsx(&bytes).unwrap();
+    wb.sheet_mut(0).unwrap().default_row_height = 31.0;
+    let saved = crate::write_xlsx(&wb).unwrap();
+    exact(&saved);
+    let (mut back, _) = read_xlsx(&saved).unwrap();
+    exact(&crate::write_xlsx(&back).unwrap());
+
+    // A direct edit to the effective default child space also invalidates placement.
+    let mut edited = back.clone();
+    edited.sheet_mut(0).unwrap().groups.iter_mut().find(|g| g.name == "Outer").unwrap().child_offset.0 += 1;
+    assert_eq!(read_part(&crate::write_xlsx(&edited).unwrap()).children[0].name, "twoCellAnchor");
+
+    let sh = back.sheet_mut(0).unwrap();
+    let member = ObjRef::new(ObjKind::Shape, sh.shapes[0].id);
+    sh.object_anchor_mut(member).unwrap().width += 12.0;
+    let edited = read_part(&crate::write_xlsx(&back).unwrap());
+    assert_eq!(edited.children[0].name, "twoCellAnchor");
+    let group = edited.children[0].child("grpSp").unwrap().child("grpSp").unwrap();
+    assert_ne!(xfrm_at(group.path(&["grpSpPr", "xfrm"]).unwrap(), "ext"), (1340000, 989911));
 }
 
 /// The box of the shape with text `text`.

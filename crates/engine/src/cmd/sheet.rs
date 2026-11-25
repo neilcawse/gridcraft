@@ -164,18 +164,20 @@ fn shift_sheet_features(sh: &mut Sheet, axis: Axis, at: u32, count: u32, insert:
         }
         let span = file.placement.physical_span(rows, span, |line, offset| {
             let pixels = offset as f64 / 9525.0;
-            if rows {
-                sh.row_at(sh.row_top(line.min(MAX_ROWS - 1)) + pixels)
-            } else {
-                sh.col_at(sh.col_left(line.min(MAX_COLS - 1)) + pixels)
-            }
+            if rows { sh.row_at(sh.row_top(line.min(MAX_ROWS - 1)) + pixels) } else { sh.col_at(sh.col_left(line.min(MAX_COLS - 1)) + pixels) }
         });
         file.placement.shift_lines(rows, at, count, insert, a.mode, span)
     });
-    let groups_to_refresh: Vec<_> = drawing_files.keys().filter_map(|r| {
-        let gridcraft_model::DrawingRef::Group(id) = *r else { return None };
-        Some(std::iter::once(r.to_owned()).chain(sh.group_contents(id).into_iter().filter(|r| matches!(r, gridcraft_model::DrawingRef::Group(_)))))
-    }).flatten().collect();
+    let groups_to_refresh: Vec<_> = drawing_files
+        .keys()
+        .filter_map(|r| {
+            let gridcraft_model::DrawingRef::Group(id) = *r else { return None };
+            Some(
+                std::iter::once(r.to_owned()).chain(sh.group_contents(id).into_iter().filter(|r| matches!(r, gridcraft_model::DrawingRef::Group(_)))),
+            )
+        })
+        .flatten()
+        .collect();
     for g in &mut sh.groups {
         if let Some(file) = &mut g.file
             && !groups_to_refresh.contains(&gridcraft_model::DrawingRef::Group(g.id))

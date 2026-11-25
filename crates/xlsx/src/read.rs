@@ -518,18 +518,7 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
 
     wb.external_books = Arc::new(crate::external::read(&mut cx, &wb_xml, &wb_rels)?);
     crate::slicer::resolve(&mut cx, &wb_xml, &wb_rels, &sheet_els, &file_to_model, &pivot_caches, &mut wb);
-    // A frame can be recognized before discovering that its slicer cache is unsupported.
-    for sh in &mut wb.sheets {
-        let sh = Arc::make_mut(sh);
-        let slicers = &sh.slicers;
-        let keep = |r: &gridcraft_model::DrawingRef| match r {
-            gridcraft_model::DrawingRef::Slicer(id) => slicers.iter().any(|s| s.id == *id),
-            _ => true,
-        };
-        sh.drawing_files.retain(|r, _| keep(r));
-        sh.drawing_names.retain(|r, _| keep(r));
-        sh.drawing_order.retain(|r, _| keep(r));
-    }
+    discard_unresolved_slicer_placements(&mut wb);
 
     // Defined names. Chartex parts refer to their data through hidden `_xlchart.*` names.
     let mut chart_names: Vec<(String, String)> = vec![];
@@ -697,6 +686,21 @@ fn read_slicer_caches(cx: &mut Ctx<'_>, wb_rels: &[crate::package::Rel]) -> Resu
         }
     }
     Ok(())
+}
+
+/// Removes drawing metadata reserved for frames whose cache could not be resolved.
+fn discard_unresolved_slicer_placements(wb: &mut Workbook) {
+    for sh in &mut wb.sheets {
+        let sh = Arc::make_mut(sh);
+        let slicers = &sh.slicers;
+        let keep = |r: &gridcraft_model::DrawingRef| match r {
+            gridcraft_model::DrawingRef::Slicer(id) => slicers.iter().any(|s| s.id == *id),
+            _ => true,
+        };
+        sh.drawing_files.retain(|r, _| keep(r));
+        sh.drawing_names.retain(|r, _| keep(r));
+        sh.drawing_order.retain(|r, _| keep(r));
+    }
 }
 
 /// Matches drawing slicer graphicFrames on `sheet_idx` to worksheet slicer definitions and queues them for attachment.

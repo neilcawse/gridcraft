@@ -216,8 +216,18 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
             sh.shapes.iter_mut().for_each(|o| reassign(&mut o.id, DrawingRef::Shape));
             sh.groups.iter_mut().for_each(|g| reassign(&mut g.id, DrawingRef::Group));
             for g in &mut sh.groups {
-                g.members.retain_mut(|r| remap.get(r).is_some_and(|&new| { *r = new; true }));
-                g.member_rotations.retain_mut(|(r, _)| remap.get(r).is_some_and(|&new| { *r = new; true }));
+                g.members.retain_mut(|r| {
+                    remap.get(r).is_some_and(|&new| {
+                        *r = new;
+                        true
+                    })
+                });
+                g.member_rotations.retain_mut(|(r, _)| {
+                    remap.get(r).is_some_and(|&new| {
+                        *r = new;
+                        true
+                    })
+                });
                 if let Some(file) = &mut g.file {
                     for member in &mut file.members {
                         if let Some(&new) = remap.get(&member.reference) {

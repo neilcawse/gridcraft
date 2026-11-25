@@ -5314,8 +5314,8 @@ fn object_commands_on_a_grouped_member_act_on_the_group() {
 
 #[test]
 fn source_drawing_placement_shifts_or_drops_by_anchor_mode() {
-    use gridcraft_model::{AnchorMode, DrawingFile, DrawingMarker, DrawingPlacement, DrawingRef};
     use DrawingPlacement::{Absolute, OneCell, TwoCell};
+    use gridcraft_model::{AnchorMode, DrawingFile, DrawingMarker, DrawingPlacement, DrawingRef};
     let from = DrawingMarker { col: 1, row: 4, col_off: -22, row_off: 99 };
     let to = DrawingMarker { col: 2, row: 7, col_off: 23, row_off: -100 };
     let two = |edit: Option<&str>| TwoCell { from, to, edit_as: edit.map(str::to_owned) };
@@ -5348,7 +5348,10 @@ fn source_drawing_placement_shifts_or_drops_by_anchor_mode() {
         assert_eq!(file(&s).unwrap().placement, placement);
         s.execute("home.insertRows", json!({"sheet": 0, "rows": "1:1"})).unwrap();
         assert_eq!(file(&s).is_some(), retained_before);
-        let shift = |mut m: DrawingMarker| { m.row += 1; m };
+        let shift = |mut m: DrawingMarker| {
+            m.row += 1;
+            m
+        };
         if let Some(f) = file(&s) {
             let shifted = match placement.clone() {
                 TwoCell { from, to, edit_as } => TwoCell { from: shift(from), to: shift(to), edit_as },
@@ -5356,13 +5359,86 @@ fn source_drawing_placement_shifts_or_drops_by_anchor_mode() {
                 absolute @ Absolute { .. } => absolute,
             };
             assert_eq!(f.placement, shifted);
-            assert_eq!(f.anchor.cell, image_cell(&s, id).unwrap_or(f.anchor.cell));
+            assert_eq!(Some(f.anchor), s.doc().unwrap().wb.sheet(0).unwrap().raw_drawing_anchor(r));
         }
         s.execute("home.deleteRows", json!({"sheet": 0, "rows": "1:1"})).unwrap();
         assert_eq!(file(&s).map(|f| f.placement), retained_before.then_some(placement.clone()));
         s.execute("home.deleteRows", json!({"sheet": 0, "rows": "6:6"})).unwrap();
         assert_eq!(file(&s).is_some(), matches!(placement, Absolute { .. }));
     }
+}
+
+#[test]
+fn source_group_placement_survives_copy_and_only_safe_line_edits() {
+    use gridcraft_model::{AnchorMode, DrawingFile, DrawingGroup, DrawingMarker, DrawingPlacement, DrawingRef, GroupFile, GroupFileMember};
+    let mut s = s();
+    let id = add_image(&mut s, "B5", AnchorMode::MoveOnly);
+    let (outer, inner) = {
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let inner = wb.next_object_id();
+        let outer = inner + 1;
+        let sh = wb.sheet_mut(0).unwrap();
+        let anchor = sh.images[0].anchor;
+        let extent = (381000, 381000);
+        for (id, name, member) in [(inner, "Inner", DrawingRef::Image(id)), (outer, "Outer", DrawingRef::Group(inner))] {
+            sh.groups.push(DrawingGroup {
+                id,
+                name: name.into(),
+                anchor,
+                child_offset: (0, 0),
+                child_extent: extent,
+                flip: (false, false),
+                rotation: 0,
+                member_rotations: vec![],
+                members: vec![member],
+                file: Some(GroupFile {
+                    anchor,
+                    off: (0, 0),
+                    ext: extent,
+                    child_offset: (0, 0),
+                    child_extent: extent,
+                    model_child_offset: (0, 0),
+                    model_child_extent: extent,
+                    fields: [true; 4],
+                    has_transform: true,
+                    edited: false,
+                    complete: true,
+                    flip: (false, false),
+                    rotation: 0,
+                    member_rotations: vec![],
+                    members: vec![GroupFileMember { reference: member, anchor, off: (0, 0), ext: extent }],
+                }),
+            });
+        }
+        // The negative offset places the file marker several rows before the named row.
+        let from = DrawingMarker { col: 1, row: 4, col_off: 0, row_off: -600_000 };
+        sh.drawing_files.insert(DrawingRef::Group(outer), DrawingFile { anchor, placement: DrawingPlacement::OneCell { from, ext: extent } });
+        (outer, inner)
+    };
+    s.execute("sheet.move", json!({"sheet": 0, "to": 1, "copy": true})).unwrap();
+    {
+        let original = s.doc().unwrap().wb.sheet(0).unwrap();
+        let copy = s.doc().unwrap().wb.sheet(1).unwrap();
+        let g = copy.groups.iter().find(|g| g.name == "Outer").unwrap();
+        let f = copy.source_group(g).unwrap();
+        assert_ne!(g.id, outer);
+        assert_ne!(f.members[0].reference, DrawingRef::Group(inner));
+        assert_eq!(copy.drawing_files[&DrawingRef::Group(g.id)].placement, original.drawing_files[&DrawingRef::Group(outer)].placement);
+    }
+    s.execute("home.insertRows", json!({"sheet": 0, "rows": "1:1"})).unwrap();
+    {
+        let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+        let g = sh.drawing_group(outer).unwrap();
+        let DrawingPlacement::OneCell { from, .. } = sh.drawing_files[&DrawingRef::Group(outer)].placement else { panic!("lost one-cell spelling") };
+        assert_eq!((from.row, from.row_off), (5, -600_000));
+        assert_eq!(sh.source_group(g).unwrap().members[0].anchor.cell.row, 5);
+        assert_eq!(sh.source_group(sh.drawing_group(inner).unwrap()).unwrap().members[0].anchor.cell.row, 5);
+    }
+    s.execute("home.deleteRows", json!({"sheet": 0, "rows": "4:4"})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert!(!sh.drawing_files.contains_key(&DrawingRef::Group(outer)));
+    assert!(sh.source_group(sh.drawing_group(outer).unwrap()).is_none());
+    assert!(sh.source_group(sh.drawing_group(inner).unwrap()).is_none());
 }
 
 #[test]

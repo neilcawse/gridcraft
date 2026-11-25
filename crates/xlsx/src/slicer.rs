@@ -83,16 +83,14 @@ struct Tabular {
     items: Vec<(u32, bool)>,
 }
 
-/// Records a drawing frame's slicer; returns false when `gd` is not a slicer frame.
-pub fn read_frame(cx: &mut Ctx<'_>, sheet: &str, gd: &El, anchor: Anchor, id: u32) -> bool {
-    if gd.attr("uri") != Some(FRAME_URI) {
-        return false;
-    }
-    let Some(name) = gd.child("slicer").and_then(|s| s.attr("name")) else { return false };
-    if cx.slicers.frames.len() < MAX_SLICERS {
+/// Records a PivotTable slicer drawing frame for delayed attachment.
+pub fn read_frame(cx: &mut Ctx<'_>, sheet: &str, gd: &El, anchor: Anchor, id: u32) {
+    if gd.attr("uri") == Some(FRAME_URI)
+        && cx.slicers.frames.len() < MAX_SLICERS
+        && let Some(name) = gd.child("slicer").and_then(|s| s.attr("name"))
+    {
         cx.slicers.frames.push((sheet.to_string(), name.to_string(), anchor, id));
     }
-    true
 }
 
 /// Reads the slicer parts a worksheet's `extLst` lists (`x14:slicerList`).
@@ -234,6 +232,9 @@ pub fn resolve(
             cx.warn(format!("slicer \"{}\" has no drawing frame and was skipped", part.name));
             continue;
         };
+        if wb.sheet(si).is_some_and(|sh| sh.slicers.iter().any(|s| s.id == id)) {
+            continue;
+        }
         // The cache field's items and date grouping. A PivotTable without a filter on the field
         // takes the cache's selection; with everything selected it still keeps the field's
         // grouping (the cache field's, ECMA-376 §18.10.1.33) when no Rows/Columns field has it.

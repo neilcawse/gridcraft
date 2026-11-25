@@ -42,12 +42,15 @@ pub struct GroupFile {
     pub ext: (i64, i64),
     pub child_offset: (i64, i64),
     pub child_extent: (i64, i64),
+    /// Effective child space used by the editor, which can differ from the literal EMUs.
+    pub model_child_offset: (i64, i64),
+    pub model_child_extent: (i64, i64),
     /// Presence of off, ext, chOff and chExt respectively; absent fields use layout defaults.
     pub fields: [bool; 4],
     pub has_transform: bool,
     /// An explicit edit invalidates reuse even if the anchor later returns to the same value.
     pub edited: bool,
-    /// Every member was read and had its own offset and extent.
+    /// Every retained leaf had its own offset and extent.
     pub complete: bool,
     pub flip: (bool, bool),
     pub rotation: i64,
@@ -182,20 +185,31 @@ impl Sheet {
 
     fn source_group_at_depth<'a>(&self, g: &'a DrawingGroup, depth: usize) -> Option<&'a GroupFile> {
         let f = g.file.as_ref()?;
-        if depth >= MAX_GROUP_DEPTH || f.edited || !f.complete || f.anchor != g.anchor
-            || (f.fields[2] && f.child_offset != g.child_offset)
-            || (f.fields[3] && f.child_extent != g.child_extent)
-            || f.flip != g.flip || f.rotation != g.rotation || f.member_rotations != g.member_rotations
+        if depth >= MAX_GROUP_DEPTH
+            || f.edited
+            || !f.complete
+            || f.anchor != g.anchor
+            || f.model_child_offset != g.child_offset
+            || f.model_child_extent != g.child_extent
+            || f.flip != g.flip
+            || f.rotation != g.rotation
+            || f.member_rotations != g.member_rotations
             || f.members.len() != g.members.len()
         {
             return None;
         }
-        f.members.iter().zip(&g.members).all(|(m, &r)| {
-            m.reference == r && self.raw_drawing_anchor(r) == Some(m.anchor) && match r {
-                DrawingRef::Group(id) => self.drawing_group(id).and_then(|g| self.source_group_at_depth(g, depth + 1)).is_some(),
-                _ => true,
-            }
-        }).then_some(f)
+        f.members
+            .iter()
+            .zip(&g.members)
+            .all(|(m, &r)| {
+                m.reference == r
+                    && self.raw_drawing_anchor(r) == Some(m.anchor)
+                    && match r {
+                        DrawingRef::Group(id) => self.drawing_group(id).and_then(|g| self.source_group_at_depth(g, depth + 1)).is_some(),
+                        _ => true,
+                    }
+            })
+            .then_some(f)
     }
 
     /// An object's box; a group's is the box around its members. `None` when the object is
@@ -254,7 +268,8 @@ impl Sheet {
         let mut files = std::mem::take(&mut self.drawing_files);
         files.retain(|&r, f| self.raw_drawing_anchor(r) == Some(f.anchor));
         self.drawing_files = files;
-        let changed: Vec<_> = self.groups.iter().filter(|g| g.file.as_ref().is_some_and(|f| !f.edited) && self.source_group(g).is_none()).map(|g| g.id).collect();
+        let changed: Vec<_> =
+            self.groups.iter().filter(|g| g.file.as_ref().is_some_and(|f| !f.edited) && self.source_group(g).is_none()).map(|g| g.id).collect();
         for id in changed {
             self.invalidate_drawing_file(DrawingRef::Group(id));
         }
