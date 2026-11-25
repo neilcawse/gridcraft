@@ -144,6 +144,36 @@ fn worksheet_filter_over_table_omits_totals_from_samples_and_dropdown() {
 }
 
 #[test]
+fn totals_toggle_keeps_a_full_table_worksheet_filter_on_the_table() {
+    let mut s = Session::new();
+    s.new_workbook();
+    s.execute("range.setValues", json!({"range": "A1", "values": [["Region", "Amount"], ["East", 10], ["West", 20], ["East", 30]]})).unwrap();
+    s.execute("insert.table", json!({"range": "A1:B4", "name": "Sales", "header": true})).unwrap();
+    s.execute("table.totalRow", json!({"table": "Sales", "on": true})).unwrap();
+    // The table dropdown installs a worksheet filter over the whole table.
+    s.execute("selection.set", json!({"range": "E1"})).unwrap();
+    s.execute("data.filter", json!({"range": "A1:B5"})).unwrap();
+    s.execute("data.filterBy", json!({"column": "A", "values": ["East"]})).unwrap();
+    let hidden = |s: &Session| {
+        let sh = s.doc().unwrap().wb.active().unwrap();
+        (0..6).filter(|&r| sh.is_row_hidden(r)).collect::<Vec<_>>()
+    };
+    assert_eq!(hidden(&s), [2]);
+
+    s.execute("table.totalRow", json!({"table": "Sales", "on": false})).unwrap();
+    s.execute("data.reapply", json!({})).unwrap();
+    assert_eq!(hidden(&s), [2], "the former totals row is outside the table and the filter");
+    let bytes = crate::io::save_bytes(&s.doc().unwrap().wb, "sales.xlsx").unwrap();
+    let (back, _) = crate::io::open_bytes("sales.xlsx", &bytes).unwrap();
+    assert!(back.sheets[0].is_row_filtered(2), "the criterion survives the save");
+
+    s.execute("table.totalRow", json!({"table": "Sales", "on": true})).unwrap();
+    s.execute("data.reapply", json!({})).unwrap();
+    assert_eq!(hidden(&s), [2]);
+    assert_eq!(filter_values(&s.doc().unwrap().wb, 0, 0), [("East".into(), true), ("West".into(), false)]);
+}
+
+#[test]
 fn autofilter_range_grows_when_a_value_is_entered_in_the_row_below() {
     let mut s = Session::new();
     s.new_workbook();
