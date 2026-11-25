@@ -7657,29 +7657,49 @@ fn paste_special_all_keeps_whole_line_sizes() {
 fn whole_row_cut_moves_line_sizes_as_they_are_when_pasted() {
     use gridcraft_model::LineInfo;
 
-    let mut s = s();
-    s.execute("cell.set", json!({"cell": "A3", "input": "move me"})).unwrap();
-    let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
-    for row in [2, 3] {
-        sh.rows.insert(row, LineInfo { size: Some(100.), custom: true, ..Default::default() });
+    for (at, first, expected_height) in [("A2", 1, [Some(50.), Some(100.), None]), ("A4", 2, [None, Some(50.), Some(100.)])] {
+        let mut s = s();
+        s.execute("cell.set", json!({"cell": "A3", "input": "move me"})).unwrap();
+        let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+        for row in [2, 3] {
+            sh.rows.insert(row, LineInfo { size: Some(100.), custom: true, ..Default::default() });
+        }
+        let default = sh.default_row_height;
+        let heights = |s: &Session| {
+            let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+            [first, first + 1, first + 2].map(|r| sh.row_height(r))
+        };
+        s.execute("edit.cut", json!({"range": "3:4"})).unwrap();
+        s.execute("home.rowHeight", json!({"rows": "3:3", "height": 50})).unwrap();
+        let before = heights(&s);
+        s.execute("edit.paste", json!({"at": at})).unwrap();
+        assert_eq!(v(&s, at), Value::from("move me"));
+        assert_eq!(heights(&s), expected_height.map(|h| h.unwrap_or(default)), "pasting at {at}");
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(v(&s, "A3"), Value::from("move me"));
+        assert_eq!(heights(&s), before);
     }
-    let default = sh.default_row_height;
-    let heights = |s: &Session| {
-        let sh = s.doc().unwrap().wb.sheet(0).unwrap();
-        [2, 3, 4].map(|r| sh.row_height(r))
-    };
-    s.execute("edit.cut", json!({"range": "3:4"})).unwrap();
-    s.execute("home.rowHeight", json!({"rows": "3:3", "height": 50})).unwrap();
-    s.execute("edit.paste", json!({"at": "A4"})).unwrap();
-    assert_eq!(v(&s, "A4"), Value::from("move me"));
-    assert_eq!(heights(&s), [default, 50., 100.]);
-    s.execute("edit.undo", json!({})).unwrap();
-    assert_eq!(v(&s, "A3"), Value::from("move me"));
-    assert_eq!(heights(&s), [50., 100., default]);
 }
 
-/// A filter that leaves one run of copied rows showing packs the copy, which keeps its previous
-/// behavior: the destination lines are not replaced.
+#[test]
+fn whole_row_cut_paste_refuses_a_replaced_source_index() {
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "A3", "input": "source"})).unwrap();
+    s.execute("edit.cut", json!({"range": "3:3"})).unwrap();
+    s.execute("home.insertSheet", json!({"name": "Other", "before": 0})).unwrap();
+    s.execute("cell.set", json!({"cell": "A3", "input": "keep me"})).unwrap();
+    s.execute("home.rowHeight", json!({"rows": "3:3", "height": 50})).unwrap();
+
+    assert!(s.execute("edit.paste", json!({"at": "A8"})).is_err());
+    assert_eq!(v(&s, "A3"), Value::from("keep me"));
+    assert_eq!(v(&s, "A8"), Value::Empty);
+    let wb = &s.doc().unwrap().wb;
+    assert_eq!(wb.active().unwrap().row_height(2), 50.);
+    assert_eq!(wb.sheet(1).unwrap().value(CellRef::parse("A3").unwrap()), Value::from("source"));
+}
+
+/// Pin GridCraft's existing behavior, not Excel parity: even if a filter leaves just one visible
+/// run, the packed copy does not replace destination line settings.
 #[test]
 fn filtered_whole_row_copy_keeps_destination_line_sizes() {
     use gridcraft_model::LineInfo;

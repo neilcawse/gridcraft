@@ -65,8 +65,10 @@ not the shared bounds for print, export or calculation.
 
 GridCraft transfers size and effective visibility for contiguous whole-line `edit.paste`, and
 transfers inherited row style. An absent source resets those fields. Same-workbook Cut resets
-them on the source. Full-size explicit ranges and line syntax are equivalent. Line and cell
-edits go into the same undo entry; the line changes respect the sheet's formatting permissions.
+them on the source and moves its geometry as it stands at paste time. If the original source
+sheet is no longer at the recorded index, GridCraft refuses the paste rather than clearing another
+sheet. Full-size explicit ranges and line syntax are equivalent. Line and cell edits share one
+undo entry and line changes respect the sheet's formatting permissions.
 
 Zero size demonstrates effective geometry; the probes did not recover `Hidden`, `OutlineLevel`
 or `ShowDetail` values, nor did they save XML. Outline/collapse, thickness and bare markers stay
