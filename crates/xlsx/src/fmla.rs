@@ -162,16 +162,17 @@ pub fn from_file(text: &str) -> String {
 }
 
 /// Excel stores some formula-bar operators and names as compatibility functions. Preserve the
-/// surrounding source layout, but only change actual tokens, not literals or sheet names.
-pub(crate) fn formula_bar_text(text: &str, canonical: &str) -> Option<Box<str>> {
+/// surrounding source layout, but only change actual tokens, not literals or sheet names. The
+/// result is kept only when it differs from `canonical` in layout alone (see [`layout_only`]).
+pub(crate) fn formula_bar_text(text: &str, canonical: &Formula) -> Option<String> {
     use gridcraft_formula::lexer::{Tok, tokenize};
 
     let body = text.strip_prefix('=').unwrap_or(text);
-    if body == canonical {
+    if body == canonical.text {
         return None;
     }
     if !body.as_bytes().windows(3).any(|w| w.eq_ignore_ascii_case(b"_xl")) {
-        return Some(body.into());
+        return layout_only(body, canonical).then(|| body.to_string());
     }
     let tokens = tokenize(body).ok()?;
     // Only keep rewrite slots for prefixed tokens and their closing parentheses. A stack also
@@ -179,12 +180,7 @@ pub(crate) fn formula_bar_text(text: &str, canonical: &str) -> Option<Box<str>> 
     let mut edits = Vec::new();
     let mut stack = Vec::new();
     let mut in_array = 0_usize;
-    let mut previous_end = 0;
     for t in &tokens {
-        let prev = previous_end;
-        if t.tok != Tok::Space {
-            previous_end = t.end;
-        }
         match &t.tok {
             Tok::Func(spelling) => {
                 let name = ["_xlfn._xlws.", "_xlfn.", "_xlws."].iter().find_map(|p| unprefix(spelling, p));
@@ -230,10 +226,11 @@ pub(crate) fn formula_bar_text(text: &str, canonical: &str) -> Option<Box<str>> 
                     edits.push((t.start, t.end, name));
                 }
             }
-            Tok::Op(op) if in_array == 0 => {
-                if let Some(Some((open, spill, group))) = stack.last_mut() {
-                    // A leading unary sign is valid after @, but a binary operand needs grouping.
-                    *group |= *spill || !matches!(*op, "+" | "-") || prev != edits[*open].1;
+            Tok::Op(_) if in_array == 0 => {
+                // An operand with an operator is parenthesized, as the printer spells it
+                // (`@(-A1:A3)`, `@(A1:A3*2)`).
+                if let Some(Some((_, _, group))) = stack.last_mut() {
+                    *group = true;
                 }
             }
             Tok::Comma if in_array == 0 && stack.last().is_some_and(Option::is_some) => return None,
@@ -251,7 +248,21 @@ pub(crate) fn formula_bar_text(text: &str, canonical: &str) -> Option<Box<str>> 
         pos = end;
     }
     display.push_str(&body[pos..]);
-    (display != canonical).then(|| display.into_boxed_str())
+    layout_only(&display, canonical).then_some(display)
+}
+
+/// Whether `display` spells `canonical` with different whitespace only. Its other tokens must
+/// match, so a file-only spelling (`[#This Row]`, `_xleta.SUM`, `_xlfn._TRO_ALL(…)`) or a
+/// spill or `@` placement the printer spells otherwise falls back to canonical text. It must
+/// also parse to the same expression: a space can be the intersection operator.
+fn layout_only(display: &str, canonical: &Formula) -> bool {
+    use gridcraft_formula::lexer::{Tok, tokenize};
+
+    let Some(expr) = canonical.expr.as_deref() else { return false };
+    let solid = |s: &str| tokenize(s).ok().map(|t| t.into_iter().map(|t| t.tok).filter(|t| *t != Tok::Space).collect::<Vec<_>>());
+    display != canonical.text
+        && solid(display).is_some_and(|d| Some(d) == solid(&canonical.text))
+        && gridcraft_formula::parse(display).is_ok_and(|e| &e == expr)
 }
 
 fn unprefix<'a>(word: &'a str, prefix: &str) -> Option<&'a str> {

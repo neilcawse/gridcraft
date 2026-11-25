@@ -511,8 +511,12 @@ impl<'h> Evaluator<'h> {
             "color" | "parentheses" => Ev::V(Value::Number(0.0)),
             "prefix" => {
                 use gridcraft_model::HAlign;
+                // A label prefix belongs to typed text: a formula's text result has none.
+                let typed = sheet
+                    .and_then(|s| s.cell(c))
+                    .is_some_and(|cell| cell.formula.is_none() && matches!(&cell.value, Value::Text(t) if !t.is_empty()));
                 let align = sheet.map(|s| wb.styles.get(s.style_id(c)).align.h);
-                let prefix = if matches!(self.cell(a.sheet, c), Value::Text(t) if !t.is_empty()) {
+                let prefix = if typed {
                     match align {
                         Some(HAlign::General | HAlign::Left) => "'",
                         Some(HAlign::Right) => "\"",

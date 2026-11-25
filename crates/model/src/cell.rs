@@ -14,10 +14,12 @@ use crate::style::StyleId;
 #[serde(from = "SavedFormula")]
 pub struct Formula {
     pub text: String,
-    /// Imported formula-bar spelling, only when it differs from canonical text. Reference
-    /// rewrites discard it rather than trying to preserve the original layout.
+    /// Imported formula-bar spelling, only when it differs from canonical text in layout alone.
+    /// A rewrite that changes the expression discards it rather than trying to preserve the
+    /// original layout. Boxed twice so the common `None` costs one pointer, keeping a formula
+    /// in the same allocation size class it had without this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_text: Option<Box<str>>,
+    pub display_text: Option<Box<String>>,
     #[serde(skip)]
     pub expr: Option<Arc<Expr>>,
     /// Legacy array formula (Ctrl+Shift+Enter) covering this range; the formula lives in the
@@ -82,7 +84,7 @@ impl Formula {
 struct SavedFormula {
     text: String,
     #[serde(default)]
-    display_text: Option<Box<str>>,
+    display_text: Option<String>,
     array: Option<RangeRef>,
     #[serde(default)]
     legacy: bool,
@@ -93,7 +95,7 @@ struct SavedFormula {
 impl From<SavedFormula> for Formula {
     fn from(f: SavedFormula) -> Formula {
         let expr = gridcraft_formula::parse(&f.text).ok().map(Arc::new);
-        Formula { text: f.text, display_text: f.display_text, expr, array: f.array, legacy: f.legacy, dynamic: f.dynamic }
+        Formula { text: f.text, display_text: f.display_text.map(Box::new), expr, array: f.array, legacy: f.legacy, dynamic: f.dynamic }
     }
 }
 
@@ -179,7 +181,7 @@ mod tests {
     fn imported_formula_bar_text_is_optional_in_json() -> Result<(), serde_json::Error> {
         let mut f = Formula::new("A1+2");
         assert!(serde_json::to_value(&f)?.get("display_text").is_none());
-        f.display_text = Some("A1 + 2".into());
+        f.display_text = Some(Box::new("A1 + 2".into()));
         let restored: Formula = serde_json::from_value(serde_json::to_value(&f)?)?;
         assert_eq!(restored, f);
         let old: Formula = serde_json::from_str(r#"{"text":"A1+2","array":null}"#)?;

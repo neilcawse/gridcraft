@@ -2406,6 +2406,9 @@ fn cell_prefix_reports_the_alignment_of_text() {
         ("A7", "42", HAlign::Center, ""),
         ("A8", "=\"\"", HAlign::Center, ""),
         ("A9", "", HAlign::Center, ""),
+        // Public Excel caches: a formula's text result has no label prefix, whatever its alignment.
+        ("A10", "=\"label\"", HAlign::Center, ""),
+        ("A11", "=A1", HAlign::General, ""),
     ] {
         t.set(cell, input);
         let id = t.wb.styles.intern(Style { align: Alignment { h: align, ..Default::default() }, ..Default::default() });
