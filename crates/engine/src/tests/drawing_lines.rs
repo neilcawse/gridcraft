@@ -204,6 +204,47 @@ fn a_row_fit_inside_a_chart_sizes_it() {
     assert_rect(chart_rect(&s), ObjectRect { h: before.h + grown, ..before }, "fitted row");
 }
 
+/// A sort that leaves a chart's anchor as it was still placed it, so the sorted row heights
+/// don't move it a second time. Rows 1 and 3 trade places (and heights) around the chart's top
+/// row, so the chart rises with row 2; its bottom lies past the sorted rows, so it keeps its size.
+#[test]
+fn a_sort_that_keeps_a_charts_anchor_does_not_follow_the_sorted_rows_again() {
+    let mut s = s();
+    s.execute("range.setValues", json!({"range": "A1", "values": [[3], [2], [1]]})).unwrap();
+    s.execute("home.rowHeight", json!({"rows": "1:1", "points": 37.5})).unwrap();
+    s.execute("selection.set", json!({"range": "A1:A3"})).unwrap();
+    s.execute("insert.chart", json!({"type": "column", "at": "B2", "width": 200, "height": 100, "mode": "moveAndSize"})).unwrap();
+    let (anchor, before) = (s.doc().unwrap().wb.sheet(0).unwrap().charts[0].anchor, chart_rect(&s));
+    s.execute("data.sort", json!({"range": "A1:D3", "header": false, "keys": [{"column": "A"}]})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert_eq!(sh.charts[0].anchor, anchor, "the sort keeps the chart's anchor");
+    let raised = f64::from(sh.row_height(2) - sh.row_height(0));
+    assert!(raised > 20.0, "row 1's height went to row 3");
+    assert_rect(chart_rect(&s), ObjectRect { y: before.y - raised, ..before }, "sorted once");
+}
+
+/// A chart the sort moves still follows the row fit after the sort: a cell's 36 pt text, never
+/// fitted, sorts into the middle of the chart's new rows.
+#[test]
+fn a_chart_the_sort_moves_still_follows_the_row_fit_after_it() {
+    let mut s = s();
+    s.execute("range.setValues", json!({"range": "A1", "values": [[4], [5], [6], [1], [2], [3]]})).unwrap();
+    let rh = f64::from(s.doc().unwrap().wb.sheet(0).unwrap().row_height(0));
+    s.execute("selection.set", json!({"range": "A1:A6"})).unwrap();
+    s.execute("insert.chart", json!({"type": "column", "at": "B1", "width": 200, "height": 2.0 * rh + 10.0, "mode": "moveAndSize"})).unwrap();
+    {
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let large = wb.styles.derive(StyleId::DEFAULT, |st| st.font.size = 36.0);
+        wb.sheet_mut(0).unwrap().set_style(CellRef::new(1, 0), large);
+    }
+    s.execute("data.sort", json!({"range": "A1:D6", "header": false, "keys": [{"column": "A"}]})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert!(f64::from(sh.row_height(4)) > rh + 20.0, "the 36 pt row fits after the sort");
+    let (top, bottom) = (sh.row_top(3), sh.row_top(5) + 10.0);
+    let r = chart_rect(&s);
+    assert!((r.y - top).abs() < 1e-3 && (r.y + r.h - bottom).abs() < 1e-3, "chart {r:?} spans rows 4 to 6 over the fitted rows ({top}, {bottom})");
+}
+
 /// The row fit after a deletion re-measures the chart against the remapped rows.
 #[test]
 fn a_row_fit_after_a_deletion_sizes_the_shifted_chart() {

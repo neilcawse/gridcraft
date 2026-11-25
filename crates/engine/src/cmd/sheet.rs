@@ -380,13 +380,18 @@ impl ShiftedDrawingFit {
     }
 }
 
-/// Row heights and column widths an edit changed without shifting lines (sizes, automatic row
-/// fits, sorted row heights) move what sits on them. Each object the edit didn't place itself
-/// follows by its anchor mode: "move and size with cells" keeps both corners on their cells,
-/// "move but don't size" keeps its size and "don't move or size" its place (ECMA-376 Part 1,
-/// 20.5.3.2 `ST_EditAs`). Restructured sheets re-placed theirs when the lines shifted, and
-/// again after their row fit.
-pub(crate) fn follow_line_changes(old: &gridcraft_model::Workbook, wb: &mut gridcraft_model::Workbook, restructured: &[u64]) {
+/// Row heights and column widths an edit changed without shifting lines (sizes, sorted row
+/// heights) move what sits on them. Each object not in `placed` (the ones the edit placed
+/// itself, by sheet uid) follows by its anchor mode: "move and size with cells" keeps both
+/// corners on their cells, "move but don't size" keeps its size and "don't move or size" its
+/// place (ECMA-376 Part 1, 20.5.3.2 `ST_EditAs`). Restructured sheets re-placed theirs when the
+/// lines shifted. Runs before the edit's row fit, which `commit` follows for every object.
+pub(crate) fn follow_line_changes(
+    old: &gridcraft_model::Workbook,
+    wb: &mut gridcraft_model::Workbook,
+    restructured: &[u64],
+    placed: &[(u64, gridcraft_model::ObjRef)],
+) {
     for si in 0..wb.sheets.len() {
         let Some(after) = wb.sheets.get(si).filter(|sh| sh.object_anchors().next().is_some()) else { continue };
         let uid = after.uid.get();
@@ -401,10 +406,8 @@ pub(crate) fn follow_line_changes(old: &gridcraft_model::Workbook, wb: &mut grid
         }
         let before = Arc::clone(before);
         let Some(sh) = wb.sheet_mut(si) else { continue };
-        sh.follow_line_sizes(&before, &|o, a| {
-            let was = if o.kind == gridcraft_model::ObjKind::Group { before.drawing_group(o.id).map(|g| g.anchor) } else { before.object_anchor(o) };
-            was != Some(*a)
-        });
+        let mine: std::collections::HashSet<gridcraft_model::ObjRef> = placed.iter().filter(|(s, _)| *s == uid).map(|&(_, o)| o).collect();
+        sh.follow_line_sizes(&before, &|o| mine.contains(&o));
     }
 }
 

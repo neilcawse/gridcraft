@@ -425,6 +425,18 @@ impl Sheet {
             .chain(self.controls.iter().map(|o| &o.anchor))
     }
 
+    /// The objects [`Sheet::object_anchors`] visits, in its order. Every shape, an equation
+    /// included, is an [`ObjKind::Shape`], as line following names it.
+    pub fn object_refs(&self) -> impl Iterator<Item = ObjRef> + '_ {
+        let refs = |kind: ObjKind| move |id: u32| ObjRef::new(kind, id);
+        (self.charts.iter().map(|o| o.id).map(refs(ObjKind::Chart)))
+            .chain(self.images.iter().map(|o| o.id).map(refs(ObjKind::Image)))
+            .chain(self.shapes.iter().map(|o| o.id).map(refs(ObjKind::Shape)))
+            .chain(self.slicers.iter().map(|o| o.id).map(refs(ObjKind::Slicer)))
+            .chain(self.groups.iter().map(|g| g.id).map(refs(ObjKind::Group)))
+            .chain(self.controls.iter().map(|o| o.id).map(refs(ObjKind::Control)))
+    }
+
     pub fn object_anchors_mut(&mut self) -> impl Iterator<Item = &mut Anchor> {
         self.charts
             .iter_mut()

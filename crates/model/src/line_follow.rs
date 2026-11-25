@@ -218,9 +218,10 @@ impl Sheet {
     /// Lines hidden or shown are left out (an object keeps the size it had over them), as only
     /// the size, not the cell, of a collapsed line is known afterwards.
     ///
-    /// `settled` names objects to leave alone, with their current anchor: ones the change
-    /// itself already placed. A group is left alone when it or anything in it is settled.
-    pub fn follow_line_sizes(&mut self, before: &Sheet, settled: &dyn Fn(ObjRef, &Anchor) -> bool) {
+    /// `settled` names objects to leave alone: ones the change itself already placed (every
+    /// shape as an [`ObjKind::Shape`]). A group is left alone when it or anything in it is
+    /// settled.
+    pub fn follow_line_sizes(&mut self, before: &Sheet, settled: &dyn Fn(ObjRef) -> bool) {
         if !self.lines_differ(before) {
             return;
         }
@@ -228,13 +229,13 @@ impl Sheet {
         keep_visibility(&mut new.rows, &before.rows);
         keep_visibility(&mut new.cols, &before.cols);
         for (object, a) in self.floating() {
-            if settled(object.obj_ref(), &a) {
+            if settled(object.obj_ref()) {
                 continue;
             }
             match object {
                 Floating::Drawing(DrawingRef::Group(id)) => {
                     let contents = self.group_contents(id);
-                    if contents.iter().any(|&m| self.raw_drawing_anchor(m).is_some_and(|ma| settled(drawing_obj(m), &ma))) {
+                    if contents.iter().any(|&m| settled(drawing_obj(m))) {
                         continue;
                     }
                     let next = follow(before, &new, &a, self.live_drawing_placement(DrawingRef::Group(id), a)).unwrap_or(a);
@@ -294,7 +295,7 @@ impl Sheet {
                 file.anchor = next;
             }
         }
-        self.follow_line_sizes(before, &|o, _| drawing_reference(o).is_some_and(|r| files.contains(&r)));
+        self.follow_line_sizes(before, &|o| drawing_reference(o).is_some_and(|r| files.contains(&r)));
     }
 
     /// Records group `id`'s current anchors, and those of the groups inside it, as their file
