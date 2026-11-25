@@ -176,19 +176,19 @@ FALSE skips the accrued period from issue to first interest. The accrual algorit
 [accrint]: https://support.microsoft.com/en-us/excel/functions/accrint-function
 
 FORMULATEXT can return the original layout of an imported XLSX formula: its spacing and line
-breaks, with compatibility functions shown as their formula-bar operators (`@`, `#`). The
-layout is kept only when nothing but whitespace differs from the canonical text; a file-only
-spelling (`Table1[[#This Row],[Col]]`, `_xleta.SUM`) or an operator placement GridCraft prints
-otherwise falls back to canonical text, as do the cells of a shared formula after its first.
-Evaluation and XLSX output use canonical text. The layout is dropped when an edit changes the
-expression (a fill or move that shifts references, a sheet or name rename) and when different
-text is entered.
+breaks, with compatibility functions shown as the formula-bar operators public Excel caches
+show (`@-A1:A3`, `@(A1:A3*2)`, `OFFSET(G4,1,1)#`, `F5:INDEX(F5:F14, 3)#`). A formula holding
+a file-only spelling the formula bar shows otherwise (`Table1[[#This Row],[Col]]`,
+`_xleta.SUM`, `_xludf.`, `_xlfn._TRO_ALL(…)`) falls back to canonical text, as do the cells
+of a shared formula after its first. Evaluation and XLSX output use canonical text. The
+layout is dropped when an edit changes the expression (a fill or move that shifts
+references, a sheet or name rename) and when different text is entered.
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-11-25 | minor | Review fixes: `CELL("prefix")` of a formula cell is empty text; FORMULATEXT keeps an imported layout only when it differs from canonical text in whitespace alone (no `[#This Row]`, `_xleta.` or re-bound `@`/`#` spellings); BIFF width, XNPV and legacy CONCAT residuals recorded |
+| 2026-11-25 | minor | Review fixes: `CELL("prefix")` of a formula cell is empty text; FORMULATEXT falls back to canonical text for formulas with file-only spellings (`[#This Row]`, `_xleta.`, `_xludf.`, trim-reference calls); BIFF width, XNPV and legacy CONCAT residuals recorded |
 | 2026-11-24 | minor | Corrected corpus-backed argument and reference behavior for CELL, XIRR, WEEKNUM, logical folds, GCD/LCM, LOGEST and FORMULATEXT |
 | 2026-11-04 | minor | GCD and LCM reject negative fractional arguments before truncation; scalar and range regressions in the extracted math tests preserve positive truncation and signed-zero behavior; estimates unchanged |
 | 2026-11-03 | minor | GROUPBY: a total depth of 2 or more adds a subtotal line for each group of the leading key columns (after the group, or before it for a negative depth) and labels the last line Grand Total; a depth past the key columns, or above 1 with `field_relationship` 1, is `#VALUE!`, as in Excel (#1456 item 1) |

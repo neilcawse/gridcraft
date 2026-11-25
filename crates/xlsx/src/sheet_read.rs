@@ -886,8 +886,8 @@ fn read_craft_formula_text(
     let text = model.as_str();
     let formula = || {
         let mut formula = Formula::new(text);
-        if !*unwrapped && formula.text != f.text.trim() {
-            formula.display_text = formula_bar_text(f.text.trim(), &formula).map(Box::new);
+        if !*unwrapped && formula.expr.is_some() && formula.text != f.text.trim() {
+            formula.display_text = formula_bar_text(f.text.trim(), &formula.text).map(Box::new);
         }
         formula
     };
