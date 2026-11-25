@@ -926,6 +926,24 @@ fn mac_ignores_a_non_positive_custom_sheet_default() {
 }
 
 #[test]
+fn bare_rows_survive_import_and_save() {
+    // Measured (boundary set): a bare `<row r="N"/>` is a row element; Excel counts a trailing
+    // one in UsedRange and fits it on a switched custom-default sheet, so it is kept and saved.
+    let body = r#"<sheetFormatPr defaultRowHeight="21.75" customHeight="1"/>
+          <sheetData><row r="1" ht="30.75"><c r="A1"><v>1</v></c></row><row r="3"/><row r="5"/></sheetData>"#;
+    for geometry in [Geometry::mac as fn(&gridcraft_model::Font) -> Geometry, |_: &gridcraft_model::Font| Geometry::Legacy] {
+        let wb = crate::read::read_xlsx(&super::minimal(body, &[], "", ""), crate::ReadOptions::default(), geometry).unwrap().0;
+        let rows = &wb.sheets[0].rows;
+        assert!(rows.contains_key(&2) && rows.contains_key(&4) && !rows.contains_key(&3), "{rows:?}");
+        let saved = write_xlsx(&wb).unwrap();
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(saved)).unwrap();
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut zip.by_name("xl/worksheets/sheet1.xml").unwrap(), &mut xml).unwrap();
+        assert!(xml.contains(r#"<row r="3"/>"#) && xml.contains(r#"<row r="5"/>"#) && !xml.contains(r#"<row r="4""#), "{xml}");
+    }
+}
+
+#[test]
 fn cell_text_carriage_returns_survive_xlsx_roundtrip() {
     let mut wb = Workbook::new();
     let values = [("A1", "Line 1\r\nLine 2"), ("A2", "Part A\rPart B"), ("A3", "Item 3\nItem 4"), ("A4", "literal _x000D_ marker")];

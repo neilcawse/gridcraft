@@ -763,13 +763,18 @@ fn read_craft_row(cx: &mut Ctx<'_>, sheet: &mut Sheet, st: &mut RowState, row: &
     if let Some(s) = row.style {
         info.style = Some(cx.style(Some(s)));
     }
-    if info != LineInfo::default() {
+    let bare = info == LineInfo::default();
+    if !bare {
         sheet.rows.insert(r, info);
     }
     for c in &row.cells {
         charge_cells(cx, 1).map_err(|e| craft_xlsx::Error::TooLarge(e.to_string()))?;
         let pos = CellRef::new(c.at.row, c.at.col);
         read_craft_cell(cx, sheet, st, c, pos);
+    }
+    // A `<row>` with nothing else kept is still a row element (measured: UsedRange, H5 fitting).
+    if bare && !sheet.row_has_cells(r) {
+        sheet.rows.insert(r, LineInfo { saved_element: true, ..info });
     }
     Ok(())
 }

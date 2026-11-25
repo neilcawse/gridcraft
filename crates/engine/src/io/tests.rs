@@ -77,6 +77,84 @@ fn mac_empty_rows_fit_their_row_format_and_valueless_cells() {
 }
 
 #[test]
+fn mac_row_fits_the_larger_of_row_format_and_cell_fonts() {
+    // Measured (boundary set), identical on an ordinary and a triggered sheet, with one
+    // explicitly styled cell in column A: the larger of the row format's font
+    // (`customFormat="1"`; the reader keeps no row style without it) and that cell's font wins.
+    use gridcraft_core::Value;
+    use gridcraft_model::{Geometry, LineInfo, SavedSheetGeometry, StyleId};
+
+    let (tall, normal) = (47. * (4.0 / 3.0), 20.);
+    for triggered in [false, true] {
+        let mut wb = Workbook::new();
+        let large = wb.styles.derive(StyleId::DEFAULT, |s| s.font.size = 36.0);
+        let small = wb.styles.derive(StyleId::DEFAULT, |s| s.font.bold = true);
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.geometry = Geometry::Mac { digit_pt: 6 };
+        if triggered {
+            sh.default_row_height = 28.0;
+            sh.saved_geometry = Some(SavedSheetGeometry {
+                custom_height: Some(true),
+                default_row_height: Some(21.75),
+                fit_automatic_rows: true,
+                ..Default::default()
+            });
+        }
+        // (row format, cell style, valued): rows 0..=5 mirror the measured table; rows 3..=5 had
+        // a row `s` without `customFormat`, which the reader does not keep.
+        for (r, row_style, cell_style, valued) in [
+            (0, Some(large), small, false),
+            (1, Some(small), large, false),
+            (2, Some(large), small, true),
+            (3, None, small, false),
+            (4, None, large, false),
+            (5, None, small, true),
+        ] {
+            if row_style.is_some() {
+                sh.rows.insert(r, LineInfo { style: row_style, ..Default::default() });
+            }
+            let at = CellRef::new(r, 0);
+            sh.set_style(at, cell_style);
+            if valued {
+                sh.set_value(at, Value::number(1.));
+            }
+        }
+        fit_imported_rows(&mut wb);
+        let sh = wb.sheet(0).unwrap();
+        assert_eq!((0..6).map(|r| sh.row_height(r)).collect::<Vec<_>>(), [tall, tall, tall, normal, tall, normal], "triggered {triggered}");
+    }
+}
+
+#[test]
+fn mac_bare_rows_fit_on_a_switched_custom_default_sheet() {
+    // Measured (boundary set): bare `<row>` elements read H_N (15 pt) on a triggered sheet while
+    // row numbers without a `<row>` keep the 21 pt floor; untriggered, both keep the floor.
+    use gridcraft_core::Value;
+    use gridcraft_model::{Geometry, LineInfo, SavedSheetGeometry};
+
+    for (triggered, bare) in [(true, 20.), (false, 28.)] {
+        let mut wb = Workbook::new();
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.geometry = Geometry::Mac { digit_pt: 6 };
+        sh.default_row_height = 28.0;
+        sh.saved_geometry = Some(SavedSheetGeometry {
+            custom_height: Some(true),
+            default_row_height: Some(21.75),
+            fit_automatic_rows: triggered,
+            ..Default::default()
+        });
+        sh.set_value(CellRef::new(0, 0), Value::number(1.));
+        for r in [2, 4] {
+            sh.rows.insert(r, LineInfo { saved_element: true, ..Default::default() });
+        }
+        fit_imported_rows(&mut wb);
+        let sh = wb.sheet(0).unwrap();
+        assert_eq!([1, 2, 3, 4, 5].map(|r| sh.row_height(r)), [28., bare, 28., bare, 28.], "triggered {triggered}");
+        assert!(sh.rows[&2].saved_element && sh.rows[&4].saved_element);
+    }
+}
+
+#[test]
 fn legacy_saved_automatic_height_is_kept_only_while_shown() {
     use gridcraft_core::Value;
     use gridcraft_model::LineInfo;

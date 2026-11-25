@@ -910,8 +910,8 @@ impl MergeSweep {
     }
 }
 
-/// On a triggered sheet, fit automatic rows with cells or serializable row metadata.
-/// Absent rows (including bare rows dropped by the reader) keep the sheet default.
+/// On a triggered sheet, fit automatic rows with cells or a saved `<row>` element, bare ones
+/// included. Row numbers without a `<row>` element keep the sheet default.
 fn mac_fits_automatic_row(sh: &gridcraft_model::Sheet, row: u32) -> bool {
     sh.saved_geometry.is_some_and(|g| g.fit_automatic_rows)
         // An entry holding only a fitted size is this function's own, not a saved `<row>`.
@@ -963,13 +963,10 @@ pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut
     } else {
         default
     };
-    // Excel for Mac fits a cell-less row to its row format (`customFormat` row `s`), and any
-    // styled cell, valued or not, to its font. Which wins when both apply is unmeasured: a row
-    // with cells fits to its cells only.
-    if mac
-        && let Some(style) = sh.rows.get(&row).and_then(|i| i.style)
-        && !sh.row_has_cells(row)
-    {
+    // Excel for Mac fits a row to the larger of its row format's font (`s` with `customFormat`;
+    // without it the reader keeps no row style) and its styled cell's font, valued or not
+    // (measured with one styled cell; several cells take the tallest, unmeasured).
+    if mac && let Some(style) = sh.rows.get(&row).and_then(|i| i.style) {
         need = need.max((gridcraft_model::geometry::mac_line_height_pt(&wb.styles.get(style).font) * (4.0 / 3.0)).min(546.0));
     }
     // The cell loop must not rescan every merge per cell: the merges touching this row are

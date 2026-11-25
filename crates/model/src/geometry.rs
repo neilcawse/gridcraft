@@ -46,13 +46,15 @@ impl Geometry {
 
     pub fn mac(font: &Font) -> Self {
         let measured: &[(u8, u8)] = if font.name.eq_ignore_ascii_case("Calibri") {
-            &[(6, 3), (10, 5), (11, 6), (12, 6), (14, 7), (18, 9), (24, 12), (26, 13), (34, 17)]
+            &[(6, 3), (10, 5), (11, 6), (12, 6), (14, 7), (16, 8), (18, 9), (20, 10), (24, 12), (26, 13), (34, 17)]
         } else if font.name.eq_ignore_ascii_case("Arial") {
             &[(6, 3), (8, 4), (10, 6), (11, 6), (12, 7), (14, 8), (16, 9), (18, 10), (20, 11), (24, 13), (32, 18)]
         } else if font.name.eq_ignore_ascii_case("Times New Roman") {
             &[(10, 5), (12, 6)]
-        } else if font.name.eq_ignore_ascii_case("Aptos Narrow") || font.name.eq_ignore_ascii_case("MS PGothic") {
-            &[(11, 6), (12, 6)]
+        } else if font.name.eq_ignore_ascii_case("Aptos Narrow") {
+            &[(11, 6), (12, 6), (16, 8)]
+        } else if font.name.eq_ignore_ascii_case("MS PGothic") {
+            &[(11, 6), (12, 6), (32, 16)]
         } else {
             &[]
         };
@@ -244,7 +246,7 @@ mod tests {
 
     #[test]
     fn padding_steps_and_character_ties_follow_excel_mac() {
-        for (digit_pt, padding) in [(4, 3), (5, 5), (12, 7), (13, 9), (16, 9), (17, 11), (18, 11)] {
+        for (digit_pt, padding) in [(4, 3), (5, 5), (8, 5), (10, 7), (12, 7), (13, 9), (16, 9), (17, 11), (18, 11)] {
             let g = Geometry::Mac { digit_pt };
             let points = f64::from(8 * u16::from(digit_pt) + padding);
             assert_eq!(g.inherited_width_px(true, None, None), (points * (4.0 / 3.0)) as f32);
@@ -285,6 +287,8 @@ mod tests {
             ("Times New Roman", 72., 36, 89.),
             ("Aptos Narrow", 16., 8, 22.),
             ("MS PGothic", 32., 16, 38.),
+            ("Calibri", 16., 8, 21.),
+            ("Calibri", 20., 10, 26.),
         ] {
             let font = Font { name: name.into(), size, ..Font::default() };
             assert_eq!(Geometry::mac(&font), Geometry::Mac { digit_pt });
@@ -296,11 +300,12 @@ mod tests {
     fn unmeasured_sizes_follow_their_family_measurements() {
         // Estimates, not measurements: Calibri digits measure half the size from 10 to 34 pt.
         for (name, size, digit_pt) in [
-            ("Calibri", 16., 8),
-            ("Calibri", 20., 10),
             ("Calibri", 22., 11),
             ("Calibri", 28., 14),
             ("Calibri", 40., 20),
+            ("Aptos Narrow", 14., 7),
+            ("Aptos Narrow", 20., 10),
+            ("MS PGothic", 20., 10),
             ("Arial", 9., 5),
             ("Verdana", 10., 6),
         ] {
