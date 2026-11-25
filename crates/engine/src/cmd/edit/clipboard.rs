@@ -215,19 +215,14 @@ fn slide_together(wb: &gridcraft_model::Workbook, sheet: usize, areas: &[RangeRe
             dst.merges.push(RangeRef::new(s, e));
         }
     }
-    // Column widths (side by side) or row heights and hidden rows (stacked) follow their cells.
-    let mut next = if across { anchor.col } else { anchor.row };
-    for a in &sorted {
+    // Pack line records along the same axis and with the same offsets as the cells. Read the
+    // sparse maps independently of the cell store so lines with only metadata still travel.
+    for (a, &(dr, dc)) in sorted.iter().zip(&shifts) {
         if across {
-            for (c, info) in src.cols.range(a.start.col..=a.end.col) {
-                dst.cols.insert(next.saturating_add(c.saturating_sub(a.start.col)), *info);
-            }
+            dst.cols.extend(src.cols.range(a.start.col..=a.end.col).map(|(&col, &info)| ((i64::from(col) + dc) as u32, info)));
         } else {
-            for (r, info) in src.rows.range(a.start.row..=a.end.row) {
-                dst.rows.insert(next.saturating_add(r.saturating_sub(a.start.row)), *info);
-            }
+            dst.rows.extend(src.rows.range(a.start.row..=a.end.row).map(|(&row, &info)| ((i64::from(row) + dr) as u32, info)));
         }
-        next = next.saturating_add(if across { a.width() } else { a.height() });
     }
     dst.validations.extend(packed_rules);
     Some((out, block))

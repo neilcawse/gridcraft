@@ -198,10 +198,28 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 - Font weights beyond regular/bold (#168), system font list (#4), Calibri metrics (#29), macOS
   chrome (#169, #170), Linux title bar (#54), icon consistency across apps (#173). **Estimate:** 7–12 h.
 
+### 25. Used worksheet extent and whole-line Paste Special (F)
+
+- The extent reported by workbook inspection and CLI `info` includes stored cells (including cell
+  formatting) and spills, not row or column records. The same extent backs Ctrl+End, Go To Special
+  (Last Cell), the review report's end-of-sheet field and grid navigation. Excel for Mac counted a
+  trailing bare XLSX row in UsedRange in the sizing probe; [Microsoft's last-cell guidance](https://support.microsoft.com/en-us/excel/locate-and-reset-the-last-cell-on-a-worksheet)
+  also includes formatting when locating the last cell. The effects of individual row and column
+  attributes are not established for all consumers.
+- Do not widen the shared extent based on those observations alone. It also bounds default and
+  selected-area print/PDF layout, CSV and range/text/HTML export, calculation, charts and pivots
+  (including XLSX serialization ranges), conditional formatting, selection, clipboard, fill, clear,
+  sort, validation, AutoFit, sheet operations, spelling, forecast, what-if analysis and macros.
+  In particular, Excel's default print and CSV bounds for bare or geometry-only lines are unmeasured.
+  A separate reported extent for inspection and navigation would avoid changing those work bounds.
+- Whole-line Paste Special (Formats, Values, and Column widths) has not been measured for dimension,
+  style, hidden, or outline transfer. Those special modes retain their existing behavior.
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-25 | minor | §25: record the worksheet-extent and whole-line Paste Special gaps and affected consumers. |
 | 2026-11-02 | minor | §17: equations (Insert › Equation, LaTeX source, gallery, editor) |
 | 2026-11-02 | minor | §13: Solver Sensitivity report: shadow prices, reduced costs and allowable ranges for Simplex LP; Lagrange multipliers and reduced gradients for GRG Nonlinear |
 | 2026-11-02 | minor | §4: charts, like every floating object, move and resize from eight handles (#190), so resizing is no longer listed as missing; the evidence is one paragraph again, without the stale "PRs #158, #161 open" |
