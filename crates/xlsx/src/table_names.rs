@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use gridcraft_core::{quote_sheet, split_sheet, valid_table_name};
+use gridcraft_core::{CellError, quote_sheet, split_sheet, valid_table_name};
 use gridcraft_formula::{Expr, StructRef, fold_name};
 use gridcraft_model::{CfRule, CfValueKind, Formula, PivotSource, SlicerSource, TotalsFn, Workbook, workbook::rewrite_table_tokens};
 
@@ -60,7 +60,8 @@ pub(crate) fn repair(wb: &mut Cow<'_, Workbook>, extra_names: impl IntoIterator<
             let mut name: String = base.chars().take(255 - tail.len()).collect();
             name.push_str(&tail);
             if valid_table_name(&name) && used.insert(fold_name(&name)) {
-                warnings.push(format!("Table {old:?} on sheet {:?} was renamed to {name:?}.", wb.sheets[at.0].name));
+                // Names as the user typed them: `{:?}` would escape a table's leading `\`.
+                warnings.push(format!("Table \"{old}\" on sheet \"{}\" was renamed to \"{name}\".", wb.sheets[at.0].name));
                 renamed.insert(at, name);
                 break;
             }
@@ -117,8 +118,17 @@ impl Rewrite<'_> {
         owner.filter(|&(si, ti)| self.original.sheets[si].tables[ti].name.eq_ignore_ascii_case(bare)).or_else(|| self.table(bare))
     }
 
+    /// Whether the token changes: it names a renamed table, or it names no table but is spelled
+    /// like a new name, which would capture it on reopen.
     fn renames(&self, bare: &str, owner: Option<Position>) -> bool {
-        self.resolve(bare, owner).is_some_and(|at| self.renamed.contains_key(&at))
+        match self.resolve(bare, owner) {
+            Some(at) => self.renamed.contains_key(&at),
+            None => self.captures(bare),
+        }
+    }
+
+    fn captures(&self, bare: &str) -> bool {
+        self.renamed.values().any(|name| name.eq_ignore_ascii_case(bare))
     }
 
     fn replacement(&self, n: &str, structured: bool, sheet: usize, owner: Option<Position>, env: &[String]) -> Option<Expr> {
@@ -135,7 +145,10 @@ impl Rewrite<'_> {
         if !structured && scope == usize::MAX && self.original.names.iter().any(|n| n.scope.is_some() && n.name.eq_ignore_ascii_case(bare)) {
             return None;
         }
-        let at = self.resolve(bare, owner.filter(|_| qualifier.is_none()))?;
+        let Some(at) = self.resolve(bare, owner.filter(|_| qualifier.is_none())) else {
+            // The reference stays the error it evaluates to rather than reaching a renamed table.
+            return self.captures(bare).then_some(Expr::Error(if structured { CellError::Ref } else { CellError::Name }));
+        };
         let name = self.renamed.get(&at)?.clone();
         Some(if structured {
             Expr::Name(name)

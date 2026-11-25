@@ -99,7 +99,8 @@ impl SheetApp {
         {
             self.deliver_pdf(r);
         }
-        if matches!(id, "file.save" | "file.saveAs" | "file.saveBytes")
+        // `file.saveBytes` only encodes: its caller shows the warnings once the bytes are handed over.
+        if matches!(id, "file.save" | "file.saveAs")
             && let Ok(r) = &r
         {
             self.show_save_warnings(r);
@@ -505,6 +506,7 @@ impl SheetApp {
             match host(&name, &b, save_as) {
                 Ok(()) => {
                     self.mark_active_saved_xlsx(&name);
+                    self.show_save_warnings(&r);
                     true
                 }
                 Err(e) => {
@@ -514,6 +516,7 @@ impl SheetApp {
             }
         } else if let Some(dl) = &self.services.download {
             dl(&name, &b);
+            self.show_save_warnings(&r);
             true
         } else {
             false

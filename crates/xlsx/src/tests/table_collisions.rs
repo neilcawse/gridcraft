@@ -566,3 +566,49 @@ fn headers_and_overlaps_do_not_claim_formula_ownership() {
         assert_eq!(formula.map(|f| f.text.as_str()), Some(expected), "{at:?}");
     }
 }
+
+/// A rename warning shows the names as spelled, not Rust-escaped: a table may start with `\`
+/// and a sheet name may hold `"`.
+#[test]
+fn rename_warnings_show_names_as_spelled() -> Result<(), Box<dyn std::error::Error>> {
+    let mut wb = Workbook::new();
+    let sh = Arc::make_mut(&mut wb.sheets[0]);
+    sh.name = "Q\"1".into();
+    sh.tables.push(table("\\Bad?Name", 0));
+    let (_, report) = crate::write::write_xlsx_named_with(&wb, crate::XlsxKind::Workbook, None, Default::default())?;
+    assert_eq!(report.warnings, [r#"Table "\Bad?Name" on sheet "Q"1" was renamed to "\Bad_Name"."#]);
+    Ok(())
+}
+
+/// A reference to no table must not start naming a table that repair gives its spelling: it
+/// stays the error it evaluates to.
+#[test]
+fn a_reference_to_no_table_is_not_captured_by_a_repaired_name() -> Result<(), Box<dyn std::error::Error>> {
+    let mut wb = Workbook::new();
+    let sh = Arc::make_mut(&mut wb.sheets[0]);
+    sh.tables.push(table("Sale?", 0));
+    sh.tables.push(table("Sale?", 3));
+    for (row, f) in [(6, "SUM(Sale__2[Value])"), (7, "COUNT(SALE__2)"), (8, "SUM(Sale?[Value])")] {
+        sh.set_cell(CellRef::new(row, 0), Cell::formula(Formula::new(f)));
+    }
+    wb.names.push(DefinedName {
+        name: "Dangling".into(),
+        scope: None,
+        formula: "Sale__2[Value]".into(),
+        comment: String::new(),
+        hidden: false,
+        uid: Default::default(),
+    });
+    let mut back = wb;
+    for cycle in 0..2 {
+        (back, _) = read_xlsx(&write_xlsx(&back)?)?;
+        let names: Vec<_> = back.sheets[0].tables.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["Sale_", "Sale__2"], "cycle {cycle}");
+        for (row, f) in [(6, "SUM(#REF!)"), (7, "COUNT(#NAME?)"), (8, "SUM(Sale_[Value])")] {
+            let text = back.sheets[0].cell(CellRef::new(row, 0)).and_then(|c| c.formula.as_ref()).map(|f| f.text.as_str());
+            assert_eq!(text, Some(f), "cycle {cycle}");
+        }
+        assert_eq!(back.name("Dangling", 0).map(|n| n.formula.as_str()), Some("#REF!"), "cycle {cycle}");
+    }
+    Ok(())
+}

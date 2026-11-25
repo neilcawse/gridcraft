@@ -40,7 +40,8 @@ impl TableRename<'_> {
 
 /// Rewrites table tokens and free names, leaving LET/LAMBDA binders, bound names and text alone.
 /// The callback receives a name, whether it is the table token of a structured reference, and
-/// the lexical binders currently in scope. For a table token it returns the new name.
+/// the lexical binders currently in scope. For a table token it returns the new name, or any
+/// other expression to take the whole structured reference's place.
 pub fn rewrite_table_tokens(e: &mut Expr, replacement: &impl Fn(&str, bool, &[String]) -> Option<Expr>) -> bool {
     fn args(xs: &mut [Expr], env: &mut Vec<String>, replacement: &impl Fn(&str, bool, &[String]) -> Option<Expr>) -> bool {
         xs.iter_mut().fold(false, |changed, e| visit(e, env, replacement) | changed)
@@ -58,7 +59,11 @@ pub fn rewrite_table_tokens(e: &mut Expr, replacement: &impl Fn(&str, bool, &[St
                         st.table = n;
                         true
                     }
-                    _ => false,
+                    Some(other) => {
+                        *e = other;
+                        true
+                    }
+                    None => false,
                 },
                 Expr::Name(n) if !env.iter().any(|local| gridcraft_formula::same_name(local, n)) => match replacement(n, false, env) {
                     Some(new) => {

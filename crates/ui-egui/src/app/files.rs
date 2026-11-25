@@ -52,8 +52,9 @@ impl SheetApp {
         }
     }
 
-    /// Unlike a clean open, a clean save leaves any existing info-bar notice alone.
-    pub(super) fn show_save_warnings(&mut self, r: &Json) {
+    /// Unlike a clean open, a clean save leaves any existing info-bar notice alone. Called once the
+    /// file is written or handed over.
+    pub(crate) fn show_save_warnings(&mut self, r: &Json) {
         if let Some(notice) = file_warning_notice(&file_warnings(r)) {
             self.notice = Some(notice);
         }

@@ -340,13 +340,19 @@ fn define_name(s: &mut Session, p: &Json) -> Result<Json> {
         refuse_stash_name(&s.doc()?.wb, p, n)?;
     }
     let d = s.doc()?;
-    if table_uses_name(&d.wb, &name) {
-        return Err(EngineError::Other(format!("A table already uses the name {name:?}. Enter a unique name.")));
-    }
     let scope = match str_param(p, "scope") {
         None | Some("Workbook") => None,
         Some(sh) => Some(d.wb.sheet_index(sh).ok_or_else(|| bad("formulas.defineName", "no such sheet"))?),
     };
+    // A new spelling may not collide with a table. A name that already has the spelling (from a
+    // file or an earlier version) can still be edited or defined over: that adds no collision.
+    let keeps_spelling = match str_param(p, "oldName") {
+        Some(old) => gridcraft_formula::same_name(old, &name),
+        None => d.wb.names.iter().any(|n| n.scope == scope && gridcraft_formula::same_name(&n.name, &name)),
+    };
+    if !keeps_spelling && table_uses_name(&d.wb, &name) {
+        return Err(EngineError::Other(format!("A table already uses the name \"{name}\". Enter a unique name.")));
+    }
     let mut refers = match str_param(p, "refersTo") {
         // As in Excel, relative references are relative to the active cell; names keep them
         // relative to A1, as files do.
@@ -1008,6 +1014,32 @@ mod tests {
         assert_eq!(wb.names.len(), 1);
         assert_eq!(wb.names[0].name, "Existing");
         assert_eq!(wb.names[0].formula, "1");
+        Ok(())
+    }
+
+    /// A name that already has a table's spelling (an older document allowed it) can still be
+    /// edited or defined over; only a new spelling is refused.
+    #[test]
+    fn a_name_already_spelled_like_a_table_can_still_be_edited() -> Result<()> {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("range.setValues", json!({"range": "A1:A2", "values": [["Header"], [1]]}))?;
+        s.execute("insert.table", json!({"range": "A1:A2", "name": "DataRows"}))?;
+        std::sync::Arc::make_mut(&mut s.doc_mut()?.wb).names.push(DefinedName {
+            name: "DataRows".into(),
+            scope: None,
+            formula: "1".into(),
+            comment: String::new(),
+            hidden: false,
+            uid: Default::default(),
+        });
+        s.execute("formulas.defineName", json!({"name": "DataRows", "oldName": "DataRows", "refersTo": "=2", "comment": "kept"}))?;
+        s.execute("formulas.defineName", json!({"name": "DATAROWS", "refersTo": "=3"}))?;
+        let refused = s.execute("formulas.defineName", json!({"name": "DataRows", "scope": "Sheet1", "refersTo": "=4"}));
+        assert!(matches!(refused, Err(e) if e.to_string() == "A table already uses the name \"DataRows\". Enter a unique name."));
+        let wb = &s.doc()?.wb;
+        assert_eq!(wb.names.len(), 1);
+        assert_eq!((wb.names[0].name.as_str(), wb.names[0].formula.as_str(), wb.names[0].scope), ("DATAROWS", "3", None));
         Ok(())
     }
 

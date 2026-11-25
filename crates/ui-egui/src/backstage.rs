@@ -787,6 +787,7 @@ pub fn export_as(app: &mut SheetApp, fmt: &str) -> bool {
             match (bytes, &app.services.download) {
                 (Some(b), Some(dl)) => {
                     dl(&name, &b);
+                    app.show_save_warnings(&r);
                     true
                 }
                 _ => false,
