@@ -658,11 +658,13 @@ impl<'h> Evaluator<'h> {
     /// An array constant written in the formula (`{1,2,3}`), or a defined name whose definition is
     /// one. Only reached on the path that would reject the argument.
     fn is_array_constant(&self, e: &Expr) -> bool {
-        let mut e = e;
-        while let Expr::Paren(inner) = e {
-            e = inner;
+        fn unparen(mut e: &Expr) -> &Expr {
+            while let Expr::Paren(inner) = e {
+                e = inner;
+            }
+            e
         }
-        match e {
+        match unparen(e) {
             Expr::Array(_) => true,
             // A LET or LAMBDA binding of the same name is a computed value.
             Expr::Name(n) if !self.env.iter().any(|(k, _)| gridcraft_formula::same_name(k, n)) => {
@@ -674,7 +676,8 @@ impl<'h> Evaluator<'h> {
                     },
                     None => (self.sheet, n.as_str()),
                 };
-                wb.name(bare, sheet).is_some_and(|def| matches!(gridcraft_formula::parse_name(&def.formula), Ok(Expr::Array(_))))
+                wb.name(bare, sheet)
+                    .is_some_and(|def| gridcraft_formula::parse_name(&def.formula).is_ok_and(|expr| matches!(unparen(&expr), Expr::Array(_))))
             }
             _ => false,
         }

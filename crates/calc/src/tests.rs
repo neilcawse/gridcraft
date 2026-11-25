@@ -255,6 +255,26 @@ fn aggregate_reference_form_keeps_array_constants() {
 }
 
 #[test]
+fn aggregate_reference_form_classifies_the_resolved_name() {
+    let mut t = T::new();
+    t.wb.sheets.push(std::sync::Arc::new(gridcraft_model::Sheet::new("Other")));
+    for (name, scope, formula) in
+        [("Konst", None, "{1,2,3}"), ("Konst", Some(0), "={1,2}*1"), ("Konst", Some(1), "=(({4,5}))"), ("Computed", None, "={1,2}*1")]
+    {
+        t.wb.names.push(gridcraft_model::DefinedName { name: name.into(), scope, formula: formula.into(), comment: String::new(), hidden: false });
+    }
+    for (at, formula, expected) in [
+        ("A1", "=AGGREGATE(9,4,Konst)", Value::Error(CellError::Value)),
+        ("A2", "=AGGREGATE(9,4,Computed)", Value::Error(CellError::Value)),
+        ("A3", "=AGGREGATE(9,4,Missing!Konst)", Value::Error(CellError::Name)),
+        ("A4", "=AGGREGATE(9,4,Other!Konst)", Value::number(9.0)),
+    ] {
+        t.set(at, formula);
+        assert_eq!(t.get(at), expected, "{formula}");
+    }
+}
+
+#[test]
 fn transition_arithmetic_in_a_sheet_scoped_name_follows_the_formula_worksheet() {
     let mut t = T::new();
     t.wb.sheets.push(std::sync::Arc::new(gridcraft_model::Sheet::new("Ordinary")));
