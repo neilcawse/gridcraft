@@ -48,8 +48,8 @@ fn field_index(db: &Array, a: &[Arg]) -> R<Option<usize>> {
     }
 }
 
-/// One criteria cell as a matcher. Plain text becomes a "begins with" pattern.
-fn cell_criterion(v: &Value) -> Option<Criterion> {
+/// One criteria cell as a matcher. Ordinary plain text becomes a "begins with" pattern.
+fn cell_criterion(v: &Value, transition: bool) -> Option<Criterion> {
     match v {
         Value::Empty => None,
         Value::Text(t) => {
@@ -60,7 +60,12 @@ fn cell_criterion(v: &Value) -> Option<Criterion> {
                 && !s.eq_ignore_ascii_case("TRUE")
                 && !s.eq_ignore_ascii_case("FALSE")
                 && CellError::parse(s).is_none();
-            if plain_text && !s.ends_with('*') { Some(Criterion::parse(&Value::from(format!("{s}*")))) } else { Some(Criterion::parse(v)) }
+            let exact_text = transition && !s.is_empty() && !s.contains(['*', '?', '~']);
+            if plain_text && !exact_text && !s.ends_with('*') {
+                Some(Criterion::parse(&Value::from(format!("{s}*"))))
+            } else {
+                Some(Criterion::parse(v))
+            }
         }
         other => Some(Criterion::parse(other)),
     }
@@ -90,11 +95,12 @@ fn matching_records(db: &Array, crit: &Array, ctx: &mut dyn Ctx) -> R<Vec<usize>
     // the label is unknown, criterion).
     let mut rows: Vec<CriteriaRow> = Vec::new();
     let mut tests = 0usize;
+    let transition = ctx.transition_evaluation();
     for r in 1..crit.rows {
         let mut conds = Vec::new();
         for c in 0..crit.cols {
             let Some(cell) = crit.get(r, c) else { continue };
-            let Some(cr) = cell_criterion(cell) else { continue };
+            let Some(cr) = cell_criterion(cell, transition) else { continue };
             conds.push((c, columns.get(c).copied().flatten(), cr));
         }
         tests = tests.saturating_add(conds.len().max(1));

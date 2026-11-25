@@ -557,6 +557,8 @@ impl<'h> Evaluator<'h> {
         if !(1..=19).contains(&func) || (name == "SUBTOTAL" && func > 11) {
             return err(CellError::Value);
         }
+        let aggregate_array_form = name == "AGGREGATE" && func >= 14;
+        let aggregate_reference_form = name == "AGGREGATE" && !aggregate_array_form;
         let skip_hidden = matches!(options, 1 | 3 | 5 | 7);
         // SUBTOTAL leaves out rows a filter hides whatever the function number (Microsoft's
         // SUBTOTAL documentation); 101-111 also leave out rows hidden by hand.
@@ -566,8 +568,8 @@ impl<'h> Evaluator<'h> {
         let skip_nested = name == "SUBTOTAL" || options <= 3;
         let mut values = Vec::new();
         let mut k = None;
-        let refs = if name == "AGGREGATE" && func >= 14 { &rest[..1.min(rest.len())] } else { rest };
-        if name == "AGGREGATE" && func >= 14 {
+        let refs = if aggregate_array_form { &rest[..1] } else { rest };
+        if aggregate_array_form {
             k = rest.get(1).map(|e| self.value(e));
         }
         // Every cell visited (even one skipped as hidden, nested or an error) and every value
@@ -581,7 +583,7 @@ impl<'h> Evaluator<'h> {
         let mut inputs = Vec::new();
         let mut budget = MAX_CELLS;
         for e in refs {
-            let v = if name == "AGGREGATE"
+            let v = if aggregate_array_form
                 && skip_errors
                 && let Some(v) = self.eval_aggregate_filtered_div(e)
             {
@@ -600,6 +602,8 @@ impl<'h> Evaluator<'h> {
                         inputs.push(Input::Cells(a.sheet, range));
                     }
                 }
+                // Functions 1–13 accept references and scalar arguments, not computed arrays.
+                Ev::V(Value::Array(_)) if aggregate_reference_form => return err(CellError::Value),
                 Ev::V(v) => {
                     let n = match &v {
                         Value::Array(a) => u64::try_from(a.data.len()).unwrap_or(u64::MAX),
@@ -733,10 +737,11 @@ impl<'h> Evaluator<'h> {
         };
         let len = cond_max + 1;
         let sys = self.host.workbook().date_system;
-        // Equality keys with transition-only matches also match a blank and
-        // have already taken the fallback above.
+        // A numeric key on a transition sheet can match Booleans; the numeric index doesn't
+        // contain those. Text keys already fell back above on transition sheets (blank equals text).
         if *cmp_op == BinOp::Eq
             && matches!(key, Value::Text(_) | Value::Number(_))
+            && !transition
             && u64::from(len) <= MAX_CELLS
             && let (full_range, base_off) = if vertical {
                 let r0 = u.start.row.min(cond_area.range.start.row);
@@ -882,11 +887,13 @@ mod tests {
     fn aggregate_with_skip_errors_trims_bounded_references_past_used_range() {
         let mut wb = Workbook::default();
         let sh = wb.sheet_mut(0).unwrap_or_else(|| panic!("sheet"));
-        sh.set_value(CellRef::new(1, 0), Value::from("k"));
+        // Blank compares equal to text in transition mode. A nonzero key excludes the suffix
+        // on either sheet and makes the bounded shortcut safe.
+        sh.set_value(CellRef::new(1, 0), Value::Number(1.0));
         sh.set_value(CellRef::new(1, 1), Value::Number(10.0));
-        sh.set_value(CellRef::new(2, 0), Value::from("other"));
+        sh.set_value(CellRef::new(2, 0), Value::Number(2.0));
         sh.set_value(CellRef::new(2, 1), Value::Number(20.0));
-        sh.set_value(CellRef::new(3, 0), Value::from("k"));
+        sh.set_value(CellRef::new(3, 0), Value::Number(1.0));
         sh.set_value(CellRef::new(3, 1), Value::Number(42.0));
         let expr = gridcraft_formula::parser::parse("=AGGREGATE(15,6,B3:$B$100000/(A3:$A$100000=A2),1)").unwrap_or_else(|e| panic!("{e}"));
         for transition in [false, true] {

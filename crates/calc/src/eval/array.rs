@@ -203,14 +203,16 @@ fn concat_arrays(x: &Value, y: &Value, sys: gridcraft_core::DateSystem, budget: 
 }
 
 pub(super) fn operator_compare(a: &Value, b: &Value, transition: bool) -> std::cmp::Ordering {
-    if transition {
-        // Transition formulas compare a blank with a space as equal, and
-        // compare empty text with numbers as zero.
-        match (a, b) {
-            (Value::Empty, Value::Text(t)) | (Value::Text(t), Value::Empty) if t.as_ref() == " " => return std::cmp::Ordering::Equal,
-            (Value::Number(_), Value::Text(t)) if t.is_empty() => return compare(a, &Value::Empty),
-            (Value::Text(t), Value::Number(_)) if t.is_empty() => return compare(&Value::Empty, b),
-            _ => {}
+    // Text pairs still collate as text. Only mixed comparisons take the numeric path.
+    if transition && !matches!((a, b), (Value::Text(_), Value::Text(_))) {
+        let numeric = |v: &Value| match v {
+            Value::Number(n) => Some(*n),
+            Value::Bool(b) => Some(f64::from(*b)),
+            Value::Text(_) | Value::Empty => Some(0.0),
+            _ => None,
+        };
+        if let (Some(x), Some(y)) = (numeric(a), numeric(b)) {
+            return gridcraft_core::compare_numbers(x, y);
         }
     }
     compare(a, b)
@@ -242,6 +244,9 @@ fn binary_scalar(op: BinOp, a: &Value, b: &Value, sys: gridcraft_core::DateSyste
                 Value::number(x.powf(y))
             }
         }),
+        BinOp::Concat if transition && matches!((a, b), (Value::Text(_), Value::Empty) | (Value::Empty, Value::Text(_))) => {
+            Value::Error(CellError::Value)
+        }
         BinOp::Concat => match (a.to_text(), b.to_text()) {
             (Ok(x), Ok(y)) => {
                 if x.len() + y.len() > 32767 * 4 {

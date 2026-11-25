@@ -380,6 +380,17 @@ impl<'h> Evaluator<'h> {
                 }
                 ev => self.deref(ev),
             };
+            // Preserve the numeric result of a scalar addition, the measured transition
+            // DATEVALUE shape. Numeric literals, references and arrays follow the usual path.
+            if self.transition && spec.name == "DATEVALUE" && !from_ref && matches!(value, Value::Number(_)) {
+                let mut inner = a;
+                while let Expr::Paren(expr) = inner {
+                    inner = expr;
+                }
+                if matches!(inner, Expr::Binary(gridcraft_formula::BinOp::Add, ..)) {
+                    return if self.spend(1) { Ev::V(value) } else { err(CellError::Calc) };
+                }
+            }
             // Only an argument left out (`f(a,,b)`) is omitted; one that computes a blank is given.
             let blank_value = !from_ref && value == Value::Empty && lambda_at != Some(i) && !matches!(a, Expr::Missing);
             let value = one_cell_reference_as_array(self.host.one_cell_reading(), spec.name, from_ref, value);
@@ -410,7 +421,17 @@ impl<'h> Evaluator<'h> {
         let mut acc = Acc::default();
         let mut first_error = None;
         for a in args {
-            let ev = self.eval(a);
+            let mut ev = self.eval(a);
+            // A numeric text literal contributes zero. Other argument forms are unmeasured.
+            if self.transition && kind == Agg::Average && matches!(ev, Ev::V(Value::Text(_))) {
+                let mut literal = a;
+                while let Expr::Paren(inner) = literal {
+                    literal = inner;
+                }
+                if matches!(literal, Expr::Text(t) if gridcraft_core::parse::parse_number_text(t).is_some()) {
+                    ev = Ev::V(Value::Number(0.0));
+                }
+            }
             let steps = match ev {
                 Ev::R(areas) => areas.iter().map(|area| self.aggregate_area(kind, area, &mut acc)).collect(),
                 ev => {

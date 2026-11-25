@@ -248,6 +248,9 @@ impl Ctx for FnCtx<'_, '_> {
     fn random(&mut self) -> f64 {
         self.ev.host.random()
     }
+    fn transition_evaluation(&self) -> bool {
+        self.ev.transition
+    }
     /// Excel's "formula as criteria": the formula is written for the first record, so its relative
     /// references move down to `record`'s row, and the database's labels name its fields.
     /// Known gap: the shifted references are not dependencies of the calling cell. One that lands
