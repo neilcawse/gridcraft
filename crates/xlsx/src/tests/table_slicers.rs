@@ -217,6 +217,28 @@ fn slicer_without_its_table_or_column_is_dropped_with_a_warning() -> TestResult 
     Ok(())
 }
 
+#[test]
+fn empty_table_drops_its_slicer_but_preserves_imported_marker() -> TestResult {
+    let (mut wb, _) = read_xlsx(&save(&workbook())?.0)?;
+    let cache_name = wb.sheets[1].slicers[0].imported_cache.name.clone();
+    let marker = wb.names.iter().find(|n| n.name == cache_name).ok_or("imported marker")?.clone();
+    for (range, totals) in [("A1:C1", false), ("A1:C2", true)] {
+        let table = &mut wb.sheet_mut(0).ok_or("source sheet")?.tables[0];
+        table.range = RangeRef::parse(range).ok_or("test range")?;
+        table.totals_row = totals;
+        let (bytes, warnings) = save(&wb)?;
+        let parts = unzip(&bytes)?;
+        assert!(parts.contains_key("xl/tables/table1.xml"));
+        assert!(parts.keys().all(|k| !k.contains("slicer")));
+        assert!(parts.values().all(|xml| !xml.contains("slicerList") && !xml.contains("slicerCaches") && !xml.contains("sle:slicer")));
+        assert!(warnings.iter().any(|w| w.contains("slicer \"Region 1\"") && w.contains("no data rows")), "{warnings:?}");
+        let (back, _) = read_xlsx(&bytes)?;
+        assert!(back.names.contains(&marker));
+        assert!(back.sheets[1].slicers.is_empty());
+    }
+    Ok(())
+}
+
 /// A file's table slicer keeps its cache name, its marker (written once, with its attributes) and
 /// the cache's item options, and is bound by file id even when another table has a column of the
 /// same name.
@@ -235,19 +257,47 @@ fn imported_table_slicer_keeps_its_cache() -> TestResult {
     let slicer = r#"<slicers xmlns="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"><slicer name="Status" cache="Slicer_Status" caption="Status" rowHeight="241300"/></slicers>"#;
     let cache = r#"<slicerCacheDefinition xmlns="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main" name="Slicer_Status" sourceName="Status"><extLst><x:ext uri="{2F2917AC-EB37-4324-AD4E-5DD8C200BD13}" xmlns:x15="http://schemas.microsoft.com/office/spreadsheetml/2010/11/main"><x15:tableSlicerCache tableId="9" column="5" sortOrder="descending" customListSort="0" crossFilter="none"/></x:ext></extLst></slicerCacheDefinition>"#;
     let (first, second) = (table(4, "Open", "A1:A2"), table(9, "Done", "C1:C2"));
-    let file = make_zip(&[
-        ("[Content_Types].xml", CT.as_bytes()),
-        ("_rels/.rels", ROOT_RELS.as_bytes()),
-        ("xl/workbook.xml", book.as_bytes()),
-        ("xl/_rels/workbook.xml.rels", book_rels.as_bytes()),
-        ("xl/worksheets/sheet1.xml", sheet.as_bytes()),
-        ("xl/worksheets/_rels/sheet1.xml.rels", sheet_rels.as_bytes()),
-        ("xl/drawings/drawing1.xml", drawing.as_bytes()),
-        ("xl/tables/table1.xml", first.as_bytes()),
-        ("xl/tables/table2.xml", second.as_bytes()),
-        ("xl/slicers/slicer1.xml", slicer.as_bytes()),
-        ("xl/slicerCaches/slicerCache1.xml", cache.as_bytes()),
-    ]);
+    let package = |second: &str, cache: &str| {
+        let sheet = if second.contains("name=\"Other\"") {
+            sheet.replace(r#"r="C1" t="inlineStr"><is><t>Status"#, r#"r="C1" t="inlineStr"><is><t>Other"#)
+        } else {
+            sheet.to_owned()
+        };
+        make_zip(&[
+            ("[Content_Types].xml", CT.as_bytes()),
+            ("_rels/.rels", ROOT_RELS.as_bytes()),
+            ("xl/workbook.xml", book.as_bytes()),
+            ("xl/_rels/workbook.xml.rels", book_rels.as_bytes()),
+            ("xl/worksheets/sheet1.xml", sheet.as_bytes()),
+            ("xl/worksheets/_rels/sheet1.xml.rels", sheet_rels.as_bytes()),
+            ("xl/drawings/drawing1.xml", drawing.as_bytes()),
+            ("xl/tables/table1.xml", first.as_bytes()),
+            ("xl/tables/table2.xml", second.as_bytes()),
+            ("xl/slicers/slicer1.xml", slicer.as_bytes()),
+            ("xl/slicerCaches/slicerCache1.xml", cache.as_bytes()),
+        ])
+    };
+    let mut mismatches = Vec::new();
+    for (second, cache, target) in [
+        (second.clone(), cache.replace("column=\"5\"", "column=\"77\""), Some("Done")),
+        (second.replace("name=\"Status\"", "name=\"Other\""), cache.replace("column=\"5\"", "column=\"77\""), None),
+        (second.clone(), cache.replace("tableId=\"9\"", "tableId=\"77\""), None),
+        (second.replace("name=\"Status\"", "name=\"Other\""), cache.replace("tableId=\"9\"", "tableId=\"invalid\""), None),
+        (second.clone(), cache.replace(" tableId=\"9\"", ""), None),
+        (second.replace("name=\"Status\"", "name=\"Other\""), cache.replace(" tableId=\"9\"", ""), Some("Open")),
+    ] {
+        let (wb, report) = read_xlsx(&package(&second, &cache))?;
+        let actual = wb.sheets[0].slicers.first().and_then(|s| match &s.source {
+            SlicerSource::Table { table, .. } => Some(table.as_str()),
+            _ => None,
+        });
+        let warned = report.warnings.iter().any(|w| w.contains("table column could not be found"));
+        if actual != target || warned != target.is_none() {
+            mismatches.push(format!("expected {target:?}, got {actual:?} with warnings {:?}: {cache}", report.warnings));
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    let file = package(&second, cache);
     let (wb, report) = read_xlsx(&file)?;
     assert!(report.warnings.iter().all(|w| !w.contains("slicer")), "{:?}", report.warnings);
     let sl = wb.sheets[0].slicers.first().ok_or("slicer")?;

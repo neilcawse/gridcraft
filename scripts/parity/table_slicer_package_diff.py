@@ -12,11 +12,10 @@ parts compare equal:
   options, and whether a workbook-scoped `#N/A` defined name (its marker) exists;
 - every slicer of every worksheet (by sheet name): its name, cache, caption, column count, style,
   button height and the sheet `extLst` entry listing its part;
-- every slicer drawing frame: its name, the markup-compatibility namespace it requires, and its
-  anchor cells (offsets compared within one pixel). An offset past the end of its column or row
-  (Excel writes some) is first carried into the following columns or rows, using the BEFORE sheet's
-  widths and heights (Excel's pixel width with a 7 px maximum digit width, the default font's), so
-  the same position written in normal form compares equal.
+- every slicer drawing frame: its name, compatibility choice, anchor type and edit mode, and
+  its geometry (within one pixel). Cell positions use each package's own grid, assuming a 7 px
+  maximum digit width; this is a comparison convention, not an Excel rendering measurement.
+  Expressing an overflowing offset in the next row or column does not change the position.
 
 Prints the reduced form of BEFORE and every difference; exits 1 when they differ, 2 when BEFORE has
 no slicer.
@@ -34,7 +33,7 @@ MAX_DIGIT_PX = 7
 
 
 class Grid:
-    """A worksheet's column widths and row heights in EMU, for carrying overflowing offsets."""
+    """A worksheet's column widths and row heights in EMU."""
 
     def __init__(self, ws):
         fmt = first(ws, "sheetFormatPr") if ws is not None else None
@@ -45,25 +44,26 @@ class Grid:
         cols = first(ws, "cols") if ws is not None else None
         for c in [] if cols is None else kids(cols, "col"):
             w = self.default_col if c.get("width") is None else self.col_emu(float(c.get("width")))
-            for i in range(int(c.get("min", 1)) - 1, min(int(c.get("max", 1)), 1024)):
+            for i in range(int(c.get("min", 1)) - 1, min(int(c.get("max", 1)), 16384)):
                 self.cols[i] = 0 if c.get("hidden") in ("1", "true") else w
         data = first(ws, "sheetData") if ws is not None else None
         for r in [] if data is None else kids(data, "row"):
-            if r.get("ht") is not None and r.get("r") is not None:
-                self.rows[int(r.get("r")) - 1] = 0 if r.get("hidden") in ("1", "true") else round(float(r.get("ht")) * EMU_PER_PT)
+            if r.get("r") is not None:
+                if r.get("hidden") in ("1", "true"):
+                    self.rows[int(r.get("r")) - 1] = 0
+                elif r.get("ht") is not None:
+                    self.rows[int(r.get("r")) - 1] = round(float(r.get("ht")) * EMU_PER_PT)
 
     @staticmethod
     def col_emu(width):
         return int((256 * width + int(128 / MAX_DIGIT_PX)) / 256 * MAX_DIGIT_PX) * EMU_PER_PX
 
-    def carry(self, cell):
-        cell = dict(cell)
+    def position(self, cell):
+        result = {}
         for axis, sizes, default in (("col", self.cols, self.default_col), ("row", self.rows, self.default_row)):
-            off = f"{axis}Off"
-            while cell.get(off, 0) > 0 and cell.get(off, 0) >= (size := sizes.get(cell.get(axis, 0), default)) > 0:
-                cell[off] -= size
-                cell[axis] = cell.get(axis, 0) + 1
-        return cell
+            index = cell.get(axis, 0)
+            result[axis] = index * default + sum(size - default for i, size in sizes.items() if i < index) + cell.get(f"{axis}Off", 0)
+        return result
 
 
 def local(tag):
@@ -116,8 +116,8 @@ def ext_uris(root, list_name):
     return out
 
 
-def reduce(path, grids=None):
-    """The package's slicer facts; `grids` (sheet name → Grid) normalizes frame anchors."""
+def reduce(path):
+    """The package's slicer facts."""
     pkg = Package(path)
     wb_part = next((t for k, t in pkg.rels("").values() if k == "officeDocument"), "xl/workbook.xml")
     wb = pkg.xml(wb_part)
@@ -161,11 +161,10 @@ def reduce(path, grids=None):
             entry["pivotTables"] = sorted(p.get("name") for p in descendants(c, "pivotTable"))
         caches[c.get("name")] = entry
 
-    slicers, frames, own_grids = {}, {}, {}
+    slicers, frames = {}, {}
     for sheet_name, part in sheets:
         ws = pkg.xml(part)
-        own_grids[sheet_name] = Grid(ws)
-        grid = (grids or {}).get(sheet_name, own_grids[sheet_name])
+        grid = Grid(ws)
         listed = ext_uris(ws, "slicerList")
         for rid, (kind, target) in pkg.rels(part).items():
             if kind == "slicer" and (x := pkg.xml(target)) is not None:
@@ -182,27 +181,29 @@ def reduce(path, grids=None):
                 for anchor in d:
                     for sl in descendants(anchor, "slicer"):
                         choice = next(iter(descendants(anchor, "Choice")), None)
-                        cells = {}
-                        for edge in ("from", "to"):
+                        geometry = {}
+                        for edge in ("from", "to", "pos", "ext"):
                             e = first(anchor, edge)
                             if e is not None:
-                                cells[edge] = grid.carry({local(k.tag): int(k.text or 0) for k in e})
+                                geometry[edge] = (grid.position({local(k.tag): int(k.text or 0) for k in e})
+                                                  if edge in ("from", "to") else {k: int(v) for k, v in e.attrib.items()})
                         frames[(sheet_name, sl.get("name"))] = {
                             "requires": None if choice is None else choice.get("Requires"),
-                            "anchor": cells,
+                            "type": local(anchor.tag),
+                            "editAs": anchor.get("editAs", "twoCell") if local(anchor.tag) == "twoCellAnchor" else None,
+                            "anchor": geometry,
                         }
-    return {"caches": caches, "slicers": slicers, "frames": frames, "grids": own_grids}
+    return {"caches": caches, "slicers": slicers, "frames": frames}
 
 
 def same_anchor(a, b):
     if a.keys() != b.keys():
         return False
     for edge in a:
-        for k in ("col", "row"):
-            if a[edge].get(k) != b[edge].get(k):
-                return False
-        for k in ("colOff", "rowOff"):
-            if abs(a[edge].get(k, 0) - b[edge].get(k, 0)) > EMU_PER_PX:
+        if a[edge].keys() != b[edge].keys():
+            return False
+        for k in a[edge]:
+            if abs(a[edge][k] - b[edge][k]) > EMU_PER_PX:
                 return False
     return True
 
@@ -212,7 +213,7 @@ def main():
         print(__doc__)
         return 64
     before = reduce(sys.argv[1])
-    after = reduce(sys.argv[2], before["grids"])
+    after = reduce(sys.argv[2])
     for section in ("caches", "slicers", "frames"):
         print(f"[{section}]")
         for k, v in sorted(before[section].items(), key=str):
@@ -229,7 +230,7 @@ def main():
             elif k not in b:
                 diffs.append(f"{section} {k}: added {a[k]}")
             elif section == "frames":
-                if b[k]["requires"] != a[k]["requires"] or not same_anchor(b[k]["anchor"], a[k]["anchor"]):
+                if any(b[k][f] != a[k][f] for f in ("requires", "type", "editAs")) or not same_anchor(b[k]["anchor"], a[k]["anchor"]):
                     diffs.append(f"{section} {k}: {b[k]} -> {a[k]}")
             elif b[k] != a[k]:
                 diffs.append(f"{section} {k}: {b[k]} -> {a[k]}")

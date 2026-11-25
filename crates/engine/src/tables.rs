@@ -385,8 +385,33 @@ pub(crate) fn sync_headers(cx: &mut crate::cmd::Ctx) {
     if renames.is_empty() {
         return;
     }
-    // Structured references follow the new names.
+    // Slicers and structured references follow the new names.
     for i in 0..cx.wb.sheets.len() {
+        let slicers = cx.wb.sheets[i]
+            .slicers
+            .iter()
+            .enumerate()
+            .filter_map(|(index, sl)| {
+                let gridcraft_model::SlicerSource::Table { table, column, .. } = &sl.source else { return None };
+                let mut updated = column.as_str();
+                for (_, renamed_table, _, old, new) in &renames {
+                    if table.eq_ignore_ascii_case(renamed_table) && updated.eq_ignore_ascii_case(old) {
+                        updated = new;
+                    }
+                }
+                (updated != column).then(|| (index, updated.to_owned()))
+            })
+            .collect::<Vec<_>>();
+        if !slicers.is_empty()
+            && let Some(sh) = cx.wb.sheet_mut(i)
+        {
+            for (index, new) in slicers {
+                if let gridcraft_model::SlicerSource::Table { column, .. } = &mut sh.slicers[index].source {
+                    *column = new;
+                }
+            }
+        }
+
         let formulas: Vec<(CellRef, std::sync::Arc<Formula>)> =
             cx.wb.sheets.get(i).map(|s| s.cells.iter().filter_map(|(c, x)| x.formula.clone().map(|f| (c, f))).collect()).unwrap_or_default();
         for (c, f) in formulas {

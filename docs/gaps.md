@@ -44,7 +44,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
   Excel for Mac 16.114 files used x14 for cross-sheet expression and `cfvo` rules; Excel opened
   GridCraft-written main-section `cfvo` files without a repair prompt.
 - **Evidence:** `crates/xlsx/src/passthrough.rs` (what is kept, and why the rest isn't).
-- **Impact:** open-edit-save still simplifies workbooks with table or OLAP slicers or timelines.
+- **Impact:** open-edit-save still simplifies workbooks with OLAP slicers or timelines.
 - **Estimate:** 6–10 h. [file-format-parity.md](file-format-parity.md)
 
 ### 4. Charts lose options on round trip; shallow chart model (F, FF)

@@ -47,7 +47,7 @@ pub const FRAME_URI: &str = "http://schemas.microsoft.com/office/drawing/2010/sl
 const NS_SLE15: &str = "http://schemas.microsoft.com/office/drawing/2012/slicer";
 const EXT_SHEET_SLICERS: &str = "{A8765BA9-456A-4dab-B4F3-ACF838C121DE}";
 const EXT_WB_SLICER_CACHES: &str = "{BBE1A952-AA13-448e-AADC-164F8A28A991}";
-/// The sheet's `x15` list of table slicer parts.
+/// The sheet's `x14:slicerList` extension for table slicer parts.
 const EXT_SHEET_TABLE_SLICERS: &str = "{3A4CF648-6AED-40f4-86FF-DC5316D8AED3}";
 /// The workbook's `x15` list of table slicer caches.
 const EXT_WB_TABLE_SLICER_CACHES: &str = "{46BE6895-7355-4a93-B00E-2C351335B9C9}";
@@ -201,7 +201,8 @@ fn read_cache_def(x: &El) -> Option<CacheDef> {
             .unwrap_or_default(),
     });
     let table = x.child("extLst").and_then(|l| l.kids("ext").find_map(|e| e.child("tableSlicerCache"))).map(|t| TableCache {
-        table_id: t.attr_u32("tableId"),
+        // Zero is never a recorded table id. Do not treat malformed ids as absent.
+        table_id: t.attr("tableId").map(|id| id.trim().parse().unwrap_or(0)),
         column_id: t.attr_u32("column"),
         items: TableSlicerItems {
             descending: t.attr("sortOrder") == Some("descending"),
@@ -391,31 +392,38 @@ pub fn resolve(
 }
 
 /// Binds the table slicers [`resolve`] found to their tables, once the tables have their repaired
-/// names, and adds them to their sheets. A cache names its table and column by file id; without
-/// them, the slicer filters the first table with a column named by the cache's `sourceName`.
+/// names. A present table id limits recovery to that table; only an absent id permits a unique
+/// workbook-wide header match.
 pub fn attach_tables(cx: &mut Ctx<'_>, wb: &mut Workbook) {
     for t in std::mem::take(&mut cx.slicers.tables) {
-        let by_id = t.table.table_id.and_then(|id| cx.file_tables.get(&id)).and_then(|(model_id, columns)| {
-            let table = wb.sheets.iter().flat_map(|sh| &sh.tables).find(|x| x.id == *model_id)?;
-            let header = t.table.column_id.and_then(|c| columns.get(&c)).filter(|h| !h.is_empty()).unwrap_or(&t.source);
-            let column = table.columns.get(table.column_index(header)?)?;
-            Some((table.name.clone(), column.name.clone()))
-        });
-        let resolved = by_id.or_else(|| {
-            (!t.source.is_empty())
-                .then(|| {
-                    wb.sheets
-                        .iter()
-                        .flat_map(|s| &s.tables)
-                        .find_map(|x| x.columns.iter().find(|c| c.name.eq_ignore_ascii_case(&t.source)).map(|c| (x.name.clone(), c.name.clone())))
-                })
-                .flatten()
-        });
+        let tables = || wb.sheets.iter().flat_map(|sh| &sh.tables);
+        let resolved = match t.table.table_id {
+            Some(id) => cx.file_tables.get(&id).and_then(|(model_id, columns)| {
+                let table = tables().find(|x| x.id == *model_id)?;
+                let ci = t
+                    .table
+                    .column_id
+                    .and_then(|id| columns.get(&id))
+                    .filter(|h| !h.is_empty())
+                    .and_then(|h| table.column_index(h))
+                    .or_else(|| if t.source.is_empty() { None } else { table.column_index(&t.source) })?;
+                Some((table.name.as_str(), table.columns[ci].name.as_str()))
+            }),
+            None if !t.source.is_empty() => {
+                let mut matches = tables().filter_map(|table| {
+                    let ci = table.column_index(&t.source)?;
+                    Some((table.name.as_str(), table.columns[ci].name.as_str()))
+                });
+                matches.next().filter(|_| matches.next().is_none())
+            }
+            None => None,
+        };
         let Some((table, column)) = resolved.filter(|(table, column)| !table.is_empty() && !column.is_empty()) else {
             cx.warn(format!("slicer \"{}\": its table column could not be found; skipped", t.part.name));
             continue;
         };
-        let selected = saved_table_column_selection(wb, t.sheet, &table, &column);
+        let selected = saved_table_column_selection(wb, t.sheet, table, column);
+        let (table, column) = (table.to_owned(), column.to_owned());
         let id = cx.next_object_id();
         let caption = if t.part.caption.is_empty() { column.clone() } else { t.part.caption };
         let slicer = Slicer {
@@ -543,6 +551,10 @@ impl SlicerWriter {
                             continue;
                         };
                         let t = &wb.sheets[tsi].tables[ti];
+                        if t.data_range().is_none() {
+                            warnings.push(format!("slicer \"{base}\" was dropped because table \"{table}\" has no data rows"));
+                            continue;
+                        }
                         let Some(ci) = t.column_index(column).filter(|&ci| ci < t.range.width() as usize) else {
                             warnings.push(format!("slicer \"{base}\" was dropped because table \"{table}\" has no column \"{column}\""));
                             continue;
