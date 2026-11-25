@@ -92,3 +92,7 @@ Whether Excel cancels cut mode when a sheet is inserted, deleted, moved or renam
 Refusing is the conservative choice; it never moves cells from a sheet the person did not cut.
 Copy is unaffected, because it pastes from the snapshot taken when copying. Drag-and-drop cuts and
 pastes in one step, so no sheet change can come between them.
+
+Enter-to-Paste shows the refusal without dismissing it on the same keystroke and leaves the
+clipboard pending, like Cmd+V and the ribbon. It still ends copy mode after a successful paste.
+Excel's behavior on refusal is unmeasured; this keeps GridCraft's own paste paths consistent.

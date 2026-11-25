@@ -124,8 +124,14 @@ pub(super) fn keyboard(app: &mut SheetApp, ctx: &egui::Context, resp: &egui::Res
                     }
                     // Excel: Enter while a copied range is marked pastes it and ends copy mode.
                     Key::Enter if !m.alt && !m.ctrl && !shift && !cmd && app.session.clipboard.is_some() => {
-                        app.run_or_alert("edit.paste", json!({}));
-                        app.session.clipboard = None;
+                        match app.run("edit.paste", json!({})) {
+                            Ok(_) => app.session.clipboard = None,
+                            Err(e) => {
+                                // The Enter that caused the refusal must not dismiss its alert.
+                                ctx.input_mut(|i| i.consume_key(m, key));
+                                app.alert(e);
+                            }
+                        }
                         app.grid.ensure_visible = true;
                     }
                     Key::Enter => {
