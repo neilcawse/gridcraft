@@ -323,7 +323,7 @@ fn a_name_scoped_to_a_kept_sheet_follows_the_repaired_table() -> Result<(), Box<
             kind: PreservedSheetKind::Module,
             before: 1,
             sheet_id: 2,
-            names: vec![PreservedName { attrs: r#" name="LocalRef" hidden="1""#.into(), formula: "Source?Rows[Value]".into() }],
+            names: vec![PreservedName { name: "LocalRef".into(), attrs: r#" hidden="1""#.into(), formula: "Source?Rows[Value]".into() }],
             ..Default::default()
         }],
         ..Default::default()
@@ -483,7 +483,7 @@ fn sheet_scoped_names_reserve_table_names() -> Result<(), Box<dyn std::error::Er
             kind: PreservedSheetKind::Module,
             before: 2,
             sheet_id: 3,
-            names: vec![PreservedName { attrs: r#" name="LOCAL&#82;EF" comment="A &amp; B""#.into(), formula: "Sheet1!$H$2".into() }],
+            names: vec![PreservedName { name: "LOCALREF".into(), attrs: r#" comment="A &amp; B""#.into(), formula: "Sheet1!$H$2".into() }],
             ..Default::default()
         }],
         ..Default::default()

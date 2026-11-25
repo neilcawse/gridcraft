@@ -296,7 +296,7 @@ fn forecast_sheet(s: &mut Session, p: &Json) -> Result<Json> {
     let fmt_of = |c: Option<&CellRef>| c.map(|c| d.wb.styles.get(sh.style_id(*c)).num_fmt.clone()).unwrap_or_default();
     let (tfmt, vfmt) = (fmt_of(tcells.get(skip)), fmt_of(vcells.get(skip)));
     let sheet_name = d.wb.next_sheet_name();
-    let table_name = (1..).map(|n| format!("Table{n}")).find(|n| d.wb.table(n).is_none()).unwrap_or_else(|| "Table".into());
+    let table_name = d.wb.next_table_name();
     let chart_id = d.wb.next_object_id();
     let table_id = chart_id.saturating_add(1);
 

@@ -392,7 +392,8 @@ pub fn write_workbook(wb: &Workbook, wb_rels: &mut Rels, out: &mut Out, macros: 
         // before it.
         let position = s.before.min(wb.sheets.len()) + kept.sheets.len();
         for n in &s.names {
-            let _ = write!(kept.names, "<definedName localSheetId=\"{position}\"{}>{}</definedName>", n.attrs, xml::esc(&n.formula));
+            let (name, attrs, formula) = (esc_attr(&n.name), &n.attrs, xml::esc(&n.formula));
+            let _ = write!(kept.names, "<definedName localSheetId=\"{position}\" name=\"{name}\"{attrs}>{formula}</definedName>");
         }
         kept.sheets.push(KeptSheet { before: s.before, name: s.name.clone(), visibility: s.visibility, rid, sheet_id: s.sheet_id });
     }

@@ -95,8 +95,11 @@ pub struct PreservedSheet {
 /// names rewrite as they do the workbook's own names.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PreservedName {
-    /// The attributes of the element other than `localSheetId` (the sheet's position when it is
-    /// written), as they are written: ` name="Rate" hidden="1"`.
+    /// The name (its `name` attribute, unescaped), held apart so that the namespace tables share
+    /// with defined names ([`crate::Workbook::table_name_taken`]) is read without parsing XML.
+    pub name: String,
+    /// The attributes of the element other than `name` and `localSheetId` (the sheet's position
+    /// when it is written), as they are written: ` hidden="1" comment="A &amp; B"`.
     pub attrs: String,
     /// The formula, as the file spells it (the text of the element, not escaped).
     pub formula: String,
