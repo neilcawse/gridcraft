@@ -7830,6 +7830,99 @@ fn whole_row_cut_paste_refuses_a_replaced_source_index() {
     assert_eq!(wb.sheet(1).unwrap().value(CellRef::parse("A3").unwrap()), Value::from("source"));
 }
 
+/// The cell values of A3 and A8 on each sheet, by name.
+fn cut_cells(s: &Session) -> Vec<(String, Value, Value)> {
+    let wb = &s.doc().unwrap().wb;
+    let at = |sh: &gridcraft_model::Sheet, a: &str| sh.value(CellRef::parse(a).unwrap());
+    wb.sheets.iter().map(|sh| (sh.name.clone(), at(sh, "A3"), at(sh, "A8"))).collect()
+}
+
+/// A pending Cut finds its source sheet by index. Inserting, deleting or moving a sheet can put
+/// another sheet at that index; Paste then refuses instead of moving that sheet's cells.
+fn cell_cut_paste_refuses_after(change: &str) {
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "A3", "input": "source"})).unwrap();
+    s.execute("home.insertSheet", json!({"name": "Other"})).unwrap();
+    s.execute("cell.set", json!({"sheet": "Other", "cell": "A3", "input": "keep me"})).unwrap();
+    s.execute("sheet.activate", json!({"sheet": "Sheet1"})).unwrap();
+    s.execute("edit.cut", json!({"range": "A3"})).unwrap();
+    match change {
+        "insert" => {
+            s.execute("home.insertSheet", json!({"name": "New", "before": 0})).unwrap();
+            s.execute("cell.set", json!({"cell": "A3", "input": "keep me too"})).unwrap();
+        }
+        "delete" => {
+            s.execute("home.deleteSheet", json!({"sheet": "Sheet1"})).unwrap();
+        }
+        _ => {
+            s.execute("sheet.move", json!({"sheet": "Sheet1", "to": 1})).unwrap();
+        }
+    }
+    let first = if change == "insert" { "New" } else { "Other" };
+    assert_eq!(s.doc().unwrap().wb.sheets[0].name, first);
+    s.execute("sheet.activate", json!({"sheet": first})).unwrap();
+    let before = cut_cells(&s);
+    let refused = s.execute("edit.paste", json!({"at": "A8"}));
+    assert!(refused.unwrap_err().to_string().contains("Cut it again"));
+    assert_eq!(cut_cells(&s), before);
+    assert!(s.clipboard.as_ref().is_some_and(|c| c.cut));
+}
+
+#[test]
+fn cell_cut_paste_refuses_after_a_sheet_is_inserted_before_the_source() {
+    cell_cut_paste_refuses_after("insert");
+}
+
+#[test]
+fn cell_cut_paste_refuses_after_the_source_sheet_is_deleted() {
+    cell_cut_paste_refuses_after("delete");
+}
+
+#[test]
+fn cell_cut_paste_refuses_after_the_source_sheet_is_moved() {
+    cell_cut_paste_refuses_after("move");
+}
+
+/// Sheets added after the source leave its index alone, so the Cut still moves its cells.
+#[test]
+fn cell_cut_pastes_after_a_sheet_is_added_behind_the_source() {
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "A3", "input": "source"})).unwrap();
+    s.execute("edit.cut", json!({"range": "A3"})).unwrap();
+    s.execute("home.insertSheet", json!({"name": "Other"})).unwrap();
+    s.execute("edit.paste", json!({"at": "A8"})).unwrap();
+    let cells = cut_cells(&s);
+    assert_eq!(cells[0], ("Sheet1".into(), Value::Empty, Value::Empty));
+    assert_eq!(cells[1], ("Other".into(), Value::Empty, Value::from("source")));
+}
+
+#[test]
+fn insert_cut_cells_refuses_when_another_sheet_took_the_source_index() {
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "A3", "input": "source"})).unwrap();
+    s.execute("edit.cut", json!({"range": "3:3"})).unwrap();
+    s.execute("home.insertSheet", json!({"name": "Other", "before": 0})).unwrap();
+    s.execute("cell.set", json!({"cell": "A3", "input": "keep me"})).unwrap();
+    let before = cut_cells(&s);
+    let refused = s.execute("home.insertCopiedCells", json!({"at": "A8"}));
+    assert!(refused.unwrap_err().to_string().contains("Cut it again"));
+    assert_eq!(cut_cells(&s), before);
+    assert!(s.clipboard.as_ref().is_some_and(|c| c.cut));
+}
+
+/// Renaming the source sheet keeps its identity: references to the moved cells follow them.
+#[test]
+fn cell_cut_paste_after_renaming_the_source_moves_references() {
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "A3", "input": "5"})).unwrap();
+    s.execute("cell.set", json!({"cell": "B1", "input": "=A3*2"})).unwrap();
+    s.execute("edit.cut", json!({"range": "A3"})).unwrap();
+    s.execute("sheet.rename", json!({"sheet": 0, "name": "Data"})).unwrap();
+    s.execute("edit.paste", json!({"at": "A8"})).unwrap();
+    assert_eq!(v(&s, "A8"), Value::number(5.));
+    assert_eq!(v(&s, "B1"), Value::number(10.));
+}
+
 /// Pin GridCraft's existing behavior, not Excel parity: even if a filter leaves just one visible
 /// run, the packed copy does not replace destination line settings.
 #[test]

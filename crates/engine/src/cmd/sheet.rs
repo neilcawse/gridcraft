@@ -862,6 +862,10 @@ fn insert_copied_cells(s: &mut Session, p: &Json) -> Result<Json> {
     if cut && !rows && !cols {
         return Err(EngineError::Other("Insert Cut Cells works on whole rows or columns; cut whole rows or columns, or use Paste.".into()));
     }
+    // Checked before any step: the steps refresh the clip from the live workbook.
+    if cut {
+        clip.check_cut_source(&d.wb)?;
+    }
     // A moved block can't be inserted inside itself.
     if cut && clip.sheet == sheet {
         let inside = if rows { at.row > sel.start.row && at.row <= sel.end.row } else { at.col > sel.start.col && at.col <= sel.end.col };

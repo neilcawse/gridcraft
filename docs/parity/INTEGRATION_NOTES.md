@@ -85,6 +85,24 @@ on their existing lines. Paste Special (including All), the system clipboard, dr
 Insert Copied Cells, filtered and packed copies, and tiled pastes remain unmeasured and retain
 their previous behavior.
 
+## X29 — Cut source sheet identity
+
+A pending Cut records its source sheet by position. Inserting a sheet before it, deleting it or
+moving it can leave another sheet at that position. Paste, Insert Cut Cells and the whole-line
+paste of X25 now compare the sheet there with the one that was cut. If they differ, the command
+is refused before anything changes, and the cut stays pending; cutting again works. Sheets
+added after the source, and renames, leave the cut valid. After a rename, references to the moved
+cells follow them under the sheet's new name.
+
+Whether Excel cancels cut mode when a sheet is inserted, deleted, moved or renamed is unmeasured.
+Refusing is the conservative choice; it never moves cells from a sheet the person did not cut.
+Copy is unaffected, because it pastes from the snapshot taken when copying. Drag-and-drop cuts and
+pastes in one step, so no sheet change can come between them.
+
+Enter-to-Paste shows the refusal without dismissing it on the same keystroke and leaves the
+clipboard pending, like Cmd+V and the ribbon. It still ends copy mode after a successful paste.
+Excel's behavior on refusal is unmeasured; this keeps GridCraft's own paste paths consistent.
+
 ## X31 — Whole-row AutoFill carries row formatting
 
 Measured in Excel for Mac 16.115.2 on a synthetic workbook using

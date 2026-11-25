@@ -87,9 +87,14 @@ pub(super) fn paste_internal(s: &mut Session, p: &Json, transfer_lines: bool) ->
     }
     let same_doc = s.doc()?.uid == clip.doc_uid;
     let cut_move = clip.cut && same_doc && what == What::All;
+    if cut_move {
+        clip.check_cut_source(&s.doc()?.wb)?;
+    }
     let src_wb = clip.wb.clone();
     let Some(src_sheet) = src_wb.sheet(clip.sheet) else { return Err(EngineError::Other("The copied sheet no longer exists.".into())) };
-    let src_sheet_name = src_sheet.name.clone();
+    // A cut rewrites references by the source's current name: it may have been renamed since.
+    let live_name = if cut_move { s.doc()?.wb.sheet(clip.sheet).map(|sh| sh.name.clone()) } else { None };
+    let src_sheet_name = live_name.unwrap_or_else(|| src_sheet.name.clone());
     let shared = if same_doc { vec![] } else { shared_links(&src_wb, &s.doc()?.wb) };
     // A geometric full-width or full-height source counts regardless of how it was selected.
     // Packed/filtered, tiled and full-sheet copies are outside the contiguous line case.
@@ -118,15 +123,8 @@ pub(super) fn paste_internal(s: &mut Session, p: &Json, transfer_lines: bool) ->
             let (first, last) = (axis.index(src.start), axis.index(src.end));
             let dest = axis.index(at);
             // A Cut moves its lines as they are now, like its cells; a copy pastes the snapshot.
-            // Hold the pre-reset sheet for overlapping moves, and never cut from a replacement tab.
-            let live = if cut_move {
-                let Some(source) = cx.wb.sheets.get(clip.sheet).filter(|sheet| sheet.uid.get() == src_sheet.uid.get()) else {
-                    return Err(EngineError::Other("The source sheet for this cut has moved or been deleted. Cut it again to paste.".into()));
-                };
-                Some(source.clone())
-            } else {
-                None
-            };
+            // Hold the pre-reset sheet (checked above) for overlapping moves.
+            let live = if cut_move { cx.wb.sheets.get(clip.sheet).cloned() } else { None };
             let from = live.as_deref().unwrap_or(src_sheet);
             let incoming = axis.lines(from).range(first..=last).map(|(&i, &info)| (dest + (i - first), info));
             let (dest_last, moving) = (dest + (last - first), cut_move && (clip.sheet != dest_sheet || first != dest));
