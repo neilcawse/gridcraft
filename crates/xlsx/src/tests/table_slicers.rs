@@ -217,6 +217,31 @@ fn slicer_without_its_table_or_column_is_dropped_with_a_warning() -> TestResult 
     Ok(())
 }
 
+/// At the file boundary a table outranks an imported cache name the file gave no marker: the table
+/// keeps its spelling, which formulas may use, and the cache is written under another name.
+#[test]
+fn a_table_keeps_its_name_over_a_markerless_imported_cache() -> TestResult {
+    let mut wb = workbook();
+    wb.sheet_mut(0).ok_or("data")?.tables[0].name = "Slicer_Region".into();
+    let sl = &mut wb.sheet_mut(1).ok_or("dash")?.slicers[0];
+    sl.source = SlicerSource::Table { table: "Slicer_Region".into(), column: "Region".into(), selected: None };
+    sl.imported_cache = SlicerCacheOrigin { name: "SLICER_REGION".into(), marker: None, table_items: None };
+    let (bytes, warnings) = save(&wb)?;
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let parts = unzip(&bytes)?;
+    let part = |k: &str| parts.get(k).cloned().ok_or_else(|| format!("missing {k}"));
+    assert!(part("xl/tables/table1.xml")?.contains(" name=\"Slicer_Region\" displayName=\"Slicer_Region\""));
+    let cache = part("xl/slicerCaches/slicerCache1.xml")?;
+    let name = cache.split(" name=\"").nth(1).and_then(|s| s.split('"').next()).ok_or("cache name")?;
+    assert!(!name.eq_ignore_ascii_case("Slicer_Region"), "{cache}");
+    assert!(part("xl/workbook.xml")?.contains(&format!("<definedName name=\"{name}\">#N/A</definedName>")));
+    let (back, report) = read_xlsx(&bytes)?;
+    assert!(!report.warnings.iter().any(|w| w.contains("was renamed")), "{:?}", report.warnings);
+    assert_eq!(back.table("Slicer_Region"), Some((0, 0)));
+    assert_eq!(back.sheets[1].slicers[0].imported_cache.name, name);
+    Ok(())
+}
+
 #[test]
 fn empty_table_drops_its_slicer_but_preserves_imported_marker() -> TestResult {
     let (mut wb, _) = read_xlsx(&save(&workbook())?.0)?;
