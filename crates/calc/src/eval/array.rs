@@ -202,6 +202,20 @@ fn concat_arrays(x: &Value, y: &Value, sys: gridcraft_core::DateSystem, budget: 
     .unwrap_or(Value::Error(CellError::Num))
 }
 
+fn operator_compare(a: &Value, b: &Value, transition: bool) -> std::cmp::Ordering {
+    if transition {
+        // Transition formulas compare a blank with a space as equal, and
+        // compare empty text with numbers as zero.
+        match (a, b) {
+            (Value::Empty, Value::Text(t)) | (Value::Text(t), Value::Empty) if t.as_ref() == " " => return std::cmp::Ordering::Equal,
+            (Value::Number(_), Value::Text(t)) if t.is_empty() => return compare(a, &Value::Empty),
+            (Value::Text(t), Value::Number(_)) if t.is_empty() => return compare(&Value::Empty, b),
+            _ => {}
+        }
+    }
+    compare(a, b)
+}
+
 fn binary_scalar(op: BinOp, a: &Value, b: &Value, sys: gridcraft_core::DateSystem, transition: bool) -> Value {
     if let Value::Error(e) = a {
         return Value::Error(*e);
@@ -238,12 +252,12 @@ fn binary_scalar(op: BinOp, a: &Value, b: &Value, sys: gridcraft_core::DateSyste
             }
             (Err(e), _) | (_, Err(e)) => Value::Error(e),
         },
-        BinOp::Eq => Value::Bool(compare(a, b) == Equal),
-        BinOp::Ne => Value::Bool(compare(a, b) != Equal),
-        BinOp::Lt => Value::Bool(compare(a, b) == Less),
-        BinOp::Gt => Value::Bool(compare(a, b) == Greater),
-        BinOp::Le => Value::Bool(compare(a, b) != Greater),
-        BinOp::Ge => Value::Bool(compare(a, b) != Less),
+        BinOp::Eq => Value::Bool(operator_compare(a, b, transition) == Equal),
+        BinOp::Ne => Value::Bool(operator_compare(a, b, transition) != Equal),
+        BinOp::Lt => Value::Bool(operator_compare(a, b, transition) == Less),
+        BinOp::Gt => Value::Bool(operator_compare(a, b, transition) == Greater),
+        BinOp::Le => Value::Bool(operator_compare(a, b, transition) != Greater),
+        BinOp::Ge => Value::Bool(operator_compare(a, b, transition) != Less),
         BinOp::Range | BinOp::Union | BinOp::Intersect => Value::Error(CellError::Value),
     }
 }

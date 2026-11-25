@@ -85,6 +85,25 @@ fn transition_arithmetic_uses_the_formula_worksheet() {
 }
 
 #[test]
+fn transition_comparisons_coerce_blank_and_empty_text() {
+    for transition in [false, true] {
+        let mut t = T::new();
+        t.wb.sheet_mut(0).unwrap().transition_evaluation = transition;
+        t.set("A2", "=\"\"");
+        t.set("B1", "=IF(A1=\" \",190.75,0)");
+        t.set("B2", "=IF(0=A2,\"\",4)");
+        t.set("B3", "=\"abc\"=0");
+        t.set("B4", "=\"\"=\" \"");
+        t.set("B5", "=A1=#N/A");
+        assert_eq!(t.num("B1"), if transition { 190.75 } else { 0.0 });
+        assert_eq!(t.get("B2"), if transition { Value::text("") } else { Value::number(4.0) });
+        assert_eq!(t.get("B3"), Value::Bool(false));
+        assert_eq!(t.get("B4"), Value::Bool(false));
+        assert_eq!(t.get("B5"), Value::Error(CellError::NA));
+    }
+}
+
+#[test]
 fn spill_range_operator() {
     let mut t = T::new();
     t.set("A1", "3");
