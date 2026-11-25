@@ -1,14 +1,12 @@
 //! Slicers: on-sheet widgets that filter a table column or a PivotTable field by clicking value
 //! tiles.
 //!
-//! A slicer is a thin front-end over the existing filter machinery. A table slicer's selection is
-//! written as a [`FilterCriterion::Values`] into the sheet's [`AutoFilter`] (over the table's
-//! range) and [`super::data::apply_filter`] hides the rows. A PivotTable slicer's selection is each
-//! connected PivotTable's [`PivotFilter`] on the field, and the PivotTables are refreshed. Creating
-//! a slicer (`insert.slicer` / `table.insertSlicer`) selects everything, i.e. applies no filter.
+//! A table slicer writes a [`FilterCriterion::Values`] to its table's AutoFilter. A PivotTable
+//! slicer sets each connected PivotTable's [`PivotFilter`] and refreshes the PivotTables.
+//! Creating a slicer (`insert.slicer` / `table.insertSlicer`) selects everything.
 
 use gridcraft_core::CellRef;
-use gridcraft_model::{Anchor, AnchorMode, AutoFilter, FilterCriterion, Slicer, SlicerPivot, SlicerSource, Workbook};
+use gridcraft_model::{Anchor, AnchorMode, FilterCriterion, Slicer, SlicerPivot, SlicerSource, Workbook};
 
 use crate::pivot::{self as pv, SlicerTile};
 use serde_json::{Value as Json, json};
@@ -177,31 +175,30 @@ pub(crate) fn remove_orphaned_table_slicers(before: &Workbook, wb: &mut Workbook
     }
 }
 
-/// Re-applies slicer `id`'s selected filter values to its target table's sheet autofilter.
-fn reapply_slicer(wb: &mut Workbook, sheet: usize, id: u32) {
-    let info = wb.sheet(sheet).and_then(|sh| {
-        let sl = sh.slicers.iter().find(|s| s.id == id)?;
-        let SlicerSource::Table { table, column, selected } = &sl.source else { return None };
-        let (target_sheet, t) = sh
-            .tables
-            .iter()
-            .find(|t| t.name.eq_ignore_ascii_case(table))
-            .map(|t| (sheet, t))
-            .or_else(|| wb.table(table).and_then(|(si, ti)| Some((si, wb.sheet(si)?.tables.get(ti)?))))?;
-        let ci = t.column_index(column)?;
-        Some((target_sheet, t.range, t.range.start.col + ci as u32, selected.clone()))
-    });
-    let Some((target_sheet, table_range, abs_col, selected)) = info else { return };
-    {
-        let Some(sh) = wb.sheet_mut(target_sheet) else { return };
-        let af = sh.autofilter.get_or_insert_with(|| AutoFilter { range: table_range, criteria: vec![] });
-        let off = abs_col.saturating_sub(af.range.start.col);
-        af.criteria.retain(|(o, _)| *o != off);
-        if let Some(values) = selected {
-            af.criteria.push((off, FilterCriterion::Values { values, blanks: false }));
-        }
+fn table_filter_target(wb: &Workbook, sheet: usize, table: &str, column: &str) -> Option<(usize, usize, u32)> {
+    let (si, ti) =
+        wb.sheet(sheet)?.tables.iter().position(|t| t.name.eq_ignore_ascii_case(table)).map(|ti| (sheet, ti)).or_else(|| wb.table(table))?;
+    let col = wb.sheet(si)?.tables[ti].column_index(column)?;
+    Some((si, ti, col as u32))
+}
+
+fn set_table_filter(wb: &mut Workbook, sheet: usize, table: usize, column: u32, selected: Option<Vec<String>>) {
+    let Some(sh) = wb.sheet_mut(sheet) else { return };
+    sh.adopt_table_autofilter(table);
+    let t = &mut sh.tables[table];
+    t.filter.retain(|(off, _)| *off != column);
+    if let Some(values) = selected {
+        t.filter.push((column, FilterCriterion::Values { values, blanks: false }));
     }
-    super::data::apply_filter(wb, target_sheet);
+    super::data::apply_filters(wb, sheet, Some(table), false);
+}
+
+fn reapply_slicer(wb: &mut Workbook, sheet: usize, id: u32) {
+    let Some(slicer) = wb.sheet(sheet).and_then(|sh| sh.slicers.iter().find(|s| s.id == id)) else { return };
+    let SlicerSource::Table { table, column, selected } = &slicer.source else { return };
+    if let Some((si, ti, col)) = table_filter_target(wb, sheet, table, column) {
+        set_table_filter(wb, si, ti, col, selected.clone());
+    }
 }
 
 /// Inserts a slicer for a table column on the active sheet or the named table's sheet.
@@ -336,30 +333,17 @@ fn slicer_select_all(s: &mut Session, p: &Json) -> Result<Json> {
 fn slicer_delete(s: &mut Session, p: &Json) -> Result<Json> {
     let (idx, id) = find_slicer(s, p)?;
     let sheet = s.doc()?.wb.active_sheet();
-    // Absolute column of a table slicer, so its filter criterion can be removed too.
+    // Resolve the table column before deleting the slicer binding.
     let target = s.doc().ok().and_then(|d| {
         let sh = d.wb.active()?;
         let SlicerSource::Table { table, column, .. } = &sh.slicers.get(idx)?.source else { return None };
-        let (target_sheet, t) = sh
-            .tables
-            .iter()
-            .find(|t| t.name.eq_ignore_ascii_case(table))
-            .map(|t| (sheet, t))
-            .or_else(|| d.wb.table(table).and_then(|(si, ti)| Some((si, d.wb.sheet(si)?.tables.get(ti)?))))?;
-        let ci = t.column_index(column)?;
-        Some((target_sheet, t.range.start.col + ci as u32))
+        table_filter_target(&d.wb, sheet, table, column)
     });
     edit(s, |cx| {
         let sh = cx.sheet_mut(sheet)?;
         sh.slicers.retain(|x| x.id != id);
-        if let Some((target_sheet, abs)) = target {
-            if let Some(af) = cx.sheet_mut(target_sheet)?.autofilter.as_mut() {
-                let off = abs.saturating_sub(af.range.start.col);
-                af.criteria.retain(|(o, _)| *o != off);
-            }
-            super::data::apply_filter(&mut cx.wb, target_sheet);
-        } else {
-            super::data::apply_filter(&mut cx.wb, sheet);
+        if let Some((si, ti, col)) = target {
+            set_table_filter(&mut cx.wb, si, ti, col, None);
         }
         cx.structural = true;
         Ok(Json::Null)
@@ -389,6 +373,54 @@ pub(crate) fn drop_pivot(wb: &mut Workbook, sheet: &str, name: &str) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn assert_slicer_rows(totals: bool, sheet_filter: bool) {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute(
+            "range.setValues",
+            json!({"range": "A1", "values": [["Region", "Amount"], ["East", 10], ["West", 20], ["East", 30], ["West", 40]]}),
+        )
+        .unwrap();
+        if sheet_filter {
+            // The old worksheet-filter proxy can include the totals row already.
+            s.execute("data.filter", json!({"range": "A1:B6"})).unwrap();
+        }
+        s.execute("insert.table", json!({"range": "A1:B5", "name": "Sales", "header": true})).unwrap();
+        if totals {
+            s.execute("table.totalRow", json!({"table": "Sales", "on": true})).unwrap();
+        }
+        let id = s.execute("insert.slicer", json!({"table": "Sales", "column": "Region"})).unwrap()["slicer"].clone();
+        let assert_rows = |sh: &gridcraft_model::Sheet, expected: &[u32]| {
+            assert_eq!((0..6).filter(|&r| sh.is_row_hidden(r)).collect::<Vec<_>>(), expected);
+            assert_eq!((0..6).filter(|&r| sh.is_row_filtered(r)).collect::<Vec<_>>(), expected);
+        };
+        s.execute("slicer.toggle", json!({"slicer": id, "value": "East"})).unwrap();
+        assert_rows(&s.doc().unwrap().wb.sheets[0], &[2, 4]);
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_rows(&s.doc().unwrap().wb.sheets[0], &[]);
+        s.execute("edit.redo", json!({})).unwrap();
+        assert_rows(&s.doc().unwrap().wb.sheets[0], &[2, 4]);
+
+        let bytes = crate::io::save_bytes(&s.doc().unwrap().wb, "sales.xlsx").unwrap();
+        let (back, _) = crate::io::open_bytes("sales.xlsx", &bytes).unwrap();
+        assert_rows(&back.sheets[0], &[2, 4]);
+    }
+
+    #[test]
+    fn slicer_leaves_totals_visible_through_undo_redo_and_reopen() {
+        assert_slicer_rows(true, false);
+    }
+
+    #[test]
+    fn slicer_leaves_totals_visible_with_existing_worksheet_filter() {
+        assert_slicer_rows(true, true);
+    }
+
+    #[test]
+    fn slicer_filters_all_data_rows_without_totals() {
+        assert_slicer_rows(false, false);
+    }
 
     #[test]
     /// Verifies same-sheet and cross-sheet slicer filtering/clearing/deletion as well as missing-table fallbacks.

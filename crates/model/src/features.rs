@@ -117,6 +117,17 @@ impl Table {
         }
         Some(RangeRef::new(CellRef::new(r0, self.range.start.col), CellRef::new(r1, self.range.end.col)))
     }
+    /// Header and data rows of a table AutoFilter, excluding the totals row.
+    pub fn autofilter_range(&self) -> Option<RangeRef> {
+        let end_row = self.range.end.row.checked_sub(u32::from(self.totals_row))?;
+        (self.header_row && end_row >= self.range.start.row).then(|| RangeRef::new(self.range.start, CellRef::new(end_row, self.range.end.col)))
+    }
+
+    /// Older GridCraft versions used a worksheet AutoFilter over the whole table as a proxy.
+    pub fn matches_autofilter(&self, range: RangeRef) -> bool {
+        self.autofilter_range().is_some_and(|canonical| range == canonical || range == self.range)
+    }
+
     pub fn header_range(&self) -> Option<RangeRef> {
         self.header_row.then(|| RangeRef::new(self.range.start, CellRef::new(self.range.start.row, self.range.end.col)))
     }

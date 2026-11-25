@@ -45,7 +45,7 @@ pub fn heading_table<'a>(geo: &Geo, sh: &'a Sheet, active: CellRef) -> Option<&'
 /// The headings of `heading_table`'s visible columns.
 pub fn table_headings(geo: &Geo, sh: &Sheet, active: CellRef) -> Vec<TableHeading> {
     let Some(tb) = heading_table(geo, sh, active) else { return Vec::new() };
-    let af = sh.autofilter.as_ref().filter(|af| af.range == tb.range);
+    let af = sh.autofilter.as_ref().filter(|af| tb.matches_autofilter(af.range));
     let mut out = Vec::new();
     for col in tb.range.start.col..=tb.range.end.col {
         let w = sh.col_width(col) * geo.z;

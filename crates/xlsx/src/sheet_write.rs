@@ -105,13 +105,15 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, table_names: &[Opti
             .iter()
             .cloned()
             .map(|mut t| {
-                if t.header_row
-                    && t.filter_button
-                    && t.filter.is_empty()
-                    && t.range.contains_range(&af.range)
-                    && t.range.start.col == af.range.start.col
+                if t.filter_button
+                    && (t.matches_autofilter(af.range)
+                        || (t.header_row && t.filter.is_empty() && t.range.contains_range(&af.range) && t.range.start.col == af.range.start.col))
                 {
-                    t.filter = af.criteria.clone();
+                    for (offset, criterion) in &af.criteria {
+                        if !t.filter.iter().any(|(o, _)| o == offset) {
+                            t.filter.push((*offset, criterion.clone()));
+                        }
+                    }
                 }
                 t
             })

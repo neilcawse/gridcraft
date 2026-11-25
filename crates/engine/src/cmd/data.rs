@@ -24,7 +24,7 @@ mod tools;
 mod validation;
 
 pub use filter::filter_values;
-pub(crate) use filter::{apply_filter, grow_autofilter};
+pub(crate) use filter::{apply_filters, clear_table_filter, grow_autofilter};
 use filter::{clear_filter, filter_by, reapply, toggle_filter};
 use grouping::{detail, group, outline_settings, show_levels, subtotal};
 pub use sort::sort_context;

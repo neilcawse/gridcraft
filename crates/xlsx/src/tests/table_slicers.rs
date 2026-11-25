@@ -85,6 +85,43 @@ fn workbook() -> Workbook {
     wb
 }
 
+#[test]
+fn totals_filter_refs_repair_only_the_stale_active_filter() -> TestResult {
+    let mut wb = workbook();
+    let data = wb.sheet_mut(0).ok_or("source sheet")?;
+    data.tables[0].range.end.row = 5;
+    data.tables[0].totals_row = true;
+    data.set_value(CellRef::new(5, 0), Value::text("Total"));
+    data.rows.entry(3).or_default().hidden = true;
+    data.rows.entry(5).or_default().hidden = true;
+    let mut parts = unzip(&save(&wb)?.0)?;
+    let table = parts.remove("xl/tables/table1.xml").ok_or("table part")?;
+    let sheet = parts.remove("xl/worksheets/sheet1.xml").ok_or("sheet part")?;
+    let start = table.find("<autoFilter").ok_or("table filter")?;
+    let end = table.find("</autoFilter>").ok_or("table filter end")? + "</autoFilter>".len();
+    let stale = table[start..end].replace("A1:C5", "A1:C6");
+
+    for (table, sheet, totals_hidden) in [
+        (table.clone(), sheet.clone(), true), // valid ref: an explicitly hidden row stays hidden
+        (table.replace(&table[start..end], &stale), sheet.clone(), false),
+        (
+            format!("{}<autoFilter ref=\"A1:C5\"/>{}", &table[..start], &table[end..]),
+            sheet.replace("<tableParts", &format!("{stale}<tableParts")),
+            false,
+        ),
+    ] {
+        let mut entries: Vec<_> = parts.iter().map(|(k, v)| (k.as_str(), v.as_bytes())).collect();
+        entries.extend([("xl/worksheets/sheet1.xml", sheet.as_bytes()), ("xl/tables/table1.xml", table.as_bytes())]);
+        let (back, _) = read_xlsx(&make_zip(&entries))?;
+        assert!(back.sheets[0].is_row_filtered(3));
+        assert_eq!(back.sheets[0].is_row_hidden(5), totals_hidden);
+        assert!(!back.sheets[0].is_row_filtered(5));
+        let saved = unzip(&save(&back)?.0)?;
+        assert!(saved["xl/tables/table1.xml"].contains("<autoFilter ref=\"A1:C5\">"));
+    }
+    Ok(())
+}
+
 fn assert_same_slicer(a: &Slicer, b: &Slicer) {
     assert_eq!((&b.source, &b.caption, b.columns, &b.name, &b.style), (&a.source, &a.caption, a.columns, &a.name, &a.style));
     assert_eq!(b.anchor.cell, a.anchor.cell);

@@ -523,10 +523,30 @@ impl Sheet {
     pub fn is_row_filtered(&self, row: u32) -> bool {
         self.is_row_hidden(row) && self.filter_row_spans().iter().any(|&(first, last)| row >= first && row <= last)
     }
+    /// Fold the exact worksheet proxy into its table, preferring existing native criteria.
+    pub fn adopt_table_autofilter(&mut self, table: usize) {
+        let t = &mut self.tables[table];
+        if let Some(af) = self.autofilter.take_if(|af| t.matches_autofilter(af.range)) {
+            for (offset, criterion) in af.criteria {
+                if !t.filter.iter().any(|(o, _)| *o == offset) {
+                    t.filter.push((offset, criterion));
+                }
+            }
+        }
+    }
+
+    /// Effective range of a worksheet AutoFilter, including when it proxies a table's filter.
+    pub fn effective_autofilter_range(&self, range: RangeRef) -> RangeRef {
+        self.tables.iter().find(|t| t.totals_row && t.range == range).and_then(Table::autofilter_range).unwrap_or(range)
+    }
+
     /// The row spans (first, last) an applied filter can hide: the data rows of the sheet
     /// AutoFilter while it has criteria, and of each filtered table.
     pub fn filter_row_spans(&self) -> Vec<(u32, u32)> {
-        let sheet = self.autofilter.as_ref().filter(|af| !af.criteria.is_empty()).map(|af| (af.range.start.row.saturating_add(1), af.range.end.row));
+        let sheet = self.autofilter.as_ref().filter(|af| !af.criteria.is_empty()).map(|af| {
+            let range = self.effective_autofilter_range(af.range);
+            (range.start.row.saturating_add(1), range.end.row)
+        });
         let tables = self.tables.iter().filter(|t| !t.filter.is_empty()).filter_map(|t| t.data_range()).map(|r| (r.start.row, r.end.row));
         sheet.into_iter().chain(tables).collect()
     }

@@ -670,8 +670,11 @@ fn paint_filter_buttons(q: &QuadrantPaint<'_>, range: RangeRef) {
     }
     for tb in &sh.tables {
         if tb.filter_button && tb.header_row {
+            let proxy = sh.autofilter.as_ref().filter(|af| tb.matches_autofilter(af.range));
             for col in tb.range.start.col..=tb.range.end.col {
-                buttons.push((CellRef::new(tb.range.start.row, col), false));
+                let off = col - tb.range.start.col;
+                let active = tb.filter.iter().any(|(o, _)| *o == off) || proxy.is_some_and(|af| af.criteria.iter().any(|(o, _)| *o == off));
+                buttons.push((CellRef::new(tb.range.start.row, col), active));
             }
         }
     }

@@ -401,7 +401,18 @@ fn apply_craft_sheet_part(
 fn read_sheet_notes_and_tables(cx: &mut Ctx<'_>, sp: &CraftSheetPart, rels: &[Rel], sheet: &mut Sheet) -> Result<(), IoError> {
     let tables = cx.pkg.craft_mut().tables(sp).map_err(craft_error)?;
     for (_, t) in tables {
-        let mut model = parts::from_craft_table(cx, &t);
+        let (mut model, filter_range) = parts::from_craft_table(cx, &t);
+        // The row flag has no provenance. Repair only an active, exact full-table ref;
+        // a correctly bounded filter cannot explain a hidden totals row.
+        if model.totals_row && model.autofilter_range().is_some() {
+            let stale_native = filter_range == Some(model.range) && !model.filter.is_empty();
+            let stale_sheet = sheet.autofilter.as_ref().is_some_and(|af| af.range == model.range && !af.criteria.is_empty());
+            if (stale_native || stale_sheet)
+                && let Some(row) = sheet.rows.get_mut(&model.range.end.row)
+            {
+                row.hidden = false;
+            }
+        }
         model.id = cx.next_object_id();
         record_file_table(cx, &t, model.id);
         sheet.tables.push(model);

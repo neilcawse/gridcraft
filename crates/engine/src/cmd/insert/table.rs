@@ -196,8 +196,9 @@ pub(super) fn table_flag(s: &mut Session, p: &Json, which: &str) -> Result<Json>
             "lastCol" => t.last_col = on.unwrap_or(!t.last_col),
             "header" => {
                 t.filter_button = on.unwrap_or(!t.filter_button);
-                if !t.filter_button {
-                    t.filter.clear();
+                if !t.filter_button && crate::cmd::data::clear_table_filter(sh, ti) {
+                    crate::cmd::data::apply_filters(&mut cx.wb, si, Some(ti), false);
+                    cx.structural = true;
                 }
             }
             _ => {}
