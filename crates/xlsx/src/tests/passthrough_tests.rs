@@ -854,6 +854,7 @@ fn a_slicer_cache_names_its_pivot_sheet_by_the_written_sheet_id() {
         name: "Region".into(),
         style: String::new(),
         row_height: None,
+        imported_cache: Default::default(),
     });
     let out = write_xlsx(&wb).unwrap();
     let u = Unpacked::new(&out);

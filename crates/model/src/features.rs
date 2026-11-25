@@ -1163,6 +1163,23 @@ pub struct Slicer {
     /// Button height in pixels; `None` uses the default.
     #[serde(default)]
     pub row_height: Option<f32>,
+    /// XLSX cache provenance used only to preserve the cache's name on save.
+    #[serde(skip)]
+    pub imported_cache: SlicerCacheOrigin,
+}
+
+/// The XLSX cache name and the identity of its workbook marker, if present.
+/// Not part of the slicer's editable content.
+#[derive(Clone, Debug, Default)]
+pub struct SlicerCacheOrigin {
+    pub name: String,
+    pub marker: Option<crate::DefinitionUid>,
+}
+
+impl PartialEq for SlicerCacheOrigin {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 impl Slicer {

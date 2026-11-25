@@ -573,9 +573,9 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
     crate::chart::plot_pivot_caches(&mut wb, &cx.pivot_charts);
 
     wb.external_books = Arc::new(crate::external::read(&mut cx, &wb_xml, &wb_rels)?);
-    crate::slicer::resolve(&mut cx, &wb_xml, &wb_rels, &sheet_els, &file_to_model, &pivot_caches, &mut wb);
 
     let chart_names = read_defined_names(&mut wb, &wb_xml, &file_to_model);
+    crate::slicer::resolve(&mut cx, &wb_xml, &wb_rels, &sheet_els, &file_to_model, &pivot_caches, &mut wb);
 
     if !chart_names.is_empty() {
         let resolve = |f: &mut String| {
@@ -754,6 +754,7 @@ fn attach_pending_slicers(cx: &mut Ctx<'_>, wb: &mut Workbook) {
                     name: String::new(),
                     style: String::new(),
                     row_height: None,
+                    imported_cache: Default::default(),
                 });
             }
         }

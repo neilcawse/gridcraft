@@ -604,6 +604,7 @@ fn generated_slicer_names_never_displace_a_pivot_source() {
         columns: 1,
         style: String::new(),
         row_height: None,
+        imported_cache: Default::default(),
         anchor: Anchor { cell: CellRef::parse("M1").unwrap(), dx: 0.0, dy: 0.0, width: 180.0, height: 240.0, mode: AnchorMode::default() },
         source: SlicerSource::Pivot {
             pivots: vec![SlicerPivot { sheet: "Report".into(), name: "Sliced".into() }],
@@ -615,10 +616,14 @@ fn generated_slicer_names_never_displace_a_pivot_source() {
     });
     for rebuilt in [false, true] {
         let candidate = if rebuilt { edited(wb.clone()) } else { wb.clone() };
-        let (written, warnings, mut back) = save_package(&candidate);
+        let (written, warnings, back) = save_package(&candidate);
         assert_eq!(written.len(), 2, "{written:?} {warnings:?}");
         assert_ne!(written[0].cache_id, written[1].cache_id);
         assert_eq!(back.sheets[REPORT].slicers.len(), 1);
+        let (written, warnings, mut back) = save_package(&back);
+        assert_eq!(written.len(), 2, "{written:?} {warnings:?}");
+        assert_eq!(back.sheets[REPORT].slicers.len(), 1);
+        assert_eq!(back.names.iter().filter(|n| n.name.starts_with("Slicer_K")).count(), 2);
         assert_eq!(back.name_in_scope("Slicer_K", None).unwrap().formula, "Data!$A$1:$B$3");
         assert_eq!(back.name_in_scope("Slicer_K3", None).unwrap().formula, "#N/A");
         assert_eq!(total(&mut back), Ok(FROM_DATA));

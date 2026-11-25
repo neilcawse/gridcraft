@@ -991,6 +991,7 @@ mod tests {
                 name: String::new(),
                 style: String::new(),
                 row_height: None,
+                imported_cache: Default::default(),
             }),
             ObjKind::Group => s.groups.push(crate::DrawingGroup {
                 id,

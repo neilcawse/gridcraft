@@ -840,6 +840,7 @@ fn slicer_workbook() -> Workbook {
         name: "Product".into(),
         style: "SlicerStyleDark1".into(),
         row_height: Some(30.0),
+        imported_cache: Default::default(),
     });
     wb
 }
@@ -1007,6 +1008,7 @@ fn pivot_slicer_on_grouped_dates_writes_the_groups() {
         name: "Date".into(),
         style: String::new(),
         row_height: None,
+        imported_cache: Default::default(),
     });
     let bytes = write_xlsx(&wb).unwrap();
     let parts = unzip(&bytes);
@@ -1058,6 +1060,7 @@ fn pivot_slicer_on_a_coarser_date_level_is_skipped_with_a_warning() {
         name: "Years".into(),
         style: String::new(),
         row_height: None,
+        imported_cache: Default::default(),
     });
     let mut parts = unzip(&write_xlsx(&wb).unwrap());
     let defs: Vec<String> = parts
@@ -1362,4 +1365,84 @@ fn a_read_slicer_cache_name_is_written_once_under_its_name() {
     let (back, _) = read_xlsx(&first).unwrap();
     let second = write_xlsx(&back).unwrap();
     assert_eq!(names(&second), names(&first));
+}
+
+#[test]
+fn slicer_cache_names_respect_ordinary_definitions() {
+    for (scope, formula) in [(None, "#N/A"), (None, "42"), (Some(1), "#N/A")] {
+        let mut wb = slicer_workbook();
+        let ordinary = DefinedName {
+            name: "Slicer_Product".into(),
+            scope,
+            formula: formula.into(),
+            comment: "Keep this definition".into(),
+            hidden: true,
+            uid: Default::default(),
+        };
+        wb.names.push(ordinary.clone());
+        let report = wb.sheet_mut(1).unwrap();
+        let mut second = report.slicers[0].clone();
+        second.id += 1;
+        second.name = "Another product filter".into();
+        second.anchor.cell = at("M20");
+        report.slicers.push(second);
+        let (back, _) = read_xlsx(&write_xlsx(&wb).unwrap()).unwrap();
+        assert!(back.names.contains(&ordinary), "{scope:?}, {formula}: {:?}", back.names);
+        for name in ["Slicer_Product2", "Slicer_Product3"] {
+            assert_eq!(back.names.iter().filter(|n| n.name == name && n.formula == "#N/A").count(), 1);
+        }
+        assert_eq!(back.sheet(1).unwrap().slicers.len(), 2);
+    }
+}
+
+#[test]
+fn slicer_cache_names_preserve_imported_markers_and_respect_tables() {
+    let original = write_xlsx(&slicer_workbook()).unwrap();
+    let mut parts = unzip(&original);
+    for part in ["xl/workbook.xml", "xl/slicerCaches/slicerCache1.xml", "xl/slicers/slicer1.xml"] {
+        let bytes = parts.get_mut(part).unwrap();
+        let xml = std::str::from_utf8(bytes).unwrap().replace("Slicer_Product", "Slicer_Custom");
+        *bytes = xml.replace("name=\"Slicer_Custom\">#N/A", "name=\"Slicer_Custom\" hidden=\"1\" comment=\"Imported marker\">#N/A").into_bytes();
+    }
+    let refs: Vec<_> = parts.iter().map(|(n, d)| (n.as_str(), d.as_slice())).collect();
+    let (mut wb, _) = read_xlsx(&super::make_zip(&refs)).unwrap();
+    let marker = wb.names.iter().find(|n| n.name == "Slicer_Custom").unwrap().clone();
+    let saved = write_xlsx(&wb).unwrap();
+    let parts = unzip(&saved);
+    let cache = std::str::from_utf8(&parts["xl/slicerCaches/slicerCache1.xml"]).unwrap();
+    assert!(cache.contains("name=\"Slicer_Custom\""), "{cache}");
+    let (back, _) = read_xlsx(&saved).unwrap();
+    assert_eq!(back.names.iter().filter(|n| n.name == marker.name).collect::<Vec<_>>(), [&marker]);
+    assert!(!back.names.iter().any(|n| n.name == "Slicer_Product"));
+
+    let mut replaced = wb.clone();
+    let replacement = replaced.names.iter_mut().find(|n| n.name == marker.name).unwrap();
+    replacement.uid = Default::default();
+    let saved = write_xlsx(&replaced).unwrap();
+    let parts = unzip(&saved);
+    let cache = std::str::from_utf8(&parts["xl/slicerCaches/slicerCache1.xml"]).unwrap();
+    assert!(cache.contains("name=\"Slicer_Product\""), "{cache}");
+    assert!(read_xlsx(&saved).unwrap().0.names.contains(&marker));
+
+    let mut missing_target = wb.clone();
+    missing_target.sheet_mut(1).unwrap().pivots.retain(|p| p.name != "Sales by Region");
+    let saved = write_xlsx(&missing_target).unwrap();
+    assert!(!unzip(&saved).keys().any(|name| name.starts_with("xl/slicerCaches/")));
+    assert!(read_xlsx(&saved).unwrap().0.names.contains(&marker));
+
+    let mut table = wb.sheet(0).unwrap().tables[0].clone();
+    table.name.clone_from(&marker.name);
+    table.id += 1;
+    table.uid = Default::default();
+    table.range = rr("H1:I2");
+    table.columns.truncate(2);
+    wb.sheet_mut(0).unwrap().tables.push(table);
+    let saved = write_xlsx(&wb).unwrap();
+    let parts = unzip(&saved);
+    let cache = std::str::from_utf8(&parts["xl/slicerCaches/slicerCache1.xml"]).unwrap();
+    assert!(cache.contains("name=\"Slicer_Product\""), "{cache}");
+    let (back, _) = read_xlsx(&saved).unwrap();
+    assert!(back.names.contains(&marker));
+    assert!(back.sheet(0).unwrap().tables.iter().any(|t| t.name == marker.name));
+    assert_eq!(back.sheet(1).unwrap().slicers.len(), 1);
 }

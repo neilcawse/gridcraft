@@ -340,6 +340,7 @@ fn kept_rebuilt_and_slicer_caches_have_distinct_ids() {
         name: "K".into(),
         style: String::new(),
         row_height: None,
+        imported_cache: Default::default(),
     });
     let u = Unpacked::new(&write_xlsx(&wb).unwrap());
     u.assert_valid();

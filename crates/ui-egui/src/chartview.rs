@@ -857,6 +857,7 @@ pub(crate) mod tests {
                 name: String::new(),
                 style: String::new(),
                 row_height: None,
+                imported_cache: Default::default(),
             };
             std::sync::Arc::make_mut(&mut d.wb).sheet_mut(sheet).unwrap().slicers.push(slicer);
         }

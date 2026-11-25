@@ -1689,6 +1689,7 @@ fn add_pivot_slicer(s: &mut Session, id: u32, field: &str, pivots: &[&str]) {
         name: String::new(),
         style: String::new(),
         row_height: None,
+        imported_cache: Default::default(),
     });
 }
 
