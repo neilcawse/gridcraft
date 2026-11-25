@@ -366,6 +366,21 @@ fn dde_and_ole_links_read_saved_items_and_keep_other_values() {
 }
 
 #[test]
+fn quoted_dde_items_read_their_saved_values() {
+    use gridcraft_core::Array;
+    use gridcraft_model::ExternalBook;
+    let mut t = T::new();
+    // An item that isn't a plain word is quoted in the formula (`''` for a quote), not in the link.
+    let column = Value::from(Array::new(3, 1, vec![Value::text("+0.005"), Value::text("--0.00"), Value::text("--0.01")]).unwrap());
+    let items = vec![("0#NG: 2 16 6 14".into(), column), ("it's".into(), Value::Number(7.0))];
+    t.wb.external_books = vec![ExternalBook { opaque: true, items, ..Default::default() }].into();
+    t.set("A1", "=ROWS([1]!'0#NG: 2 16 6 14')");
+    t.set("A2", "=INDEX([1]!'0#NG: 2 16 6 14',3)");
+    t.set("A3", "=[1]!'it''s'*2");
+    assert_eq!((t.num("A1"), t.get("A2"), t.num("A3")), (3.0, Value::text("--0.01"), 14.0));
+}
+
+#[test]
 fn if_family_range_arguments_with_a_deleted_linked_reference_are_ref() {
     let mut t = T::new();
     t.set("A1", "1");

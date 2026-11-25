@@ -435,8 +435,10 @@ impl<'h> Evaluator<'h> {
         let wb = self.host.workbook();
         let Some(b) = book.checked_sub(1).and_then(|i| wb.external_books.get(i)) else { return err(CellError::Ref) };
         if b.opaque {
+            // An item that isn't a plain word is quoted: `[2]!'0#NG: 2 16 6'`, `''` for a quote.
+            let quoted = name.strip_prefix('\'').and_then(|n| n.strip_suffix('\'')).map(|n| n.replace("''", "'"));
             if sheet.is_empty()
-                && let Some(v) = b.item(name)
+                && let Some(v) = b.item(quoted.as_deref().unwrap_or(name))
             {
                 return Ev::V(v.clone());
             }

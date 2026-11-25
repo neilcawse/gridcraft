@@ -116,12 +116,15 @@ fn linked_workbook_sheet_ranges_round_trip() {
 #[test]
 fn names_of_linked_workbooks_print_as_excel_writes_them() {
     // `[1]!Rate` is the linked workbook's own name: Excel writes no quotes, and `'[1]'!Rate`
-    // would name a sheet called `[1]` in this workbook. A sheet of the link is quoted as needed.
+    // would name a sheet called `[1]` in this workbook. A sheet of the link is quoted as needed, and
+    // so is a DDE item that isn't a plain word (`[2]!'0#NG: 2 16'`), as written.
     for (src, printed) in [
         ("[1]!Rate", "[1]!Rate"),
         ("SUM([1]!Rate,1)", "SUM([1]!Rate,1)"),
         ("[1]Prices!Rate", "[1]Prices!Rate"),
         ("'My Sheet'!Total", "'My Sheet'!Total"),
+        ("[2]!'0#NG: 2 16 6 14'", "[2]!'0#NG: 2 16 6 14'"),
+        ("SUM([2]!'it''s',1)", "SUM([2]!'it''s',1)"),
     ] {
         assert_eq!(print(&parse(src).unwrap()), printed, "{src}");
     }
