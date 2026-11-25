@@ -13,7 +13,7 @@ use gridcraft_core::{MAX_COLS, MAX_ROWS};
 
 use crate::group::map_rect;
 use crate::sheet::drawing_reference;
-use crate::{Anchor, AnchorMode, DrawingRef, LineInfo, ObjKind, ObjRef, Sheet};
+use crate::{Anchor, AnchorMode, DrawingPlacement, DrawingRef, LineInfo, ObjKind, ObjRef, Sheet};
 
 /// Pixels per EMU, for the half-EMU a stored marker can't resolve.
 const PX_PER_EMU: f64 = 1.0 / 9525.0;
@@ -127,6 +127,17 @@ fn keep_visibility(lines: &mut BTreeMap<u32, LineInfo>, before: &BTreeMap<u32, L
             None => lines.remove(&k),
         };
     }
+}
+
+/// Where an object read with `placement` sits once the open has fitted its rows: its anchor over
+/// the final lines. For a two-cell anchor that is both markers whatever its `editAs`, which
+/// ECMA-376 `ST_EditAs` (20.5.3.2) ties to rows resized after it is placed. Whether Excel for Mac
+/// counts its own open-time row fit as such a resize for `editAs="oneCell"` (keep the read size)
+/// or `"absolute"` (keep the read box) is unmeasured; this is the one place to change if a
+/// measurement says it does (returning the read anchor there, whose stored `to` marker then no
+/// longer matches, so its placement must be dropped rather than kept current).
+fn opened_anchor(placement: &DrawingPlacement, sheet: &Sheet) -> Anchor {
+    placement.anchor(sheet)
 }
 
 impl Sheet {
@@ -249,7 +260,7 @@ impl Sheet {
             .floating()
             .into_iter()
             .filter_map(|(object, a)| match object {
-                Floating::Drawing(r) => self.drawing_files.get(&r).filter(|f| f.anchor == a).map(|f| (r, f.placement.anchor(self))),
+                Floating::Drawing(r) => self.drawing_files.get(&r).filter(|f| f.anchor == a).map(|f| (r, opened_anchor(&f.placement, self))),
                 Floating::Control(_) => None,
             })
             .collect();
