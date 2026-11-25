@@ -11,6 +11,8 @@ documentation (the Office bundle is off limits under this repo's clean-room rule
 support comes from `crates/engine/src/io.rs` (`FileKind`), `crates/xlsx/src` and the tests in
 `crates/xlsx/src/tests/` (round-trip, fixtures, malformed input, CSV, ODS, XLSB, XLS, PivotTables).
 
+On macOS, XLSX imports use Excel for Mac's measured worksheet sizing: stored column widths convert to whole points using a Normal-font digit width, manual heights floor to whole points, and automatic heights use calibrated font heights and wrapping. Column defaults distinguish a missing `sheetFormatPr` from a present one; stored `defaultColWidth` takes precedence over `baseColWidth`. A custom default row height fixes the inherited height; otherwise GridCraft derives it from the Normal font. Other hosts retain the legacy geometry rules. Layout conversions do not overwrite imported numeric width or height values on save. The XLSX codec may normalize the spelling of those numbers and equivalent boolean attributes. Unmeasured font sizes and families, and line breaks that depend on the installed font metrics, are estimates.
+
 Legacy scalar `INDEX(range, MATCH(...))` formulas remain ordinary formulas on save, including when
 shared formulas are expanded during import (`array_export.rs`, #1505).
 

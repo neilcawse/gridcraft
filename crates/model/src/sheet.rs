@@ -110,6 +110,11 @@ pub struct Sheet {
     /// Default column width and row height in pixels at 96 dpi (a file stores row heights in points).
     pub default_col_width: f32,
     pub default_row_height: f32,
+    /// Geometry profile of the worksheet, separate from the values saved in the source file.
+    #[serde(default, skip_serializing_if = "crate::Geometry::is_legacy")]
+    pub geometry: crate::Geometry,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_geometry: Option<crate::SavedSheetGeometry>,
     pub merges: Vec<RangeRef>,
     /// Frozen rows and columns (top/left).
     pub freeze: Option<(u32, u32)>,
@@ -213,6 +218,8 @@ impl Sheet {
             rows: BTreeMap::new(),
             default_col_width: DEFAULT_COL_WIDTH,
             default_row_height: DEFAULT_ROW_HEIGHT,
+            geometry: crate::Geometry::default(),
+            saved_geometry: None,
             merges: vec![],
             freeze: None,
             tab_color: None,
@@ -531,7 +538,7 @@ impl Sheet {
         sheet.into_iter().chain(tables).collect()
     }
     pub fn is_col_hidden(&self, col: u32) -> bool {
-        self.cols.get(&col).is_some_and(|r| r.hidden)
+        self.cols.get(&col).is_some_and(|line| line.hidden || (self.geometry != crate::Geometry::Legacy && line.size == Some(0.0)))
     }
     /// Y offset (points) of the top of `row`.
     pub fn row_top(&self, row: u32) -> f64 {

@@ -268,6 +268,7 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
                 None => {
                     if let Some(e) = shm.rows.get_mut(&row) {
                         e.size = None;
+                        e.saved_size = None;
                     }
                 }
             }

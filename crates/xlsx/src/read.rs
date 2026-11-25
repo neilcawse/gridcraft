@@ -30,6 +30,8 @@ pub struct Ctx<'a> {
     pub palette: Vec<u32>,
     pub date_system: DateSystem,
     pub styles: StyleTable,
+    pub geometry: gridcraft_model::Geometry,
+    pub normal_row_height_px: f32,
     /// Threaded-comment person id → display name.
     pub persons: std::collections::HashMap<String, String>,
     pub next_id: u32,
@@ -367,6 +369,8 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
         palette: crate::tables::INDEXED.to_vec(),
         date_system: DateSystem::D1900,
         styles: StyleTable::default(),
+        geometry: gridcraft_model::Geometry::Legacy,
+        normal_row_height_px: gridcraft_model::DEFAULT_ROW_HEIGHT,
         persons: Default::default(),
         next_id: 1,
         num_fmts: Default::default(),
@@ -407,6 +411,12 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
     wb.sheets.clear();
 
     read_workbook_styles(&mut cx, &mut wb, &wb_rels)?;
+    let normal =
+        &wb.cell_styles.iter().find(|(name, _)| name.eq_ignore_ascii_case("Normal")).map_or(cx.styles.get(StyleId::DEFAULT), |(_, s)| s).font;
+    cx.geometry = gridcraft_model::Geometry::host(normal);
+    if cx.geometry != gridcraft_model::Geometry::Legacy {
+        cx.normal_row_height_px = gridcraft_model::geometry::mac_line_height_pt(normal) * (4.0 / 3.0);
+    }
     read_shared_strings(&mut cx, &wb_rels)?;
 
     if let Some(r) = find_rel(&wb_rels, "person").cloned()

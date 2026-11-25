@@ -772,7 +772,7 @@ fn same_content(a: Option<&gridcraft_model::Cell>, b: Option<&gridcraft_model::C
 /// words (egui's LayoutJob), so dividing the total width by the column width undercounts: each
 /// drawn line ends early at the last word that fits. A word wider than the column breaks
 /// mid-word, the way egui does. (#1969)
-fn wrapped_line_count(line: &str, width: f32, size: f32, bold: bool) -> f32 {
+fn wrapped_line_count(line: &str, width: f32, size: f32, bold: bool, mac: bool) -> f32 {
     let word_w = |w: &str| crate::cmd::format::approx_text_width(w, size, bold);
     let space_w = word_w(" ");
     let mut lines = 1.0f32;
@@ -784,7 +784,7 @@ fn wrapped_line_count(line: &str, width: f32, size: f32, bold: bool) -> f32 {
             if used > 0.0 {
                 lines += 1.0;
             }
-            let chunks = (w / width).ceil();
+            let chunks = if mac { (w / width).ceil().min(word.chars().count() as f32) } else { (w / width).ceil() };
             lines += chunks - 1.0;
             used = w - (chunks - 1.0) * width;
             continue;
@@ -898,12 +898,18 @@ pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut
     if sh.rows.get(&row).is_some_and(|i| i.custom) {
         return;
     }
+    let mac = sh.geometry != gridcraft_model::Geometry::Legacy;
+    if mac && sh.saved_geometry.is_some_and(|g| g.custom_height == Some(true) && g.default_row_height.is_some()) {
+        return;
+    }
+    let edges = sh.rows.get(&row).map_or(0, |i| u8::from(i.thick_edges.0) + u8::from(i.thick_edges.1));
     let default = sh.default_row_height;
     // Fast path: rows of default-size, unwrapped content keep the default height.
-    let plain = sh.cells.row(row, 0, gridcraft_core::MAX_COLS - 1).all(|(_, cell)| {
-        let st = wb.styles.get(cell.style);
-        st.font.size <= gridcraft_model::DEFAULT_FONT_SIZE && !st.align.wrap
-    });
+    let plain = !mac
+        && sh.cells.row(row, 0, gridcraft_core::MAX_COLS - 1).all(|(_, cell)| {
+            let st = wb.styles.get(cell.style);
+            st.font.size <= gridcraft_model::DEFAULT_FONT_SIZE && !st.align.wrap
+        });
     if plain {
         if sh.rows.get(&row).is_some_and(|i| i.size.is_some())
             && let Some(shm) = wb.sheet_mut(si)
@@ -937,9 +943,6 @@ pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut
         }
         let st = wb.styles.get(cell.style);
         let size = st.font.size;
-        // Scaled from an 11pt row's height, not the sheet's default: a sheet whose default
-        // already fits a bigger font (21pt rows for 16pt text) would otherwise scale it twice.
-        let line = (size * 1.8).round().max(gridcraft_model::DEFAULT_ROW_HEIGHT * size / gridcraft_model::DEFAULT_FONT_SIZE);
         let mut lines = 1.0f32;
         if !cell.value.is_empty() || cell.formula.is_some() {
             // Only a wrapping cell is laid out over several lines: each explicit line break
@@ -947,13 +950,30 @@ pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut
             if st.align.wrap {
                 let text = crate::display::cell_text(wb, sh, CellRef::new(row, c));
                 let w = sh.col_width(c).max(1.0) - 6.0;
-                lines = text.lines().map(|l| wrapped_line_count(l, w.max(1.0), size, st.font.bold)).sum::<f32>().max(1.0);
+                let width = w.max(1.0);
+                lines = if mac {
+                    text.split('\n').map(|l| wrapped_line_count(l, width, size, st.font.bold, true)).sum::<f32>()
+                } else {
+                    text.lines().map(|l| wrapped_line_count(l, width, size, st.font.bold, false)).sum::<f32>().max(1.0)
+                };
             }
-        } else if st.font.size <= gridcraft_model::DEFAULT_FONT_SIZE {
+        } else if !mac && st.font.size <= gridcraft_model::DEFAULT_FONT_SIZE {
             continue;
         }
-        let h = if lines > 1.0 { (size * 96.0 / 72.0 * 1.22 * lines + 5.0).ceil() } else { line };
+        let h = if mac {
+            let points = gridcraft_model::geometry::mac_line_height_pt(&st.font);
+            let points = if st.align.wrap { (points + 1.0) * lines } else { points };
+            points * (4.0 / 3.0)
+        } else if lines > 1.0 {
+            (size * 96.0 / 72.0 * 1.22 * lines + 5.0).ceil()
+        } else {
+            // Scale from an 11 pt row so a larger sheet default does not scale twice.
+            (size * 1.8).round().max(gridcraft_model::DEFAULT_ROW_HEIGHT * size / gridcraft_model::DEFAULT_FONT_SIZE)
+        };
         need = need.max(h.min(546.0));
+    }
+    if mac {
+        need = (need + f32::from(edges) * (4.0 / 3.0)).min(546.0);
     }
     let Some(shm) = wb.sheet_mut(si) else { return };
     let e = shm.rows.entry(row).or_default();
@@ -978,6 +998,35 @@ impl Ctx<'_> {
 #[cfg(test)]
 mod merge_sweep_tests {
     use super::*;
+
+    #[test]
+    fn mac_fit_uses_wrapped_line_height_and_preserves_custom_height() {
+        // H1, H5, H8 and H10: custom height, fixed sheet default, wrap and thick edges.
+        use gridcraft_core::Value;
+        use gridcraft_model::{Cell, Geometry, LineInfo, SavedSheetGeometry, Style};
+
+        let mut wb = Workbook::new();
+        let wrapped = wb.styles.intern(Style { align: gridcraft_model::Alignment { wrap: true, ..Default::default() }, ..Default::default() });
+        {
+            let sh = wb.sheet_mut(0).unwrap();
+            sh.geometry = Geometry::Mac { digit_pt: 6 };
+            for row in 0..3 {
+                sh.cells.set(CellRef::new(row, 0), Cell::styled(Value::Text("a\nb\nc".into()), wrapped));
+            }
+            sh.rows.insert(1, LineInfo { size: Some(28.0), custom: true, saved_size: Some(21.75), ..LineInfo::default() });
+        }
+        let mut sweep = MergeSweep::new(MERGE_FIT_WORK);
+        fit_row_height(&mut wb, 0, 0, &mut sweep);
+        fit_row_height(&mut wb, 0, 1, &mut sweep);
+        let sh = wb.sheet_mut(0).unwrap();
+        assert_eq!(sh.row_height(0), 64.0);
+        assert_eq!(sh.row_height(1), 28.0);
+        assert_eq!(sh.rows[&1].saved_size, Some(21.75));
+        sh.default_row_height = 28.0;
+        sh.saved_geometry = Some(SavedSheetGeometry { custom_height: Some(true), default_row_height: Some(21.75), ..Default::default() });
+        fit_row_height(&mut wb, 0, 2, &mut sweep);
+        assert_eq!(wb.sheet(0).unwrap().row_height(2), 28.0);
+    }
 
     #[test]
     fn the_budget_carries_from_one_sheets_sweep_to_the_next() {

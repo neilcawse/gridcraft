@@ -5,7 +5,6 @@ use gridcraft_engine::core::{CellRef, MAX_COLS, MAX_ROWS, RangeRef, Value, col_t
 use gridcraft_engine::display::{CellLook, cell_look};
 use gridcraft_engine::model::{
     Alignment, Anchor, AnchorMode, BorderLine, BorderStyle, Color, Font, HAlign, LineIndex, Sheet, StyleId, Theme, Underline, Workbook,
-    points_to_chars,
 };
 use gridcraft_ui_egui::grid::display::{DisplayText, SheetText, TextContext};
 use serde::Serialize;
@@ -107,12 +106,15 @@ fn dump_sheet(out: &mut impl Write, wb: &Workbook, si: usize, sh: &Sheet, select
         }),
     )?;
     write!(out, ",\"standard_dimensions\":")?;
+    let (digit_px, padding_px) = sh.geometry.digit_and_padding_px();
     serde_json::to_writer(
         &mut *out,
         &json!({
             "width_pt": dimension(f64::from(sh.default_col_width), PT), "width_px": dimension(f64::from(sh.default_col_width), 1.0),
             "height_pt": dimension(f64::from(sh.default_row_height), PT), "height_px": dimension(f64::from(sh.default_row_height), 1.0),
-            "width_chars": points_to_chars(f64::from(sh.default_col_width)), "digit_width_px": 7, "padding_px": 5,
+            "width_chars": sh.geometry.width_chars(f64::from(sh.default_col_width)),
+            "digit_width_px": digit_px, "padding_px": padding_px,
+            "geometry_profile": if sh.geometry == gridcraft_engine::model::Geometry::Legacy { "legacy" } else { "excel-mac" },
         }),
     )?;
     let merges = sh.merges.iter().filter(|m| m.intersects(&r));
@@ -145,15 +147,16 @@ fn dump_sheet(out: &mut impl Write, wb: &Workbook, si: usize, sh: &Sheet, select
         out,
         used_cols.into_iter().enumerate().filter(|(_, used)| *used).map(|(i, _)| {
             let col = r.start.col + i as u32;
-            let size = sh.cols.get(&col).and_then(|l| l.size);
+            let line = sh.cols.get(&col);
+            let size = line.and_then(|l| l.size);
             let px = f64::from(sh.col_width(col));
             let configured_px = f64::from(size.unwrap_or(sh.default_col_width));
             Column {
                 column: col_to_letters(col),
                 width_pt: dimension(px, PT),
                 width_px: dimension(px, 1.0),
-                width_chars: points_to_chars(px),
-                hidden: sh.cols.get(&col).is_some_and(|l| l.hidden),
+                width_chars: sh.geometry.width_chars(px),
+                hidden: sh.is_col_hidden(col),
                 custom: size.is_some(),
                 configured_width_pt: dimension(configured_px, PT),
                 configured_width_px: dimension(configured_px, 1.0),

@@ -117,7 +117,7 @@ fn sample() -> Workbook {
     s.cols.insert(1, LineInfo { size: Some(100.0), ..Default::default() });
     s.cols.insert(3, LineInfo { hidden: true, outline: 1, ..Default::default() });
     s.cols.insert(5, LineInfo { style: Some(money), ..Default::default() });
-    s.rows.insert(0, LineInfo { size: Some(30.0), ..Default::default() });
+    s.rows.insert(0, LineInfo { size: Some(32.0), custom: true, ..Default::default() });
     s.rows.insert(9, LineInfo { hidden: true, outline: 2, collapsed: true, ..Default::default() });
     s.rows.insert(10, LineInfo { style: Some(bold), ..Default::default() });
     s.default_row_height = 24.0;
@@ -562,8 +562,13 @@ fn assert_sheet_cells_and_settings(wb: &Workbook, back: &Workbook, a: &Sheet, b:
     }
     // Spilled cells are written as cached values and dropped again on read.
     assert!(b.cell(at("H2")).is_none());
-    assert_eq!(b.cols, a.cols);
-    assert_eq!(b.rows, a.rows);
+    for (saved, expected) in [(&b.cols, &a.cols), (&b.rows, &a.rows)] {
+        assert_eq!(saved.len(), expected.len());
+        for (index, line) in expected {
+            let actual = saved[index];
+            assert_eq!(LineInfo { saved_size: None, saved_col_flags: None, ..actual }, *line, "line {index}");
+        }
+    }
     assert_eq!(b.default_row_height, a.default_row_height);
     assert_eq!(b.default_col_width, a.default_col_width);
     assert_eq!(b.merges, a.merges);
@@ -815,6 +820,40 @@ fn empty_workbook_roundtrip() {
     assert_eq!(back.sheets[0].default_col_width, 64.0);
     assert_eq!(back.sheets[0].default_row_height, 20.0);
     assert!(crate::sniff(&bytes) == crate::Format::Xlsx);
+}
+
+#[test]
+fn xlsx_geometry_attributes_survive_layout_conversion() {
+    // W1, W4, H1–H3 and H5 must not rewrite the saved numeric widths and heights.
+    let custom_format = r#"<sheetFormatPr baseColWidth="4" defaultColWidth="13.25123" defaultRowHeight="21.75" customHeight="1"/>"#;
+    for format in ["", custom_format] {
+        let cols = r#"<cols><col min="1" max="1" width="8.30078125" customWidth="1"/></cols>"#;
+        let rows = r#"<sheetData><row r="1" ht="15.51" customHeight="1"/><row r="2" ht="14.1234"/></sheetData>"#;
+        let wb = read_xlsx(&super::minimal(&format!("{format}{cols}{rows}"), &[], "", "")).unwrap().0;
+        let sheet = &wb.sheets[0];
+        let mac = matches!(sheet.geometry, Geometry::Mac { .. });
+        assert_eq!(sheet.rows[&0].saved_size, Some(15.51));
+        assert_eq!(sheet.rows[&1].saved_size, Some(14.1234));
+        assert_eq!(sheet.cols[&0].saved_size, Some(8.30078125));
+        if mac {
+            assert_eq!(sheet.row_height(0), 20.0);
+            assert_eq!(sheet.row_height(1), if format.is_empty() { 20.0 } else { 28.0 });
+        }
+        let bytes = write_xlsx(&wb).unwrap();
+        let mut pkg = Package::open(&bytes).unwrap();
+        let xml = pkg.read_xml("xl/worksheets/sheet1.xml").unwrap().unwrap();
+        assert_eq!(xml.child("sheetFormatPr").is_some(), !format.is_empty());
+        if let Some(fmt) = xml.child("sheetFormatPr") {
+            assert_eq!(fmt.attr("baseColWidth"), Some("4"));
+            assert_eq!(fmt.attr("defaultColWidth"), Some("13.25123"));
+            assert_eq!(fmt.attr("defaultRowHeight"), Some("21.75"));
+            assert_eq!(fmt.attr("customHeight"), Some("1"));
+        }
+        assert_eq!(xml.child("cols").unwrap().child("col").unwrap().attr("width"), Some("8.30078125"));
+        let mut saved = xml.child("sheetData").unwrap().kids("row");
+        assert_eq!(saved.next().unwrap().attr("ht"), Some("15.51"));
+        assert_eq!(saved.next().unwrap().attr("ht"), Some("14.1234"));
+    }
 }
 
 #[test]

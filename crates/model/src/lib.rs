@@ -8,6 +8,7 @@ mod b64;
 pub mod cell;
 mod cellmap;
 pub mod features;
+pub mod geometry;
 pub mod group;
 pub mod macros;
 pub mod password;
@@ -21,6 +22,7 @@ pub mod workbook;
 
 pub use cell::{Cell, CellPicture, Formula};
 pub use features::*;
+pub use geometry::{Geometry, SavedSheetGeometry};
 pub use group::{DrawingGroup, DrawingRef, GroupFile, GroupFileMember, MAX_GROUP_DEPTH, ObjectRect, rotates};
 pub use macros::*;
 pub use password::PasswordHash;

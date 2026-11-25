@@ -2306,7 +2306,9 @@ fn open_keeps_custom_height_rows() {
     let mut s = Session::new();
     s.execute("file.open", json!({"name": "custom.xlsx", "base64": crate::io::base64_encode(&big_font_workbook(Some((25.0, true, false)), true))}))
         .unwrap();
-    assert_eq!(s.doc().unwrap().wb.active().unwrap().row_height(4), 25.0, "custom-height rows are left alone on open");
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    assert_eq!(sh.row_height(4), sh.geometry.custom_height_px(18.75), "manual height is evaluated by the host profile");
+    assert_eq!(sh.rows[&4].saved_size, Some(18.75));
 }
 
 #[test] // C — Review Focus 2 (Some→Some: the fit shrinks the row, the clamp keeps the taller height)
@@ -2314,7 +2316,12 @@ fn open_never_shrinks_taller_auto_rows() {
     let mut s = Session::new();
     s.execute("file.open", json!({"name": "tall.xlsx", "base64": crate::io::base64_encode(&big_font_workbook(Some((60.0, false, false)), true))}))
         .unwrap();
-    assert_eq!(s.doc().unwrap().wb.active().unwrap().row_height(4), 60.0, "open is grow-only: a 60px auto-height row keeps its height");
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    match sh.geometry {
+        gridcraft_model::Geometry::Legacy => assert_eq!(sh.row_height(4), 60.0, "legacy opening never shrinks saved auto heights"),
+        gridcraft_model::Geometry::Mac { .. } => assert_eq!(sh.row_height(4) * 0.75, 26.0, "Mac open recalculates the automatic row"),
+    }
+    assert_eq!(sh.rows[&4].saved_size, Some(45.0));
 }
 
 #[test] // C′ — Review Focus 2 (Some→None: a plain tall row's entry is removed by the fit, the clamp restores it)
@@ -2325,7 +2332,10 @@ fn open_restores_height_of_plain_rows_the_fit_removed() {
         json!({"name": "tall-plain.xlsx", "base64": crate::io::base64_encode(&big_font_workbook(Some((60.0, false, false)), false))}),
     )
     .unwrap();
-    assert_eq!(s.doc().unwrap().wb.active().unwrap().row_height(4), 60.0, "a tall plain row keeps its height after the fit removes its entry");
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    let expected = if sh.geometry == gridcraft_model::Geometry::Legacy { 60.0 } else { 20.0 };
+    assert_eq!(sh.row_height(4), expected);
+    assert_eq!(sh.rows[&4].saved_size, Some(45.0));
 }
 
 #[test] // D — Review Focus 5
@@ -6187,6 +6197,26 @@ fn line_sizes_and_freeze_panes_take_a_sheet() {
     assert!(s.execute("home.columnWidth", json!({"sheet": "Sheet1", "cols": "Data!B:B", "width": 10})).is_err());
     assert!(s.execute("home.rowHeight", json!({"rows": "Nope!1:1", "height": 10})).is_err());
     assert_eq!(sheet(&s, 0), before);
+}
+
+#[test]
+fn mac_resize_replaces_saved_xlsx_dimensions() {
+    use gridcraft_model::{Geometry, LineInfo};
+    let mut s = s();
+    let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+    sh.geometry = Geometry::Mac { digit_pt: 6 };
+    sh.cols.insert(0, LineInfo { size: Some(64.0), saved_size: Some(8.0), saved_col_flags: Some((true, true)), ..Default::default() });
+    sh.rows.insert(0, LineInfo { saved_size: Some(60.0), ..Default::default() });
+
+    s.execute("home.columnWidth", json!({"cols": "A:A", "chars": 8.43})).unwrap();
+    s.execute("home.rowHeight", json!({"rows": "1:1", "points": 15.51})).unwrap();
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    // W3: the nearest representable width to 8.43 chars is 56 pt at d = 6.
+    assert_eq!(sh.geometry.width_chars(f64::from(sh.col_width(0))), 8.5);
+    assert_eq!((sh.cols[&0].saved_size, sh.cols[&0].saved_col_flags), (None, None));
+    // H1: lay out at 15 points but save the new input height, not the old value or the floor.
+    assert_eq!(sh.row_height(0), 20.0);
+    assert_eq!(sh.rows[&0].saved_size, Some(15.51));
 }
 
 #[test]

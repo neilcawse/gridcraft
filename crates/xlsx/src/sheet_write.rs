@@ -179,18 +179,39 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> (
 
     let max_row_outline = sheet.rows.values().map(|r| r.outline).max().unwrap_or(0);
     let max_col_outline = sheet.cols.values().map(|r| r.outline).max().unwrap_or(0);
-    part.features.format = Some(CraftSheetFormat {
-        default_col_width: ((sheet.default_col_width - gridcraft_model::DEFAULT_COL_WIDTH).abs() > 0.01)
-            .then(|| px_to_col_width(sheet.default_col_width)),
-        default_row_height: Some(px_to_pt(sheet.default_row_height)),
-        custom_height: ((sheet.default_row_height - gridcraft_model::DEFAULT_ROW_HEIGHT).abs() > 0.01).then_some(true),
-        outline_level_row: (max_row_outline > 0).then_some(u32::from(max_row_outline)),
-        outline_level_col: (max_col_outline > 0).then_some(u32::from(max_col_outline)),
-        ..Default::default()
-    });
+    let normal = &wb
+        .cell_styles
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("Normal"))
+        .map_or(wb.styles.get(gridcraft_model::StyleId::DEFAULT), |(_, s)| s)
+        .font;
+    let geometry = gridcraft_model::Geometry::host(normal);
+    let saved = sheet.saved_geometry;
+    let width_unchanged = saved.is_some_and(|g| g.original_width_px == sheet.default_col_width);
+    let height_unchanged = saved.is_some_and(|g| g.original_height_px == sheet.default_row_height);
+    if saved.is_none_or(|g| g.has_format) || !width_unchanged || !height_unchanged || max_row_outline != 0 || max_col_outline != 0 {
+        part.features.format = Some(CraftSheetFormat {
+            base_col_width: saved.filter(|_| width_unchanged).and_then(|g| g.base_col_width),
+            default_col_width: if width_unchanged {
+                saved.and_then(|g| g.default_col_width)
+            } else {
+                (geometry != gridcraft_model::Geometry::Legacy || (sheet.default_col_width - gridcraft_model::DEFAULT_COL_WIDTH).abs() > 0.01)
+                    .then(|| stored_width(geometry, sheet.default_col_width))
+            },
+            default_row_height: if height_unchanged { saved.and_then(|g| g.default_row_height) } else { Some(px_to_pt(sheet.default_row_height)) },
+            custom_height: if height_unchanged {
+                saved.and_then(|g| g.custom_height)
+            } else {
+                ((sheet.default_row_height - gridcraft_model::DEFAULT_ROW_HEIGHT).abs() > 0.01).then_some(true)
+            },
+            outline_level_row: (max_row_outline > 0).then_some(u32::from(max_row_outline)),
+            outline_level_col: (max_col_outline > 0).then_some(u32::from(max_col_outline)),
+            ..Default::default()
+        });
+    }
 
     part.features.views = vec![build_craft_view(sheet, selected)];
-    part.columns = build_craft_cols(sheet, &sid);
+    part.columns = build_craft_cols(sheet, geometry, &sid);
     part.merges = sheet.merges.iter().filter(|m| !m.is_single()).copied().map(to_craft_range).collect();
 
     let rows = build_craft_rows(SheetCellData { workbook: wb, index: si, sheet, overrides: &overrides, extra: &extra, dynamic: &dynamic }, &sid, out);
@@ -245,17 +266,29 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> (
     (xml, rels)
 }
 
-fn build_craft_cols(sheet: &Sheet, sid: &dyn Fn(gridcraft_model::StyleId) -> u32) -> Vec<CraftColumn> {
+fn stored_width(geometry: gridcraft_model::Geometry, px: f32) -> f64 {
+    match geometry {
+        gridcraft_model::Geometry::Legacy => px_to_col_width(px),
+        gridcraft_model::Geometry::Mac { digit_pt } => (f64::from(px) * 0.75).round() / f64::from(digit_pt.max(1)),
+    }
+}
+
+fn build_craft_cols(sheet: &Sheet, geometry: gridcraft_model::Geometry, sid: &dyn Fn(gridcraft_model::StyleId) -> u32) -> Vec<CraftColumn> {
     let mut cols = Vec::new();
     let mut run: Option<(u32, u32, LineInfo)> = None;
     let push_run = |cols: &mut Vec<CraftColumn>, (a, b, i): (u32, u32, LineInfo)| {
-        let w = i.size.unwrap_or(sheet.default_col_width);
+        let (width, custom_width, best_fit) = match i.saved_col_flags {
+            Some((custom, best_fit)) if i.size.is_none_or(|size| i.saved_size.is_some_and(|raw| sheet.geometry.stored_width_px(raw) == size)) => {
+                (i.saved_size, custom, best_fit)
+            }
+            _ => (i.size.map(|px| stored_width(geometry, px)), i.size.is_some(), false),
+        };
         cols.push(CraftColumn {
             first: a,
             last: b,
-            width: Some(px_to_col_width(w)),
-            custom_width: i.size.is_some(),
-            best_fit: false,
+            width,
+            custom_width,
+            best_fit,
             hidden: i.hidden,
             outline_level: i.outline.min(7),
             collapsed: i.collapsed,
@@ -763,14 +796,20 @@ fn build_craft_rows(data: SheetCellData<'_>, sid: &dyn Fn(gridcraft_model::Style
         }
         rows.push(CraftRow {
             index: row,
-            height: info.size.map(px_to_pt),
-            custom_height: info.size.is_some() && info.custom,
+            height: info
+                .saved_size
+                .or_else(|| if sheet.geometry == gridcraft_model::Geometry::Legacy || info.custom { info.size.map(px_to_pt) } else { None }),
+            custom_height: info.custom,
             hidden: info.hidden,
             outline_level: info.outline.min(7),
             collapsed: info.collapsed,
             style: info.style.map(sid),
             cells: craft_cells,
-            attrs: Vec::new(),
+            attrs: [("thickTop", info.thick_edges.0), ("thickBot", info.thick_edges.1)]
+                .into_iter()
+                .filter(|(_, set)| *set)
+                .map(|(key, _)| (key.to_owned(), "1".to_owned()))
+                .collect(),
         });
     }
     rows

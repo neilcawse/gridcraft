@@ -95,21 +95,28 @@ pub fn open_bytes_with(name: &str, bytes: &[u8], password: Option<&str>, csv_as_
     Ok((wb, warnings))
 }
 
-/// Excel auto-fits rows to their tallest font when opening a file: rows without a user-set
-/// height grow to fit their content. Rows the file made taller keep their height — our
-/// line-height estimate can differ from Excel's, and shrinking files that already look
-/// right would be a visible regression. Custom-height rows are left alone entirely.
+/// Fit automatic rows on open. The Mac XLSX profile recomputes automatic heights without
+/// inheriting a saved `ht`. Other formats and hosts keep the legacy grow-only fit so that
+/// a saved automatic height cannot shrink. Manual heights are left alone in both cases.
 fn fit_imported_rows(wb: &mut Workbook) {
     // The whole pass shares one budget of merge comparisons: later sheets keep their heights once it is spent.
     let mut left = crate::cmd::MERGE_FIT_WORK;
     for si in 0..wb.sheets.len() {
         let Some(sh) = wb.sheet(si) else { continue };
         let mut rows: Vec<u32> = sh.cells.iter().map(|(c, _)| c.row).collect();
+        let mac = sh.geometry != gridcraft_model::Geometry::Legacy;
+        if mac {
+            rows.extend(sh.rows.iter().filter(|(_, info)| info.thick_edges != (false, false)).map(|(&row, _)| row));
+        }
         rows.sort_unstable();
         rows.dedup();
         // One sweep over the sheet's merges for all of its rows, in ascending order.
         let mut sweep = crate::cmd::MergeSweep::new(left);
         for row in rows {
+            if mac {
+                crate::cmd::fit_row_height(wb, si, row, &mut sweep);
+                continue;
+            }
             let before = wb.sheet(si).and_then(|sh| sh.rows.get(&row)).and_then(|i| i.size);
             crate::cmd::fit_row_height(wb, si, row, &mut sweep);
             let Some(before) = before else { continue };
