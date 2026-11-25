@@ -7707,35 +7707,48 @@ fn cut_cells(s: &Session) -> Vec<(String, Value, Value)> {
 
 /// A pending Cut finds its source sheet by index. Inserting, deleting or moving a sheet can put
 /// another sheet at that index; Paste then refuses instead of moving that sheet's cells.
-#[test]
-fn cell_cut_paste_refuses_when_another_sheet_took_the_source_index() {
-    for change in ["insert", "delete", "move"] {
-        let mut s = s();
-        s.execute("cell.set", json!({"cell": "A3", "input": "source"})).unwrap();
-        s.execute("home.insertSheet", json!({"name": "Other"})).unwrap();
-        s.execute("cell.set", json!({"sheet": "Other", "cell": "A3", "input": "keep me"})).unwrap();
-        s.execute("sheet.activate", json!({"sheet": "Sheet1"})).unwrap();
-        s.execute("edit.cut", json!({"range": "A3"})).unwrap();
-        match change {
-            "insert" => {
-                s.execute("home.insertSheet", json!({"name": "New", "before": 0})).unwrap();
-                s.execute("cell.set", json!({"cell": "A3", "input": "keep me too"})).unwrap();
-            }
-            "delete" => {
-                s.execute("home.deleteSheet", json!({"sheet": "Sheet1"})).unwrap();
-            }
-            _ => {
-                s.execute("sheet.move", json!({"sheet": "Sheet1", "to": 1})).unwrap();
-            }
+fn cell_cut_paste_refuses_after(change: &str) {
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "A3", "input": "source"})).unwrap();
+    s.execute("home.insertSheet", json!({"name": "Other"})).unwrap();
+    s.execute("cell.set", json!({"sheet": "Other", "cell": "A3", "input": "keep me"})).unwrap();
+    s.execute("sheet.activate", json!({"sheet": "Sheet1"})).unwrap();
+    s.execute("edit.cut", json!({"range": "A3"})).unwrap();
+    match change {
+        "insert" => {
+            s.execute("home.insertSheet", json!({"name": "New", "before": 0})).unwrap();
+            s.execute("cell.set", json!({"cell": "A3", "input": "keep me too"})).unwrap();
         }
-        let first = if change == "insert" { "New" } else { "Other" };
-        assert_eq!(s.doc().unwrap().wb.sheets[0].name, first);
-        s.execute("sheet.activate", json!({"sheet": first})).unwrap();
-        let before = cut_cells(&s);
-        let refused = s.execute("edit.paste", json!({"at": "A8"}));
-        assert!(refused.unwrap_err().to_string().contains("Cut it again"), "{change}");
-        assert_eq!(cut_cells(&s), before, "{change}");
+        "delete" => {
+            s.execute("home.deleteSheet", json!({"sheet": "Sheet1"})).unwrap();
+        }
+        _ => {
+            s.execute("sheet.move", json!({"sheet": "Sheet1", "to": 1})).unwrap();
+        }
     }
+    let first = if change == "insert" { "New" } else { "Other" };
+    assert_eq!(s.doc().unwrap().wb.sheets[0].name, first);
+    s.execute("sheet.activate", json!({"sheet": first})).unwrap();
+    let before = cut_cells(&s);
+    let refused = s.execute("edit.paste", json!({"at": "A8"}));
+    assert!(refused.unwrap_err().to_string().contains("Cut it again"));
+    assert_eq!(cut_cells(&s), before);
+    assert!(s.clipboard.as_ref().is_some_and(|c| c.cut));
+}
+
+#[test]
+fn cell_cut_paste_refuses_after_a_sheet_is_inserted_before_the_source() {
+    cell_cut_paste_refuses_after("insert");
+}
+
+#[test]
+fn cell_cut_paste_refuses_after_the_source_sheet_is_deleted() {
+    cell_cut_paste_refuses_after("delete");
+}
+
+#[test]
+fn cell_cut_paste_refuses_after_the_source_sheet_is_moved() {
+    cell_cut_paste_refuses_after("move");
 }
 
 /// Sheets added after the source leave its index alone, so the Cut still moves its cells.
