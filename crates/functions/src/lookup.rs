@@ -169,8 +169,8 @@ fn row(a: &Array, r: usize) -> Vec<Value> {
 
 /// Resolves the 0-based `(row_or_col_pos, col_or_row_index)` of a `VLOOKUP` or `HLOOKUP` against a
 /// 1-D key array, without requiring the caller to materialize the rest of `table_array`.
-/// The `range_lookup` argument comes with whether it was read from a cell.
-pub fn vh_lookup_pos(needle_val: &Value, keys_val: &Value, idx_val: &Value, approx: Option<(&Value, bool)>, max_len: usize) -> R<(usize, usize)> {
+/// The index and `range_lookup` arguments come with whether each was read from a cell.
+pub fn vh_lookup_pos(needle_val: &Value, keys_val: &Value, idx: (&Value, bool), approx: Option<(&Value, bool)>, max_len: usize) -> R<(usize, usize)> {
     let x = match needle_val.scalar() {
         Value::Error(e) => return Err(e),
         Value::Empty => Value::Number(0.0),
@@ -183,7 +183,7 @@ pub fn vh_lookup_pos(needle_val: &Value, keys_val: &Value, idx_val: &Value, appr
     let keys = as_array(keys_val);
     let pos = if approx { bsearch_last(&x, &keys.data, false) } else { find_exact_in_array(&x, &keys, true, false) };
     let pos = pos.ok_or(CellError::NA)?;
-    Ok((pos, lookup_index(idx_val, max_len)?))
+    Ok((pos, lookup_index(idx.0, idx.1, max_len)?))
 }
 
 /// The `range_lookup` of VLOOKUP / HLOOKUP. Text read from a cell is `#VALUE!`, even "TRUE"
@@ -198,13 +198,15 @@ fn range_lookup_arg(v: &Value, from_ref: bool) -> R<bool> {
 /// The 0-based column (VLOOKUP) or row (HLOOKUP) of the index argument in a table `len` wide.
 /// Excel resolves it only once the key is found: a lookup that finds nothing is `#N/A` whatever
 /// the index (Excel 2013: `HLOOKUP(x, E45:AB49, 43, 0)` without x in the first row is `#N/A`).
-/// An index that is no whole number is `#REF!`: an error, and text that doesn't read as a whole
-/// number (Excel 16: text "2" is column 2, but text "0.9", "29.9e-1" and "abc" are #REF!, while
-/// the number 0.9 is #VALUE! and 2.99 is column 2). Below 1 (a blank, FALSE) it is `#VALUE!`;
-/// past the table `#REF!`.
-fn lookup_index(v: &Value, len: usize) -> R<usize> {
+/// An index that is no whole number is `#REF!`: an error read from a cell, and text that doesn't
+/// read as a whole number (Excel 16: text "2" is column 2, but text "0.9", "29.9e-1" and "abc" are
+/// #REF!, while the number 0.9 is #VALUE! and 2.99 is column 2). An error computed in the formula
+/// is that error (Excel 2013: `VLOOKUP(a, t, HLOOKUP(…), FALSE)` with the HLOOKUP #N/A is #N/A).
+/// Below 1 (a blank, FALSE) it is `#VALUE!`; past the table `#REF!`.
+fn lookup_index(v: &Value, from_ref: bool, len: usize) -> R<usize> {
     let idx = match v.scalar() {
-        Value::Error(_) => return Err(CellError::Ref),
+        Value::Error(_) if from_ref => return Err(CellError::Ref),
+        Value::Error(e) => return Err(e),
         Value::Text(t) => parse_number_text(&t).filter(|n| n.fract() == 0.0).ok_or(CellError::Ref)?,
         v => v.to_number()?,
     };
@@ -279,7 +281,7 @@ fn vh_lookup(args: &[Arg], vertical: bool) -> R<Value> {
         }
     };
     let pos = pos.ok_or(CellError::NA)?;
-    let idx = lookup_index(&idx_arg.value, len)?;
+    let idx = lookup_index(&idx_arg.value, idx_arg.from_ref, len)?;
     let v = if vertical { table.get(pos, idx) } else { table.get(idx, pos) };
     // An empty target stays blank, as in Excel: ISBLANK sees it as blank and `&` /
     // CONCATENATE treat it as ""; only a formula's final result displays 0 (#374).
@@ -756,7 +758,9 @@ mod tests {
         close(ev("VLOOKUP", vec![t("Bz"), rf(names()), n(2.0)]), 2.0);
         is_err(ev("VLOOKUP", vec![e(CellError::Div0), rf(names()), n(2.0)]), CellError::Div0);
         // The index is resolved once the key is found (Excel): a key not found is #N/A whatever
-        // the index; an error or text that isn't a whole number there is #REF!.
+        // the index; an error read from a cell or text that isn't a whole number there is #REF!,
+        // an error computed in the formula is that error.
+        is_err(ev("VLOOKUP", vec![n(3.0), rf(table()), e(CellError::NA), b(false)]), CellError::NA);
         is_err(ev("VLOOKUP", vec![n(0.5), rf(table()), n(9.0), b(false)]), CellError::NA);
         is_err(ev("VLOOKUP", vec![n(0.5), rf(table()), n(0.0), b(false)]), CellError::NA);
         is_err(ev("HLOOKUP", vec![n(0.5), rf(table()), n(9.0), b(false)]), CellError::NA);
