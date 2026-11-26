@@ -184,6 +184,30 @@ fn table_slicer_round_trips_binding_selection_and_geometry() -> TestResult {
     Ok(())
 }
 
+/// Two table slicer parts that name the same drawing frame share the ID reserved for that frame:
+/// only the first slicer takes it, so no two objects in the workbook have one ID.
+#[test]
+fn table_slicers_sharing_a_frame_name_keep_distinct_ids() -> TestResult {
+    let mut wb = workbook();
+    let dash = Arc::make_mut(&mut wb.sheets[1]);
+    let mut twin = dash.slicers[0].clone();
+    twin.id = 8;
+    dash.slicers.push(twin);
+    let (bytes, _) = save(&wb)?;
+    // The writer names the twin "Region 1 2"; its slicer part is renamed back to the first
+    // frame's name, leaving its own frame without a slicer.
+    let mut parts = unzip(&bytes)?;
+    let slicer = parts.get_mut("xl/slicers/slicer1.xml").ok_or("slicer part")?;
+    assert_eq!(slicer.matches("<slicer name=\"Region 1 2\"").count(), 1, "{slicer}");
+    *slicer = slicer.replace("<slicer name=\"Region 1 2\"", "<slicer name=\"Region 1\"");
+    let parts: Vec<(&str, &[u8])> = parts.iter().map(|(k, v)| (k.as_str(), v.as_bytes())).collect();
+    let (back, report) = read_xlsx(&make_zip(&parts))?;
+    let ids: Vec<u32> = back.sheets.iter().flat_map(|s| s.slicers.iter().map(|sl| sl.id)).collect();
+    assert_eq!(ids.len(), 1, "{ids:?}");
+    assert!(report.warnings.iter().any(|w| w.contains("\"Region 1 2\" has no slicer part")), "{:?}", report.warnings);
+    Ok(())
+}
+
 #[test]
 fn renamed_table_keeps_its_slicer() -> TestResult {
     let mut wb = workbook();
