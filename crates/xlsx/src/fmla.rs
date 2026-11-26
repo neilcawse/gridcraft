@@ -169,7 +169,7 @@ pub(crate) fn formula_bar_text(text: &str, canonical: &str) -> Option<String> {
     use gridcraft_formula::{
         StructItem,
         lexer::{Tok, tokenize},
-        parser::parse_struct,
+        parser::{file_trim_mode, parse_struct},
     };
 
     let body = text.strip_prefix('=').unwrap_or(text);
@@ -205,9 +205,7 @@ pub(crate) fn formula_bar_text(text: &str, canonical: &str) -> Option<String> {
                     edits.push((t.start, t.end, if spill { "" } else { "@" }));
                     stack.push(Some((open, spill, false)));
                 } else {
-                    if unprefix(spelling, "_xludf.").is_some()
-                        || name.is_some_and(|n| ["_TRO_ALL", "_TRO_LEADING", "_TRO_TRAILING"].iter().any(|mode| n.eq_ignore_ascii_case(mode)))
-                    {
+                    if unprefix(spelling, "_xludf.").is_some() || file_trim_mode(spelling).is_some() {
                         return None;
                     }
                     if let Some(name) = name.or_else(|| unprefix(spelling, PARAM_PREFIX)) {

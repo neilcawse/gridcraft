@@ -449,6 +449,18 @@ fn trim_references() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn only_file_trim_calls_become_trim_references() -> Result<(), Box<dyn std::error::Error>> {
+    for (name, range) in [("_TRO_ALL", "A1.:.E10"), ("_TRO_LEADING", "A1.:E10"), ("_TRO_TRAILING", "A1:.E10")] {
+        assert_eq!(parse(&format!("_xlfn.{name}(A1:E10)"))?, parse(range)?);
+        assert_eq!(parse(&format!("_XlFn.{}(A1:E10)", name.to_ascii_lowercase()))?, parse(range)?);
+        for prefix in ["", "_xlfn._xlws.", "_xlws."] {
+            assert!(matches!(parse(&format!("{prefix}{name}(A1:E10)"))?, Expr::Call(n, _) if n == name));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn trim_references_adjust() -> Result<(), Box<dyn std::error::Error>> {
     let ins = Edit::Insert { axis: Axis::Rows, at: 2, count: 2 };
     let e = parse("SUM(A1:.A5)+SUM(B:.B)+ROWS(2.:.4)")?;

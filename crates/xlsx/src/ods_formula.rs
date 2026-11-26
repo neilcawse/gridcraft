@@ -411,10 +411,11 @@ fn call(name: &str, mut args: Vec<String>, doc: &dyn Sheets) -> Result<String, U
     let upper = name.to_ascii_uppercase();
     let n = args.len();
     // Functions Excel added after OpenFormula 1.2, and the Excel spellings OpenFormula keeps for
-    // compatibility (LEGACY.FDIST is Excel's right-tailed FDIST).
+    // compatibility (LEGACY.FDIST is Excel's right-tailed FDIST). An Excel trim reference keeps the
+    // `_xlfn.` its `_TRO_*` call needs to be one rather than a call to a workbook name.
     let excel =
         if let Some(n) = upper.strip_prefix("COM.MICROSOFT.").or_else(|| upper.strip_prefix("LEGACY.")).or_else(|| upper.strip_prefix("_XLFN.")) {
-            n.to_string()
+            if gridcraft_formula::parser::trim_function_mode(n).is_some() { format!("_xlfn.{n}") } else { n.to_string() }
         } else {
             let cumulative = |args: &mut Vec<String>, at: usize| {
                 if args.len() == at {
@@ -1153,6 +1154,9 @@ mod tests {
             ("of:=IF([.A1]=\"a;b\";\"x\"\"y\";1.5E+3)", "IF(A1=\"a;b\",\"x\"\"y\",1.5E+3)"),
             ("of:=[.E26]-[#REF!]+[.F1:.#REF!]", "E26-#REF!+#REF!"),
             ("of:=COM.MICROSOFT.XLOOKUP(1;[.A1:.A3];[.B1:.B3])", "XLOOKUP(1,A1:A3,B1:B3)"),
+            // A vendor-prefixed trim reference stays one; a bare `_TRO_*` call is a name's.
+            ("of:=COM.MICROSOFT._TRO_ALL([.A1:.E10])+_xlfn._tro_leading([.A1:.E10])", "_xlfn._TRO_ALL(A1:E10)+_xlfn._TRO_LEADING(A1:E10)"),
+            ("of:=_TRO_ALL(41)", "_TRO_ALL(41)"),
             ("of:=LEGACY.CHIDIST(3;2)+ERROR.TYPE(#N/A)+BINOM.DIST.RANGE(3;0.5;1)", "CHIDIST(3,2)+ERROR.TYPE(#N/A)+BINOM.DIST.RANGE(3,0.5,1)"),
             ("of:=FORMULA([.A1])", "FORMULATEXT(A1)"),
             ("of:=PI()+TRUE()-IF(;1)", "PI()+TRUE()-IF(,1)"),

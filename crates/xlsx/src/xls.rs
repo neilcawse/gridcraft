@@ -7,6 +7,7 @@
 //! Every formula in the file is a legacy (pre-dynamic-array) one, so it is read with Excel's
 //! implicit `@` (see `array_formula.rs`), like an `.xlsx` formula saved without `cm`.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use craft_xls as x;
@@ -118,13 +119,13 @@ pub(crate) fn read_xls_budgeted(bytes: &[u8], limits: x::Limits, functions: Func
         // about records it could not decode.
         for (dropped, skipped) in [
             (!s.conditional_formats.is_empty(), x::Warning::ConditionalFormattingSkipped),
-            (s.validations.iter().any(|v| validation_of(v).is_none()), x::Warning::DataValidationSkipped),
+            (s.validations.iter().any(|v| validation_of(v, &book.names).is_none()), x::Warning::DataValidationSkipped),
         ] {
             if dropped {
                 report.warn(warning(&skipped));
             }
         }
-        let sheet = sheet_of(s, &styles, &mut unparsed);
+        let sheet = sheet_of(s, &styles, &book.names, &mut unparsed);
         wb.sheets.push(Arc::new(sheet));
     }
     if unparsed {
@@ -133,7 +134,8 @@ pub(crate) fn read_xls_budgeted(bytes: &[u8], limits: x::Limits, functions: Func
     wb.calc = calc_of(&book.calc);
     wb.calc.precision_as_displayed = book.precision_as_displayed;
     for n in &book.names {
-        wb.names.push(DefinedName { name: n.name.clone(), scope: n.scope, formula: n.formula.clone(), comment: String::new(), hidden: n.hidden });
+        let formula = with_trim_prefixes(&n.formula, &book.names).into_owned();
+        wb.names.push(DefinedName { name: n.name.clone(), scope: n.scope, formula, comment: String::new(), hidden: n.hidden });
     }
     // Every .xls formula is a legacy (pre-dynamic-array) one: read with Excel's implicit `@`, like
     // an .xlsx formula without `cm`. Ctrl+Shift+Enter arrays are read as they are.
@@ -195,9 +197,42 @@ fn calc_of(c: &x::Calc) -> CalcSettings {
     calc
 }
 
+/// craft-xls drops the `_xlfn.` of a newer function's name, so a trim reference, which `.xlsx`
+/// spells as the newer function `_xlfn._TRO_ALL(…)`, comes as `_TRO_ALL(…)`, just as a call to a
+/// workbook name `_TRO_ALL` does. A `_TRO_*` call is the trim reference unless the workbook
+/// defines a name so spelled (in any scope); it gets its prefix back so the parser reads it as
+/// one, and the formula comes back in canonical text (`A1.:.E10`) as an `.xlsx` one would.
+fn with_trim_prefixes<'a>(text: &'a str, names: &[x::DefinedName]) -> Cow<'a, str> {
+    use gridcraft_formula::{
+        lexer::{Tok, tokenize},
+        parser::trim_function_mode,
+    };
+    if !text.as_bytes().windows(5).any(|w| w.eq_ignore_ascii_case(b"_TRO_")) {
+        return Cow::Borrowed(text);
+    }
+    let Ok(tokens) = tokenize(text) else { return Cow::Borrowed(text) };
+    let mut out = String::new();
+    let mut from = 0;
+    for t in &tokens {
+        if let Tok::Func(name) = &t.tok
+            && trim_function_mode(name).is_some()
+            && !names.iter().any(|n| n.name.eq_ignore_ascii_case(name))
+        {
+            out.push_str(text.get(from..t.start).unwrap_or(""));
+            out.push_str("_xlfn.");
+            from = t.start;
+        }
+    }
+    if out.is_empty() {
+        return Cow::Borrowed(text);
+    }
+    out.push_str(text.get(from..).unwrap_or(""));
+    Cow::Owned(crate::fmla::from_file(&out))
+}
+
 /// One worksheet. `unparsed` is set when a formula's text is one GridCraft can't parse: the cell
 /// keeps its saved result.
-fn sheet_of(s: &x::Sheet, styles: &[StyleId], unparsed: &mut bool) -> Sheet {
+fn sheet_of(s: &x::Sheet, styles: &[StyleId], names: &[x::DefinedName], unparsed: &mut bool) -> Sheet {
     let style = |f: Option<u16>| f.and_then(|i| styles.get(usize::from(i)).copied()).unwrap_or(StyleId::DEFAULT);
     let mut sheet = Sheet::new(&s.name);
     sheet.visibility = match s.visibility {
@@ -207,7 +242,7 @@ fn sheet_of(s: &x::Sheet, styles: &[StyleId], unparsed: &mut bool) -> Sheet {
     };
     for (at, c) in &s.cells {
         let formula = c.formula.as_ref().and_then(|f| {
-            let mut parsed = Formula::new(&f.text);
+            let mut parsed = Formula::new(&with_trim_prefixes(&f.text, names));
             if parsed.expr.is_none() {
                 *unparsed = true;
                 return None;
@@ -258,7 +293,7 @@ fn sheet_of(s: &x::Sheet, styles: &[StyleId], unparsed: &mut bool) -> Sheet {
         sheet.show_zeros = v.show_zeros;
         sheet.right_to_left = v.right_to_left;
     }
-    sheet.validations = s.validations.iter().filter_map(validation_of).collect();
+    sheet.validations = s.validations.iter().filter_map(|v| validation_of(v, names)).collect();
     if let Some(text) = &s.print_area {
         sheet.print.print_area = crate::read::parse_print_area(text);
     }
@@ -272,7 +307,7 @@ fn sheet_of(s: &x::Sheet, styles: &[StyleId], unparsed: &mut bool) -> Sheet {
 
 /// A data validation rule, as `sheet_read` maps a SpreadsheetML `dataValidation`: a list that
 /// is not a literal refers to cells (`=…`).
-fn validation_of(v: &x::DataValidation) -> Option<Validation> {
+fn validation_of(v: &x::DataValidation, names: &[x::DefinedName]) -> Option<Validation> {
     let ranges: Vec<RangeRef> = v.ranges.iter().map(|r| range(*r)).collect();
     if ranges.is_empty() {
         return None;
@@ -287,11 +322,8 @@ fn validation_of(v: &x::DataValidation) -> Option<Validation> {
         x::ValidationType::Custom => ValidationKind::Custom,
         _ => ValidationKind::Any,
     };
-    let f1 = if kind == ValidationKind::List && !v.formula1.is_empty() && !v.formula1.starts_with('"') {
-        format!("={}", v.formula1)
-    } else {
-        v.formula1.clone()
-    };
+    let f1 = with_trim_prefixes(&v.formula1, names);
+    let f1 = if kind == ValidationKind::List && !f1.is_empty() && !f1.starts_with('"') { format!("={f1}") } else { f1.into_owned() };
     Some(Validation {
         ranges,
         kind,
@@ -306,7 +338,7 @@ fn validation_of(v: &x::DataValidation) -> Option<Validation> {
             _ => CfOperator::Between,
         },
         f1,
-        f2: v.formula2.clone(),
+        f2: v.formula2.as_deref().map(|f| with_trim_prefixes(f, names).into_owned()),
         allow_blank: v.allow_blank,
         in_cell_dropdown: v.in_cell_dropdown,
         input_title: v.prompt_title.clone(),

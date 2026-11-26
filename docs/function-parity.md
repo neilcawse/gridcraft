@@ -186,6 +186,19 @@ references, a sheet or name rename) and when different text is entered.
 Other names starting with `_xl` (`_xlBudget`) and table column labels containing an escaped
 `'#This Row` are not file-only tokens and keep their imported spelling; the compatibility
 prefixes and items above are matched in any letter case.
+Only `_xlfn._TRO_*` calls are read as trim references; bare `_TRO_*` calls resolve as ordinary
+names and keep their imported spelling in FORMULATEXT. The writer still uses `_xlfn.TRIMRANGE`
+for trim references. ODS keeps the compatibility marker on `COM.MICROSOFT._TRO_*`
+and `_xlfn._TRO_*` calls.
+
+**Known `.xls` limit:** `craft-xls` returns formula text without `_xlfn.` or the identity of
+the referenced [Lbl record][ms-xls-lbl]. After decoding, a compatibility call and a user call
+with the same spelling are indistinguishable. The importer treats a `_TRO_*` call as a trim
+reference unless a case-insensitive match exists among defined names in any scope. A matching
+name therefore also suppresses trim interpretation on other sheets. MS-XLS reserves Lbl bit
+`0x1000` and uses `fFunc` to mark XLM macros; neither bit identifies future functions.
+
+[ms-xls-lbl]: https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-xls/d148e898-4504-4841-a793-ee85f3ea9eef
 
 ## Revision history
 

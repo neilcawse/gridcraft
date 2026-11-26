@@ -167,6 +167,24 @@ pub fn normalize_function_name(name: &str) -> String {
     }
 }
 
+/// Trim-reference mode for a raw XLSX compatibility function token, before name normalization.
+pub fn file_trim_mode(spelling: &str) -> Option<TrimMode> {
+    let prefix = "_xlfn.";
+    let (head, name) = spelling.split_at_checked(prefix.len())?;
+    if !head.eq_ignore_ascii_case(prefix) {
+        return None;
+    }
+    trim_function_mode(name)
+}
+
+/// Trim-reference mode for a `_TRO_*` function name without its `_xlfn.` prefix, for readers
+/// whose source format drops or replaces that prefix (`.xls` names, ODS vendor prefixes).
+pub fn trim_function_mode(name: &str) -> Option<TrimMode> {
+    [("_TRO_ALL", TrimMode::All), ("_TRO_LEADING", TrimMode::Leading), ("_TRO_TRAILING", TrimMode::Trailing)]
+        .into_iter()
+        .find_map(|(trim, mode)| name.eq_ignore_ascii_case(trim).then_some(mode))
+}
+
 impl Parser {
     fn peek(&self) -> &Tok {
         self.toks.get(self.i).map(|t| &t.tok).unwrap_or(&Tok::Eof)
@@ -316,8 +334,8 @@ impl Parser {
                 Ok(Expr::Paren(Box::new(e)))
             }
             Tok::LBrace => self.array(),
-            Tok::Func(name) => {
-                let name = normalize_function_name(&name);
+            Tok::Func(spelling) => {
+                let name = normalize_function_name(&spelling);
                 let mut args = self.args()?;
                 // Files write `A1#` as `_xlfn.ANCHORARRAY(A1)`.
                 if name == "ANCHORARRAY"
@@ -337,15 +355,9 @@ impl Parser {
                     };
                     return Ok(Expr::Unary(UnOp::At, Box::new(x)));
                 }
-                // Files may spell a trim reference as a function call (`_xlfn._TRO_ALL(A1:E10)`).
-                let trim = match name.as_str() {
-                    "_TRO_LEADING" => Some(TrimMode::Leading),
-                    "_TRO_TRAILING" => Some(TrimMode::Trailing),
-                    "_TRO_ALL" => Some(TrimMode::All),
-                    _ => None,
-                };
-                if let Some(mode) = trim
-                    && args.len() == 1
+                // Plain `_TRO_*` calls can refer to user-defined names.
+                if args.len() == 1
+                    && let Some(mode) = file_trim_mode(&spelling)
                     && let Some(x) = args.pop()
                 {
                     return Ok(Expr::Unary(UnOp::Trim(mode), Box::new(x)));
