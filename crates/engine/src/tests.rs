@@ -2553,10 +2553,6 @@ fn x36_shown_formula_reenters_to_the_stored_formula() {
     s.execute("selection.set", json!({"range": "H10"})).unwrap();
     s.execute("edit.paste", json!({})).unwrap();
     assert_eq!(v(&s, "H10"), Value::Number(18.0));
-
-    // Outside every table a bare reference is still entered as typed.
-    s.execute("cell.set", json!({"cell": "H11", "input": "=SUM([Qty])"})).unwrap();
-    assert_eq!(stored(&s, "H11").as_deref(), Some("SUM([Qty])"));
 }
 
 #[test]
@@ -2564,15 +2560,84 @@ fn x36_range_fill_binds_each_destination_and_follows_table_rename() {
     let mut s = structured_ref_session();
     s.execute("range.setValues", json!({"range": "E1", "values": [["Qty", "Double"], [10], [20]]})).unwrap();
     s.execute("insert.table", json!({"range": "E1:F3", "hasHeaders": true})).unwrap();
-    s.execute("range.fill", json!({"range": "C2,D2,F2", "input": "=SUM([@Qty])*2"})).unwrap();
+    s.execute("range.fill", json!({"range": "C2,F2", "input": "=SUM([@Qty])*2"})).unwrap();
     assert_eq!(v(&s, "C2"), Value::Number(6.0));
     assert_eq!(v(&s, "F2"), Value::Number(20.0));
-    assert_eq!(v(&s, "D2"), Value::Error(gridcraft_core::CellError::Ref));
     s.execute("table.rename", json!({"table": "Sales", "name": "Orders"})).unwrap();
     let sh = s.doc().unwrap().wb.sheet(0).unwrap();
-    for (address, expected) in [("C2", "SUM(Orders[@Qty])*2"), ("D2", "SUM([@Qty])*2"), ("F2", "SUM(Table1[@Qty])*2")] {
+    for (address, expected) in [("C2", "SUM(Orders[@Qty])*2"), ("F2", "SUM(Table1[@Qty])*2")] {
         assert_eq!(sh.cell(CellRef::parse(address).unwrap()).unwrap().formula.as_ref().unwrap().text, expected);
     }
+}
+
+/// Excel for Mac 16.115 refused `=SUM([Qty])` written outside the table (action-probe Batch 5,
+/// `x36-short-structured-refs`, F2 stayed empty) and entered `=[@Qty]*2` and
+/// `=SUBTOTAL(109,[Qty])` in the table as typed.
+#[test]
+fn x46_typed_bare_structured_ref_is_refused_outside_every_table() {
+    let mut s = structured_ref_session();
+    s.execute("cell.set", json!({"cell": "H2", "input": "7"})).unwrap();
+    let stored = |s: &Session, a: &str| s.doc().unwrap().wb.sheet(0).unwrap().cell(CellRef::parse(a).unwrap()).cloned();
+    let before = |s: &Session| (stored(s, "H2"), stored(s, "F2"), stored(s, "C2"), stored(s, "D2"));
+    let (cells, undo) = (before(&s), s.doc().unwrap().undo.len());
+    let refused = |s: &mut Session, cmd: &str, p: Json| {
+        let e = s.execute(cmd, p.clone()).expect_err(&format!("{cmd} {p}"));
+        assert!(e.to_string().starts_with("There's a problem with this formula:"), "{cmd} {p}: {e}");
+        e.to_string()
+    };
+    let msg = refused(&mut s, "cell.set", json!({"cell": "F2", "input": "=SUM([Qty])"}));
+    assert!(msg.contains("[Qty] has no table name"), "{msg}");
+    for input in ["=SUM([Qty])", "=[@Qty]*2", "=COUNTA([[#Headers],[Qty]])", "=SUM(Sales[Qty])+SUM([Qty])", "+SUM([Qty])"] {
+        refused(&mut s, "cell.set", json!({"cell": "H2", "input": input}));
+        refused(&mut s, "cell.set", json!({"cell": "H2", "input": input, "array": true}));
+        refused(&mut s, "range.setValues", json!({"range": "H2", "values": [[input]]}));
+        // Without parsing, only `=` starts a formula: `+SUM([Qty])` is stored as text.
+        if input.starts_with('=') {
+            refused(&mut s, "range.setValues", json!({"range": "H2", "values": [[input]], "parse": false}));
+        }
+        refused(&mut s, "range.fill", json!({"range": "H2:H3", "input": input}));
+        // A fill reaching out of the table refuses the cells inside it too.
+        refused(&mut s, "range.fill", json!({"range": "C2:D2", "input": input}));
+    }
+    // A multi-cell write refuses all of it, not just the cell outside the table.
+    refused(&mut s, "range.setValues", json!({"range": "C2", "values": [["=[@Qty]*2", "=SUM([Qty])"]]}));
+    assert!(before(&s) == cells, "a refused formula leaves every cell as it was");
+    assert_eq!(s.doc().unwrap().undo.len(), undo, "a refused formula leaves no undo step");
+
+    // In the table the same short forms still bind to it, as Excel entered them.
+    s.execute("cell.set", json!({"cell": "C2", "input": "=[@Qty]*2"})).unwrap();
+    s.execute("range.setValues", json!({"range": "C3", "values": [["=[@Qty]*2"]]})).unwrap();
+    s.execute("cell.set", json!({"cell": "B6", "input": "=SUBTOTAL(109,[Qty])"})).unwrap();
+    for (addr, formula, value) in [("C2", "=[@Qty]*2", 6.0), ("C3", "=[@Qty]*2", 8.0), ("B6", "=SUBTOTAL(109,[Qty])", 18.0)] {
+        let got = s.execute("cell.get", json!({"cell": addr})).unwrap();
+        assert_eq!((got["formula"].clone(), got["value"].clone()), (json!(formula), json!(value)), "{addr}");
+    }
+    // Named, the table can be used from anywhere.
+    s.execute("cell.set", json!({"cell": "F2", "input": "=SUM(Sales[Qty])"})).unwrap();
+    assert_eq!(v(&s, "F2"), Value::Number(18.0));
+
+    // Unmeasured routes keep entering it as written: pasted text.
+    s.execute("edit.paste", json!({"at": "H4", "text": "=SUM([Qty])"})).unwrap();
+    assert_eq!(stored(&s, "H4").and_then(|c| c.formula).map(|f| f.text.clone()).as_deref(), Some("SUM([Qty])"));
+}
+
+/// Opening a file is not typing: a table-less structured reference saved outside every table
+/// (unmeasured in Excel) is read as written, and the workbook keeps it on saving.
+#[test]
+fn x46_imported_bare_structured_ref_outside_a_table_is_kept() {
+    let s = structured_ref_session();
+    let mut wb = (*s.doc().unwrap().wb).clone();
+    wb.sheet_mut(0).unwrap().set_cell(CellRef::parse("H2").unwrap(), gridcraft_model::Cell::formula(gridcraft_model::Formula::new("=SUM([Qty])")));
+    let bytes = gridcraft_xlsx::write_xlsx(&wb).unwrap();
+    let mut s = Session::new();
+    s.execute("file.open", json!({"name": "bare.xlsx", "base64": crate::io::base64_encode(&bytes)})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert_eq!(sh.cell(CellRef::parse("H2").unwrap()).and_then(|c| c.formula.as_ref()).map(|f| f.text.as_str()), Some("SUM([Qty])"));
+    let bytes = gridcraft_xlsx::write_xlsx(&s.doc().unwrap().wb).unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("xl/worksheets/sheet1.xml").unwrap(), &mut xml).unwrap();
+    assert!(xml.contains(">SUM([Qty])</f>"), "{xml}");
 }
 
 #[test]
