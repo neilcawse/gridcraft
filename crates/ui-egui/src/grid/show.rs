@@ -166,22 +166,10 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
         if row >= MAX_ROWS - 40 || col >= MAX_COLS - 20 {
             let g = make_geo(app, view.scroll);
             if row >= (MAX_ROWS - 40).max(g.fr) {
-                scroll_cap.y = scroll_cap.y.max(reveal_scroll_cap(
-                    g.scroll_top_of(sh, row),
-                    sh.row_height(row),
-                    g.cells.height() - g.frozen_h,
-                    g.z,
-                    g.scroll_top_of(sh, MAX_ROWS - 1),
-                ));
+                scroll_cap.y = scroll_cap.y.max(edge_row_scroll(&g, sh, row));
             }
             if col >= (MAX_COLS - 20).max(g.fc) {
-                scroll_cap.x = scroll_cap.x.max(reveal_scroll_cap(
-                    g.scroll_left_of(sh, col),
-                    sh.col_width(col),
-                    g.cells.width() - g.frozen_w,
-                    g.z,
-                    g.scroll_left_of(sh, MAX_COLS - 1),
-                ));
+                scroll_cap.x = scroll_cap.x.max(edge_col_scroll(&g, sh, col));
             }
             geo = Some(g);
         }
@@ -276,10 +264,22 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
     update_clipboard_repaint(app, ui, now);
 }
 
-/// The first offset that fits the endpoint, or its start if the line is wider/taller than the
-/// viewport. Use the same two-point inset as the keyboard reveal.
-fn reveal_scroll_cap(start: f32, size: f32, viewport: f32, zoom: f32, last: f32) -> f32 {
-    (start + (size - (viewport - 2.0) / zoom).min(0.0)).min(last)
+fn edge_row_scroll(g: &Geo, sh: &Sheet, row: u32) -> f32 {
+    let frozen = g.ri.start(g.fr) as f32;
+    reveal_scroll_cap(g.ri.start(row) as f32 - frozen, sh.row_height(row), g.cells.height() - g.frozen_h, g.z)
+}
+
+fn edge_col_scroll(g: &Geo, sh: &Sheet, col: u32) -> f32 {
+    let frozen = g.ci.start(g.fc) as f32;
+    reveal_scroll_cap(g.ci.start(col) as f32 - frozen, sh.col_width(col), g.cells.width() - g.frozen_w, g.z)
+}
+
+/// Compute from the same line start as painting, not from a screen rectangle potentially
+/// millions of pixels away. Round up in scroll units so the far edge stays inside the pane.
+fn reveal_scroll_cap(start: f32, size: f32, viewport: f32, zoom: f32) -> f32 {
+    let offset = f64::from(start) + (f64::from(size) - f64::from(viewport - 2.0) / f64::from(zoom)).min(0.0);
+    let rounded = offset as f32;
+    if f64::from(rounded) < offset { rounded.next_up() } else { rounded }
 }
 
 /// The vertical scroll bar's width: none when the workbook hides it (File › Options ›
@@ -368,7 +368,11 @@ impl<F: Fn(&mut SheetApp, egui::Vec2) -> Geo> ActiveCellVisibility<'_, F> {
             if cr.top() < area.top() {
                 view.scroll.y -= (area.top() - cr.top()) / geo.z;
             } else if cr.bottom() > area.bottom() - 2.0 {
-                view.scroll.y += (cr.bottom() - area.bottom() + 2.0) / geo.z;
+                if !paper && target.row >= MAX_ROWS - 40 {
+                    view.scroll.y = view.scroll.y.max(edge_row_scroll(geo, sh, target.row));
+                } else {
+                    view.scroll.y += (cr.bottom() - area.bottom() + 2.0) / geo.z;
+                }
             }
         } else if from.is_some_and(|f| f.row >= geo.fr) {
             // A move from the scrolled rows into the frozen ones (Page Up or Ctrl+Up onto a frozen
@@ -389,7 +393,11 @@ impl<F: Fn(&mut SheetApp, egui::Vec2) -> Geo> ActiveCellVisibility<'_, F> {
             if cr.left() < area.left() {
                 view.scroll.x -= (area.left() - cr.left()) / geo.z;
             } else if cr.right() > area.right() - 2.0 {
-                view.scroll.x += ((cr.right() - area.right() + 2.0) / geo.z).min(cr.left() - area.left());
+                if !paper && target.col >= MAX_COLS - 20 {
+                    view.scroll.x = view.scroll.x.max(edge_col_scroll(geo, sh, target.col));
+                } else {
+                    view.scroll.x += ((cr.right() - area.right() + 2.0) / geo.z).min(cr.left() - area.left());
+                }
             }
         } else if from.is_some_and(|f| f.col >= geo.fc) {
             view.scroll.x = 0.0;

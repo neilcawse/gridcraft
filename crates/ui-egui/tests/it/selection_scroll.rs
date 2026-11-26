@@ -123,7 +123,8 @@ fn keyboard_navigation_keeps_the_sheet_edge_visible_after_the_reveal_frame() {
         let app = h.state();
         let sheet = app.session.active().unwrap().wb.active().unwrap();
         let geo = app.grid.geo.as_ref().unwrap();
-        geo.cells.contains_rect(geo.cell_rect(sheet, last))
+        let cell = geo.cell_rect(sheet, last);
+        assert!(geo.cells.contains_rect(cell), "{cell:?} outside {:?} at scroll {:?}", geo.cells, geo.scroll);
     };
 
     // Even without a used cell, Ctrl+Down and Ctrl+Right reach the physical sheet edge.
@@ -131,19 +132,20 @@ fn keyboard_navigation_keeps_the_sheet_edge_visible_after_the_reveal_frame() {
     key(&mut h, Key::ArrowRight, CTRL);
     assert_eq!(active(&h), last);
     h.run_steps(3);
-    assert!(fully_visible(&h), "the sheet-edge arrow destination must stay visible");
+    fully_visible(&h);
 
     key(&mut h, Key::Home, CTRL);
+    assert_eq!(h.state().grid.geo.as_ref().unwrap().scroll, egui::Vec2::ZERO);
     key(&mut h, Key::End, CTRL_SHIFT);
     h.run_steps(3);
     assert_extended(&h, "A1", "XFD1048576");
-    assert!(fully_visible(&h), "the extended formatting-only Last Cell must stay fully visible");
+    fully_visible(&h);
 
     key(&mut h, Key::Home, CTRL);
     key(&mut h, Key::End, CTRL);
     h.run_steps(3);
     assert_eq!(active(&h), last);
-    assert!(fully_visible(&h), "a formatting-only Last Cell must stay visible");
+    fully_visible(&h);
 }
 
 fn control(h: &mut Harness, method: &str, params: Json) -> Json {
