@@ -85,6 +85,12 @@ gridcraft-cli run --in book.xlsx \
 
 Command ids and parameters: `gridcraft-cli commands`.
 
+`sheet.move` with `copy:true` inserts a copy at the zero-based `to` tab index. Copying `Data`
+starts with `Data (2)`; copying `Data (3)` starts with `Data (4)` even when `Data (2)` is free.
+The command skips existing tab names and keeps the original separator (`Q(2)` → `Q(3)`). On a copy
+of a sheet copied during the same session, inherited sheet-level names keep their table
+references while structured cell references follow the new tables.
+
 ## `check`
 
 ```sh

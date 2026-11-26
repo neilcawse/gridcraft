@@ -72,7 +72,7 @@ fn copy_three_times(s: &mut Session) {
 }
 
 #[test]
-fn a_copy_of_a_copy_numbers_from_the_original_name() {
+fn a_copy_of_a_copy_skips_the_taken_successor() {
     let mut s = book();
     copy(&mut s, "Data", 1);
     assert_eq!(sheet_names(&s), ["Data", "Data (2)", "Report"]);
@@ -87,18 +87,32 @@ fn a_copy_of_a_copy_numbers_from_the_original_name() {
     assert_eq!(formula(&s, "Data (4)", "H4"), "SUM(Sales59[Qty])");
 }
 
-/// Choices the probe did not measure: the lowest free number from 2 (with gaps), a base that is
-/// shortened so the name fits in 31 characters, and only a trailing ` (digits)` counting as a
-/// copy number.
+/// Batch 5's `x35-number-*` tab readbacks, from synthetic workbooks on Excel for Mac 16.115.2.
 #[test]
-fn copy_numbers_take_the_lowest_free_number_of_the_base() {
-    let mut gaps = s();
-    gaps.execute("sheet.rename", json!({"sheet": 0, "name": "Data (3)"})).unwrap();
-    copy(&mut gaps, "Data (3)", 1);
-    assert_eq!(sheet_names(&gaps), ["Data (3)", "Data (2)"]);
-    copy(&mut gaps, "Data (3)", 2);
-    assert_eq!(sheet_names(&gaps), ["Data (3)", "Data (2)", "Data (4)"]);
+fn copy_numbers_increment_the_source_suffix() -> crate::Result<()> {
+    let mut actual_names = Vec::new();
+    let mut expected_names = Vec::new();
+    for (tabs, source, expected) in [
+        (&["Data", "Data (3)"][..], "Data (3)", "Data (4)"),
+        (&["Budget (2019)"][..], "Budget (2019)", "Budget (2020)"),
+        (&["Q(2)"][..], "Q(2)", "Q(3)"),
+        (&["ABCDEFGHIJKLMNOPQRSTUVWXYZabcde"][..], "ABCDEFGHIJKLMNOPQRSTUVWXYZabcde", "ABCDEFGHIJKLMNOPQRSTUVWXYZa (2)"),
+    ] {
+        let mut s = s();
+        s.execute("sheet.rename", json!({"sheet": 0, "name": tabs[0]}))?;
+        for name in &tabs[1..] {
+            s.execute("home.insertSheet", json!({"name": name}))?;
+        }
+        copy(&mut s, source, tabs.len());
+        actual_names.push(sheet_names(&s));
+        expected_names.push(tabs.iter().copied().chain([expected]).collect::<Vec<_>>());
+    }
+    assert_eq!(actual_names, expected_names);
+    Ok(())
+}
 
+#[test]
+fn copy_numbering_keeps_existing_unmeasured_edge_cases() {
     let mut long_book = s();
     let long = "A".repeat(31);
     long_book.execute("sheet.rename", json!({"sheet": 0, "name": long})).unwrap();
@@ -108,15 +122,9 @@ fn copy_numbers_take_the_lowest_free_number_of_the_base() {
     copy(&mut long_book, &first, 2);
     assert_eq!(sheet_names(&long_book)[2], format!("{} (3)", "A".repeat(27)));
 
-    for (name, copied) in [
-        ("Q (2a)", "Q (2a) (2)"),
-        ("Q(2)", "Q(2) (2)"),
-        ("Q ()", "Q () (2)"),
-        ("Budget (2019)", "Budget (2)"),
-        ("(2)", "(2) (2)"),
-        ("Data (02)", "Data (2)"),
-        ("Q (999999999999999999999999999)", "Q (2)"),
-    ] {
+    for (name, copied) in
+        [("Q (2a)", "Q (2a) (2)"), ("Q ()", "Q () (2)"), ("(2)", "(2) (2)"), ("Data (02)", "Data (2)"), ("Q (999999999999999999999999999)", "Q (2)")]
+    {
         let mut one = s();
         one.execute("sheet.rename", json!({"sheet": 0, "name": name})).unwrap();
         copy(&mut one, name, 1);
@@ -188,17 +196,17 @@ fn each_copy_gets_sheet_level_copies_of_the_workbook_names_that_use_the_sheet() 
     after_second.extend([local("Data (3)", "Global", "SUM(Sales7[Qty])"), local("Data (3)", "Local", "SUM(Sales7[Qty])")]);
     after_second.sort();
     assert_eq!(names(&s), after_second);
-    // The copy of `Data (2)` gets that sheet's own `Global` (it shadows the workbook's there).
-    // Known mismatch: Excel kept both names at `Sales5` while the cells use `Sales59`.
-    // Keep GridCraft's existing retargeting; the Excel rule behind this difference is unmeasured.
+    // `Global` shadows the workbook's here. Both names keep the first copy's table;
+    // the cell formula still follows the third copy's own table.
     copy(&mut s, "Data (2)", 4);
     let mut after_third = after_second.clone();
-    after_third.extend([local("Data (4)", "Global", "SUM(Sales59[Qty])"), local("Data (4)", "Local", "SUM(Sales59[Qty])")]);
+    after_third.extend([local("Data (4)", "Global", "SUM(Sales5[Qty])"), local("Data (4)", "Local", "SUM(Sales5[Qty])")]);
     after_third.sort();
     assert_eq!(names(&s), after_third);
     // The workbook name and the original's names are unchanged.
     assert!(after_third.contains(&(None, "Global".into(), "SUM(Sales[Qty])".into())));
     assert!(after_third.contains(&local("Data", "Local", "SUM(Sales[Qty])")));
+    assert_eq!(formula(&s, "Data (4)", "H1"), "SUM(Sales59[Qty])");
     // On the copy, `Global` now means the copy's own.
     s.execute("cell.set", json!({"sheet": "Data (2)", "cell": "B2", "input": "103"})).unwrap();
     s.execute("cell.set", json!({"sheet": "Data (2)", "cell": "J1", "input": "=Global"})).unwrap();
@@ -207,6 +215,30 @@ fn each_copy_gets_sheet_level_copies_of_the_workbook_names_that_use_the_sheet() 
     assert_eq!(super::v(&s, "J1"), gridcraft_core::Value::Number(118.0));
     s.execute("sheet.activate", json!({"sheet": "Data"})).unwrap();
     assert_eq!(super::v(&s, "J1"), gridcraft_core::Value::Number(18.0));
+}
+
+/// Batch 5 `x35-total-copy` / `x35-copy-of-copy`: a numbered table, not a numbered tab.
+#[test]
+fn copying_a_copied_sheet_keeps_its_local_total_on_the_source_table() -> crate::Result<()> {
+    let mut s = s();
+    s.execute("sheet.rename", json!({"sheet": 0, "name": "Data"}))?;
+    s.execute("range.setValues", json!({"range": "A1", "values": [["Region", "Qty"], ["East", 3], ["West", 5], ["East", 2], ["North", 8]]}))?;
+    s.execute("insert.table", json!({"range": "A1:B5", "name": "Sales5"}))?;
+    s.execute("cell.set", json!({"cell": "H1", "input": "=SUM(Sales5[Qty])"}))?;
+    s.execute("formulas.defineName", json!({"name": "Total", "refersTo": "=SUM(Sales5[Qty])"}))?;
+    copy(&mut s, "Data", 1);
+    let global = (None, "Total".into(), "SUM(Sales5[Qty])".into());
+    let first = local("Data (2)", "Total", "SUM(Sales53[Qty])");
+    assert_eq!(names(&s), [global.clone(), first.clone()]);
+
+    copy(&mut s, "Data (2)", 2);
+    assert_eq!(sheet_names(&s), ["Data", "Data (2)", "Data (3)"]);
+    for (sheet, table) in [("Data", "Sales5"), ("Data (2)", "Sales53"), ("Data (3)", "Sales534")] {
+        assert_eq!(formula(&s, sheet, "H1"), format!("SUM({table}[Qty])"));
+    }
+    assert_eq!(wb(&s).sheets.iter().flat_map(|sh| sh.tables.iter().map(|t| t.name.as_str())).collect::<Vec<_>>(), ["Sales5", "Sales53", "Sales534"]);
+    assert_eq!(names(&s), [global, first, local("Data (3)", "Total", "SUM(Sales53[Qty])")]);
+    Ok(())
 }
 
 /// Unmeasured choices: a workbook name gets a copy only when it refers to the copied sheet (by
@@ -313,7 +345,7 @@ fn undo_and_redo_of_a_copy_take_and_bring_back_its_names() {
     let before = (sheet_names(&s), names(&s));
     copy(&mut s, "Data (2)", 4);
     let after = (sheet_names(&s), names(&s));
-    assert!(after.1.contains(&local("Data (4)", "Global", "SUM(Sales59[Qty])")));
+    assert!(after.1.contains(&local("Data (4)", "Global", "SUM(Sales5[Qty])")));
     s.execute("edit.undo", json!({})).unwrap();
     assert_eq!((sheet_names(&s), names(&s)), before);
     s.execute("edit.undo", json!({})).unwrap();
@@ -361,11 +393,11 @@ fn sheet_level_copies_save_with_their_sheet_and_reopen() {
         ("Global".to_string(), None, "SUM(Sales[Qty])".to_string()),
         ("Global".into(), sid("1"), "SUM(Sales5[Qty])".into()),
         ("Global".into(), sid("3"), "SUM(Sales7[Qty])".into()),
-        ("Global".into(), sid("4"), "SUM(Sales59[Qty])".into()),
+        ("Global".into(), sid("4"), "SUM(Sales5[Qty])".into()),
         ("Local".into(), sid("0"), "SUM(Sales[Qty])".into()),
         ("Local".into(), sid("1"), "SUM(Sales5[Qty])".into()),
         ("Local".into(), sid("3"), "SUM(Sales7[Qty])".into()),
-        ("Local".into(), sid("4"), "SUM(Sales59[Qty])".into()),
+        ("Local".into(), sid("4"), "SUM(Sales5[Qty])".into()),
     ];
     assert_eq!(saved_names(&bytes), expected);
     s.execute("file.open", json!({"name": "book.xlsx", "base64": crate::io::base64_encode(&bytes)})).unwrap();

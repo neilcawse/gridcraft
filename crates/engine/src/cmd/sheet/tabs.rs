@@ -197,6 +197,7 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
             let mut sh = (*src).clone();
             // The copy is a sheet of its own, not the one it was copied from.
             sh.uid = gridcraft_model::SheetUid::fresh();
+            sh.copied_in_session = true;
             let base = sh.name.clone();
             sh.name = copied_sheet_name(&cx.wb, &base);
             // The tables come along under names of their own (table names are unique).
@@ -293,6 +294,8 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
                     copies.push(local_copy(nm, formula));
                 }
             }
+            // Names inherited from an in-session copy keep their original table bindings.
+            let retarget_from = if src.copied_in_session { copies.len() } else { 0 };
             for nm in cx.wb.names.iter().filter(|nm| nm.scope.is_none()) {
                 if nm.name.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("_xl")) || !seen.insert(nm.name.to_ascii_lowercase()) {
                     continue;
@@ -310,13 +313,13 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
                     *sc += 1;
                 }
             }
-            cx.wb.names.extend(copies);
             cx.wb.sheets.insert(at, Arc::new(sh));
             cx.wb.set_active_sheet(at);
-            // The copy's own references, sheet-level names and slicers use its tables.
+            // Cells and other table consumers still follow the newest copy's tables.
             for (old, new) in &retargets {
-                cx.wb.retarget_table_on_sheet(at, old, new);
+                cx.wb.retarget_table_on_sheet(at, old, new, &mut copies[retarget_from..]);
             }
+            cx.wb.names.extend(copies);
         } else {
             let sh = cx.wb.sheets.remove(i);
             let at = to.min(n - 1);
@@ -355,23 +358,21 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
     })
 }
 
-/// The tab name of a copy of sheet `source`: `Data (2)`, or the lowest free number after it. A
-/// source already numbered like a copy counts from its base, so with `Data`, `Data (2)` and
-/// `Data (3)` taken, a copy of `Data (2)` is `Data (4)` (Excel for Mac, X23 probe P1). The base is
-/// shortened so the suffix fits in Excel's 31 characters.
+/// A copy starts at ` (2)` or increments the source's trailing `(n)`, keeping its separator.
+/// Skip occupied numbers and shorten the base so the suffix fits Excel's 31 characters.
 fn copied_sheet_name(wb: &gridcraft_model::Workbook, source: &str) -> String {
     use std::fmt::Write;
 
-    let base = copy_base(source);
+    let (mut base, mut separator, mut k) = copy_number(source);
     let mut candidate = String::new();
-    for k in 2usize.. {
-        let keep = 31 - (k.ilog10() as usize + 4); // ` (` + the digits + `)`
+    loop {
+        let keep = 31 - (k.ilog10() as usize + 3 + separator.len());
         let end = base.char_indices().nth(keep).map_or(base.len(), |(i, _)| i);
         let prefix = base[..end].trim_end();
         candidate.clear();
         candidate.push_str(if prefix.is_empty() { "Sheet" } else { prefix });
         let tail = candidate.len();
-        let _ = write!(candidate, " ({k})");
+        let _ = write!(candidate, "{separator}({k})");
         let collides = |name: &str| name.ends_with(&candidate[tail..]) && gridcraft_formula::same_name(name, &candidate);
         // Kept chart, dialog and macro tabs are absent from `wb.sheets`. A worksheet with the
         // same name would displace the kept tab on export.
@@ -384,16 +385,36 @@ fn copied_sheet_name(wb: &gridcraft_model::Workbook, source: &str) -> String {
         if !wb.sheets.iter().any(|sh| collides(&sh.name)) && !kept_collision {
             break;
         }
+        if let Some(next) = k.checked_add(1) {
+            k = next;
+        } else {
+            // The numbered sequence does not fit in u64. Fall back to the ordinary suffix.
+            (base, separator, k) = (source, " ", 2);
+        }
     }
     candidate
 }
 
-/// `name` without a trailing copy number ` (n)`, n decimal digits; `name` itself otherwise.
-fn copy_base(name: &str) -> &str {
-    name.strip_suffix(')')
-        .and_then(|s| s.rsplit_once(" ("))
-        .filter(|(base, n)| !base.trim().is_empty() && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-        .map_or(name, |(base, _)| base)
+/// Parse a final decimal suffix without confusing an unnumbered sheet with a copy.
+fn copy_number(name: &str) -> (&str, &'static str, u64) {
+    if let Some((stem, digits)) = name.strip_suffix(')').and_then(|s| s.rsplit_once('('))
+        && !stem.trim().is_empty()
+        && !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+    {
+        let (base, separator) = stem.strip_suffix(' ').map_or((stem, ""), |base| (base, " "));
+        if !digits.starts_with('0')
+            && let Ok(n) = digits.parse::<u64>()
+            && let Some(next) = n.checked_add(1)
+        {
+            return (base, separator, next);
+        }
+        // Keep the previous behavior for padded and out-of-range spaced suffixes.
+        if separator == " " {
+            return (base, separator, 2);
+        }
+    }
+    (name, " ", 2)
 }
 
 /// Whether a workbook name explicitly uses the source sheet or one of its tables. Match the
