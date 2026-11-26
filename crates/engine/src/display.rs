@@ -62,13 +62,21 @@ fn text_needs_quote_prefix(t: &str, sys: gridcraft_core::date::DateSystem) -> bo
     !matches!(gridcraft_core::parse::parse_input(t, sys).value, Value::Text(ref x) if x.as_ref() == t)
 }
 
-/// The A1 formula as shown for a cell, without changing the stored text or expression.
+/// The table holding `c`, when that table's name finds it: a structured reference without a
+/// table name means this table there, and one naming it can be shown without the name.
+pub(crate) fn containing_table<'a>(wb: &Workbook, sheet: &'a Sheet, c: CellRef) -> Option<&'a gridcraft_model::Table> {
+    let table = sheet.table_at(c)?;
+    wb.table(&table.name).and_then(|(si, ti)| wb.sheet(si)?.tables.get(ti)).is_some_and(|found| std::ptr::eq(found, table)).then_some(table)
+}
+
+/// The A1 formula `f` as shown for cell `c` (its own cell, or the cell it is about to be entered
+/// in), without changing the stored text or expression: references to the table holding `c` omit
+/// the table name.
 pub fn formula_text(wb: &Workbook, sheet: &Sheet, c: CellRef, f: &gridcraft_model::Formula) -> String {
     let mut text = String::with_capacity(f.text.len() + 1);
     text.push('=');
     if f.text.contains('[')
-        && let Some(table) = sheet.table_at(c)
-        && wb.table(&table.name).and_then(|(si, ti)| wb.sheet(si)?.tables.get(ti)).is_some_and(|resolved| std::ptr::eq(resolved, table))
+        && let Some(table) = containing_table(wb, sheet, c)
         && f.with_expr(|expr| gridcraft_formula::printer::write_in_table(&mut text, expr, &table.name)).is_some()
     {
         return text;

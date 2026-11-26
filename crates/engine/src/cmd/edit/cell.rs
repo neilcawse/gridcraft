@@ -37,7 +37,7 @@ pub(crate) fn input_to_cell(input: &str, sheet: usize, at: CellRef, wb: &mut gri
     }
     if is_formula {
         let body = input.strip_prefix('=').unwrap_or(input);
-        let expr = wb.name_call_case(parse_typed_formula(body, wb, sheet)?);
+        let expr = bind_local_tables(wb.name_call_case(parse_typed_formula(body, wb, sheet)?), wb, sheet, at);
         check_linked_books(&expr, wb.external_books.len())?;
         check_arg_counts(&expr)?;
         let mut cell = Cell::formula(Formula::from_expr(expr));
@@ -212,6 +212,24 @@ pub(crate) fn drop_linked_books(expr: gridcraft_formula::Expr, shared: &[bool]) 
             Err(_) => true,
         });
         if unshared { Expr::Error(gridcraft_core::CellError::Ref) } else { e }
+    })
+}
+
+/// Binds structured references typed without a table name (`[@Qty]`, as the formula bar shows
+/// them inside their own table) to the table holding `at`, so re-entering the shown text stores
+/// the formula it came from and the formula keeps its table when it is moved out of it. Left
+/// unbound when `at` is in no table, or its table's name finds another table first.
+fn bind_local_tables(expr: gridcraft_formula::Expr, wb: &gridcraft_model::Workbook, sheet: usize, at: CellRef) -> gridcraft_formula::Expr {
+    use gridcraft_formula::Expr;
+    let mut bare = false;
+    expr.walk(&mut |e| bare |= matches!(e, Expr::Struct(st) if st.table.is_empty()));
+    let Some(table) = wb.sheet(sheet).filter(|_| bare).and_then(|sh| crate::display::containing_table(wb, sh, at)) else { return expr };
+    expr.map(&mut |e| match e {
+        Expr::Struct(mut st) if st.table.is_empty() => {
+            st.table.clone_from(&table.name);
+            Expr::Struct(st)
+        }
+        other => other,
     })
 }
 

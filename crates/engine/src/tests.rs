@@ -2492,13 +2492,59 @@ fn x36_display_elides_only_references_to_the_containing_table() {
     assert_eq!(result["formula"], "=[@Qty]+SUM(Table1[Qty])+LEN(\"Sales[Qty]\")");
     assert_eq!(result["value"], 18.0);
 
-    // A bare right operand must not be parsed as part of the left operand.
+    // A right operand that would start with a bare `[` keeps its table name: entered, the
+    // bracket would attach to the word before the intersection space.
     s.execute("cell.set", json!({"cell": "C2", "input": "=SUM($B$2:$B$3 Sales[Qty])"})).unwrap();
     let result = s.execute("cell.get", json!({"cell": "C2"})).unwrap();
-    assert_eq!(result["formula"], "=SUM($B$2:$B$3 ([Qty]))");
+    assert_eq!(result["formula"], "=SUM($B$2:$B$3 Sales[Qty])");
     assert_eq!(result["value"], 7.0);
-    s.execute("cell.set", json!({"cell": "C2", "input": result["formula"]})).unwrap();
-    assert_eq!(v(&s, "C2"), Value::Number(7.0));
+}
+
+#[test]
+fn x36_shown_formula_reenters_to_the_stored_formula() {
+    let mut s = structured_ref_session();
+    let stored = |s: &Session, a: &str| {
+        s.doc().unwrap().wb.sheet(0).unwrap().cell(CellRef::parse(a).unwrap()).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone())
+    };
+    for input in [
+        "=Sales[@Qty]*2",
+        "=COUNTA(Sales[@])",
+        "=COUNTA(Sales[[#Headers],[Qty]])",
+        "=COUNTA(Sales[#All])",
+        "=COUNTA(Sales[])",
+        "=COUNTA(Sales[[Item]:[Qty]])",
+        "=SUM(Sales[[#Data],[#Totals],[Qty]])",
+        "=@Sales[Qty]",
+        "=SUM(Sales[Qty] Sales[@])",
+        "=LET(x,Sales[Qty],SUM(x))",
+        "=SUM(B2:Sales[Qty])",
+    ] {
+        s.execute("cell.set", json!({"cell": "C3", "input": input})).unwrap();
+        let (before, value) = (stored(&s, "C3"), v(&s, "C3"));
+        let shown = s.execute("cell.get", json!({"cell": "C3"})).unwrap()["formula"].clone();
+        assert_ne!(shown, input, "{input} is shown without its table");
+        s.execute("cell.set", json!({"cell": "C3", "input": shown})).unwrap();
+        assert_eq!(stored(&s, "C3"), before, "{input} shown as {shown}");
+        assert_eq!(v(&s, "C3"), value, "{input}");
+    }
+
+    // The total formula as the formula bar shows it, confirmed again: still saved with its table
+    // name, and still that table's total once cut out of the table.
+    s.execute("cell.set", json!({"cell": "B6", "input": "=SUBTOTAL(109,[Qty])"})).unwrap();
+    assert_eq!(stored(&s, "B6").as_deref(), Some("SUBTOTAL(109,Sales[Qty])"));
+    let bytes = gridcraft_xlsx::write_xlsx(&s.doc().unwrap().wb).unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("xl/worksheets/sheet1.xml").unwrap(), &mut xml).unwrap();
+    assert!(xml.contains(">SUBTOTAL(109,Sales[Qty])</f>"), "{xml}");
+    s.execute("edit.cut", json!({"range": "B6"})).unwrap();
+    s.execute("selection.set", json!({"range": "H10"})).unwrap();
+    s.execute("edit.paste", json!({})).unwrap();
+    assert_eq!(v(&s, "H10"), Value::Number(18.0));
+
+    // Outside every table a bare reference is still entered as typed.
+    s.execute("cell.set", json!({"cell": "H11", "input": "=SUM([Qty])"})).unwrap();
+    assert_eq!(stored(&s, "H11").as_deref(), Some("SUM([Qty])"));
 }
 
 #[test]

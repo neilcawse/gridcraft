@@ -78,6 +78,22 @@ fn copy_formula_from_above_and_function_keys() {
 }
 
 #[test]
+fn formula_from_above_a_table_total_keeps_the_table_name() {
+    let mut s = Session::new();
+    s.new_workbook();
+    s.execute("range.setValues", json!({"range": "A1", "values": [["Qty"], [3], [4]]})).unwrap();
+    s.execute("insert.table", json!({"range": "A1:A3", "hasHeaders": true})).unwrap();
+    s.execute("table.totalRow", json!({"table": "Table1", "on": true})).unwrap();
+    s.execute("cell.set", json!({"cell": "A4", "input": "=SUBTOTAL(109,Table1[Qty])"})).unwrap();
+    s.execute("selection.set", json!({"range": "A5"})).unwrap();
+    let mut h = harness(s);
+    key(&mut h, Key::Quote, CTRL);
+    // The total shows as `=SUBTOTAL(109,[Qty])` in its own cell; below the table that would
+    // name no table.
+    assert_eq!(h.state().editor.as_ref().map(|e| e.text.clone()).as_deref(), Some("=SUBTOTAL(109,Table1[Qty])"));
+}
+
+#[test]
 fn windows_and_mac_variants() {
     let cmd = CTRL;
     let mac_cmd = Modifiers { mac_cmd: true, command: true, ..Modifiers::NONE };

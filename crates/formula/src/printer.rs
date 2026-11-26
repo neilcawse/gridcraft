@@ -355,13 +355,14 @@ fn write_expr(s: &mut String, e: &Expr, r1c1: Option<CellRef>, local_table: Opti
             write_expr(s, first, r1c1, local_table);
             for (op, right) in rest.into_iter().rev() {
                 s.push_str(op.symbol());
-                // Group an elided right operand if its opening bracket could otherwise
-                // attach to the word before the intersection space.
+                // A right operand shown starting with an elided `[` would attach to the word
+                // before the intersection space when entered: it keeps its table names, so the
+                // shown text re-enters to the same formula.
                 let start = s.len();
                 write_expr(s, right, r1c1, local_table);
                 if local_table.is_some() && *op == BinOp::Intersect && s[start..].starts_with('[') {
-                    s.insert(start, '(');
-                    s.push(')');
+                    s.truncate(start);
+                    write_expr(s, right, r1c1, None);
                 }
             }
         }
