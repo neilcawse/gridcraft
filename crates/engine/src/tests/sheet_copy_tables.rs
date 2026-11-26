@@ -190,7 +190,7 @@ fn copy_reserves_kept_sheet_defined_names() {
     let mut s = book();
     let kept = gridcraft_model::PreservedSheet {
         name: "ChartSheet".into(),
-        names: vec![gridcraft_model::PreservedName { attrs: r#" name="sAlEs&#52;" hidden="1""#.into(), formula: "1".into() }],
+        names: vec![gridcraft_model::PreservedName { name: "sAlEs4".into(), attrs: r#" hidden="1""#.into(), formula: "1".into() }],
         ..Default::default()
     };
     std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).preserved =
