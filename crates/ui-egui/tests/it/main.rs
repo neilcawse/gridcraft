@@ -44,6 +44,7 @@ mod find_dialog_focus;
 mod floating_pictures;
 mod font_box_filter;
 mod font_size_box;
+mod form_check_box;
 mod form_controls;
 mod form_drop_down;
 mod format_chart_type;

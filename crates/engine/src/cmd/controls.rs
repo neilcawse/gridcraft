@@ -1,19 +1,20 @@
 //! Form controls (Insert › Controls): buttons that run a macro or a command, sliders and spin
-//! buttons that hold a whole number from 0 to 30000 and write it to a linked cell, and drop-down
+//! buttons that hold a whole number from 0 to 30000 and write it to a linked cell, drop-down
 //! lists that show the cells of a source range and write the chosen item's 1-based position to
-//! a linked cell.
+//! a linked cell, and check boxes that write TRUE, FALSE or #N/A (mixed) to a linked cell.
 //!
-//! A slider or spin button's value, and a drop-down's chosen item, live on the control and in its
-//! linked cell. Setting it goes through `cell.set`, so the cell's dependents recalculate and Undo
-//! takes both back as one step; editing the linked cell moves the control (see
-//! [`sync_linked_values`]). A drop-down reads its items from the source range when it is drawn
-//! or listed, so editing those cells changes the list. Pressing a button runs its action through
-//! the macro policy with the document's trust, so a button from a file someone else made asks
-//! before it runs anything.
+//! A slider or spin button's value, a drop-down's chosen item and a check box's state live on
+//! the control and in its linked cell. Setting it goes through `cell.set`, so the cell's
+//! dependents recalculate and Undo takes both back as one step; editing the linked cell moves the
+//! control (see [`sync_linked_values`]). A drop-down reads its items from the source range when
+//! it is drawn or listed, so editing those cells changes the list. Pressing a button runs its
+//! action through the macro policy with the document's trust, so a button from a file someone
+//! else made asks before it runs anything. A check box's macro from a file is kept, never run.
 
-use gridcraft_core::{CellRef, RangeRef};
+use gridcraft_core::{CellError, CellRef, RangeRef, Value};
 use gridcraft_model::{
-    Anchor, AnchorMode, CONTROL_MAX, ControlAction, ControlKind, FormControl, MAX_MACRO_NAME, MacroInput, ObjKind, Sheet, Workbook,
+    Anchor, AnchorMode, CONTROL_MAX, CheckState, ControlAction, ControlKind, FormControl, MAX_MACRO_NAME, MacroInput, ObjKind, Sheet,
+    Workbook,
 };
 use serde_json::{Value as Json, json};
 
@@ -62,11 +63,20 @@ pub fn specs() -> Vec<CommandSpec> {
             insert_drop_down
         ),
         cmd!(
+            "insert.checkBoxControl",
+            "Check Box (Form Control)",
+            ["Insert", "Controls"],
+            None,
+            "{at?: \"B2\" (or cell), dx?, dy?, width?, height?, text?, link?: \"$B$1\", value?: \"unchecked\" | \"checked\" | \"mixed\" (or false/true, 0/1/2)} a form check box; its linked cell holds TRUE when checked, FALSE when cleared, #N/A when mixed (a cell checkbox is insert.checkbox) → {control: id}",
+            has_doc,
+            insert_check_box
+        ),
+        cmd!(
             "control.format",
             "Format Control",
             [],
             None,
-            "{id, text?, name?, link?: \"$B$1\" | \"\" (no link), min?, max?, step?, page?, value?, horizontal?, print?, locked?, listRange?: \"$A$1:$A$9\" | \"\" (drop-downs), dropLines?} → the control (as control.list)",
+            "{id, text?, name?, link?: \"$B$1\" | \"\" (no link), min?, max?, step?, page?, value?, horizontal?, print?, locked?, listRange?: \"$A$1:$A$9\" | \"\" (drop-downs), dropLines?, threeD?: bool (check boxes)} → the control (as control.list)",
             has_doc,
             format
         ),
@@ -84,7 +94,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Change Control Value",
             [],
             None,
-            "{id, value} a slider or spin button: clamps the value to min..max, snaps it to the step; a drop-down: chooses item `value` (1-based, 0: none) of its list. Writes it to the linked cell → {value}",
+            "{id, value} a slider or spin button: clamps the value to min..max, snaps it to the step; a drop-down: chooses item `value` (1-based, 0: none) of its list; a check box: \"unchecked\", \"checked\" or \"mixed\" (or false/true, 0/1/2), written as FALSE, TRUE or #N/A. Writes it to the linked cell → {value} (a check box: {value: 0|1|2, state})",
             has_doc,
             set_value
         ),
@@ -97,7 +107,7 @@ pub fn specs() -> Vec<CommandSpec> {
             has_doc,
             press
         ),
-        cmd!(query "control.list", "Form Controls", [], None, "{} → the active sheet's controls: [{id, kind, name, text, at, link?, value, min, max, step, page, horizontal, action?, listRange?, selected, dropLines, items}]", has_doc, list),
+        cmd!(query "control.list", "Form Controls", [], None, "{} → the active sheet's controls: [{id, kind, name, text, at, link?, value, min, max, step, page, horizontal, action?, listRange?, selected, dropLines, items, state, threeD}]", has_doc, list),
     ]
 }
 
@@ -107,7 +117,13 @@ const MAX_TEXT: usize = 1_024;
 fn control_json(c: &FormControl) -> Json {
     let mut o = json!({
         "id": c.id,
-        "kind": match c.kind { ControlKind::Button => "button", ControlKind::Slider => "slider", ControlKind::Spin => "spinButton", ControlKind::Drop => "dropDown" },
+        "kind": match c.kind {
+            ControlKind::Button => "button",
+            ControlKind::Slider => "slider",
+            ControlKind::Spin => "spinButton",
+            ControlKind::Drop => "dropDown",
+            ControlKind::Check => "checkBox",
+        },
         "name": c.display_name(),
         "at": c.anchor.cell.a1(),
         "width": c.anchor.width,
@@ -128,6 +144,12 @@ fn control_json(c: &FormControl) -> Json {
             if let Some(r) = &c.list_range {
                 o["listRange"] = json!(r);
             }
+        }
+        ControlKind::Check => {
+            o["text"] = json!(c.text);
+            o["value"] = json!(c.checked.number());
+            o["state"] = json!(c.checked.name());
+            o["threeD"] = json!(c.no_three_d != Some(true));
         }
         ControlKind::Slider | ControlKind::Spin => {
             o["value"] = json!(c.value);
@@ -412,6 +434,33 @@ fn insert_drop_down(s: &mut Session, p: &Json) -> Result<Json> {
     })
 }
 
+fn insert_check_box(s: &mut Session, p: &Json) -> Result<Json> {
+    const CMD: &str = "insert.checkBoxControl";
+    let anchor = new_anchor(s, p, (96.0, 20.0))?;
+    let d = s.doc()?;
+    let sheet = d.wb.active_sheet();
+    let id = d.wb.next_object_id();
+    let text = text_param(CMD, p, "text")?.unwrap_or_else(|| format!("Check Box {id}"));
+    let mut c = FormControl { id, kind: ControlKind::Check, anchor, text, ..FormControl::default() };
+    if let Some(link) = link_param(CMD, &d.wb, sheet, p)? {
+        c.link = link;
+    }
+    let given = check_state_param(CMD, p.get("value"))?;
+    // Without a value, a check box shows the state its linked cell sets.
+    c.checked = given.or_else(|| linked_check(&d.wb, sheet, &c)).unwrap_or_default();
+    let (state, link) = (c.checked, c.link.clone());
+    s.grouped("Insert Check Box", |s| {
+        edit(s, |cx| {
+            cx.sheet_mut(sheet)?.controls.push(c);
+            Ok(())
+        })?;
+        if given.is_some() {
+            write_check_link(s, sheet, link.as_deref(), state)?;
+        }
+        Ok(json!({"control": id}))
+    })
+}
+
 /// A drop-down's `dropLines`: a whole number from 1 to 30000, if given.
 fn drop_lines_param(cmd: &str, p: &Json) -> Result<Option<u32>> {
     match whole(cmd, p, "dropLines")? {
@@ -532,14 +581,25 @@ fn format(s: &mut Session, p: &Json) -> Result<Json> {
         if let Some(v) = given {
             c.selected = drop_choice(CMD, &s.doc()?.wb, sheet, &c, v as f64)?;
         }
+    } else if c.kind == ControlKind::Check {
+        if let Some(state) = check_state_param(CMD, p.get("value"))? {
+            c.checked = state;
+            given = Some(state.number());
+        }
+        if let Some(three_d) = bool_param(p, "threeD") {
+            // A file that leaves shading out (3-D) keeps leaving it out until it is turned off.
+            if c.no_three_d.is_some() || !three_d {
+                c.no_three_d = Some(!three_d);
+            }
+        }
     } else {
         // New bounds pull the value in; a given value is snapped to them.
         c.value = c.snap(given.map_or(c.value as f64, f64::from));
     }
     let write = (number && (given.is_some() || p.get("min").is_some() || p.get("max").is_some() || p.get("step").is_some()))
-        || (c.kind == ControlKind::Drop && given.is_some());
+        || (matches!(c.kind, ControlKind::Drop | ControlKind::Check) && given.is_some());
     let value = if c.kind == ControlKind::Drop { c.selected } else { c.value };
-    let link = c.link.clone();
+    let (kind, state, link) = (c.kind, c.checked, c.link.clone());
     s.grouped("Format Control", |s| {
         edit(s, |cx| {
             if let Some(slot) = cx.sheet_mut(sheet)?.controls.get_mut(i) {
@@ -547,7 +607,9 @@ fn format(s: &mut Session, p: &Json) -> Result<Json> {
             }
             Ok(())
         })?;
-        if write {
+        if write && kind == ControlKind::Check {
+            write_check_link(s, sheet, link.as_deref(), state)?;
+        } else if write {
             write_link(s, sheet, link.as_deref(), value)?;
         }
         Ok(())
@@ -648,7 +710,7 @@ fn assign(s: &mut Session, p: &Json) -> Result<Json> {
     let (sheet, i, mut c) = find(s, CMD, p)?;
     check_unlocked(s, sheet, &c)?;
     if c.kind != ControlKind::Button {
-        return Err(bad(CMD, "only buttons run actions; a slider, spin button or drop-down writes its value to its linked cell"));
+        return Err(bad(CMD, "only buttons run actions; a slider, spin button, drop-down or check box writes its value to its linked cell"));
     }
     let action = action_param(s, CMD, p)?;
     if action.is_none() && bool_param(p, "clear") != Some(true) {
@@ -674,11 +736,78 @@ fn drop_choice(cmd: &str, wb: &Workbook, host: usize, c: &FormControl, v: f64) -
     Ok(v as u32)
 }
 
+/// A check box state parameter: `false`/`true`, 0 (unchecked), 1 (checked), 2 (mixed), or the
+/// state's name. `None` when it isn't given.
+fn check_state_param(cmd: &str, v: Option<&Json>) -> Result<Option<CheckState>> {
+    let state = match v {
+        None | Some(Json::Null) => return Ok(None),
+        Some(Json::Bool(b)) => Some(if *b { CheckState::Checked } else { CheckState::Unchecked }),
+        Some(Json::Number(n)) => n.as_f64().filter(|x| x.fract() == 0.0 && (0.0..=2.0).contains(x)).and_then(|x| CheckState::from_number(x as u32)),
+        Some(Json::String(t)) => match t.trim().to_ascii_lowercase().as_str() {
+            "unchecked" | "false" | "0" => Some(CheckState::Unchecked),
+            "checked" | "true" | "1" => Some(CheckState::Checked),
+            "mixed" | "2" => Some(CheckState::Mixed),
+            _ => None,
+        },
+        Some(_) => None,
+    };
+    state.map(Some).ok_or_else(|| bad(cmd, "a check box's `value` must be \"unchecked\", \"checked\" or \"mixed\" (false/true, or 0, 1, 2)"))
+}
+
+/// What a check box's linked cell holds in each state (Microsoft's documentation of the form
+/// check box): FALSE when it is cleared, TRUE when checked, #N/A when mixed.
+fn check_cell_value(state: CheckState) -> Value {
+    match state {
+        CheckState::Unchecked => Value::Bool(false),
+        CheckState::Checked => Value::Bool(true),
+        CheckState::Mixed => Value::Error(CellError::NA),
+    }
+}
+
+/// Writes a check box's state to its linked cell through `cell.set`, as [`write_link`] writes a
+/// number: nothing without a link, or when the cell already holds that value (formula or not).
+fn write_check_link(s: &mut Session, host: usize, link: Option<&str>, state: CheckState) -> Result<()> {
+    let Some(link) = link else { return Ok(()) };
+    let Some((si, cell)) = link_target(&s.doc()?.wb, host, link) else { return Ok(()) };
+    let want = check_cell_value(state);
+    if s.doc()?.wb.sheet(si).and_then(|sh| sh.cell(cell)).is_some_and(|c| c.value == want) {
+        return Ok(());
+    }
+    let input = match state {
+        CheckState::Unchecked => json!(false),
+        CheckState::Checked => json!(true),
+        CheckState::Mixed => json!("#N/A"),
+    };
+    s.execute("cell.set", json!({"sheet": si, "cell": cell.a1(), "input": input}))?;
+    Ok(())
+}
+
+/// Sets a check box's state and writes it to the linked cell, as one undo step.
+fn set_check(s: &mut Session, sheet: usize, i: usize, c: &FormControl, p: &Json) -> Result<Json> {
+    let state = check_state_param("control.setValue", p.get("value"))?
+        .ok_or_else(|| bad("control.setValue", "missing `value` (\"unchecked\", \"checked\" or \"mixed\")"))?;
+    s.grouped("Change Check Box", |s| {
+        if c.checked != state {
+            edit(s, |cx| {
+                if let Some(slot) = cx.sheet_mut(sheet)?.controls.get_mut(i) {
+                    slot.checked = state;
+                }
+                Ok(())
+            })?;
+        }
+        write_check_link(s, sheet, c.link.as_deref(), state)?;
+        Ok(json!({"value": state.number(), "state": state.name()}))
+    })
+}
+
 fn set_value(s: &mut Session, p: &Json) -> Result<Json> {
     const CMD: &str = "control.setValue";
     let (sheet, i, c) = find(s, CMD, p)?;
     if c.kind == ControlKind::Button {
         return Err(bad(CMD, "a button has no value; use control.press"));
+    }
+    if c.kind == ControlKind::Check {
+        return set_check(s, sheet, i, &c, p);
     }
     let v = match p.get("value") {
         Some(Json::Number(n)) => n.as_f64(),
@@ -712,7 +841,7 @@ fn press(s: &mut Session, p: &Json) -> Result<Json> {
     const CMD: &str = "control.press";
     let (_, _, c) = find(s, CMD, p)?;
     if c.kind != ControlKind::Button {
-        return Err(bad(CMD, "only buttons can be pressed; use control.setValue for a slider, spin button or drop-down"));
+        return Err(bad(CMD, "only buttons can be pressed; use control.setValue for a slider, spin button, drop-down or check box"));
     }
     let name = c.display_name();
     match c.action {
@@ -811,9 +940,25 @@ fn linked_choice(wb: &Workbook, host: usize, c: &FormControl) -> Option<u32> {
     }
 }
 
+/// The state a check box's linked cell sets: TRUE checks it, FALSE clears it, #N/A makes it
+/// mixed, and a number counts as FALSE when it is 0 and TRUE otherwise. `None` for anything else
+/// (an empty cell, text, another error), which leaves the state as it was: a file whose linked
+/// cell was never filled in keeps the state it saved.
+fn linked_check(wb: &Workbook, host: usize, c: &FormControl) -> Option<CheckState> {
+    let (si, cell) = link_target(wb, host, c.link.as_deref()?)?;
+    match &wb.sheet(si)?.cell(cell)?.value {
+        Value::Bool(true) => Some(CheckState::Checked),
+        Value::Bool(false) => Some(CheckState::Unchecked),
+        Value::Error(CellError::NA) => Some(CheckState::Mixed),
+        Value::Number(n) if n.is_finite() => Some(if *n == 0.0 { CheckState::Unchecked } else { CheckState::Checked }),
+        _ => None,
+    }
+}
+
 /// After an edit: each slider and spin button whose linked cell holds a number takes that number
-/// (clamped and snapped), and each drop-down the item its linked cell names, so editing the cell
-/// moves the control. Sheets without such a control are left untouched.
+/// (clamped and snapped), each drop-down the item its linked cell names, and each check box the
+/// state its linked cell sets, so editing the cell moves the control. Sheets without such a
+/// control are left untouched.
 pub(crate) fn sync_linked_values(wb: &mut Workbook) {
     for si in 0..wb.sheets.len() {
         let updates: Vec<(usize, u32)> = match wb.sheet(si) {
@@ -824,6 +969,7 @@ pub(crate) fn sync_linked_values(wb: &mut Workbook) {
                 .filter_map(|(i, c)| match c.kind {
                     ControlKind::Button => None,
                     ControlKind::Drop => linked_choice(wb, si, c).filter(|v| *v != c.selected).map(|v| (i, v)),
+                    ControlKind::Check => linked_check(wb, si, c).filter(|v| *v != c.checked).map(|v| (i, v.number())),
                     ControlKind::Slider | ControlKind::Spin => linked_number(wb, si, c).map(|n| (i, c.snap(n))).filter(|(_, v)| *v != c.value),
                 })
                 .collect(),
@@ -835,10 +981,10 @@ pub(crate) fn sync_linked_values(wb: &mut Workbook) {
         if let Some(sh) = wb.sheet_mut(si) {
             for (i, v) in updates {
                 if let Some(c) = sh.controls.get_mut(i) {
-                    if c.kind == ControlKind::Drop {
-                        c.selected = v;
-                    } else {
-                        c.value = v;
+                    match c.kind {
+                        ControlKind::Drop => c.selected = v,
+                        ControlKind::Check => c.checked = CheckState::from_number(v).unwrap_or_default(),
+                        _ => c.value = v,
                     }
                 }
             }

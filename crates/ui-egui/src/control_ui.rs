@@ -32,6 +32,7 @@ fn insert_id(kind: ControlKind) -> &'static str {
         ControlKind::Slider => "insert.slider",
         ControlKind::Spin => "insert.spinButton",
         ControlKind::Drop => "insert.dropDown",
+        ControlKind::Check => "insert.checkBoxControl",
     }
 }
 
@@ -436,8 +437,9 @@ fn assign(app: &mut SheetApp, d: &Dialog) -> bool {
 // ---------------------------------------------------------------- Format Control
 
 /// Format Control: a slider's or spin button's cell link, value and limits (orientation and page
-/// change for sliders); a drop-down's input range, cell link and rows; a button's text.
-/// `textOnly` shows just the text (Edit Text).
+/// change for sliders); a drop-down's input range, cell link and rows; a check box's text, value
+/// (unchecked, checked, mixed), cell link and 3-D shading; a button's text. `textOnly` shows just
+/// the text (Edit Text).
 pub fn open_format(app: &SheetApp, params: &Json) -> Option<Dialog> {
     let id = params.get("id").and_then(Json::as_u64).and_then(|i| u32::try_from(i).ok())?;
     let c = control(app, id)?;
@@ -458,6 +460,8 @@ pub fn open_format(app: &SheetApp, params: &Json) -> Option<Dialog> {
         "horizontal": c.horizontal,
         "print": c.print,
         "locked": c.locked,
+        "state": c.checked.number(),
+        "threeD": c.no_three_d != Some(true),
     });
     let title = if text_only { "Edit Text".to_string() } else { app.ui.language.tr_fill("Format Control: {name}", &[("name", &c.display_name())]) };
     Some(Dialog::custom("formatControl", &title, v))
@@ -488,6 +492,13 @@ pub fn format_params(app: &SheetApp, d: &Dialog) -> Result<Json, String> {
         out["dropLines"] = json!(lines);
         out["listRange"] = json!(val(d, "listRange").trim());
         out["link"] = json!(val(d, "link").trim());
+        return Ok(out);
+    }
+    if c.kind == ControlKind::Check {
+        out["text"] = json!(val(d, "text"));
+        out["value"] = json!(d.values.get("state").and_then(Json::as_u64).filter(|n| *n <= 2).unwrap_or(0));
+        out["link"] = json!(val(d, "link").trim());
+        out["threeD"] = json!(flag("threeD"));
         return Ok(out);
     }
     let mut draft = c.clone();
@@ -537,6 +548,29 @@ pub fn format_dialog(app: &mut SheetApp, ui: &mut Ui, d: &mut Dialog, open: &mut
                 ui.end_row();
             }
         });
+    } else if c.kind == ControlKind::Check {
+        let mut text = val(d, "text");
+        ui.horizontal(|ui| {
+            ui.label("Text:");
+            ui.add(egui::TextEdit::singleline(&mut text).desired_width(200.0).id_salt("control_text"));
+        });
+        d.values.insert("text".into(), json!(text));
+        let mut state = d.values.get("state").and_then(Json::as_u64).unwrap_or(0);
+        ui.horizontal(|ui| {
+            ui.label("Value:");
+            ui.radio_value(&mut state, 0, "Unchecked");
+            ui.radio_value(&mut state, 1, "Checked");
+            ui.radio_value(&mut state, 2, "Mixed");
+        });
+        d.values.insert("state".into(), json!(state));
+        egui::Grid::new("format_control_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+            ui.label("Cell link:");
+            text_field(ui, d, "link", 160.0);
+            ui.end_row();
+        });
+        let mut three_d = d.values.get("threeD").and_then(Json::as_bool).unwrap_or(true);
+        ui.checkbox(&mut three_d, "3-D shading");
+        d.values.insert("threeD".into(), json!(three_d));
     } else {
         egui::Grid::new("format_control_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
             let mut fields = vec![("value", "Current value:"), ("min", "Minimum value:"), ("max", "Maximum value:"), ("step", "Incremental change:")];

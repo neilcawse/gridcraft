@@ -42,3 +42,23 @@ The shared reader in `craft-libs` should skip the decoder for declared-empty ent
 - `apps/gridcraft-cli/src/check/calc.rs`: trim cached error literals and recognize `#N/A!` as `#N/A`. Restore bare-literal matching for `Other` and `Unknown` producers, counting those matches in `errorDetailCache`; only Google Sheets can use the colon-delimited reason. Excel and other specifically identified producers still compare text as text, an intentional difference from the base's producer-independent grading.
 - `crates/calc/src/{eval,recalc}.rs` and their child modules: add the legacy one-cell `SUMPRODUCT` reading to the existing evaluation host, retaining its active-cell, spill/table occupancy, and linked-workbook features. The alternate reading is for checking older Excel caches, not normal recalculation.
 - `crates/xlsx/src/lib.rs`: implement the root-stream API for XLS producer metadata on the base's bounded `craft-cfb` reader; do not restore the deleted CFB parser. Retain the generated case-insensitive root-stream regression.
+
+## X37 — Form check boxes
+
+Base: published X11 form drop-downs head `b435c44f`. Legacy form check boxes become `ControlKind::Check` (`CheckState` unchecked/checked/mixed, caption, link, `no_three_d`, kept macro, caption markup), following the drop-down's path end to end; cell checkboxes (`checkbox` number format, `feature_bags.rs`) are untouched.
+
+- `crates/model/src/features.rs`: `ControlKind::Check`, `CheckState`, `CaptionMarkup` and the check box fields on `FormControl`.
+- `crates/xlsx/src/controls.rs`: reads x14 `formControlPr objectType="CheckBox"` (`checked`, `fmlaLink`, `noThreeD`, `lockText`) with the VML as fallback, and VML-only `ObjectType="Checkbox"` shapes (`x:Checked`, `x:FmlaLink`, `x:FmlaMacro`, `x:NoThreeD`, caption). A VML-only shape's name is its `id` when that isn't an `_x0000_s` number. Anything else in either part keeps the check box in pass-through, unchanged. Written like the other modelled controls (properties part, `<control>`, VML shape, DrawingML stand-in); the reader's shape numbers keep the kept VML free of duplicates. Existing pass-through tests that used a check box as their unmodelled control now use an option button or a list box.
+- `crates/engine/src/cmd/controls.rs`: `insert.checkBoxControl`; `control.list` reports `kind: "checkBox"`, `value` (0/1/2), `state`, `text`, `link`, `threeD`; `control.setValue` takes `false`/`true`, 0/1/2 or the state name (it reuses the slider/drop-down convention rather than `control.press`, which stays the button's run-an-action command, so the state is explicit and scripts can set mixed). `control.format` sets caption, state, link and `threeD`. Linked-cell writes go through `cell.set`, so Undo, protection (a locked linked cell on a protected sheet refuses the change) and the linked-cell sync behave as for sliders and drop-downs; links move with structural edits and renames through the shared control-link rewrite.
+- `crates/ui-egui/src/{form_controls,control_ui}.rs`, `ribbon/insert.rs`: draws the box, tick or mixed shading and caption; a click or Space toggles (mixed → checked); Format Control has caption, state, cell link and 3-D shading; Insert > Controls has Check Box.
+
+Measured (Excel object model, synthetic workbook): Excel lists all three VML-only check boxes `GC Check 1..3` by name at every stage.
+
+Documented, not measured (Microsoft's form check box documentation, ECMA-376, [MS-OI29500], [MS-XLSX]):
+
+- the linked cell gets TRUE when checked, FALSE when cleared and #N/A when mixed (Excel's linked-cell readback failed in the measurement run);
+- GridCraft's inverse sync is its own choice: a linked cell holding TRUE/FALSE/#N/A, or a number (0 → cleared, other → checked), moves the box; text, empty cells and other errors leave it alone;
+- a click on a mixed box checks it (GridCraft's choice, inferred; not documented or measured);
+- `x:Checked` 0/1/2 and `checked` Unchecked/Checked/Mixed, `noThreeD` / `x:NoThreeD` and the VML caption `<div>`/`<font>`, as the specs describe them. The defaults written for a new check box (`autoFill="0" autoLine="0"`, `lockText="1"`, `x:AutoLine False`, `x:TextVAlign Center`) are inferred from the specs' examples, not measured;
+- a check box's macro is kept as written and never run (GridCraft's choice, as for VBA);
+- with no link, a check box on a protected sheet still toggles, as other controls do; that matches GridCraft's existing control rule, not a measurement.

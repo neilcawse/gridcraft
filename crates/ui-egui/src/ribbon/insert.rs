@@ -167,8 +167,8 @@ pub(super) fn insert(app: &mut SheetApp, ui: &mut Ui) {
         }
     });
     sep(ui);
-    // Form controls: draw a button, slider, spin button or drop-down on the sheet (a click places
-    // it at its default size). Their key tips run the command at the active cell.
+    // Form controls: draw a button, slider, spin button, drop-down or check box on the sheet (a
+    // click places it at its default size). Their key tips run the command at the active cell.
     use gridcraft_engine::model::ControlKind;
     let placing = app.grid.placing;
     // Three to a column, as the ribbon's small buttons stack.
@@ -182,6 +182,13 @@ pub(super) fn insert(app: &mut SheetApp, ui: &mut Ui) {
             "Drop-down",
             "Draw a drop-down that writes the position of the chosen item to a linked cell",
             "insert.dropDown",
+        ),
+        (
+            Icon::Checkbox,
+            ControlKind::Check,
+            "Check Box",
+            "Draw a check box that writes TRUE or FALSE to a linked cell (a form control; Checkbox puts checkboxes in cells)",
+            "insert.checkBoxControl",
         ),
     ];
     for column in controls.chunks(3) {

@@ -1,15 +1,16 @@
-//! Form controls on the sheet: drawing buttons, sliders, spin buttons and drop-downs, and working
-//! them with the pointer and the keyboard. A click operates a control; Ctrl or Cmd+click, or a
-//! right-click, selects it instead (to move, resize or format it). Values change through
-//! `control.setValue`, and a whole drag or a held arrow is one undo step. A click on a drop-down
-//! opens its list ([`drop_picker`]); choosing an item is one undo step.
+//! Form controls on the sheet: drawing buttons, sliders, spin buttons, drop-downs and check boxes,
+//! and working them with the pointer and the keyboard. A click operates a control; Ctrl or
+//! Cmd+click, or a right-click, selects it instead (to move, resize or format it). Values change
+//! through `control.setValue`, and a whole drag or a held arrow is one undo step. A click on a
+//! drop-down opens its list ([`drop_picker`]); choosing an item is one undo step. A click on a
+//! check box (or Space while it has the focus) checks or clears it, one undo step.
 //!
 //! Positions are logical (see `Geo::rtl`): on a right-to-left sheet a control moves as a whole
 //! but is not mirrored, so a point inside it is reflected back with [`inner`] first.
 
 use egui::epaint::PathShape;
 use egui::{Painter, Pos2, Rect, Stroke, StrokeKind, pos2, vec2};
-use gridcraft_engine::model::{ControlKind, FormControl, ObjKind, ObjRef, Sheet};
+use gridcraft_engine::model::{CheckState, ControlKind, FormControl, ObjKind, ObjRef, Sheet};
 use serde_json::json;
 
 use crate::SheetApp;
@@ -35,6 +36,8 @@ pub enum Part {
     TrackAfter,
     /// A drop-down (its box or its arrow): opens or closes the list.
     Drop,
+    /// A check box (its box or its caption): checks or clears it.
+    Check,
 }
 
 /// A control being worked with the pointer.
@@ -130,6 +133,7 @@ pub fn part_at(r: Rect, c: &FormControl, z: f32, p: Pos2) -> Option<Part> {
             }
         }
         ControlKind::Drop => Part::Drop,
+        ControlKind::Check => Part::Check,
     })
 }
 
@@ -225,6 +229,27 @@ pub fn paint(p: &Painter, r: Rect, c: &FormControl, z: f32, look: Look, shown: &
             let tri = vec![pos2(m.x, m.y + s * 0.6), pos2(m.x + s, m.y - s * 0.5), pos2(m.x - s, m.y - s * 0.5)];
             clip.add(PathShape::convex_polygon(tri, t.sheet_control_text, Stroke::NONE));
         }
+        ControlKind::Check => {
+            let side = (r.height() - 4.0 * z).clamp(4.0, 13.0 * z).min(r.width());
+            let mark = Rect::from_min_size(pos2(r.left() + 2.0 * z, r.center().y - side / 2.0), vec2(side, side));
+            let mixed = c.checked == CheckState::Mixed;
+            let fill = if mixed { t.sheet_track } else { bg(Part::Check) };
+            clip.rect_filled(mark, 0.0, fill);
+            // 3-D shading draws a heavier frame; a flat check box (`noThreeD`) a thin one.
+            let frame = if c.no_three_d == Some(true) { border } else { Stroke::new(2.0 * z.max(0.5), t.sheet_control_border) };
+            clip.rect_stroke(mark, 0.0, frame, StrokeKind::Inside);
+            if c.checked != CheckState::Unchecked {
+                let (m, s) = (mark.shrink(side * 0.22), side * 0.12);
+                let tick = vec![pos2(m.left(), m.center().y), pos2(m.left() + m.width() * 0.4, m.bottom() - s * 0.5), pos2(m.right(), m.top() + s * 0.5)];
+                let ink = if mixed { t.sheet_thumb } else { t.sheet_control_text };
+                clip.add(PathShape::line(tick, Stroke::new((1.6 * z).max(1.0), ink)));
+            }
+            let text_left = mark.right() + 4.0 * z;
+            let g = clip.layout_no_wrap(c.text.clone(), theme::ui_font(11.0 * z), t.sheet_control_text);
+            let at = pos2(text_left, r.center().y - g.size().y / 2.0);
+            let caption = Rect::from_min_max(pos2(text_left, r.top()), r.max);
+            clip.with_clip_rect(caption.intersect(clip.clip_rect())).galley(at, g, t.sheet_control_text);
+        }
     }
     if look.focused {
         p.rect_stroke(r.expand(2.0), 3.0 * z, Stroke::new(2.0, t.sheet_focus), StrokeKind::Outside);
@@ -277,7 +302,7 @@ impl SheetApp {
     /// when `page` is set.
     pub fn control_nudge(&mut self, id: u32, steps: i64, page: bool) -> bool {
         let Some(c) = self.session.active().and_then(|d| d.wb.active()).and_then(|sh| find(sh, id)).cloned() else { return false };
-        if c.kind == ControlKind::Button {
+        if matches!(c.kind, ControlKind::Button | ControlKind::Check) {
             return false;
         }
         if c.kind == ControlKind::Drop {
@@ -332,7 +357,7 @@ pub fn interact(app: &mut SheetApp, ctx: &egui::Context, resp: &egui::Response, 
                         }
                     }
                 }
-                Part::Button | Part::Drop => {}
+                Part::Button | Part::Drop | Part::Check => {}
                 part => {
                     // Held arrows and track repeat while the pointer stays on them.
                     let over = pos.and_then(|p| part_at(r, &c, geo.z, inner(geo, r, p))) == Some(part);
@@ -355,6 +380,9 @@ pub fn interact(app: &mut SheetApp, ctx: &egui::Context, resp: &egui::Response, 
             match g.part {
                 Part::Button => app.press_button(c.id),
                 Part::Drop => toggle_drop(app, c.id),
+                Part::Check => {
+                    app.control_set(c.id, c.checked.toggled().number() as f64);
+                }
                 _ => {}
             }
         }
@@ -422,7 +450,7 @@ pub fn interact(app: &mut SheetApp, ctx: &egui::Context, resp: &egui::Response, 
         return true;
     }
     app.grid.control = Some(Gesture { id: c.id, part, grab, undo_start, next_repeat: time + REPEAT_DELAY });
-    if !matches!(part, Part::Button | Part::Thumb | Part::Drop) {
+    if !matches!(part, Part::Button | Part::Thumb | Part::Drop | Part::Check) {
         step_part(app, &c, part);
     }
     resp.request_focus();
@@ -440,20 +468,20 @@ fn step_part(app: &mut SheetApp, c: &FormControl, part: Part) {
         Part::Down => app.control_nudge(c.id, -1, false),
         Part::TrackBefore => app.control_nudge(c.id, -1, true),
         Part::TrackAfter => app.control_nudge(c.id, 1, true),
-        Part::Button | Part::Thumb | Part::Drop => false,
+        Part::Button | Part::Thumb | Part::Drop | Part::Check => false,
     };
 }
 
-/// Whether the focused control is a button. Space presses one, so the space it types must not
-/// start a cell edit; a slider or spin button doesn't take Space, and its space reaches the grid
-/// like any other character.
+/// Whether the focused control is a button or a check box. Space presses a button and checks or
+/// clears a check box, so the space it types must not start a cell edit; a slider or spin button
+/// doesn't take Space, and its space reaches the grid like any other character.
 pub fn focused_button(app: &SheetApp, sh: &Sheet) -> bool {
-    app.grid.focused_control.and_then(|id| find(sh, id)).is_some_and(|c| c.kind == ControlKind::Button)
+    app.grid.focused_control.and_then(|id| find(sh, id)).is_some_and(|c| matches!(c.kind, ControlKind::Button | ControlKind::Check))
 }
 
-/// The grid takes a key while a control is focused: a button gives the keyboard back, so a later
-/// Enter or Space doesn't press it again and Space starts a cell edit; a slider or spin button
-/// keeps it, as the control last worked, which the arrows still step.
+/// The grid takes a key while a control is focused: a button or check box gives the keyboard
+/// back, so a later Enter or Space doesn't work it again and Space starts a cell edit; a slider or
+/// spin button keeps it, as the control last worked, which the arrows still step.
 pub fn key_to_grid(app: &mut SheetApp, sh: &Sheet) {
     if focused_button(app, sh) {
         app.grid.focused_control = None;
@@ -461,10 +489,11 @@ pub fn key_to_grid(app: &mut SheetApp, sh: &Sheet) {
 }
 
 /// Keys for the focused control: arrows move by a step, Page Up and Page Down by a page, Home and
-/// End to the ends; Space or Enter presses a button. A drop-down's arrows choose the item above or
-/// below, Page Up and Page Down move by its rows, and Enter opens or closes its list. True when
-/// the key was used. `repeat` is a key held down: it steps a slider or spin button again, but a
-/// button runs once per press.
+/// End to the ends; Space or Enter presses a button, and Space checks or clears a check box. A
+/// drop-down's arrows choose the item above or below, Page Up and Page Down move by its rows, and
+/// Enter opens or closes its list. True when the key was used. `repeat` is a key held down: it
+/// steps a slider or spin button again, but a button runs (and a check box toggles) once per
+/// press.
 pub fn key(app: &mut SheetApp, sh: &Sheet, key: egui::Key, repeat: bool) -> bool {
     use egui::Key;
     let Some(c) = app.grid.focused_control.and_then(|id| find(sh, id)).cloned() else { return false };
@@ -485,6 +514,13 @@ pub fn key(app: &mut SheetApp, sh: &Sheet, key: egui::Key, repeat: bool) -> bool
             true
         }
         (ControlKind::Button, _) => false,
+        (ControlKind::Check, Key::Space) => {
+            if !repeat {
+                app.control_set(c.id, c.checked.toggled().number() as f64);
+            }
+            true
+        }
+        (ControlKind::Check, _) => false,
         (ControlKind::Drop, Key::Enter) => {
             if !repeat {
                 app.grid.drop_open = if app.grid.drop_open == Some(c.id) { None } else { Some(c.id) };

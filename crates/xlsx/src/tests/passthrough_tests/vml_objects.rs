@@ -1,4 +1,4 @@
-//! A sheet's legacy VML drawing holds more than notes: check boxes, buttons and pictures drawn
+//! A sheet's legacy VML drawing holds more than notes: option buttons, buttons and pictures drawn
 //! there need no `<controls>` or `<oleObjects>` element in the sheet XML. GridCraft writes the
 //! notes; everything else in the drawing is kept, shape ids and pictures included.
 
@@ -10,9 +10,10 @@ const IMAGE: &[u8] = b"\x89PNG\r\n\x1a\n a picture a shape shows";
 const HEAD: &str = r##"<xml xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel"><o:shapelayout v:ext="edit"><o:idmap v:ext="edit" data="1"/></o:shapelayout>"##;
 const TYPES: &str = r##"<v:shapetype id="_x0000_t201" coordsize="21600,21600" o:spt="201" path="m,l,21600r21600,l21600,xe"><v:stroke joinstyle="miter"/></v:shapetype><v:shapetype id="_x0000_t75" coordsize="21600,21600" o:spt="75"/>"##;
 
-fn checkbox(id: u32, label: &str) -> String {
+/// An option button (`ObjectType="Radio"`), a form control GridCraft keeps as file content.
+fn option_button(id: u32, label: &str) -> String {
     format!(
-        r##"<v:shape id="_x0000_s{id}" type="#_x0000_t201" style='position:absolute;margin-left:16.5pt;margin-top:25.5pt;width:68.25pt;height:16.5pt;z-index:1' filled="f" stroked="f"><v:textbox style='mso-direction-alt:auto'><div style='text-align:left'><font face="Tahoma" size="160" color="auto">{label}</font></div></v:textbox><x:ClientData ObjectType="Checkbox"><x:SizeWithCells/><x:Anchor>0, 22, 1, 6, 1, 46, 1, 28</x:Anchor><x:Checked>1</x:Checked><x:FmlaLink>$B$2</x:FmlaLink></x:ClientData></v:shape>"##
+        r##"<v:shape id="_x0000_s{id}" type="#_x0000_t201" style='position:absolute;margin-left:16.5pt;margin-top:25.5pt;width:68.25pt;height:16.5pt;z-index:1' filled="f" stroked="f"><v:textbox style='mso-direction-alt:auto'><div style='text-align:left'><font face="Tahoma" size="160" color="auto">{label}</font></div></v:textbox><x:ClientData ObjectType="Radio"><x:SizeWithCells/><x:Anchor>0, 22, 1, 6, 1, 46, 1, 28</x:Anchor><x:Checked>1</x:Checked><x:FmlaLink>$B$2</x:FmlaLink></x:ClientData></v:shape>"##
     )
 }
 
@@ -93,7 +94,7 @@ fn count(text: &str, what: &str) -> usize {
 
 #[test]
 fn shapes_without_a_controls_element_survive_a_save() {
-    let source = vml(&[checkbox(1025, "1ST TRIP"), checkbox(1026, "2ND TRIP"), picture(1027, "rId1")]);
+    let source = vml(&[option_button(1025, "1ST TRIP"), option_button(1026, "2ND TRIP"), picture(1027, "rId1")]);
     let (wb, rep) = read_xlsx(&package(&source, false, true)).unwrap();
     assert!(!rep.warnings.iter().any(|w| w.contains("dropped")), "{:?}", rep.warnings);
     assert!(rep.warnings.iter().any(|w| w.contains("form controls are not shown")), "{:?}", rep.warnings);
@@ -118,29 +119,30 @@ fn shapes_without_a_controls_element_survive_a_save() {
 
 #[test]
 fn notes_and_shapes_share_the_drawing_without_duplicates() {
-    // The source drawing holds a note (quoted with apostrophes, as some producers do) and a check
-    // box. GridCraft writes the note from the model; the check box is the drawing's own.
-    let source = vml(&[checkbox(1025, "Done"), note(1026, '\'')]);
+    // The source drawing holds a note (quoted with apostrophes, as some producers do) and an
+    // option button. GridCraft writes the note from the model; the option button is the drawing's
+    // own.
+    let source = vml(&[option_button(1025, "Done"), note(1026, '\'')]);
     let (mut wb, rep) = read_xlsx(&package(&source, true, true)).unwrap();
     assert!(!rep.warnings.iter().any(|w| w.contains("dropped")), "{:?}", rep.warnings);
     assert_eq!(wb.sheet(0).unwrap().comments.len(), 1, "the note is modelled");
     let u = Unpacked::new(&write_xlsx(&wb).unwrap());
     u.assert_valid();
     let (text, _) = written_vml(&u);
-    assert_eq!(count(&text, "ObjectType=\"Checkbox\""), 1, "{text}");
+    assert_eq!(count(&text, "ObjectType=\"Radio\""), 1, "{text}");
     assert_eq!(count(&text, "_x0000_s1025\""), 1);
     assert_eq!(count(&text, "ObjectType=\"Note\""), 1, "GridCraft's note only: {text}");
     assert_eq!(count(&text, "ObjectType='Note'"), 0, "the source note is not carried over: {text}");
     assert_eq!(count(&text, "<v:shapetype id=\"_x0000_t202\""), 1, "{text}");
-    // The note takes a shape block the check box doesn't use, and the drawing claims it.
+    // The note takes a shape block the option button doesn't use, and the drawing claims it.
     assert!(text.contains("_x0000_s2049") && text.contains("data=\"1,2\""), "{text}");
 
-    // Without its note the drawing is the check box alone.
+    // Without its note the drawing is the option button alone.
     wb.sheet_mut(0).unwrap().comments.clear();
     let u = Unpacked::new(&write_xlsx(&wb).unwrap());
     u.assert_valid();
     let (text, _) = written_vml(&u);
-    assert_eq!(count(&text, "ObjectType=\"Checkbox\""), 1);
+    assert_eq!(count(&text, "ObjectType=\"Radio\""), 1);
     assert_eq!(count(&text, "Note"), 0, "{text}");
     assert!(u.parts.keys().all(|n| !n.ends_with("comments1.xml")));
 }
@@ -162,7 +164,7 @@ fn a_drawing_of_notes_alone_is_left_to_the_notes_writer() {
 fn a_picture_that_is_gone_does_not_cost_the_shapes() {
     // The drawing's relationship names a picture the package doesn't hold: that picture can't be
     // kept (and is reported), the shapes are.
-    let source = vml(&[checkbox(1025, "Done"), picture(1026, "rId1")]);
+    let source = vml(&[option_button(1025, "Done"), picture(1026, "rId1")]);
     let (wb, rep) = read_xlsx(&package(&source, false, false)).unwrap();
     assert!(rep.warnings.iter().any(|w| w.contains("image1.png") && w.contains("dropped")), "{:?}", rep.warnings);
     assert!(!rep.warnings.iter().any(|w| w.contains("legacy drawing were dropped")), "{:?}", rep.warnings);
@@ -175,7 +177,7 @@ fn a_picture_that_is_gone_does_not_cost_the_shapes() {
 #[test]
 fn a_damaged_drawing_is_dropped_with_a_warning() {
     // No closing tag: the notes couldn't be merged in, so nothing is kept of it.
-    let source = vml(&[checkbox(1025, "Done")]).replace("</xml>", "");
+    let source = vml(&[option_button(1025, "Done")]).replace("</xml>", "");
     let (wb, rep) = read_xlsx(&package(&source, false, true)).unwrap();
     assert!(rep.warnings.iter().any(|w| w.contains("\"Data\"") && w.contains("dropped") && w.contains("damaged")), "{:?}", rep.warnings);
     let u = Unpacked::new(&write_xlsx(&wb).unwrap());
@@ -296,15 +298,15 @@ fn the_picture_of_a_note_that_is_gone_does_not_stay_in_the_file() {
 
 #[test]
 fn note_pictures_and_kept_shapes_share_the_drawing() {
-    // The drawing also holds a check box: it is kept with its relationships, and the note's
+    // The drawing also holds an option button: it is kept with its relationships, and the note's
     // picture is one of them.
-    let source = vml(&[checkbox(1025, "Done"), note_at(1026, 0, 0, &photo_fill("rId2", 1)), note_at(1027, 1, 1, PLAIN_FILL)]);
+    let source = vml(&[option_button(1025, "Done"), note_at(1026, 0, 0, &photo_fill("rId2", 1)), note_at(1027, 1, 1, PLAIN_FILL)]);
     let (wb, rep) = read_xlsx(&fill_package(&source)).unwrap();
     assert!(!rep.warnings.iter().any(|w| w.contains("dropped")), "{:?}", rep.warnings);
     let u = Unpacked::new(&write_xlsx(&wb).unwrap());
     u.assert_valid();
     let (text, part) = written_vml(&u);
-    assert_eq!(count(&text, "ObjectType=\"Checkbox\""), 1, "{text}");
+    assert_eq!(count(&text, "ObjectType=\"Radio\""), 1, "{text}");
     assert!(shape_of(&text, 0, 0).contains("o:relid=\"rId2\""), "{text}");
     assert!(shape_of(&text, 1, 1).contains(PLAIN_FILL), "{text}");
     // Each image is written once, under the id the drawing's text names.
