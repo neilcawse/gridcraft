@@ -324,6 +324,7 @@ fn open_places_a_group_over_the_rows_it_fits() {
             fields: [true; 4],
             has_transform: true,
             edited: false,
+            held_collapse: [None; 2],
             complete: true,
             flip: (false, false),
             rotation: 0,
@@ -571,6 +572,60 @@ fn collapsed_group_recovers_on_row_resize_with_undo_and_redo() {
     assert_eq!(member_boxes(&session.doc().unwrap().wb), collapsed);
     session.execute("edit.redo", json!({})).unwrap();
     assert_eq!(member_boxes(&session.doc().unwrap().wb), grown);
+}
+
+#[test]
+fn collapsed_group_recovers_during_sort_row_fit() {
+    use crate::{DocState, Session, Trust};
+    use gridcraft_model::{DrawingRef, LineInfo};
+    use serde_json::json;
+
+    let bytes = group_projection_book(0.0, r#"flipV="1" rot="16200000""#, "", true, true);
+    let (mut wb, _) = open_bytes("group.xlsx", &bytes).unwrap();
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.rows.insert(3, LineInfo { size: Some(60.0), custom: true, ..Default::default() });
+    let keys = [2.0, 3.0, 4.0, 1.0];
+    for (row, key) in keys.into_iter().enumerate() {
+        // Keep the large font in the original zero-height rows.
+        sh.set_value(CellRef::new(row as u32, 0), gridcraft_core::Value::Number(key));
+    }
+    let root = DrawingRef::Group(1);
+    let refs: Vec<_> = std::iter::once(root).chain(sh.group_contents(1)).collect();
+    let boxes = |wb: &Workbook| {
+        let sh = wb.sheet(0).unwrap();
+        refs.iter().map(|&r| sh.anchor_rect(&sh.raw_drawing_anchor(r).unwrap())).collect::<Vec<_>>()
+    };
+    let run = |wb, cmd, params| {
+        let mut session = Session::new();
+        session.add_document(DocState::from_saved(wb, None, "Group".to_owned(), Trust::FromFile));
+        session.execute(cmd, params).unwrap();
+        session.doc().unwrap().wb.clone()
+    };
+    let sort = |wb| run(wb, "data.sort", json!({"range": "A1:D4", "header": false, "keys": [{"column": "A"}]}));
+    let held = sort(wb.clone());
+    let held_sheet = held.sheet(0).unwrap();
+    for (row, key) in [1.0, 2.0, 3.0, 4.0].into_iter().enumerate() {
+        assert_eq!(held_sheet.value(CellRef::new(row as u32, 0)), gridcraft_core::Value::Number(key));
+    }
+    assert_ne!(held_sheet.raw_drawing_anchor(root), wb.sheet(0).unwrap().raw_drawing_anchor(root));
+    for (actual, expected) in boxes(&held).into_iter().zip(boxes(&wb)) {
+        assert_box(actual, expected, "held group box before fitting");
+    }
+
+    assert!(!held_sheet.drawing_files.contains_key(&root), "the original markers do not describe the held anchor");
+    assert!(held_sheet.source_group(held_sheet.drawing_group(1).unwrap()).is_none(), "the held source is layout-only");
+
+    let control = run(wb.clone(), "home.autofitRowHeight", json!({"rows": "3:3"}));
+    wb.sheet_mut(0).unwrap().rows.get_mut(&1).unwrap().custom = false;
+    let sorted = sort(wb);
+    let fitted_later = run((*held).clone(), "home.autofitRowHeight", json!({"rows": "3:3"}));
+    let expected = boxes(&control);
+    assert!(expected[0].h > 0.0 && expected[1..].iter().all(|r| r.w > 0.0), "control: {expected:?}");
+    for actual in [&sorted, &fitted_later] {
+        for (actual, expected) in boxes(actual).into_iter().zip(&expected) {
+            assert_box(actual, *expected, "collapsed group box after sort and fit");
+        }
+    }
 }
 
 #[test]

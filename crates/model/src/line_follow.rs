@@ -23,6 +23,10 @@ const PX_PER_EMU: f64 = 1.0 / 9525.0;
 /// Positions this close (pixels) are the same place: the same line sizes summed in another order.
 const SAME: f64 = 1e-6;
 
+fn same_rect(a: ObjectRect, b: ObjectRect) -> bool {
+    [a.x - b.x, a.y - b.y, a.w - b.w, a.h - b.h].iter().all(|d| d.abs() <= PX_PER_EMU / 2.0)
+}
+
 /// A top-level floating object: one that isn't inside a group.
 #[derive(Clone, Copy)]
 enum Floating {
@@ -243,11 +247,10 @@ impl Sheet {
         }
         let old_box = group_unturned_box(from_rect, rotation);
         let new_box = group_unturned_box(to_rect, rotation);
-        let same = |a: ObjectRect, b: ObjectRect| [a.x - b.x, a.y - b.y, a.w - b.w, a.h - b.h].iter().all(|d| d.abs() <= PX_PER_EMU / 2.0);
         for m in self.group_contents(id) {
             let Some(a) = self.raw_drawing_anchor(m) else { continue };
             let target = recovered.get(&m).copied().unwrap_or_else(|| map_rect(old_box, new_box, old.anchor_rect(&a)));
-            if same(target, self.anchor_rect(&a)) {
+            if same_rect(target, self.anchor_rect(&a)) {
                 continue;
             }
             let next = self.layout_rect_anchor(target, a.mode);
@@ -267,6 +270,90 @@ impl Sheet {
         if let Some(g) = self.groups.iter_mut().find(|g| g.id == id) {
             g.anchor = to;
         }
+    }
+
+    /// Keep layout recovery when a row permutation re-encodes a collapsed imported group's
+    /// anchors without moving any of its boxes. Keep only the response of coincident spans
+    /// to later line sizing, not the old worksheet placement for export.
+    pub fn keep_sorted_group_collapse(&mut self, before: &Sheet, id: u32, placement_affected: bool) {
+        let Some(g) = before.drawing_group(id) else { return };
+        let r = DrawingRef::Group(id);
+        let a = g.anchor;
+        if a.mode != AnchorMode::MoveAndSize
+            || (a.width != 0.0 && a.height != 0.0)
+            || before.parent_group(r).is_some()
+            || !before.source_layout_group(g)
+        {
+            return;
+        }
+        let mut spans = g.file.as_ref().unwrap().held_collapse;
+        let original = before.drawing_files.get(&r);
+        if let Some(file) = original.filter(|f| f.anchor == a && f.placement.anchor(before) == a)
+            && let DrawingPlacement::TwoCell { from, to, .. } = file.placement
+        {
+            let coincident = |rows, extent, start, end, from_off, to_off| {
+                let axis = Axis { sheet: before, rows };
+                let offset = |emu: i64| {
+                    let px = (emu as f64 / 9525.0).clamp(0.0, 1e7);
+                    if before.geometry == crate::Geometry::Legacy { f64::from(px as f32) } else { px }
+                };
+                (extent == 0.0
+                    && start != end
+                    && start < axis.limit()
+                    && end < axis.limit()
+                    && ((axis.start(end) + offset(to_off)) - (axis.start(start) + offset(from_off))).abs() <= SAME)
+                    .then_some((start, end))
+            };
+            spans = [
+                coincident(false, a.width, from.col, to.col, from.col_off, to.col_off),
+                coincident(true, a.height, from.row, to.row, from.row_off, to.row_off),
+            ];
+        }
+        if spans.iter().all(Option::is_none) {
+            return;
+        }
+        if !placement_affected
+            && original.is_some_and(|f| f.placement.anchor(self) == a)
+            && self.drawing_group(id).is_some_and(|g| self.source_layout_group(g))
+        {
+            return;
+        }
+        let same = |o| match (before.raw_drawing_anchor(o), self.raw_drawing_anchor(o)) {
+            (Some(old), Some(new)) => same_rect(before.anchor_rect(&old), self.anchor_rect(&new)),
+            _ => false,
+        };
+        if !same(r) || !before.group_contents(id).into_iter().all(same) {
+            self.invalidate_drawing_file(r);
+            return;
+        }
+        self.refresh_group_files(id);
+        if let Some(file) = self.groups.iter_mut().find(|g| g.id == id).and_then(|g| g.file.as_mut()) {
+            file.held_collapse = spans;
+        }
+        self.drawing_files.remove(&r);
+    }
+
+    fn held_group_resize(&self, before: &Sheet, new: &Sheet, id: u32, a: Anchor) -> Option<Anchor> {
+        let g = self.drawing_group(id)?;
+        let spans = g.file.as_ref()?.held_collapse;
+        if spans.iter().all(Option::is_none) || !self.source_layout_group(g) {
+            return None;
+        }
+        let mut next = follow(before, new, &a, None).unwrap_or(a);
+        let growth = |rows, (start, end)| {
+            let span = |sheet| {
+                let axis = Axis { sheet, rows };
+                axis.start(end) - axis.start(start)
+            };
+            (span(new) - span(before)).max(0.0) as f32
+        };
+        if let Some(pair) = spans[0] {
+            next.width = growth(false, pair);
+        }
+        if let Some(pair) = spans[1] {
+            next.height = growth(true, pair);
+        }
+        Some(next)
     }
 
     fn live_drawing_placement(&self, r: DrawingRef, anchor: Anchor) -> Option<&DrawingPlacement> {
@@ -300,8 +387,12 @@ impl Sheet {
                     if contents.iter().any(|&m| settled(drawing_obj(m))) {
                         continue;
                     }
-                    let next = follow(before, &new, &a, self.live_drawing_placement(DrawingRef::Group(id), a)).unwrap_or(a);
+                    let held = self.held_group_resize(before, &new, id, a);
+                    let next = held.or_else(|| follow(before, &new, &a, self.live_drawing_placement(DrawingRef::Group(id), a))).unwrap_or(a);
                     self.carry_group(id, before, &a, next);
+                    if held.is_some() && !same_rect(before.anchor_rect(&a), self.anchor_rect(&next)) {
+                        self.invalidate_drawing_file(DrawingRef::Group(id));
+                    }
                 }
                 Floating::Drawing(r) => {
                     let next = follow(before, &new, &a, self.live_drawing_placement(r, a));

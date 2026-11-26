@@ -2,7 +2,9 @@ use super::{
     Anchor, AnchorMode, Arc, Cell, CellRef, Comment, EngineError, Hyperlink, Json, LineInfo, Ordering, RangeRef, Result, Session, Sheet, Value, bad,
     bool_param, col_param, data_range, edit, guess_header, json, ok, sort_compare, split_sheet, str_param, target_sheet,
 };
-use gridcraft_model::ObjectRect;
+use crate::cmd::sheet::{changed_lines, drawing_placement_hits};
+use gridcraft_core::MAX_ROWS;
+use gridcraft_model::{DrawingRef, ObjKind, ObjRef, ObjectRect};
 
 enum SortGeometry {
     /// In a group overlapping the sorted block: keeps its place on the sheet.
@@ -260,6 +262,14 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
                 (o, a, SortGeometry::Refit { bottom })
             })
             .collect();
+        let before = (!by_cols
+            && sh.groups.iter().any(|g| {
+                grouped.get(&ObjRef::new(ObjKind::Group, g.id)) == Some(&true)
+                    && g.file.as_ref().is_some_and(|f| !f.edited)
+                    && g.anchor.mode == AnchorMode::MoveAndSize
+                    && (g.anchor.width == 0.0 || g.anchor.height == 0.0)
+            }))
+        .then(|| Arc::clone(&cx.wb.sheets[sheet]));
         let shm = cx.wb.sheet_mut(sheet).ok_or_else(|| EngineError::Other("no such sheet".into()))?;
         for (c, cell) in &moved {
             match cell {
@@ -318,6 +328,18 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
         for (a, (_, n)) in shm.object_anchors_mut().zip(&new_anchors) {
             if let Some(n) = n {
                 *a = *n;
+            }
+        }
+        if let Some(before) = before {
+            let changed = changed_lines(&before.rows, &shm.rows, (before.default_row_height, shm.default_row_height), MAX_ROWS);
+            if !changed.is_empty() {
+                for &(o, _) in &new_anchors {
+                    if o.kind == ObjKind::Group && grouped.get(&o) == Some(&true) {
+                        let r = DrawingRef::Group(o.id);
+                        let affected = before.drawing_files.get(&r).is_some_and(|file| drawing_placement_hits(&before, r, file, true, &changed));
+                        shm.keep_sorted_group_collapse(&before, o.id, affected);
+                    }
+                }
             }
         }
         // What the sort placed is on the lines it leaves: following the sorted row heights must

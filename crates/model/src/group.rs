@@ -50,6 +50,9 @@ pub struct GroupFile {
     pub has_transform: bool,
     /// An explicit edit invalidates reuse even if the anchor later returns to the same value.
     pub edited: bool,
+    /// Named line pairs (columns, rows) for a coincident two-cell span held in sheet space
+    /// by a sort. This is layout-only: the original worksheet markers must not be exported.
+    pub held_collapse: [Option<(u32, u32)>; 2],
     /// Every retained leaf had its own offset and extent.
     pub complete: bool,
     pub flip: (bool, bool),
@@ -201,7 +204,7 @@ impl Sheet {
         let f = g.file.as_ref()?;
         if depth >= MAX_GROUP_DEPTH
             || f.edited
-            || (complete && !f.complete)
+            || (complete && (!f.complete || f.held_collapse.iter().any(Option::is_some)))
             || f.anchor != g.anchor
             || f.model_child_offset != g.child_offset
             || f.model_child_extent != g.child_extent
@@ -294,7 +297,7 @@ impl Sheet {
         files.retain(|&r, f| self.raw_drawing_anchor(r) == Some(f.anchor));
         self.drawing_files = files;
         let changed: Vec<_> =
-            self.groups.iter().filter(|g| g.file.as_ref().is_some_and(|f| !f.edited) && self.source_group(g).is_none()).map(|g| g.id).collect();
+            self.groups.iter().filter(|g| g.file.as_ref().is_some_and(|f| !f.edited) && !self.source_layout_group(g)).map(|g| g.id).collect();
         for id in changed {
             self.invalidate_drawing_file(DrawingRef::Group(id));
         }

@@ -289,7 +289,7 @@ fn shift_sheet_features(sh: &mut Sheet, axis: Axis, at: u32, count: u32, insert:
 
 /// Sorted changed line indices, coalesced into inclusive runs. The maps have a cheap equal
 /// path; when they differ, merge their keys rather than doing two tree lookups per key.
-fn changed_lines(
+pub(super) fn changed_lines(
     before: &std::collections::BTreeMap<u32, gridcraft_model::LineInfo>,
     after: &std::collections::BTreeMap<u32, gridcraft_model::LineInfo>,
     (default_before, default_after): (f32, f32),
@@ -322,6 +322,20 @@ fn changed_lines(
         push(next, limit - 1);
     }
     runs
+}
+
+pub(super) fn drawing_placement_hits(
+    sh: &Sheet,
+    r: gridcraft_model::DrawingRef,
+    file: &gridcraft_model::DrawingFile,
+    rows: bool,
+    changed: &[(u32, u32)],
+) -> bool {
+    if changed.is_empty() {
+        return false;
+    }
+    let (near, far) = drawing_line_dependency(sh, r, file, rows);
+    changed.get(changed.partition_point(|&(_, hi)| hi < near)).is_some_and(|&(lo, _)| lo <= far)
 }
 
 fn drawing_line_dependency(sh: &Sheet, r: gridcraft_model::DrawingRef, file: &gridcraft_model::DrawingFile, rows: bool) -> (u32, u32) {
@@ -450,13 +464,7 @@ pub(crate) fn discard_placement_after_line_changes(old: &gridcraft_model::Workbo
             .drawing_files
             .iter()
             .filter(|&(&r, file)| {
-                [(true, &rows), (false, &cols)].into_iter().any(|(axis, changed)| {
-                    if changed.is_empty() {
-                        return false;
-                    }
-                    let (near, far) = drawing_line_dependency(before, r, file, axis);
-                    changed.get(changed.partition_point(|&(_, hi)| hi < near)).is_some_and(|&(lo, _)| lo <= far)
-                })
+                [(true, &rows), (false, &cols)].into_iter().any(|(axis, changed)| drawing_placement_hits(before, r, file, axis, changed))
             })
             .map(|(&r, _)| r)
             .collect();

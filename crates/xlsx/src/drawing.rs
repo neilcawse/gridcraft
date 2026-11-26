@@ -425,6 +425,7 @@ fn read_object_inner(
                 fields: [file_off.is_some(), file_ext.is_some(), file_child_offset.is_some(), file_child_extent.is_some()],
                 has_transform: xf.is_some(),
                 edited: false,
+                held_collapse: [None; 2],
                 complete: file_complete,
                 flip,
                 rotation,
