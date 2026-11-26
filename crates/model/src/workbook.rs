@@ -897,6 +897,7 @@ impl Workbook {
                         let (crate::DrawingRef::Chart(id)
                         | crate::DrawingRef::Image(id)
                         | crate::DrawingRef::Shape(id)
+                        | crate::DrawingRef::Slicer(id)
                         | crate::DrawingRef::Group(id)) = l.object;
                         id
                     }))
