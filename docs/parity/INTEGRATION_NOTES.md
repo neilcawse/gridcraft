@@ -120,3 +120,6 @@ The formula bar, editor, Show Formulas and formula readback (`cell.get` and `she
 Copying the table itself and retargeting its formulas depend on X23; X36 does not change sheet-copy behavior on its own.
 
 X22 and X23 conflict in `crates/model/src/workbook.rs`: keep X22's `Workbook::rename_table` delegation to `table_refs::TableRename` and retain X23's `Workbook::retarget_table_on_sheet` path with its local helpers (including `might_use_table` and `set_formulas`); do not restore X23's older workbook-rename body.
+
+**GridCraft trial (not an Excel measurement).** A scratch merge of X36 (`545f39bc`) and X23 (`ddd23805`) used that rule and kept both sets of documentation. The `sheet_copy_tables` run passed all 14 X23 tests plus one synthetic X36 probe. On the copy, `cell.get` returned `=SUBTOTAL(109,[Qty])` and `=[@Qty]*2`; the stored formulas and worksheet XML used the copied table's name, as did the outside `SUM` formula.
+The same trial passed all 10 engine tests selected by `table_rename` and the model's `rename_table_keeps_the_array_range_of_a_formula_it_rewrites` test.
