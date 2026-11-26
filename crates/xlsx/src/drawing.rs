@@ -492,14 +492,17 @@ fn read_object_inner(
             let flip = xfrm_flip(xf);
             let rotation = xfrm_rot(xf);
             let fallback = if place.parent.is_some() { 1.0 } else { 1.0 / EMU_PER_PX };
+            // The worksheet anchor is the placed box. Nested transforms already supply an
+            // unturned frame in their parent's child coordinates.
+            let frame = if place.parent.is_none() { group_unturned_box(place.frame, rotation) } else { place.frame };
             let child_box = group_child_box(
-                place.frame,
+                frame,
                 file_child_offset.or(file_off).unwrap_or_default(),
                 file_child_extent.unwrap_or_default(),
                 file_ext.unwrap_or_default(),
                 fallback,
             );
-            let own = GroupProjection::new(place.frame, child_box, (flip, rotation), fallback);
+            let own = GroupProjection::new(frame, child_box, (flip, rotation), fallback);
             let map = place.parent.map_or(own, |parent| parent.compose(own));
             let mut file_members = Vec::new();
             let mut file_complete = true;
@@ -1209,14 +1212,15 @@ impl DrawingOut<'_> {
         let exact_frame = source.is_some() && parent.is_none_or(|(_, exact)| exact);
         let (off, ext) = (frame.off, frame.ext);
         // Use the last layout frame as the reference space, not the possibly smaller box of
-        // members being written. For a nested group undo the parent's projection first.
+        // members being written. For a nested group undo the parent's projection first;
+        // both it and a worksheet anchor give the turned box before the axis swap.
         let reference = drawing_rect(sheet, &g.anchor);
-        let reference = parent.map_or(reference, |(map, _)| group_unturned_box(map.unproject(reference), g.rotation));
+        let reference = group_unturned_box(parent.map_or(reference, |(map, _)| map.unproject(reference)), g.rotation);
         let fallback = if parent.is_some() { 1.0 } else { 1.0 / EMU_PER_PX };
         let use_frame = |origin: f64, extent: f64, off: i64, span: i64, start: f64, len: f64| {
             if extent > 0.0 && span > 0 { (origin, extent, off as f64, span as f64) } else { (start, len, start / fallback, len / fallback) }
         };
-        let written = if parent.is_some() { frame.rect() } else { b };
+        let written = parent.map_or_else(|| group_unturned_box(b, g.rotation), |_| frame.rect());
         let (x, w, cx, cw) = use_frame(reference.x, reference.w, g.child_offset.0, g.child_extent.0, written.x, written.w);
         let (y, h, cy, ch) = use_frame(reference.y, reference.h, g.child_offset.1, g.child_extent.1, written.y, written.h);
         let rect = ObjectRect { x, y, w, h };
@@ -1224,8 +1228,7 @@ impl DrawingOut<'_> {
         let space = parent.map_or(own, |(map, _)| map.compose(own));
         let (group_off, group_ext, ch_off, ch_ext) = source.as_ref().map_or_else(
             || {
-                let visible =
-                    parent.map_or_else(|| group_unturned_box(b, g.rotation), |(map, _)| map.project(group_unturned_box(written, g.rotation)));
+                let visible = parent.map_or(b, |(map, _)| map.project(group_unturned_box(written, g.rotation)));
                 let ch = ChildTransform::from_rect(space.unproject(visible), 0, (false, false));
                 let (ch_off, ch_ext) = (ch.off, ch.ext);
                 // An edited top-level group from a file keeps the file's scale from its child
@@ -1387,11 +1390,12 @@ pub fn write_drawing(
                 .filter(|f| f.anchor == g.anchor && source.is_some())
                 .map_or_else(|| anchor_open(sheet, &anchor), |f| source_anchor_open(&f.placement));
             out.s.push_str(&open);
+            let frame = group_unturned_box(b, g.rotation);
             out.group(
                 g,
                 b,
                 ChildTransform::from_rect(
-                    ObjectRect { x: b.x * EMU_PER_PX, y: b.y * EMU_PER_PX, w: b.w * EMU_PER_PX, h: b.h * EMU_PER_PX },
+                    ObjectRect { x: frame.x * EMU_PER_PX, y: frame.y * EMU_PER_PX, w: frame.w * EMU_PER_PX, h: frame.h * EMU_PER_PX },
                     g.rotation,
                     g.flip,
                 ),

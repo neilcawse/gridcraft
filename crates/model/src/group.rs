@@ -70,14 +70,13 @@ pub struct DrawingGroup {
     pub id: u32,
     /// The group's name (`cNvPr name`, e.g. "Group 3").
     pub name: String,
-    /// The group's box on the sheet when it was laid out (opened, or last moved or sized as a
-    /// whole). With `child_offset`/`child_extent` it fixes the group's child coordinate space;
-    /// its current box is [`Sheet::drawing_rect`] of the group, the box around its members. A
-    /// rotated group is saved with this box, as it turns about the box's centre. An outermost
-    /// group turned exactly 90° or 270° holds its members in this box swapped about its centre;
-    /// a nested group's box is already that turned box, as its parent places it.
+    /// The group's placed box on the sheet when it was laid out, moved or sized as a whole.
+    /// At 90° or 270° its frame is this box swapped about its centre in the enclosing space:
+    /// sheet space for a root group or the parent's child coordinates for a nested group.
+    /// A rotated group is saved using its own box, not the current bounds of its members
+    /// ([`Sheet::drawing_rect`]), since those bounds needn't share its centre.
     pub anchor: Anchor,
-    /// The child box (`a:chOff`/`a:chExt`, EMUs) that `anchor`'s box maps onto.
+    /// The child box origin (`a:chOff`, EMUs), in the group's unturned frame.
     pub child_offset: (i64, i64),
     pub child_extent: (i64, i64),
     /// The group's flips (`a:xfrm flipH`/`flipV`). Members are stored where they appear on the

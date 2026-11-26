@@ -238,18 +238,15 @@ impl Sheet {
     fn carry_group(&mut self, id: u32, old: &Sheet, from: &Anchor, to: Anchor) {
         let (from_rect, to_rect) = (old.anchor_rect(from), self.anchor_rect(&to));
         let mut recovered = HashMap::new();
-        let mut rotation = 0;
-        if let Some(g) = self.drawing_group(id) {
-            rotation = g.rotation;
-            if ((from_rect.w == 0.0 && to_rect.w > 0.0) || (from_rect.h == 0.0 && to_rect.h > 0.0)) && self.source_layout_group(g) {
-                self.project_group_members(g, to_rect, None, 0, &mut recovered);
-            }
+        if let Some(g) = self.drawing_group(id)
+            && ((from_rect.w == 0.0 && to_rect.w > 0.0) || (from_rect.h == 0.0 && to_rect.h > 0.0))
+            && self.source_layout_group(g)
+        {
+            self.project_group_members(g, group_unturned_box(to_rect, g.rotation), None, 0, &mut recovered);
         }
-        let old_box = group_unturned_box(from_rect, rotation);
-        let new_box = group_unturned_box(to_rect, rotation);
         for m in self.group_contents(id) {
             let Some(a) = self.raw_drawing_anchor(m) else { continue };
-            let target = recovered.get(&m).copied().unwrap_or_else(|| map_rect(old_box, new_box, old.anchor_rect(&a)));
+            let target = recovered.get(&m).copied().unwrap_or_else(|| map_rect(from_rect, to_rect, old.anchor_rect(&a)));
             if same_rect(target, self.anchor_rect(&a)) {
                 continue;
             }
