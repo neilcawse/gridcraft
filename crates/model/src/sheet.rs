@@ -95,6 +95,9 @@ pub struct Sheet {
     /// sheet by its id keeps finding it; 0 for a sheet the file did not have. Not in JSON.
     #[serde(skip)]
     pub file_id: u32,
+    /// Whether this worksheet uses Lotus 1-2-3 transition formula evaluation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub transition_evaluation: bool,
     pub cells: CellStore,
     /// Static pictures are sparse rich content. Ordinary cells carry no picture pointer.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty", with = "picture_map")]
@@ -110,6 +113,10 @@ pub struct Sheet {
     /// Default column width and row height in pixels at 96 dpi (a file stores row heights in points).
     pub default_col_width: f32,
     pub default_row_height: f32,
+    /// Imported base column width in characters, when no explicit default width overrides it.
+    /// Only CELL("width") reads this; layout uses `default_col_width`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xlsx_base_col_width: Option<u8>,
     pub merges: Vec<RangeRef>,
     /// Frozen rows and columns (top/left).
     pub freeze: Option<(u32, u32)>,
@@ -205,6 +212,7 @@ impl Sheet {
             name: name.into(),
             uid: SheetUid::fresh(),
             file_id: 0,
+            transition_evaluation: false,
             cells: CellStore::new(),
             cell_pictures: BTreeMap::new(),
             spill: BTreeMap::new(),
@@ -213,6 +221,7 @@ impl Sheet {
             rows: BTreeMap::new(),
             default_col_width: DEFAULT_COL_WIDTH,
             default_row_height: DEFAULT_ROW_HEIGHT,
+            xlsx_base_col_width: None,
             merges: vec![],
             freeze: None,
             tab_color: None,

@@ -34,6 +34,395 @@ impl T {
 }
 
 #[test]
+fn unary_plus_preserves_values_but_not_reference_identity() {
+    let mut t = T::new();
+    t.set("A1", "TRUE");
+    t.set("B1", "=+TRUE");
+    t.set("B2", "=+A1");
+    t.set("B3", "=TYPE(+\"3\")");
+    t.set("B4", "=IF(+A2=\"\",\"\",+A2)");
+    t.set("B5", "=+A2");
+    t.set("B6", "=+A1+1");
+    t.set("B7", "=-A1");
+    t.set("B8", "=+{TRUE;\"3\";#N/A}");
+    t.set("B11", "=ISREF(+A1)");
+
+    assert_eq!(t.get("B1"), Value::Bool(true));
+    assert_eq!(t.get("B2"), Value::Bool(true));
+    assert_eq!(t.num("B3"), 2.0);
+    assert_eq!(t.get("B4"), Value::text(""));
+    assert_eq!((t.num("B5"), t.num("B6"), t.num("B7")), (0.0, 2.0, -1.0));
+    assert_eq!(t.get("B8"), Value::Bool(true));
+    assert_eq!(t.get("B9"), Value::text("3"));
+    assert_eq!(t.get("B10"), Value::Error(CellError::NA));
+    assert_eq!(t.get("B11"), Value::Bool(false));
+}
+
+#[test]
+fn transition_arithmetic_uses_the_formula_worksheet() {
+    let mut t = T::new();
+    t.wb.sheets.push(std::sync::Arc::new(gridcraft_model::Sheet::new("Ordinary")));
+    t.wb.sheet_mut(0).unwrap().transition_evaluation = true;
+    t.wb.sheet_mut(1).unwrap().cells.set(c("A1"), Cell::value(Value::text("text")));
+    t.wb.sheet_mut(1).unwrap().cells.set(c("B1"), Cell::formula(Formula::new("=Sheet1!A1+2")));
+    t.wb.sheet_mut(1).unwrap().cells.set(c("C1"), Cell::formula(Formula::new("=ROUND(SUM(Sheet1!B1:C1),2)")));
+    t.set("A1", "text");
+    t.set("B1", "=4+(Ordinary!A1-2)/2");
+    t.set("C1", "=SUM({\"-\",2}+1)");
+    t.set("D1", "=7+\"comment\"/2");
+    t.set("E1", "=1/A1");
+    t.set("F1", "=A1&#N/A");
+    t.set("G1", "=A1&\"!\"");
+    t.set("H1", "=2+-A1");
+    t.calc.recalc_all(&mut t.wb);
+
+    assert_eq!((t.num("B1"), t.num("C1"), t.num("D1"), t.num("H1")), (3.0, 4.0, 7.0, 2.0));
+    assert_eq!(t.get("E1"), Value::Error(CellError::Div0));
+    assert_eq!(t.get("F1"), Value::Error(CellError::NA));
+    assert_eq!(t.get("G1"), Value::text("text!"));
+    assert_eq!(t.wb.sheet(1).unwrap().value(c("B1")), Value::Error(CellError::Value));
+    assert_eq!(t.wb.sheet(1).unwrap().value(c("C1")), Value::number(7.0));
+}
+
+#[test]
+fn transition_comparisons_coerce_blank_and_empty_text() {
+    for transition in [false, true] {
+        let mut t = T::new();
+        t.wb.sheet_mut(0).unwrap().transition_evaluation = transition;
+        t.set("A2", "=\"\"");
+        t.set("B1", "=IF(A1=\" \",12.5,0)");
+        t.set("B2", "=IF(0=A2,\"\",4)");
+        t.set("B3", "=\"abc\"=0");
+        t.set("B4", "=\"\"=\" \"");
+        t.set("B5", "=A1=#N/A");
+        assert_eq!(t.num("B1"), if transition { 12.5 } else { 0.0 });
+        assert_eq!(t.get("B2"), if transition { Value::text("") } else { Value::number(4.0) });
+        assert_eq!(t.get("B3"), Value::Bool(transition));
+        assert_eq!(t.get("B4"), Value::Bool(false));
+        assert_eq!(t.get("B5"), Value::Error(CellError::NA));
+    }
+}
+
+fn set_transition(t: &mut T, enabled: bool) {
+    if let Some(sheet) = t.wb.sheet_mut(0) {
+        sheet.transition_evaluation = enabled;
+    }
+}
+
+#[test]
+fn measured_transition_comparisons() {
+    for transition in [false, true] {
+        let mut t = T::new();
+        set_transition(&mut t, transition);
+        t.set("A2", "=\"\"");
+        t.set("A3", "text");
+        t.set("A4", "=\"1\"");
+        t.set("A5", "FALSE");
+        t.set("A6", "TRUE");
+        for (formula, ordinary, lotus) in [
+            ("=A1=A3", false, true),
+            ("=A4=A1", false, true),
+            ("=A3<>0", true, false),
+            ("=0<>A4", true, false),
+            ("=\" \"<1", false, true),
+            ("=A4>1", true, false),
+            ("=A5<=\"1\"", false, true),
+            ("=1>=A6", false, true),
+            ("=A5=A2", false, true),
+            ("=A2=0", false, true),
+            ("=A3=A4", false, false),
+            ("=A2<A4", true, true),
+        ] {
+            t.set("B1", formula);
+            assert_eq!(t.get("B1"), Value::Bool(if transition { lotus } else { ordinary }), "{formula}");
+        }
+    }
+}
+
+#[test]
+fn measured_transition_concat_blank() {
+    for transition in [false, true] {
+        let mut t = T::new();
+        set_transition(&mut t, transition);
+        t.set("A2", "=\"\"");
+        let blank = if transition { Value::Error(CellError::Value) } else { Value::text("x") };
+        for (formula, expected) in [
+            ("=\"x\"&A1", blank.clone()),
+            ("=IF(A1=\"\",\"x\"&A1,\"no\")", blank),
+            ("=A1&A1", if transition { Value::Error(CellError::Value) } else { Value::text("") }),
+            ("=1&A1", if transition { Value::Error(CellError::Value) } else { Value::text("1") }),
+            ("=\"\"&A1", if transition { Value::Error(CellError::Value) } else { Value::text("") }),
+            ("=A1&\"\"", if transition { Value::Error(CellError::Value) } else { Value::text("") }),
+            ("=INDEX(A1:A2,1)&\"x\"", if transition { Value::Error(CellError::Value) } else { Value::text("x") }),
+            ("=IF(TRUE,A1)&\"x\"", if transition { Value::Error(CellError::Value) } else { Value::text("x") }),
+            // Not measured: empty text keeps the previous result.
+            ("=\"x\"&A2", Value::text("x")),
+            ("=\"x\"&#N/A", Value::Error(CellError::NA)),
+        ] {
+            t.set("B1", formula);
+            assert_eq!(t.get("B1"), expected, "{formula}");
+        }
+    }
+}
+
+#[test]
+fn measured_transition_average_text_literal() {
+    for transition in [false, true] {
+        let mut t = T::new();
+        set_transition(&mut t, transition);
+        t.set("A1", "-1");
+        t.set("A2", "=\"1\"");
+        t.set("A3", "text");
+        t.set("B1", "=AVERAGE(A1:A3)");
+        t.set("B2", "=AVERAGE(-1,\"1\")");
+        t.set("B3", "=AVERAGE(-1,\"abc\")");
+        t.set("B4", "=AVERAGE(-1,\"\")");
+        t.set("B5", "=AVERAGE(-1,A2)");
+        t.set("B6", "=AVERAGE(-1,A4)");
+        t.set("B7", "=AVERAGE(-1,TRUE)");
+        assert_eq!(t.get("B1"), Value::number(-1.0));
+        assert_eq!(t.get("B2"), Value::number(if transition { -0.5 } else { 0.0 }));
+        let expected = if transition { Value::number(-0.5) } else { Value::Error(CellError::Value) };
+        assert_eq!([t.get("B3"), t.get("B4")], [expected.clone(), expected]);
+        assert_eq!([t.num("B5"), t.num("B6"), t.num("B7")], [-1.0, -1.0, 0.0]);
+    }
+}
+
+#[test]
+fn measured_transition_database_plain_text_criterion() {
+    for transition in [false, true] {
+        let mut t = T::new();
+        set_transition(&mut t, transition);
+        for (at, input) in
+            [("A1", "Color"), ("A2", "Blue"), ("A3", "Bluebird"), ("A4", "Bluesky"), ("A5", "DarkBlue"), ("B1", "Color"), ("B2", "Blue")]
+        {
+            t.set(at, input);
+        }
+        t.set("C1", "=DCOUNTA(A1:A5,1,B1:B2)");
+        assert_eq!(t.get("C1"), Value::number(if transition { 1.0 } else { 3.0 }));
+        t.set("B2", "Blue*");
+        assert_eq!(t.get("C1"), Value::number(3.0));
+    }
+}
+
+#[test]
+fn measured_transition_datevalue_non_text() {
+    for transition in [false, true] {
+        let mut t = T::new();
+        set_transition(&mut t, transition);
+        t.set("A1", "=\"08/14 \"");
+        t.set("B1", "=DATEVALUE(A1+1)");
+        t.set("B2", "=DATEVALUE(A1)");
+        t.set("B3", "=DATEVALUE(A1)+1");
+        t.set("A3", "5");
+        assert_eq!(t.get("B1"), if transition { Value::number(1.0) } else { Value::Error(CellError::Value) });
+        assert!(t.num("B2") > 0.0);
+        assert_eq!(t.num("B3"), t.num("B2") + 1.0);
+        for (formula, value) in [
+            ("=DATEVALUE(1)", 1.0),
+            ("=DATEVALUE(0)", 0.0),
+            ("=DATEVALUE(1.5)", 1.5),
+            ("=DATEVALUE(-5)", -5.0),
+            ("=DATEVALUE(TRUE)", 1.0),
+            ("=DATEVALUE(A2)", 0.0),
+            ("=DATEVALUE(A3)", 5.0),
+            ("=DATEVALUE(A1-1)", -1.0),
+            ("=DATEVALUE(A1*1)", 0.0),
+            ("=DATEVALUE(2958466)", 2_958_466.0),
+            ("=DATEVALUE(1E9)", 1e9),
+        ] {
+            t.set("B4", formula);
+            assert_eq!(t.get("B4"), if transition { Value::number(value) } else { Value::Error(CellError::Value) }, "{formula}");
+        }
+        t.set("B4", "=DATEVALUE(A1&\"\")");
+        assert_eq!(t.get("B4"), t.get("B2"));
+        t.set("B4", "=DATEVALUE(\"5\")");
+        assert_eq!(t.get("B4"), Value::Error(CellError::Value));
+    }
+}
+
+#[test]
+fn measured_aggregate_reference_form_rejects_computed_arrays() {
+    for transition in [false, true] {
+        let mut t = T::new();
+        set_transition(&mut t, transition);
+        for (at, input) in [("A1", "-1"), ("A2", "=\"1\""), ("A3", "a"), ("B1", "y"), ("B2", "n"), ("B3", "y")] {
+            t.set(at, input);
+        }
+        t.set("C1", "=AGGREGATE(2,6,A1:A3/(B1:B3=\"y\"))");
+        t.set("C2", "=AGGREGATE(2,6,(A1:A3+0)/(B1:B3=\"y\"))");
+        t.set("C3", "=AGGREGATE(2,6,A1:A3)");
+        t.set("C4", "=AGGREGATE(2,6,-1)");
+        assert_eq!([t.get("C1"), t.get("C2")], [Value::Error(CellError::Value), Value::Error(CellError::Value)]);
+        assert_eq!([t.get("C3"), t.get("C4")], [Value::number(1.0), Value::number(1.0)]);
+    }
+}
+
+#[test]
+fn measured_aggregate_reference_form_rejects_array_constants() {
+    for transition in [false, true] {
+        let mut t = T::new();
+        set_transition(&mut t, transition);
+        for (name, formula) in [("ArrConst", "={1,2,3}"), ("ArrExpr", "={1,2}*1")] {
+            t.wb.names.push(gridcraft_model::DefinedName {
+                name: name.into(),
+                scope: None,
+                formula: formula.into(),
+                comment: String::new(),
+                hidden: false,
+            });
+        }
+        for (at, input) in [("A1", "1"), ("A2", "2"), ("A3", "3")] {
+            t.set(at, input);
+        }
+        for code in 1..=13 {
+            t.set("B1", &format!("=AGGREGATE({code},6,{{1,2,3}})"));
+            assert_eq!(t.get("B1"), Value::Error(CellError::Value), "code={code}, transition={transition}");
+        }
+        for formula in [
+            "=AGGREGATE(9,6,ArrConst)",
+            "=AGGREGATE(9,6,A1:A3,{1,2})",
+            "=AGGREGATE(9,6,ArrExpr)",
+            "=AGGREGATE(9,6,LET(x,{1,2,3},x))",
+            "=AGGREGATE(9,6,(A1:A3)*1)",
+        ] {
+            t.set("B1", formula);
+            assert_eq!(t.get("B1"), Value::Error(CellError::Value), "{formula}");
+        }
+        t.set("B1", "=AGGREGATE(14,6,{1,2,3},1)");
+        assert_eq!(t.get("B1"), Value::number(3.0));
+    }
+}
+
+#[test]
+fn measured_multisheet_reference_in_arithmetic_and_sum() {
+    for transition in [false, true] {
+        let mut t = T::new();
+        set_transition(&mut t, transition);
+        for (name, value) in [("First", 2.0), ("Last", 3.0)] {
+            let mut sheet = gridcraft_model::Sheet::new(name);
+            sheet.set_value(c("A1"), Value::number(value));
+            t.wb.sheets.push(std::sync::Arc::new(sheet));
+        }
+        t.set("A1", "=First:Last!A1+0");
+        // The legacy workbook importer inserts implicit intersection in scalar context.
+        t.set("A3", "=@First:Last!A1+0");
+        t.set("A2", "=SUM(First:Last!A1)");
+        assert_eq!(t.get("A1"), Value::Error(CellError::Ref));
+        assert_eq!(t.get("A3"), Value::Error(CellError::Ref));
+        assert_eq!(t.get("A2"), Value::number(5.0));
+    }
+}
+
+#[test]
+fn transition_arithmetic_in_a_sheet_scoped_name_follows_the_formula_worksheet() {
+    let mut t = T::new();
+    t.wb.sheets.push(std::sync::Arc::new(gridcraft_model::Sheet::new("Ordinary")));
+    t.wb.sheet_mut(0).unwrap().transition_evaluation = true;
+    for (name, scope) in [("Flagged", Some(0)), ("Plain", Some(1)), ("Book", None)] {
+        t.wb.names.push(gridcraft_model::DefinedName {
+            name: name.into(),
+            scope,
+            formula: "\"text\"+2".into(),
+            comment: String::new(),
+            hidden: false,
+        });
+    }
+    let ordinary = t.wb.sheet_mut(1).unwrap();
+    ordinary.cells.set(c("A1"), Cell::formula(Formula::new("=Sheet1!Flagged")));
+    ordinary.cells.set(c("A2"), Cell::formula(Formula::new("=Plain")));
+    ordinary.cells.set(c("A3"), Cell::formula(Formula::new("=Book")));
+    t.set("A1", "=Flagged");
+    t.set("A2", "=Ordinary!Plain");
+    t.set("A3", "=Book");
+    t.calc.recalc_all(&mut t.wb);
+
+    // The worksheet holding the formula decides, not the sheet the name is scoped to.
+    assert_eq!((t.num("A1"), t.num("A2"), t.num("A3")), (2.0, 2.0, 2.0));
+    for at in ["A1", "A2", "A3"] {
+        assert_eq!(t.wb.sheet(1).unwrap().value(c(at)), Value::Error(CellError::Value), "Ordinary!{at}");
+    }
+}
+
+#[test]
+fn transition_arithmetic_applies_to_aggregate_filtered_division() {
+    let mut t = T::new();
+    t.wb.sheet_mut(0).unwrap().transition_evaluation = true;
+    for (at, input) in [("A1", "5"), ("A2", "text"), ("A3", "7"), ("B1", "y"), ("B2", "y"), ("B3", "y")] {
+        t.set(at, input);
+    }
+    t.set("C1", "=AGGREGATE(15,6,A1:A3/(B1:B3=\"y\"),1)");
+    // Text divided by TRUE contributes a zero to SMALL on the transition sheet.
+    assert_eq!(t.get("C1"), Value::number(0.0));
+
+    // Trailing blanks match zero too, so this case must evaluate the full range.
+    t.set("B1", "=\"\"");
+    t.set("B2", "0");
+    t.set("C2", "=AGGREGATE(14,6,A1:A64/(B1:B64=0),63)");
+    assert_eq!(t.get("C2"), Value::number(0.0));
+}
+
+#[test]
+fn transition_aggregate_filtered_division_matches_boolean_to_number() {
+    let mut t = T::new();
+    set_transition(&mut t, true);
+    for (at, input) in [("A1", "5"), ("B1", "1"), ("A65", "7"), ("B65", "TRUE")] {
+        t.set(at, input);
+    }
+    // Both fast calls must run in one pass to share the cached column and warm its index.
+    if let Some(sheet) = t.wb.sheet_mut(0) {
+        for (at, formula) in [
+            ("C1", "=AGGREGATE(14,6,A1:A100/(B1:B100=1),1)"),
+            ("C2", "=AGGREGATE(14,6,(A1:A100/(B1:B100=1))*1,1)"),
+            ("C3", "=AGGREGATE(14,6,A1:A100/(B1:B100=1),2)"),
+        ] {
+            sheet.cells.set(c(at), Cell::formula(Formula::new(formula)));
+        }
+    }
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!([t.get("C1"), t.get("C2")], [Value::number(7.0), Value::number(7.0)]);
+    assert_eq!(t.get("C3"), Value::number(5.0));
+}
+
+/// The AGGREGATE filtered-division shortcut gives what the general path gives (the same formula
+/// wrapped in `*1`, which the shortcut does not take), on ordinary and transition sheets: text,
+/// errors, blanks, empty text and spaces on both sides, trailing blanks past the used range,
+/// predicates that match nothing, and an error key.
+#[test]
+fn aggregate_filtered_division_shortcut_matches_the_general_path() {
+    for transition in [false, true] {
+        let mut t = T::new();
+        t.wb.sheet_mut(0).unwrap().transition_evaluation = transition;
+        let nums = ["5", "text", "=1/0", "TRUE", "", "=\"\"", "3", "=\"4\"", "2"];
+        let conds = ["y", " ", "", "=\"\"", "0", "=1/0", "Y", "=\" \"", "1", "FALSE"];
+        for r in 1..=70 {
+            for (col, input) in [("A", nums[r % nums.len()]), ("B", conds[r * 7 / 3 % conds.len()])] {
+                if !input.is_empty() {
+                    t.set(&format!("{col}{r}"), input);
+                }
+            }
+        }
+        let mut mismatches = Vec::new();
+        let mut row = 1;
+        for key in ["\"y\"", "\" \"", "\"\"", "0", "1", "FALSE", "#N/A"] {
+            for op in ["=", "<>", "<", ">", "<=", ">="] {
+                for end in [3, 70, 100] {
+                    let body = format!("A1:A{end}/(B1:B{end}{op}{key})");
+                    t.set(&format!("D{row}"), &format!("=AGGREGATE(14,6,{body},1)"));
+                    t.set(&format!("E{row}"), &format!("=AGGREGATE(14,6,({body})*1,1)"));
+                    let (fast, general) = (t.get(&format!("D{row}")), t.get(&format!("E{row}")));
+                    if fast != general {
+                        mismatches.push(format!("AGGREGATE(14,6,{body},1): {fast:?} vs {general:?}"));
+                    }
+                    row += 1;
+                }
+            }
+        }
+        assert!(mismatches.is_empty(), "transition={transition}: {mismatches:#?}");
+    }
+}
+
+#[test]
 fn spill_range_operator() {
     let mut t = T::new();
     t.set("A1", "3");
@@ -2389,6 +2778,32 @@ fn blank_lookup_values_match_excel_windows_observation() {
     ] {
         t.set(at, f);
         assert_eq!(t.get(at), want, "{f}");
+    }
+}
+
+#[test]
+fn cell_prefix_reports_the_alignment_of_text() {
+    use gridcraft_model::{Alignment, HAlign, Style};
+    let mut t = T::new();
+    for (cell, input, align, want) in [
+        ("A1", "label", HAlign::General, "'"),
+        ("A2", "label", HAlign::Left, "'"),
+        ("A3", "label", HAlign::Center, "^"),
+        ("A4", "label", HAlign::Right, "\""),
+        ("A5", "label", HAlign::Fill, "\\"),
+        ("A6", "label", HAlign::Justify, ""),
+        ("A7", "42", HAlign::Center, ""),
+        ("A8", "=\"\"", HAlign::Center, ""),
+        ("A9", "", HAlign::Center, ""),
+        // Public Excel caches: a formula's text result has no label prefix, whatever its alignment.
+        ("A10", "=\"label\"", HAlign::Center, ""),
+        ("A11", "=A1", HAlign::General, ""),
+    ] {
+        t.set(cell, input);
+        let id = t.wb.styles.intern(Style { align: Alignment { h: align, ..Default::default() }, ..Default::default() });
+        t.wb.sheet_mut(0).unwrap().set_style(c(cell), id);
+        t.set("B1", &format!("=CELL(\"prefix\",{cell})"));
+        assert_eq!(t.get("B1"), Value::text(want), "{cell}");
     }
 }
 

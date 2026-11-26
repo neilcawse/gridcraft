@@ -75,11 +75,18 @@ pub(super) fn check_regression_size(n: usize, k: usize) -> R<()> {
     }
 }
 
-fn parse_xy(y: &Value, x: Option<&Value>) -> R<Xy> {
+fn parse_xy(y: &Value, x: Option<&Value>, response_errors_are_invalid: bool) -> R<Xy> {
     let ya = as_array(y);
     let n = ya.data.len();
     let y_is_row = ya.rows == 1 && ya.cols > 1;
-    let yv: Vec<f64> = ya.data.iter().map(strict_num).collect::<R<_>>()?;
+    let yv: Vec<f64> = ya
+        .data
+        .iter()
+        .map(|v| match v {
+            Value::Error(_) if response_errors_are_invalid => Err(CellError::Value),
+            v => strict_num(v),
+        })
+        .collect::<R<_>>()?;
     let (xs, k) = match x {
         None => ((1..=n).map(|i| vec![i as f64]).collect(), 1),
         Some(xv) => {
@@ -309,7 +316,8 @@ fn opt_value(a: &[Arg], i: usize) -> Option<&Value> {
 }
 
 pub(super) fn linest_impl(a: &[Arg], log: bool) -> R<Value> {
-    let mut xy = parse_xy(&arg(a, 0)?.value, opt_value(a, 1))?;
+    // LOGEST treats errors in the response series as invalid numeric data.
+    let mut xy = parse_xy(&arg(a, 0)?.value, opt_value(a, 1), log)?;
     if log {
         if xy.y.iter().any(|&v| v <= 0.0) {
             return Err(CellError::Num);
@@ -350,7 +358,7 @@ pub(super) fn linest_impl(a: &[Arg], log: bool) -> R<Value> {
 }
 
 pub(super) fn trend_impl(a: &[Arg], log: bool) -> R<Value> {
-    let mut xy = parse_xy(&arg(a, 0)?.value, opt_value(a, 1))?;
+    let mut xy = parse_xy(&arg(a, 0)?.value, opt_value(a, 1), false)?;
     if log {
         if xy.y.iter().any(|&v| v <= 0.0) {
             return Err(CellError::Num);

@@ -152,10 +152,47 @@ fractions such as `-0.5` return `#NUM!`, including inside ranges and beside a ze
 Positive fractional inputs still truncate, and signed zero remains valid. Covered by
 `gcd_and_lcm_reject_negative_fractions_before_truncation`; function counts and estimates are unchanged.
 
+`CELL("prefix")` uses horizontal alignment for nonempty typed text; a formula's text result
+has no prefix, as public caches show for centered formula cells. XIRR treats a blank cash flow
+as zero without dropping its date. WEEKNUM rejects Boolean dates and return types. AND, OR
+and XOR ignore nonlogical text without suppressing cell errors. GCD and LCM accept numeric
+and date text and distinguish missing arguments, blank single cells and blanks inside ranges.
+LOGEST reports invalid known-y error values as `#VALUE!`, without changing LINEST or its
+predictor-error behavior. CONCAT still flattens ranges and enforces the 32,767-character limit.
+`CELL("width")` reads the XLSX base column width for a default-width column when no explicit
+sheet default width overrides it. This does not affect layout or the XLSX writer.
+
+**Residuals:** the XLS (BIFF) reader keeps no base column width, so `CELL("width")` of a
+default-width column in an `.xls` file still comes from the pixel width (9 public cells
+differ). XNPV still returns `#VALUE!` for blank, text or logical cash flows, and a result for
+a negative rate, where public caches show `#NUM!`. 15 public cells cache `#VALUE!` for a
+legacy-calculated `CONCAT` over a range; GridCraft returns the joined text.
+
+**ACCRINT residual:** The public IronCalc cases include 30 matched TRUE/FALSE pairs with
+settlement after first interest. In 27 pairs, the FALSE cache is equal to or higher than the
+TRUE cache. This conflicts with [Microsoft's calc_method description][accrint], under which
+FALSE skips the accrued period from issue to first interest. The accrual algorithm is unchanged.
+
+[accrint]: https://support.microsoft.com/en-us/excel/functions/accrint-function
+
+FORMULATEXT can return the original layout of an imported XLSX formula: its spacing and line
+breaks, with compatibility functions shown as the formula-bar operators public Excel caches
+show (`@-A1:A3`, `@(A1:A3*2)`, `OFFSET(G4,1,1)#`, `F5:INDEX(F5:F14, 3)#`). A formula holding
+a file-only spelling the formula bar shows otherwise (`Table1[[#This Row],[Col]]`,
+`_xleta.SUM`, `_xludf.`, `_xlfn._TRO_ALL(…)`) falls back to canonical text, as do the cells
+of a shared formula after its first. Evaluation and XLSX output use canonical text. The
+layout is dropped when an edit changes the expression (a fill or move that shifts
+references, a sheet or name rename) and when different text is entered.
+Other names starting with `_xl` (`_xlBudget`) and table column labels containing an escaped
+`'#This Row` are not file-only tokens and keep their imported spelling; the compatibility
+prefixes and items above are matched in any letter case.
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-25 | minor | Review fixes: `CELL("prefix")` of a formula cell is empty text; FORMULATEXT falls back to canonical text for formulas with file-only spellings (`[#This Row]`, `_xleta.`, `_xludf.`, trim-reference calls); BIFF width, XNPV and legacy CONCAT residuals recorded |
+| 2026-11-24 | minor | Corrected corpus-backed argument and reference behavior for CELL, XIRR, WEEKNUM, logical folds, GCD/LCM, LOGEST and FORMULATEXT |
 | 2026-11-04 | minor | GCD and LCM reject negative fractional arguments before truncation; scalar and range regressions in the extracted math tests preserve positive truncation and signed-zero behavior; estimates unchanged |
 | 2026-11-03 | minor | GROUPBY: a total depth of 2 or more adds a subtotal line for each group of the leading key columns (after the group, or before it for a negative depth) and labels the last line Grand Total; a depth past the key columns, or above 1 with `field_relationship` 1, is `#VALUE!`, as in Excel (#1456 item 1) |
 | 2026-11-01 | minor | Python in cells row: Python mode in the formula bar |

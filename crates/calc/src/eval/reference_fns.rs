@@ -1,3 +1,4 @@
+use super::array::{operator_compare, operator_number};
 use super::format::{cell_format_code, r1c1_to_a1};
 use super::{Area, Arg, Array, CellError, Ev, Evaluator, Expr, FnCtx, MAX_CELLS, Value, err, linked_parts};
 use gridcraft_core::{CellRef, MAX_COLS, MAX_ROWS, RangeRef};
@@ -481,7 +482,17 @@ impl<'h> Evaluator<'h> {
                     _ => "v",
                 }))
             }
-            "width" => Ev::V(Value::number(sheet.map_or(8.43, |s| gridcraft_model::points_to_chars(s.col_width(c.col) as f64)).round())),
+            "width" => {
+                let chars = sheet.map_or(8.43, |s| {
+                    if let Some(base) = s.xlsx_base_col_width
+                        && s.cols.get(&c.col).is_none_or(|i| !i.hidden && i.size.is_none())
+                    {
+                        return f64::from(base);
+                    }
+                    gridcraft_model::points_to_chars(f64::from(s.col_width(c.col)))
+                });
+                Ev::V(Value::number(chars.round()))
+            }
             // Excel's `<folder>/[<file>]<sheet>`, which the classic sheet-name formula splits on
             // the `]`. Empty until the workbook has a file of its own, as in Excel (#1489).
             "filename" => Ev::V(Value::text(match &wb.source_path {
@@ -499,7 +510,26 @@ impl<'h> Evaluator<'h> {
                 Ev::V(Value::text(cell_format_code(&code)))
             }
             "color" | "parentheses" => Ev::V(Value::Number(0.0)),
-            "prefix" => Ev::V(Value::text("")),
+            "prefix" => {
+                use gridcraft_model::HAlign;
+                // A label prefix belongs to typed text: a formula's text result has none.
+                let typed = sheet
+                    .and_then(|s| s.cell(c))
+                    .is_some_and(|cell| cell.formula.is_none() && matches!(&cell.value, Value::Text(t) if !t.is_empty()));
+                let align = sheet.map(|s| wb.styles.get(s.style_id(c)).align.h);
+                let prefix = if typed {
+                    match align {
+                        Some(HAlign::General | HAlign::Left) => "'",
+                        Some(HAlign::Right) => "\"",
+                        Some(HAlign::Center) => "^",
+                        Some(HAlign::Fill) => "\\",
+                        _ => "",
+                    }
+                } else {
+                    ""
+                };
+                Ev::V(Value::text(prefix))
+            }
             _ => err(CellError::Value),
         }
     }
@@ -527,6 +557,8 @@ impl<'h> Evaluator<'h> {
         if !(1..=19).contains(&func) || (name == "SUBTOTAL" && func > 11) {
             return err(CellError::Value);
         }
+        let aggregate_array_form = name == "AGGREGATE" && func >= 14;
+        let aggregate_reference_form = name == "AGGREGATE" && !aggregate_array_form;
         let skip_hidden = matches!(options, 1 | 3 | 5 | 7);
         // SUBTOTAL leaves out rows a filter hides whatever the function number (Microsoft's
         // SUBTOTAL documentation); 101-111 also leave out rows hidden by hand.
@@ -536,8 +568,8 @@ impl<'h> Evaluator<'h> {
         let skip_nested = name == "SUBTOTAL" || options <= 3;
         let mut values = Vec::new();
         let mut k = None;
-        let refs = if name == "AGGREGATE" && func >= 14 { &rest[..1.min(rest.len())] } else { rest };
-        if name == "AGGREGATE" && func >= 14 {
+        let refs = if aggregate_array_form { &rest[..1] } else { rest };
+        if aggregate_array_form {
             k = rest.get(1).map(|e| self.value(e));
         }
         // Every cell visited (even one skipped as hidden, nested or an error) and every value
@@ -551,7 +583,7 @@ impl<'h> Evaluator<'h> {
         let mut inputs = Vec::new();
         let mut budget = MAX_CELLS;
         for e in refs {
-            let v = if name == "AGGREGATE"
+            let v = if aggregate_array_form
                 && skip_errors
                 && let Some(v) = self.eval_aggregate_filtered_div(e)
             {
@@ -570,6 +602,8 @@ impl<'h> Evaluator<'h> {
                         inputs.push(Input::Cells(a.sheet, range));
                     }
                 }
+                // Functions 1–13 accept references and scalars, not array values.
+                Ev::V(Value::Array(_)) if aggregate_reference_form => return err(CellError::Value),
                 Ev::V(v) => {
                     let n = match &v {
                         Value::Array(a) => u64::try_from(a.data.len()).unwrap_or(u64::MAX),
@@ -641,7 +675,8 @@ impl<'h> Evaluator<'h> {
         let [num_area] = num_areas.as_slice() else { return None };
         let num_area = *num_area;
         let (nh, nw) = (num_area.range.height(), num_area.range.width());
-        if nh > 1 && nw > 1 {
+        // One cell gives the general path a scalar, which `skip_errors` keeps: leave it to that path.
+        if (nh > 1 && nw > 1) || (nh == 1 && nw == 1) {
             return None;
         }
         let match_cond = |this: &Self, e: &Expr| -> Option<Area> {
@@ -660,11 +695,15 @@ impl<'h> Evaluator<'h> {
         if matches!(key, Value::Array(_)) {
             return None;
         }
+        // The general path gives an array of errors here, which `skip_errors` drops; a lone error
+        // would not be dropped.
+        let all_failed = |e: CellError| Value::from(Array::column(vec![Value::Error(e)]));
         if let Value::Error(err) = key {
-            return Some(Value::Error(err));
+            return Some(all_failed(err));
         }
+        let transition = self.transition;
         let eval_cmp = |v: &Value| -> bool {
-            let ord = if ref_on_left { super::compare(v, &key) } else { super::compare(&key, v) };
+            let ord = if ref_on_left { operator_compare(v, &key, transition) } else { operator_compare(&key, v, transition) };
             use std::cmp::Ordering::*;
             match cmp_op {
                 BinOp::Eq => ord == Equal,
@@ -683,23 +722,26 @@ impl<'h> Evaluator<'h> {
         }
         let vertical = nw == 1;
         let Some(u) = self.host.used_range(cond_area.sheet) else {
-            return Some(Value::Error(CellError::Div0));
+            return Some(all_failed(CellError::Div0));
         };
         let cond_max = if vertical {
             if u.end.col < cond_area.range.start.col || u.start.col > cond_area.range.start.col || u.end.row < cond_area.range.start.row {
-                return Some(Value::Error(CellError::Div0));
+                return Some(all_failed(CellError::Div0));
             }
             u.end.row.min(cond_area.range.end.row) - cond_area.range.start.row
         } else {
             if u.end.row < cond_area.range.start.row || u.start.row > cond_area.range.start.row || u.end.col < cond_area.range.start.col {
-                return Some(Value::Error(CellError::Div0));
+                return Some(all_failed(CellError::Div0));
             }
             u.end.col.min(cond_area.range.end.col) - cond_area.range.start.col
         };
         let len = cond_max + 1;
         let sys = self.host.workbook().date_system;
+        // A numeric key on a transition sheet can match Booleans; the numeric index doesn't
+        // contain those. Text keys already fell back above on transition sheets (blank equals text).
         if *cmp_op == BinOp::Eq
             && matches!(key, Value::Text(_) | Value::Number(_))
+            && !transition
             && u64::from(len) <= MAX_CELLS
             && let (full_range, base_off) = if vertical {
                 let r0 = u.start.row.min(cond_area.range.start.row);
@@ -739,11 +781,11 @@ impl<'h> Evaluator<'h> {
                 } else {
                     CellRef::new(num_area.range.start.row, num_area.range.start.col + i)
                 };
-                if let Ok(n) = self.host.cell_value(num_area.sheet, nc).to_number_in(sys) {
+                if let Ok(n) = operator_number(&self.host.cell_value(num_area.sheet, nc), sys, transition) {
                     matched.push(Value::number(n));
                 }
             }
-            return if matched.is_empty() { Some(Value::Error(CellError::Div0)) } else { Some(Value::from(Array::column(matched))) };
+            return Some(if matched.is_empty() { all_failed(CellError::Div0) } else { Value::from(Array::column(matched)) });
         }
         if !self.spend(u64::from(len) * 2) {
             return Some(Value::Error(CellError::Calc));
@@ -765,12 +807,12 @@ impl<'h> Evaluator<'h> {
                 } else {
                     CellRef::new(num_area.range.start.row, num_area.range.start.col + i)
                 };
-                if let Ok(n) = self.host.cell_value(num_area.sheet, nc).to_number_in(sys) {
+                if let Ok(n) = operator_number(&self.host.cell_value(num_area.sheet, nc), sys, transition) {
                     matched.push(Value::number(n));
                 }
             }
         }
-        if matched.is_empty() { Some(Value::Error(CellError::Div0)) } else { Some(Value::from(Array::column(matched))) }
+        Some(if matched.is_empty() { all_failed(CellError::Div0) } else { Value::from(Array::column(matched)) })
     }
 }
 
@@ -845,17 +887,21 @@ mod tests {
     fn aggregate_with_skip_errors_trims_bounded_references_past_used_range() {
         let mut wb = Workbook::default();
         let sh = wb.sheet_mut(0).unwrap_or_else(|| panic!("sheet"));
-        sh.set_value(CellRef::new(1, 0), Value::from("k"));
+        // Blank compares equal to text in transition mode. A nonzero key excludes the suffix
+        // on either sheet and makes the bounded shortcut safe.
+        sh.set_value(CellRef::new(1, 0), Value::Number(1.0));
         sh.set_value(CellRef::new(1, 1), Value::Number(10.0));
-        sh.set_value(CellRef::new(2, 0), Value::from("other"));
+        sh.set_value(CellRef::new(2, 0), Value::Number(2.0));
         sh.set_value(CellRef::new(2, 1), Value::Number(20.0));
-        sh.set_value(CellRef::new(3, 0), Value::from("k"));
+        sh.set_value(CellRef::new(3, 0), Value::Number(1.0));
         sh.set_value(CellRef::new(3, 1), Value::Number(42.0));
-        let mut host = Counting { wb, cells_read: 0 };
-        let mut ev = Evaluator::new(&mut host, 0, CellRef::new(1, 3));
         let expr = gridcraft_formula::parser::parse("=AGGREGATE(15,6,B3:$B$100000/(A3:$A$100000=A2),1)").unwrap_or_else(|e| panic!("{e}"));
-        let v = ev.value(&expr);
-        assert_eq!(v, Value::Number(42.0));
-        assert_eq!(host.cells_read, 0);
+        for transition in [false, true] {
+            wb.sheet_mut(0).unwrap().transition_evaluation = transition;
+            let mut host = Counting { wb: wb.clone(), cells_read: 0 };
+            let mut ev = Evaluator::new(&mut host, 0, CellRef::new(1, 3));
+            assert_eq!(ev.value(&expr), Value::Number(42.0));
+            assert_eq!(host.cells_read, 0, "transition={transition}");
+        }
     }
 }

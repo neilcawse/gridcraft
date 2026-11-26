@@ -53,13 +53,17 @@ impl Acc {
 
 // ---------------------------------------------------------------- operators
 
-pub(super) fn map_unary(v: &Value, f: &dyn Fn(f64) -> Value, plus: bool, sys: gridcraft_core::DateSystem) -> Value {
+pub(super) fn operator_number(v: &Value, sys: gridcraft_core::DateSystem, transition: bool) -> Result<f64, CellError> {
+    // Lotus transition formulas treat text operands as zero, not as numeric strings.
+    if transition && matches!(v, Value::Text(_)) { Ok(0.0) } else { v.to_number_in(sys) }
+}
+
+pub(super) fn map_unary(v: &Value, f: &dyn Fn(f64) -> Value, sys: gridcraft_core::DateSystem, transition: bool) -> Value {
     match v {
-        Value::Array(a) => Array::new(a.rows, a.cols, a.data.iter().map(|x| map_unary(x, f, plus, sys)).collect())
+        Value::Array(a) => Array::new(a.rows, a.cols, a.data.iter().map(|x| map_unary(x, f, sys, transition)).collect())
             .map_or(Value::Error(CellError::Value), Value::from),
         Value::Error(e) => Value::Error(*e),
-        Value::Text(_) if plus => v.clone(),
-        other => match other.to_number_in(sys) {
+        other => match operator_number(other, sys, transition) {
             Ok(n) => f(n),
             Err(e) => Value::Error(e),
         },
@@ -171,10 +175,14 @@ pub(super) fn single(v: Value) -> Option<Value> {
 pub(super) const MAX_CONCAT_ARRAY_BYTES: usize = 512 * 1024 * 1024;
 
 pub fn binary_values(op: BinOp, x: &Value, y: &Value, sys: gridcraft_core::DateSystem) -> Value {
+    binary_values_in(op, x, y, sys, false)
+}
+
+pub(super) fn binary_values_in(op: BinOp, x: &Value, y: &Value, sys: gridcraft_core::DateSystem, transition: bool) -> Value {
     if op == BinOp::Concat && (matches!(x, Value::Array(_)) || matches!(y, Value::Array(_))) {
         return concat_arrays(x, y, sys, MAX_CONCAT_ARRAY_BYTES);
     }
-    zip2(x, y, |a, b| binary_scalar(op, a, b, sys))
+    zip2(x, y, |a, b| binary_scalar(op, a, b, sys, transition))
 }
 
 /// `x & y` with at least one array operand, giving `#NUM!` once the texts built so far pass `budget`
@@ -182,7 +190,7 @@ pub fn binary_values(op: BinOp, x: &Value, y: &Value, sys: gridcraft_core::DateS
 fn concat_arrays(x: &Value, y: &Value, sys: gridcraft_core::DateSystem, budget: usize) -> Value {
     let mut used = 0usize;
     try_zip2(x, y, |a, b| {
-        let v = binary_scalar(BinOp::Concat, a, b, sys);
+        let v = binary_scalar(BinOp::Concat, a, b, sys, false);
         if let Value::Text(t) = &v {
             used = used.saturating_add(t.len());
             if used > budget {
@@ -194,14 +202,30 @@ fn concat_arrays(x: &Value, y: &Value, sys: gridcraft_core::DateSystem, budget: 
     .unwrap_or(Value::Error(CellError::Num))
 }
 
-fn binary_scalar(op: BinOp, a: &Value, b: &Value, sys: gridcraft_core::DateSystem) -> Value {
+pub(super) fn operator_compare(a: &Value, b: &Value, transition: bool) -> std::cmp::Ordering {
+    // Text pairs still collate as text. Only mixed comparisons take the numeric path.
+    if transition && !matches!((a, b), (Value::Text(_), Value::Text(_))) {
+        let numeric = |v: &Value| match v {
+            Value::Number(n) => Some(*n),
+            Value::Bool(b) => Some(f64::from(*b)),
+            Value::Text(_) | Value::Empty => Some(0.0),
+            _ => None,
+        };
+        if let (Some(x), Some(y)) = (numeric(a), numeric(b)) {
+            return gridcraft_core::compare_numbers(x, y);
+        }
+    }
+    compare(a, b)
+}
+
+fn binary_scalar(op: BinOp, a: &Value, b: &Value, sys: gridcraft_core::DateSystem, transition: bool) -> Value {
     if let Value::Error(e) = a {
         return Value::Error(*e);
     }
     if let Value::Error(e) = b {
         return Value::Error(*e);
     }
-    let num = |f: fn(f64, f64) -> Value| match (a.to_number_in(sys), b.to_number_in(sys)) {
+    let num = |f: fn(f64, f64) -> Value| match (operator_number(a, sys, transition), operator_number(b, sys, transition)) {
         (Ok(x), Ok(y)) => f(x, y),
         (Err(e), _) | (_, Err(e)) => Value::Error(e),
     };
@@ -220,6 +244,7 @@ fn binary_scalar(op: BinOp, a: &Value, b: &Value, sys: gridcraft_core::DateSyste
                 Value::number(x.powf(y))
             }
         }),
+        BinOp::Concat if transition && (matches!(a, Value::Empty) || matches!(b, Value::Empty)) => Value::Error(CellError::Value),
         BinOp::Concat => match (a.to_text(), b.to_text()) {
             (Ok(x), Ok(y)) => {
                 if x.len() + y.len() > 32767 * 4 {
@@ -230,12 +255,12 @@ fn binary_scalar(op: BinOp, a: &Value, b: &Value, sys: gridcraft_core::DateSyste
             }
             (Err(e), _) | (_, Err(e)) => Value::Error(e),
         },
-        BinOp::Eq => Value::Bool(compare(a, b) == Equal),
-        BinOp::Ne => Value::Bool(compare(a, b) != Equal),
-        BinOp::Lt => Value::Bool(compare(a, b) == Less),
-        BinOp::Gt => Value::Bool(compare(a, b) == Greater),
-        BinOp::Le => Value::Bool(compare(a, b) != Greater),
-        BinOp::Ge => Value::Bool(compare(a, b) != Less),
+        BinOp::Eq => Value::Bool(operator_compare(a, b, transition) == Equal),
+        BinOp::Ne => Value::Bool(operator_compare(a, b, transition) != Equal),
+        BinOp::Lt => Value::Bool(operator_compare(a, b, transition) == Less),
+        BinOp::Gt => Value::Bool(operator_compare(a, b, transition) == Greater),
+        BinOp::Le => Value::Bool(operator_compare(a, b, transition) != Greater),
+        BinOp::Ge => Value::Bool(operator_compare(a, b, transition) != Less),
         BinOp::Range | BinOp::Union | BinOp::Intersect => Value::Error(CellError::Value),
     }
 }

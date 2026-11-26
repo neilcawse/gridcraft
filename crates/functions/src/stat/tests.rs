@@ -430,6 +430,9 @@ fn linest_family() {
     let fitted = rows_of(&ev("TREND", vec![c(&[1.0, 9.0, 5.0, 7.0]), c(&[0.0, 4.0, 2.0, 3.0])]));
     close(fitted[1][0].clone(), 9.0);
     is_err(ev("LOGEST", vec![c(&[1.0, -2.0])]), CellError::Num);
+    let invalid = rf(arr(vec![vec![nv(2.0)], vec![Value::Error(CellError::Div0)]]));
+    is_err(ev("LOGEST", vec![invalid.clone()]), CellError::Value);
+    is_err(ev("LINEST", vec![invalid]), CellError::Div0);
     is_err(ev("LINEST", vec![c(&[1.0, 2.0]), c(&[1.0, 2.0, 3.0])]), CellError::Ref);
 }
 

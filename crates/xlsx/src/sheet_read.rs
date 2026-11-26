@@ -17,7 +17,7 @@ use gridcraft_model::{
 };
 
 use crate::IoError;
-use crate::fmla::{from_file, unwrap_google_sheets};
+use crate::fmla::{formula_bar_text, from_file, unwrap_google_sheets};
 use crate::package::{Rel, craft_error};
 use crate::read::Ctx;
 use crate::styles::read_color;
@@ -296,6 +296,7 @@ fn apply_craft_sheet_part(
         } else if let Some(b) = fmt.base_col_width {
             let px = ((f64::from(b.min(255)) * 7.0 + 5.0) / 8.0).ceil() * 8.0;
             sheet.default_col_width = px as f32;
+            sheet.xlsx_base_col_width = Some(b.min(255) as u8);
         }
     }
     let cols_blocks = sp.root.children.iter().filter(|n| matches!(n, craft_xml::Node::El(e) if e.name == "cols")).count();
@@ -333,6 +334,7 @@ fn apply_craft_sheet_part(
         match child.name.as_str() {
             "sheetPr" => {
                 let e = from_craft_el(child);
+                sheet.transition_evaluation = e.flag("transitionEvaluation", false);
                 if let Some(t) = e.child("tabColor") {
                     sheet.tab_color = Some(read_color(t, &cx.palette));
                 }
@@ -883,6 +885,13 @@ fn read_craft_formula_text(
         *unwrapped = true;
     }
     let text = model.as_str();
+    let formula = || {
+        let mut formula = Formula::new(text);
+        if !*unwrapped && formula.expr.is_some() && formula.text != f.text.trim() {
+            formula.display_text = formula_bar_text(f.text.trim(), &formula.text).map(Box::new);
+        }
+        formula
+    };
     match f.kind {
         CraftFormulaKind::Shared => {
             let si = f.shared_index?;
@@ -890,7 +899,7 @@ fn read_craft_formula_text(
                 let expr = gridcraft_formula::parse(text).ok();
                 let cost = shared_cost(text, expr.as_ref());
                 st.shared.insert(si, Shared { anchor: pos, expr, text: text.to_string(), unwrapped: *unwrapped, cost });
-                Some(Formula::new(text))
+                Some(formula())
             } else {
                 let Some(sh) = st.shared.get(&si) else {
                     cx.warn("a shared formula refers to a missing master cell; kept the cached value");
@@ -927,7 +936,7 @@ fn read_craft_formula_text(
             if text.is_empty() {
                 return None;
             }
-            let mut fm = Formula::new(text);
+            let mut fm = formula();
             let range = f.range.map(to_range_ref).unwrap_or(RangeRef::cell(pos));
             if !range.is_single() {
                 push_dynamic(st, range);
@@ -945,7 +954,7 @@ fn read_craft_formula_text(
             if text.is_empty() {
                 None
             } else {
-                Some(Formula::new(text))
+                Some(formula())
             }
         }
     }

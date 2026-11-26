@@ -203,6 +203,10 @@ pub struct Evaluator<'h> {
     pub host: &'h mut dyn Host,
     pub sheet: usize,
     pub at: CellRef,
+    /// The formula's own worksheet has transition formula evaluation on. Fixed at construction:
+    /// `sheet` moves to a defined name's scope while the name is evaluated, but the setting
+    /// belongs to the sheet that holds the formula.
+    transition: bool,
     env: Vec<(String, Ev)>,
     depth: usize,
     /// LAMBDA calls in progress.
@@ -244,6 +248,9 @@ impl Ctx for FnCtx<'_, '_> {
     fn random(&mut self) -> f64 {
         self.ev.host.random()
     }
+    fn transition_evaluation(&self) -> bool {
+        self.ev.transition
+    }
     /// Excel's "formula as criteria": the formula is written for the first record, so its relative
     /// references move down to `record`'s row, and the database's labels name its fields.
     /// Known gap: the shifted references are not dependencies of the calling cell. One that lands
@@ -266,10 +273,12 @@ impl Ctx for FnCtx<'_, '_> {
                 _ => None,
             })
             .collect();
+        let transition = self.ev.host.workbook().sheet(area.sheet).is_some_and(|s| s.transition_evaluation);
         let mut ev = Evaluator {
             host: &mut *self.ev.host,
             sheet: area.sheet,
             at,
+            transition,
             env,
             depth: self.ev.depth,
             calls: self.ev.calls,
@@ -310,10 +319,12 @@ impl Ctx for FnCtx<'_, '_> {
 
 impl<'h> Evaluator<'h> {
     pub fn new(host: &'h mut dyn Host, sheet: usize, at: CellRef) -> Self {
+        let transition = host.workbook().sheet(sheet).is_some_and(|s| s.transition_evaluation);
         Evaluator {
             host,
             sheet,
             at,
+            transition,
             env: Vec::new(),
             depth: 0,
             calls: 0,
@@ -679,49 +690,40 @@ impl<'h> Evaluator<'h> {
     }
 
     fn unary(&mut self, op: UnOp, x: &Expr) -> Ev {
-        if let UnOp::Trim(mode) = op {
-            return self.trim_ref(mode, x);
-        }
-        if op == UnOp::Spill {
-            return match self.eval(x) {
-                Ev::R(areas) => match areas.as_slice() {
-                    [a] if a.range.is_single() => match self.host.spill_range(a.sheet, a.range.start) {
-                        Some(range) => Ev::R(vec![Area { sheet: a.sheet, range }]),
-                        None => err(CellError::Ref),
+        let numeric: fn(f64) -> Value = match op {
+            UnOp::Trim(mode) => return self.trim_ref(mode, x),
+            UnOp::Plus => return Ev::V(self.value(x)),
+            UnOp::Neg => |n| Value::number(-n),
+            UnOp::Percent => |n| Value::number(n / 100.0),
+            UnOp::Spill => {
+                return match self.eval(x) {
+                    Ev::R(areas) => match areas.as_slice() {
+                        [a] if a.range.is_single() => match self.host.spill_range(a.sheet, a.range.start) {
+                            Some(range) => Ev::R(vec![Area { sheet: a.sheet, range }]),
+                            None => err(CellError::Ref),
+                        },
+                        _ => err(CellError::Ref),
                     },
+                    Ev::V(Value::Error(e)) => err(e),
                     _ => err(CellError::Ref),
-                },
-                Ev::V(Value::Error(e)) => err(e),
-                _ => err(CellError::Ref),
-            };
-        }
-        if op == UnOp::At {
-            let ev = self.eval(x);
-            return match ev {
-                Ev::R(areas) => match areas.as_slice() {
-                    [a] => match self.implicit_intersect(a) {
-                        Some(c) => Ev::V(self.cell(a.sheet, c)),
-                        None => err(CellError::Value),
+                };
+            }
+            UnOp::At => {
+                return match self.eval(x) {
+                    Ev::R(areas) => match areas.as_slice() {
+                        [a] => match self.implicit_intersect(a) {
+                            Some(c) => Ev::V(self.cell(a.sheet, c)),
+                            None => err(CellError::Value),
+                        },
+                        _ => err(CellError::Value),
                     },
-                    _ => err(CellError::Value),
-                },
-                Ev::V(v) => Ev::V(v.scalar()),
-                l => l,
-            };
-        }
+                    Ev::V(v) => Ev::V(v.scalar()),
+                    l => l,
+                };
+            }
+        };
         let v = self.value(x);
-        let sys = self.host.workbook().date_system;
-        Ev::V(map_unary(
-            &v,
-            &|n| match op {
-                UnOp::Neg => Value::number(-n),
-                UnOp::Plus => Value::number(n),
-                UnOp::Percent => Value::number(n / 100.0),
-                UnOp::At | UnOp::Spill | UnOp::Trim(_) => Value::number(n),
-            },
-            op == UnOp::Plus,
-            sys,
-        ))
+        Ev::V(map_unary(&v, &numeric, self.host.workbook().date_system, self.transition))
     }
 
     fn implicit_intersect(&self, a: &Area) -> Option<CellRef> {
@@ -818,14 +820,35 @@ impl<'h> Evaluator<'h> {
                     rest.push((*o, r.as_ref()));
                     left = l.as_ref();
                 }
-                let mut acc = self.value(left);
+                let sys = self.host.workbook().date_system;
+                let transition = self.transition;
+                let mut acc = self.binary_operand(rest.last().map_or(op, |&(o, _)| o), left);
                 while let Some((o, r)) = rest.pop() {
-                    let y = self.value(r);
-                    acc = binary_values(o, &acc, &y, self.host.workbook().date_system);
+                    let y = self.binary_operand(o, r);
+                    acc = array::binary_values_in(o, &acc, &y, sys, transition);
                 }
                 Ev::V(acc)
             }
         }
+    }
+
+    fn binary_operand(&mut self, op: BinOp, expr: &Expr) -> Value {
+        let ev = self.eval(expr);
+        if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Pow)
+            && (matches!(&ev, Ev::R(areas) if areas.len() > 1) || matches!(ev, Ev::V(Value::Error(CellError::Value))))
+        {
+            let mut operand = expr;
+            // Legacy workbook import wraps scalar-context references in implicit intersection.
+            while let Expr::Paren(inner) | Expr::Unary(UnOp::At, inner) = operand {
+                operand = inner;
+            }
+            // A written 3-D span is not a single arithmetic operand. Keep reference unions
+            // and consumers that take references (such as SUM) on their existing paths.
+            if matches!(operand, Expr::Ref(r) if matches!(&r.sheet, SheetSel::Span(a, b) if !a.eq_ignore_ascii_case(b))) {
+                return Value::Error(CellError::Ref);
+            }
+        }
+        self.deref(ev)
     }
 
     // ------------------------------------------------------------------ calls

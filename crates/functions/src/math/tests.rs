@@ -244,6 +244,21 @@ fn gcd_and_lcm_reject_negative_fractions_before_truncation() {
 }
 
 #[test]
+fn gcd_and_lcm_coerce_numeric_text_but_not_nonnumeric_range_values() {
+    for (name, want) in [("GCD", 2.0), ("LCM", 24.0)] {
+        close(ev(name, vec![rf(arr(vec![vec![tv("8"), nv(6.0)]]))]), want);
+        close(ev(name, vec![av(arr(vec![vec![tv("8"), nv(6.0)]]))]), want);
+        for v in [tv(""), tv("eight"), Value::Bool(true)] {
+            is_err(ev(name, vec![rf(arr(vec![vec![nv(6.0), v]]))]), CellError::Value);
+        }
+        is_err(ev(name, vec![empty(), n(5.0)]), NA);
+        is_err(ev(name, vec![rf(Value::Empty)]), CellError::Value);
+        close(ev(name, vec![rf(Value::Empty), n(5.0)]), 5.0);
+        close(ev(name, vec![rf(arr(vec![vec![Value::Empty, nv(5.0)]]))]), if name == "GCD" { 5.0 } else { 0.0 });
+    }
+}
+
+#[test]
 fn trig() {
     close(ev1("SIN", PI / 2.0), 1.0);
     close(ev1("COS", 0.0), 1.0);

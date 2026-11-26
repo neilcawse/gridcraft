@@ -53,14 +53,14 @@ impl<'h> Evaluator<'h> {
                 let Some(Ev::R(a)) = args.first().map(|a| self.eval(a)) else { return err(CellError::NA) };
                 let Some(a) = a.first() else { return err(CellError::NA) };
                 let wb = self.host.workbook();
-                let f = wb.sheet(a.sheet).and_then(|s| s.cell(a.range.start)).and_then(|c| c.formula.clone());
+                let f = wb.sheet(a.sheet).and_then(|s| s.cell(a.range.start)).and_then(|c| c.formula.as_deref());
                 // A formula formatted Hidden on a protected sheet stays hidden from FORMULATEXT too.
                 let hidden = wb.sheet(a.sheet).is_some_and(|s| s.is_protected() && wb.styles.get(s.style_id(a.range.start)).protection.hidden);
                 if name == "ISFORMULA" {
                     Ev::V(Value::Bool(f.is_some()))
                 } else {
                     match f {
-                        Some(f) if !hidden => Ev::V(Value::text(format!("={}", f.text))),
+                        Some(f) if !hidden => Ev::V(Value::text(format!("={}", f.display_text.as_deref().unwrap_or(&f.text)))),
                         _ => err(CellError::NA),
                     }
                 }
@@ -410,7 +410,17 @@ impl<'h> Evaluator<'h> {
         let mut acc = Acc::default();
         let mut first_error = None;
         for a in args {
-            let ev = self.eval(a);
+            let mut ev = self.eval(a);
+            // A literal text argument contributes zero on transition sheets.
+            if self.transition && kind == Agg::Average && matches!(ev, Ev::V(Value::Text(_))) {
+                let mut literal = a;
+                while let Expr::Paren(inner) = literal {
+                    literal = inner;
+                }
+                if matches!(literal, Expr::Text(_)) {
+                    ev = Ev::V(Value::Number(0.0));
+                }
+            }
             let steps = match ev {
                 Ev::R(areas) => areas.iter().map(|area| self.aggregate_area(kind, area, &mut acc)).collect(),
                 ev => {

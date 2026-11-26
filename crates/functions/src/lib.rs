@@ -111,6 +111,10 @@ pub trait Ctx {
     fn now_serial(&self) -> f64;
     /// Uniform in [0, 1).
     fn random(&mut self) -> f64;
+    /// Whether the worksheet containing the calling formula uses Lotus transition evaluation.
+    fn transition_evaluation(&self) -> bool {
+        false
+    }
     /// For the database functions: whether the formula in the criteria cell at (`row`, `col`) holds
     /// for `record` (a row of `db` below its labels). `None` when that cell holds no formula or the
     /// criteria didn't come from a reference.
