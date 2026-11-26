@@ -277,6 +277,7 @@ impl Sheet {
     /// to later line sizing, not the old worksheet placement for export.
     pub fn keep_sorted_group_collapse(&mut self, before: &Sheet, id: u32, placement_affected: bool) {
         let Some(g) = before.drawing_group(id) else { return };
+        let Some(source) = &g.file else { return };
         let r = DrawingRef::Group(id);
         let a = g.anchor;
         if a.mode != AnchorMode::MoveAndSize
@@ -286,7 +287,7 @@ impl Sheet {
         {
             return;
         }
-        let mut spans = g.file.as_ref().unwrap().held_collapse;
+        let mut spans = source.held_collapse;
         let original = before.drawing_files.get(&r);
         if let Some(file) = original.filter(|f| f.anchor == a && f.placement.anchor(before) == a)
             && let DrawingPlacement::TwoCell { from, to, .. } = file.placement
