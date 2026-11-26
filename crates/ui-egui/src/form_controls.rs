@@ -230,7 +230,7 @@ pub fn paint(p: &Painter, r: Rect, c: &FormControl, z: f32, look: Look, shown: &
             clip.add(PathShape::convex_polygon(tri, t.sheet_control_text, Stroke::NONE));
         }
         ControlKind::Check => {
-            let side = (r.height() - 4.0 * z).clamp(4.0, 13.0 * z).min(r.width());
+            let side = (r.height() - 4.0 * z).clamp(4.0 * z, 13.0 * z).min(r.width());
             let mark = Rect::from_min_size(pos2(r.left() + 2.0 * z, r.center().y - side / 2.0), vec2(side, side));
             let mixed = c.checked == CheckState::Mixed;
             let fill = if mixed { t.sheet_track } else { bg(Part::Check) };
@@ -240,16 +240,19 @@ pub fn paint(p: &Painter, r: Rect, c: &FormControl, z: f32, look: Look, shown: &
             clip.rect_stroke(mark, 0.0, frame, StrokeKind::Inside);
             if c.checked != CheckState::Unchecked {
                 let (m, s) = (mark.shrink(side * 0.22), side * 0.12);
-                let tick =
-                    vec![pos2(m.left(), m.center().y), pos2(m.left() + m.width() * 0.4, m.bottom() - s * 0.5), pos2(m.right(), m.top() + s * 0.5)];
+                let bend = pos2(m.left() + m.width() * 0.4, m.bottom() - s * 0.5);
                 let ink = if mixed { t.sheet_thumb } else { t.sheet_control_text };
-                clip.add(PathShape::line(tick, Stroke::new((1.6 * z).max(1.0), ink)));
+                let stroke = Stroke::new((1.6 * z).max(1.0), ink);
+                clip.line_segment([pos2(m.left(), m.center().y), bend], stroke);
+                clip.line_segment([bend, pos2(m.right(), m.top() + s * 0.5)], stroke);
             }
             let text_left = mark.right() + 4.0 * z;
-            let g = clip.layout_no_wrap(c.text.clone(), theme::ui_font(11.0 * z), t.sheet_control_text);
-            let at = pos2(text_left, r.center().y - g.size().y / 2.0);
-            let caption = Rect::from_min_max(pos2(text_left, r.top()), r.max);
-            clip.with_clip_rect(caption.intersect(clip.clip_rect())).galley(at, g, t.sheet_control_text);
+            if !c.text.is_empty() && text_left < r.right() {
+                let g = clip.layout_no_wrap(c.text.clone(), theme::ui_font(11.0 * z), t.sheet_control_text);
+                let at = pos2(text_left, r.center().y - g.size().y / 2.0);
+                let caption = Rect::from_min_max(pos2(text_left, r.top()), r.max);
+                clip.with_clip_rect(caption.intersect(clip.clip_rect())).galley(at, g, t.sheet_control_text);
+            }
         }
     }
     if look.focused {
@@ -443,9 +446,13 @@ pub fn interact(app: &mut SheetApp, ctx: &egui::Context, resp: &egui::Response, 
     } else {
         0.0
     };
-    if part == Part::Drop && batched {
+    if matches!(part, Part::Drop | Part::Check) && batched {
         if click.is_some_and(|(_, end)| r.contains(end)) {
-            toggle_drop(app, c.id);
+            if part == Part::Check {
+                app.control_set(c.id, c.checked.toggled().number() as f64);
+            } else {
+                toggle_drop(app, c.id);
+            }
         }
         resp.request_focus();
         return true;

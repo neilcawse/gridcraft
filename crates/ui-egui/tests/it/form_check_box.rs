@@ -91,6 +91,29 @@ fn a_click_toggles_the_check_box_and_its_linked_cell_as_one_undo_step() {
 }
 
 #[test]
+fn a_check_box_paints_and_toggles_at_minimum_zoom() {
+    let (mut h, id) = fixture();
+    h.state_mut().run("view.zoom", json!({"percent": 10})).unwrap();
+    h.run_steps(2);
+    let p = rect(&h, id).center();
+    click(&mut h, p);
+    assert_eq!(cell(&h, "K1"), Value::Bool(true));
+}
+
+#[test]
+fn a_batched_check_box_click_toggles_in_its_own_frame() {
+    let (mut h, id) = fixture();
+    let pos = rect(&h, id).center();
+    h.input_mut().events.push(Event::PointerMoved(pos));
+    h.step();
+    for pressed in [true, false] {
+        h.input_mut().events.push(Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+    }
+    h.step();
+    assert_eq!(cell(&h, "K1"), Value::Bool(true));
+}
+
+#[test]
 fn space_toggles_the_focused_check_box_without_editing_a_cell() {
     let (mut h, id) = fixture();
     let r = rect(&h, id);
