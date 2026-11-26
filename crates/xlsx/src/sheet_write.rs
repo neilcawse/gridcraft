@@ -12,8 +12,8 @@ use craft_xlsx::{
 };
 use gridcraft_core::{CellError, CellRef, MAX_COLS, MAX_ROWS, RangeRef, Value};
 use gridcraft_model::{
-    Cell, CfOperator, CfRule, CfValueKind, Color, CondFormat, ErrorStyle, FilterCriterion, Formula, LineInfo, NoteBox, NoteCorner, Orientation,
-    PageOrder, Sheet, SparklineKind, Style, Table, TotalsFn, Validation, ValidationKind, Workbook, default_icon_thresholds, icon_count,
+    Cell, CfOperator, CfRule, CfValueKind, Color, CondFormat, ErrorStyle, FilterCriterion, FormControl, Formula, LineInfo, NoteBox, NoteCorner,
+    Orientation, PageOrder, Sheet, SparklineKind, Style, Table, TotalsFn, Validation, ValidationKind, Workbook, default_icon_thresholds, icon_count,
 };
 
 use crate::drawing::{Obj, image_content_type, image_ext};
@@ -227,8 +227,9 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, table_names: &[Opti
     push_fragment_kids(&mut part.root, &kept.custom_sheet_views());
     push_fragment_kids(&mut part.root, &kept.custom_properties());
     build_sheet_printing(sheet, &mut part.features.print, &kept);
-    part.features.drawing = write_sheet_drawing_rel(wb, si, sheet, &kept, &mut rels, out);
-    let (legacy_rid, notes_frag) = write_sheet_notes_frag(sheet, si, &kept, &mut rels, out);
+    let legacy = legacy_ids(sheet, &kept, out);
+    part.features.drawing = write_sheet_drawing_rel(wb, si, &kept, legacy.as_ref(), &mut rels, out);
+    let (legacy_rid, notes_frag) = write_sheet_notes_frag(sheet, si, &kept, legacy, &mut rels, out);
     part.features.legacy_drawing = legacy_rid;
 
     if !tables.is_empty() {
@@ -446,25 +447,47 @@ fn write_sheet_extensions(s: &mut String, sheet: &Sheet, x14_cf: &str, slicers: 
     }
 }
 
+/// The VML shape numbering of a sheet with notes or controls: the `o:idmap` blocks its legacy
+/// drawing takes and the number its shapes count from (the notes first, then the controls).
+struct LegacyIds {
+    idmap: String,
+    base: u64,
+}
+
+impl LegacyIds {
+    /// The VML shape number of the sheet's control `i`, which its DrawingML stand-in names too.
+    fn control(&self, sheet: &Sheet, i: usize) -> u64 {
+        self.base.saturating_add(1).saturating_add(sheet.comments.len() as u64).saturating_add(i as u64)
+    }
+}
+
+/// Takes the `o:idmap` blocks for the sheet's notes and controls (none without either).
+fn legacy_ids(sheet: &Sheet, kept: &crate::passthrough::SheetKept<'_>, out: &mut Out) -> Option<LegacyIds> {
+    if sheet.comments.is_empty() && sheet.controls.is_empty() {
+        return None;
+    }
+    let shapes = (sheet.comments.len() as u64).saturating_add(sheet.controls.len() as u64);
+    let blocks = u32::try_from(shapes.saturating_add(1).div_ceil(1024)).unwrap_or(u32::MAX).max(1);
+    let first = out.kept.notes_block(out.vml_block.saturating_add(1));
+    out.vml_block = out.vml_block.saturating_add(blocks);
+    let idmap = (first..first.saturating_add(blocks)).map(|b| b.to_string()).collect::<Vec<_>>().join(",");
+    let base = kept.shape_base().unwrap_or(u64::from(first) * 1024);
+    Some(LegacyIds { idmap, base })
+}
+
 fn write_sheet_notes_frag(
     sheet: &Sheet,
     si: usize,
     kept: &crate::passthrough::SheetKept<'_>,
+    legacy: Option<LegacyIds>,
     rels: &mut Rels,
     out: &mut Out,
 ) -> (Option<String>, String) {
     let mut controls = String::new();
-    let legacy_rid = if !sheet.comments.is_empty() || !sheet.controls.is_empty() {
-        let shapes = (sheet.comments.len() as u64).saturating_add(sheet.controls.len() as u64);
-        let blocks = u32::try_from(shapes.saturating_add(1).div_ceil(1024)).unwrap_or(u32::MAX).max(1);
-        let first = out.kept.notes_block(out.vml_block.saturating_add(1));
-        out.vml_block = out.vml_block.saturating_add(blocks);
-        let idmap = (first..first.saturating_add(blocks)).map(|b| b.to_string()).collect::<Vec<_>>().join(",");
-        let base = kept.shape_base().unwrap_or(u64::from(first) * 1024);
-        let notes = sheet.comments.len() as u64;
+    let legacy_rid = if let Some(legacy) = legacy {
         let mut control_shapes = String::new();
         if !sheet.controls.is_empty() {
-            let w = crate::controls::write(out, rels, sheet, |i| base + 1 + notes + i as u64);
+            let w = crate::controls::write(out, rels, sheet, |i| legacy.control(sheet, i));
             controls = w.entries;
             control_shapes = format!("{}{}", crate::controls::SHAPETYPE, w.vml);
         }
@@ -484,7 +507,7 @@ fn write_sheet_notes_frag(
         let v = out.vmls;
         out.default_type("vml", "application/vnd.openxmlformats-officedocument.vmlDrawing");
         let vml_name = format!("xl/drawings/vmlDrawing{v}.vml");
-        let vml = kept.notes_vml(vml_xml(sheet, &idmap, base, &control_shapes), &vml_name, out);
+        let vml = kept.notes_vml(vml_xml(sheet, &legacy.idmap, legacy.base, &control_shapes), &vml_name, out);
         out.part(&vml_name, None, vml.into_bytes());
         Some(rels.add("vmlDrawing", &format!("../drawings/vmlDrawing{v}.vml")))
     } else {
@@ -493,26 +516,40 @@ fn write_sheet_notes_frag(
     (legacy_rid, kept.elements(&controls))
 }
 
+/// The sheet's drawing part: its pictures, charts, shapes and slicers, and a hidden stand-in for
+/// each form control (`legacy` numbers their VML shapes), as Excel writes them.
 fn write_sheet_drawing_rel(
     wb: &Workbook,
     si: usize,
-    sheet: &Sheet,
     kept: &crate::passthrough::SheetKept<'_>,
+    legacy: Option<&LegacyIds>,
     rels: &mut Rels,
     out: &mut Out,
 ) -> Option<String> {
+    let sheet = wb.sheet(si)?;
     use gridcraft_model::{DrawingRef, Image, Shape};
     let slicers = out.slicers.on_sheet(si);
     let drawn = kept.drawing(sheet, out);
-    // The shapes and pictures drawn on a chart go back in its shapes part, not in the drawing.
+    // Chart user shapes go back in their chart's shapes part, not the sheet drawing.
     let images: Vec<&Image> = sheet.images.iter().filter(|i| !i.data.is_empty() && !drawn.in_chart(DrawingRef::Image(i.id))).collect();
     let shapes: Vec<&Shape> = sheet.shapes.iter().filter(|s| !drawn.in_chart(DrawingRef::Shape(s.id))).collect();
-    if images.is_empty() && sheet.charts.is_empty() && shapes.is_empty() && slicers.is_empty() {
+    let stand_ins: Vec<(&FormControl, u64)> = match legacy {
+        Some(ids) => sheet.controls.iter().enumerate().map(|(i, c)| (c, ids.control(sheet, i))).collect(),
+        None => Vec::new(),
+    };
+    let mut drels = Rels::default();
+    let proxies = kept.control_proxies(&mut drels);
+    if images.is_empty()
+        && sheet.charts.is_empty()
+        && shapes.is_empty()
+        && slicers.is_empty()
+        && stand_ins.is_empty()
+        && proxies.is_empty()
+    {
         return None;
     }
     out.drawings += 1;
     let dn = out.drawings;
-    let mut drels = Rels::default();
     let mut objs: Vec<Obj<'_>> = vec![];
     for img in images {
         let ext = image_ext(&img.mime, &img.data);
@@ -564,7 +601,11 @@ fn write_sheet_drawing_rel(
         _ => None,
     });
     let links = drawn.links(wb, (si, sheet), objects, &mut drels, out);
-    out.part(&format!("xl/drawings/drawing{dn}.xml"), Some(CT_DRAWING), crate::drawing::write_drawing(sheet, &wb.theme, &objs, &links).into_bytes());
+    out.part(
+        &format!("xl/drawings/drawing{dn}.xml"),
+        Some(CT_DRAWING),
+        crate::drawing::write_drawing(sheet, &wb.theme, &objs, &links, &stand_ins, &proxies).into_bytes(),
+    );
     if !drels.is_empty() {
         out.part(&format!("xl/drawings/_rels/drawing{dn}.xml.rels"), None, drels.xml().into_bytes());
     }

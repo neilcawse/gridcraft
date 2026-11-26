@@ -115,6 +115,8 @@ pub enum Icon {
     Slider,
     /// A form spin button.
     Spin,
+    /// A form drop-down: a box with an arrow button.
+    DropDown,
     Function,
     Name,
     Trace,
@@ -557,6 +559,11 @@ fn paint_with(p: &Painter, rect: Rect, icon: Icon, c: Color32, pal: &Palette) {
             g.stroke(&[(4.0, 8.0), (12.0, 8.0)], c);
             g.poly(&[(8.0, 3.2), (10.5, 6.3), (5.5, 6.3)], c);
             g.poly(&[(5.5, 9.7), (10.5, 9.7), (8.0, 12.8)], c);
+        }
+        Icon::DropDown => {
+            g.rect(1.5, 4.5, 13.0, 7.0, Some(paper), Some(c));
+            g.stroke(&[(10.0, 4.5), (10.0, 11.5)], c);
+            g.poly(&[(10.8, 7.0), (13.7, 7.0), (12.25, 9.2)], c);
         }
         Icon::Fx => g.text(8.0, 8.0, "fx", 10.5, c, (false, true)),
         Icon::Plus => {

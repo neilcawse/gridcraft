@@ -266,7 +266,14 @@ pub fn read_sheet(cx: &mut Ctx<'_>, part: &str, name: &str) -> Result<(Sheet, cr
 
     apply_craft_sheet_part(cx, &sheet_part, &rels, name, too_many_merges, &mut sheet)?;
     let root = from_craft_el(&sheet_part.root);
-    let read_controls = read_form_controls(cx, &root, &rels, &mut sheet);
+    // Read the controls first to separate their stand-ins from editable DrawingML shapes.
+    let mut read_controls = read_form_controls(cx, &root, &rels, &mut sheet);
+    if let Some(id) = &sheet_part.features.drawing
+        && let Some(rel) = rels.iter().find(|r| r.id == *id)
+    {
+        let target = rel.target.clone();
+        crate::drawing::read_drawing(cx, &target, &mut read_controls, &mut sheet)?;
+    }
     read_sheet_notes_and_tables(cx, &sheet_part, &rels, &mut sheet)?;
     Ok((sheet, read_controls))
 }
@@ -403,12 +410,6 @@ fn apply_craft_sheet_part(
         read_craft_hyperlinks(cx, name, &sp.features.hyperlinks, &rel_by_id, sheet, &mut link_budget);
     }
     apply_craft_print(&sp.features.print, fit_to_page, sheet);
-    if let Some(id) = &sp.features.drawing
-        && let Some(rel) = rel_by_id.get(id.as_str()).copied()
-    {
-        let target = rel.target.clone();
-        crate::drawing::read_drawing(cx, &target, sheet)?;
-    }
     Ok(())
 }
 
@@ -720,7 +721,7 @@ fn read_craft_hyperlinks(
     }
 }
 
-/// Buttons, scroll bars and spin buttons: the `<controls>` list (also inside
+/// Buttons, scroll bars, spin buttons and drop-downs: the `<controls>` list (also inside
 /// `mc:AlternateContent`) with its properties parts, else the shapes of the VML drawing that
 /// `<legacyDrawing r:id>` names (not the header and footer drawing of `<legacyDrawingHF>`).
 /// Returns the VML shape numbers read, so pass-through keeps only the others.

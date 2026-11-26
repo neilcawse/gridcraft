@@ -46,6 +46,7 @@ pub(crate) use cell_paint::paint_border;
 pub(crate) use cell_paint::{cell_text_y, rotated_text_pos, wrapped_cell_text_y};
 #[cfg(test)]
 use cell_paint::{center_across_end, display_text, look, numfmt_color, painted_halign};
+pub(crate) use editor::popup_dismissed;
 pub use editor::validation_arrow;
 #[cfg(test)]
 use editor::{editor_slack, editor_width, list_picker_height};
@@ -341,6 +342,8 @@ pub struct GridState {
     pub control: Option<crate::form_controls::Gesture>,
     /// The form control that takes the arrow keys (the one last worked).
     pub focused_control: Option<u32>,
+    /// The drop-down whose list is open.
+    pub drop_open: Option<u32>,
     /// Insert › Controls: the kind a click or drag on the grid places, and where the drag began
     /// (logical position).
     pub placing: Option<gridcraft_engine::model::ControlKind>,

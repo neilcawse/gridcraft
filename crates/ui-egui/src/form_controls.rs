@@ -1,14 +1,16 @@
-//! Form controls on the sheet: drawing buttons, sliders and spin buttons, and working them with
-//! the pointer and the keyboard. A click operates a control; Ctrl or Cmd+click, or a right-click,
-//! selects it instead (to move, resize or format it). Values change through `control.setValue`,
-//! and a whole drag or a held arrow is one undo step.
+//! Form controls on the sheet: drawing buttons, sliders, spin buttons, drop-downs and check boxes,
+//! and working them with the pointer and the keyboard. A click operates a control; Ctrl or
+//! Cmd+click, or a right-click, selects it instead (to move, resize or format it). Values change
+//! through `control.setValue`, and a whole drag or a held arrow is one undo step. A click on a
+//! drop-down opens its list ([`drop_picker`]); choosing an item is one undo step. A click on a
+//! check box (or Space while it has the focus) checks or clears it, one undo step.
 //!
 //! Positions are logical (see `Geo::rtl`): on a right-to-left sheet a control moves as a whole
 //! but is not mirrored, so a point inside it is reflected back with [`inner`] first.
 
 use egui::epaint::PathShape;
 use egui::{Painter, Pos2, Rect, Stroke, StrokeKind, pos2, vec2};
-use gridcraft_engine::model::{ControlKind, FormControl, ObjKind, ObjRef, Sheet};
+use gridcraft_engine::model::{CheckState, ControlKind, FormControl, ObjKind, ObjRef, Sheet};
 use serde_json::json;
 
 use crate::SheetApp;
@@ -32,6 +34,10 @@ pub enum Part {
     TrackBefore,
     /// The track on the maximum's side of the thumb (a page up).
     TrackAfter,
+    /// A drop-down (its box or its arrow): opens or closes the list.
+    Drop,
+    /// A check box (its box or its caption): checks or clears it.
+    Check,
 }
 
 /// A control being worked with the pointer.
@@ -55,6 +61,15 @@ pub struct Look {
     pub focused: bool,
     /// Show the value next to the thumb (while dragging).
     pub show_value: bool,
+    /// A drop-down's list is open.
+    pub open: bool,
+}
+
+/// A drop-down's box and the arrow button at its right end.
+pub fn drop_parts(r: Rect) -> (Rect, Rect) {
+    let w = r.height().min(r.width() / 2.0).max(0.0);
+    let (b, a) = r.split_left_right_at_x(r.right() - w);
+    (b, a)
 }
 
 fn fraction(c: &FormControl) -> f32 {
@@ -117,6 +132,8 @@ pub fn part_at(r: Rect, c: &FormControl, z: f32, p: Pos2) -> Option<Part> {
                 if before { Part::TrackBefore } else { Part::TrackAfter }
             }
         }
+        ControlKind::Drop => Part::Drop,
+        ControlKind::Check => Part::Check,
     })
 }
 
@@ -128,8 +145,9 @@ pub fn value_at(r: Rect, c: &FormControl, z: f32, p: Pos2, grab: f32) -> f64 {
     c.min as f64 + f.clamp(0.0, 1.0) as f64 * c.max.saturating_sub(c.min) as f64
 }
 
-/// Paints control `c` in `r`, in the sheet's control colours.
-pub fn paint(p: &Painter, r: Rect, c: &FormControl, z: f32, look: Look) {
+/// Paints control `c` in `r`, in the sheet's control colours. `shown` is the item a drop-down
+/// shows closed (ignored for other kinds).
+pub fn paint(p: &Painter, r: Rect, c: &FormControl, z: f32, look: Look, shown: &str) {
     let t = Tokens::get(p.ctx());
     let border = Stroke::new(1.0, t.sheet_control_border);
     let bg = |part: Part| {
@@ -195,6 +213,47 @@ pub fn paint(p: &Painter, r: Rect, c: &FormControl, z: f32, look: Look) {
                 clip.add(PathShape::convex_polygon(tri, t.sheet_control_text, Stroke::NONE));
             }
         }
+        ControlKind::Drop => {
+            let (field, arrow) = drop_parts(r);
+            clip.rect_filled(r, 0.0, t.sheet_control_bg);
+            clip.rect_stroke(r, 0.0, border, StrokeKind::Inside);
+            let g = clip.layout_no_wrap(shown.to_string(), theme::ui_font(11.0 * z), t.sheet_control_text);
+            let at = pos2(field.left() + 3.0 * z, field.center().y - g.size().y / 2.0);
+            clip.with_clip_rect(field.shrink(1.0).intersect(clip.clip_rect())).galley(at, g, t.sheet_control_text);
+            let fill = if look.open { t.sheet_control_pressed } else { bg(Part::Drop) };
+            let button = arrow.shrink(1.0);
+            clip.rect_filled(button, 0.0, fill);
+            clip.rect_stroke(button, 0.0, border, StrokeKind::Inside);
+            let s = (button.width().min(button.height()) * 0.22).max(1.5);
+            let m = button.center();
+            let tri = vec![pos2(m.x, m.y + s * 0.6), pos2(m.x + s, m.y - s * 0.5), pos2(m.x - s, m.y - s * 0.5)];
+            clip.add(PathShape::convex_polygon(tri, t.sheet_control_text, Stroke::NONE));
+        }
+        ControlKind::Check => {
+            let side = (r.height() - 4.0 * z).clamp(4.0 * z, 13.0 * z).min(r.width());
+            let mark = Rect::from_min_size(pos2(r.left() + 2.0 * z, r.center().y - side / 2.0), vec2(side, side));
+            let mixed = c.checked == CheckState::Mixed;
+            let fill = if mixed { t.sheet_track } else { bg(Part::Check) };
+            clip.rect_filled(mark, 0.0, fill);
+            // 3-D shading draws a heavier frame; a flat check box (`noThreeD`) a thin one.
+            let frame = if c.no_three_d == Some(true) { border } else { Stroke::new(2.0 * z.max(0.5), t.sheet_control_border) };
+            clip.rect_stroke(mark, 0.0, frame, StrokeKind::Inside);
+            if c.checked != CheckState::Unchecked {
+                let (m, s) = (mark.shrink(side * 0.22), side * 0.12);
+                let bend = pos2(m.left() + m.width() * 0.4, m.bottom() - s * 0.5);
+                let ink = if mixed { t.sheet_thumb } else { t.sheet_control_text };
+                let stroke = Stroke::new((1.6 * z).max(1.0), ink);
+                clip.line_segment([pos2(m.left(), m.center().y), bend], stroke);
+                clip.line_segment([bend, pos2(m.right(), m.top() + s * 0.5)], stroke);
+            }
+            let text_left = mark.right() + 4.0 * z;
+            if !c.text.is_empty() && text_left < r.right() {
+                let g = clip.layout_no_wrap(c.text.clone(), theme::ui_font(11.0 * z), t.sheet_control_text);
+                let at = pos2(text_left, r.center().y - g.size().y / 2.0);
+                let caption = Rect::from_min_max(pos2(text_left, r.top()), r.max);
+                clip.with_clip_rect(caption.intersect(clip.clip_rect())).galley(at, g, t.sheet_control_text);
+            }
+        }
     }
     if look.focused {
         p.rect_stroke(r.expand(2.0), 3.0 * z, Stroke::new(2.0, t.sheet_focus), StrokeKind::Outside);
@@ -213,7 +272,13 @@ pub fn look(app: &SheetApp, geo: &Geo, c: &FormControl, r: Rect, hover: Option<P
     let selected = app.selected_object == Some(ObjRef::new(ObjKind::Control, c.id));
     let hover = if selected { None } else { hover.and_then(|p| part_at(r, c, geo.z, inner(geo, r, p))) };
     let pressed = gesture.map(|g| g.part).filter(|part| *part == Part::Thumb || hover == Some(*part));
-    Look { hover, pressed, focused: app.grid.focused_control == Some(c.id) && !selected, show_value: gesture.is_some_and(|g| g.part == Part::Thumb) }
+    Look {
+        hover,
+        pressed,
+        focused: app.grid.focused_control == Some(c.id) && !selected,
+        show_value: gesture.is_some_and(|g| g.part == Part::Thumb),
+        open: app.grid.drop_open == Some(c.id),
+    }
 }
 
 impl SheetApp {
@@ -241,11 +306,25 @@ impl SheetApp {
     /// when `page` is set.
     pub fn control_nudge(&mut self, id: u32, steps: i64, page: bool) -> bool {
         let Some(c) = self.session.active().and_then(|d| d.wb.active()).and_then(|sh| find(sh, id)).cloned() else { return false };
-        if c.kind == ControlKind::Button {
+        if matches!(c.kind, ControlKind::Button | ControlKind::Check) {
             return false;
+        }
+        if c.kind == ControlKind::Drop {
+            return self.drop_step(&c, steps);
         }
         let by = if page && c.kind == ControlKind::Slider { c.page } else { c.step } as f64;
         self.control_set(id, c.value as f64 + steps as f64 * by)
+    }
+
+    /// Moves a drop-down's choice `steps` items down its list (negative: up), stopping at the
+    /// first and last items. True when the key was used.
+    fn drop_step(&mut self, c: &FormControl, steps: i64) -> bool {
+        let Some(len) = self.session.active().map(|d| gridcraft_engine::cmd::controls::drop_len(&d.wb, d.wb.active_sheet(), c)) else { return false };
+        if len == 0 {
+            return false;
+        }
+        let to = (c.selected as i64).saturating_add(steps).clamp(1, len as i64);
+        to == c.selected as i64 || self.control_set(c.id, to as f64)
     }
 
     /// Runs a button's action. Questions (approve it, make room for a macro's output) become a
@@ -282,7 +361,7 @@ pub fn interact(app: &mut SheetApp, ctx: &egui::Context, resp: &egui::Response, 
                         }
                     }
                 }
-                Part::Button => {}
+                Part::Button | Part::Drop | Part::Check => {}
                 part => {
                     // Held arrows and track repeat while the pointer stays on them.
                     let over = pos.and_then(|p| part_at(r, &c, geo.z, inner(geo, r, p))) == Some(part);
@@ -297,10 +376,19 @@ pub fn interact(app: &mut SheetApp, ctx: &egui::Context, resp: &egui::Response, 
             }
             return true;
         }
-        // Released: a button runs when the pointer is still on it.
+        // Released: a button runs when the pointer is still on it, and a drop-down opens its list
+        // (or closes it). Toggling on the release, as the in-cell list's arrow does, keeps the
+        // release from counting as a click outside the list that has just opened.
         app.grid.control = None;
-        if g.part == Part::Button && pos.is_some_and(|p| r.contains(p)) {
-            app.press_button(c.id);
+        if pos.is_some_and(|p| r.contains(p)) {
+            match g.part {
+                Part::Button => app.press_button(c.id),
+                Part::Drop => toggle_drop(app, c.id),
+                Part::Check => {
+                    app.control_set(c.id, c.checked.toggled().number() as f64);
+                }
+                _ => {}
+            }
         }
         resp.request_focus();
         return true;
@@ -313,7 +401,27 @@ pub fn interact(app: &mut SheetApp, ctx: &egui::Context, resp: &egui::Response, 
         }
         return false;
     }
-    let Some(p) = pointer.press_origin().map(|p| geo.mirror_pos(p)).or(pos) else { return false };
+    let batched = !pointer.primary_down();
+    // egui clears press_origin on release, even when both events arrived in this frame.
+    let click = batched
+        .then(|| {
+            ctx.input(|i| {
+                let mut press = None;
+                let mut click = None;
+                for event in &i.events {
+                    if let egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, .. } = event {
+                        if *pressed {
+                            press = Some(*pos);
+                        } else if let Some(start) = press.take() {
+                            click = Some((geo.mirror_pos(start), geo.mirror_pos(*pos)));
+                        }
+                    }
+                }
+                click
+            })
+        })
+        .flatten();
+    let Some(p) = click.map(|(start, _)| start).or_else(|| pointer.press_origin().map(|p| geo.mirror_pos(p))).or(pos) else { return false };
     // The selected object's handles reach past its frame and win over a control beneath them.
     if let Some(r) = app.selected_object.and_then(|o| crate::chartview::object_rect(geo, sh, o))
         && crate::objects::handle_at(r, p).is_some()
@@ -338,12 +446,27 @@ pub fn interact(app: &mut SheetApp, ctx: &egui::Context, resp: &egui::Response, 
     } else {
         0.0
     };
+    if matches!(part, Part::Drop | Part::Check) && batched {
+        if click.is_some_and(|(_, end)| r.contains(end)) {
+            if part == Part::Check {
+                app.control_set(c.id, c.checked.toggled().number() as f64);
+            } else {
+                toggle_drop(app, c.id);
+            }
+        }
+        resp.request_focus();
+        return true;
+    }
     app.grid.control = Some(Gesture { id: c.id, part, grab, undo_start, next_repeat: time + REPEAT_DELAY });
-    if !matches!(part, Part::Button | Part::Thumb) {
+    if !matches!(part, Part::Button | Part::Thumb | Part::Drop | Part::Check) {
         step_part(app, &c, part);
     }
     resp.request_focus();
     true
+}
+
+fn toggle_drop(app: &mut SheetApp, id: u32) {
+    app.grid.drop_open = if app.grid.drop_open == Some(id) { None } else { Some(id) };
 }
 
 /// One click on an arrow or the track.
@@ -353,20 +476,20 @@ fn step_part(app: &mut SheetApp, c: &FormControl, part: Part) {
         Part::Down => app.control_nudge(c.id, -1, false),
         Part::TrackBefore => app.control_nudge(c.id, -1, true),
         Part::TrackAfter => app.control_nudge(c.id, 1, true),
-        Part::Button | Part::Thumb => false,
+        Part::Button | Part::Thumb | Part::Drop | Part::Check => false,
     };
 }
 
-/// Whether the focused control is a button. Space presses one, so the space it types must not
-/// start a cell edit; a slider or spin button doesn't take Space, and its space reaches the grid
-/// like any other character.
+/// Whether the focused control is a button or a check box. Space presses a button and checks or
+/// clears a check box, so the space it types must not start a cell edit; a slider or spin button
+/// doesn't take Space, and its space reaches the grid like any other character.
 pub fn focused_button(app: &SheetApp, sh: &Sheet) -> bool {
-    app.grid.focused_control.and_then(|id| find(sh, id)).is_some_and(|c| c.kind == ControlKind::Button)
+    app.grid.focused_control.and_then(|id| find(sh, id)).is_some_and(|c| matches!(c.kind, ControlKind::Button | ControlKind::Check))
 }
 
-/// The grid takes a key while a control is focused: a button gives the keyboard back, so a later
-/// Enter or Space doesn't press it again and Space starts a cell edit; a slider or spin button
-/// keeps it, as the control last worked, which the arrows still step.
+/// The grid takes a key while a control is focused: a button or check box gives the keyboard
+/// back, so a later Enter or Space doesn't work it again and Space starts a cell edit; a slider or
+/// spin button keeps it, as the control last worked, which the arrows still step.
 pub fn key_to_grid(app: &mut SheetApp, sh: &Sheet) {
     if focused_button(app, sh) {
         app.grid.focused_control = None;
@@ -374,8 +497,11 @@ pub fn key_to_grid(app: &mut SheetApp, sh: &Sheet) {
 }
 
 /// Keys for the focused control: arrows move by a step, Page Up and Page Down by a page, Home and
-/// End to the ends; Space or Enter presses a button. True when the key was used. `repeat` is a key
-/// held down: it steps a slider or spin button again, but a button runs once per press.
+/// End to the ends; Space or Enter presses a button, and Space checks or clears a check box. A
+/// drop-down's arrows choose the item above or below, Page Up and Page Down move by its rows, and
+/// Enter opens or closes its list. True when the key was used. `repeat` is a key held down: it
+/// steps a slider or spin button again, but a button runs (and a check box toggles) once per
+/// press.
 pub fn key(app: &mut SheetApp, sh: &Sheet, key: egui::Key, repeat: bool) -> bool {
     use egui::Key;
     let Some(c) = app.grid.focused_control.and_then(|id| find(sh, id)).cloned() else { return false };
@@ -384,7 +510,9 @@ pub fn key(app: &mut SheetApp, sh: &Sheet, key: egui::Key, repeat: bool) -> bool
     }
     match (c.kind, key) {
         (_, Key::Escape) => {
-            app.grid.focused_control = None;
+            if app.grid.drop_open.take().is_none() {
+                app.grid.focused_control = None;
+            }
             true
         }
         (ControlKind::Button, Key::Space | Key::Enter) => {
@@ -394,6 +522,26 @@ pub fn key(app: &mut SheetApp, sh: &Sheet, key: egui::Key, repeat: bool) -> bool
             true
         }
         (ControlKind::Button, _) => false,
+        (ControlKind::Check, Key::Space) => {
+            if !repeat {
+                app.control_set(c.id, c.checked.toggled().number() as f64);
+            }
+            true
+        }
+        (ControlKind::Check, _) => false,
+        (ControlKind::Drop, Key::Enter) => {
+            if !repeat {
+                app.grid.drop_open = if app.grid.drop_open == Some(c.id) { None } else { Some(c.id) };
+            }
+            true
+        }
+        (ControlKind::Drop, Key::ArrowDown | Key::ArrowRight) => app.drop_step(&c, 1),
+        (ControlKind::Drop, Key::ArrowUp | Key::ArrowLeft) => app.drop_step(&c, -1),
+        (ControlKind::Drop, Key::PageDown) => app.drop_step(&c, c.drop_lines.max(1) as i64),
+        (ControlKind::Drop, Key::PageUp) => app.drop_step(&c, -(c.drop_lines.max(1) as i64)),
+        (ControlKind::Drop, Key::Home) => app.drop_step(&c, i64::MIN),
+        (ControlKind::Drop, Key::End) => app.drop_step(&c, i64::MAX),
+        (ControlKind::Drop, _) => false,
         // A spin button's up arrow adds; a slider's minimum is at its left or top.
         (ControlKind::Spin, Key::ArrowUp | Key::ArrowRight) | (ControlKind::Slider, Key::ArrowDown | Key::ArrowRight) => {
             app.control_nudge(c.id, 1, false)
@@ -406,6 +554,66 @@ pub fn key(app: &mut SheetApp, sh: &Sheet, key: egui::Key, repeat: bool) -> bool
         (_, Key::Home) => app.control_set(c.id, c.min as f64),
         (_, Key::End) => app.control_set(c.id, c.max as f64),
         _ => false,
+    }
+}
+
+/// The height of one row of a drop-down's open list (screen points).
+const DROP_ROW_H: f32 = 18.0;
+
+/// The open list of the drop-down `app.grid.drop_open` names, below the control (above it when
+/// it would run off the window), showing its `drop_lines` rows and scrolling through the rest;
+/// only the rows in view are read from the source range. A click chooses an item through
+/// `control.setValue` (one undo step, which writes the linked cell) and closes the list, as do
+/// Escape and a click elsewhere. `was_open`: the list was open last frame too.
+pub fn drop_picker(app: &mut SheetApp, ui: &mut egui::Ui, grid: &egui::Response, geo: &Geo, was_open: bool) {
+    use gridcraft_engine::cmd::controls::{drop_items, drop_len};
+    let Some(id) = app.grid.drop_open else { return };
+    let Some(d) = app.session.active() else { return };
+    let host = d.wb.active_sheet();
+    let Some(c) = d.wb.sheet(host).and_then(|sh| find(sh, id)).filter(|c| c.kind == ControlKind::Drop).cloned() else {
+        app.grid.drop_open = None;
+        return;
+    };
+    let Some(sh) = d.wb.sheet(host) else { return };
+    let r = geo.mirror_rect(crate::chartview::anchor_rect(geo, sh, &c.anchor));
+    let len = drop_len(&d.wb, host, &c) as usize;
+    let gap = ui.spacing().item_spacing.y;
+    let rows = len.clamp(1, c.drop_lines.max(1) as usize).min(64);
+    let height = rows as f32 * DROP_ROW_H + (rows as f32 - 1.0) * gap;
+    let screen = ui.ctx().content_rect();
+    let above = r.bottom() + height + 8.0 > screen.bottom() && r.top() - height - 8.0 >= screen.top();
+    let (at, pivot) = if above { (r.left_top(), egui::Align2::LEFT_BOTTOM) } else { (r.left_bottom(), egui::Align2::LEFT_TOP) };
+    let width = r.width().max(60.0);
+    let wb = &d.wb;
+    let mut chosen = None;
+    let response =
+        egui::Area::new(egui::Id::unique(("drop_list", id))).fixed_pos(at).pivot(pivot).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).inner_margin(2.0).show(ui, |ui| {
+                ui.set_min_width(width);
+                let mut area = egui::ScrollArea::vertical().max_height(height).min_scrolled_height(height).auto_shrink([false, true]);
+                // On opening, the chosen item is in view.
+                if !was_open && c.selected > 0 {
+                    area = area.vertical_scroll_offset((c.selected - 1) as f32 * (DROP_ROW_H + gap));
+                }
+                area.show_rows(ui, DROP_ROW_H, len, |ui, range| {
+                    let start = u32::try_from(range.start).unwrap_or(u32::MAX);
+                    let count = u32::try_from(range.len()).unwrap_or(0);
+                    for (i, text) in (start..).zip(drop_items(wb, host, &c, start, count)) {
+                        let item = i.saturating_add(1);
+                        if ui.add(egui::Button::selectable(item == c.selected, text).min_size(vec2(width, DROP_ROW_H))).clicked() {
+                            chosen = Some(item);
+                        }
+                    }
+                });
+            });
+        });
+    if let Some(item) = chosen {
+        app.grid.drop_open = None;
+        app.control_set(id, item as f64);
+        app.grid.focused_control = Some(id);
+        grid.request_focus();
+    } else if crate::grid::popup_dismissed(&response.response, was_open) {
+        app.grid.drop_open = None;
     }
 }
 

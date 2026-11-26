@@ -32,9 +32,9 @@ pub use macros::*;
 pub use password::PasswordHash;
 pub use pivot_source::{FoundSource, PivotSource, SavedSource};
 pub use preserved::{
-    Preserved, PreservedCellMeta, PreservedChartShapes, PreservedIndex, PreservedIndexed, PreservedMetadata, PreservedName, PreservedNoteFill,
-    PreservedNoteFills, PreservedObjectLink, PreservedObjectLinks, PreservedPart, PreservedPivot, PreservedRel, PreservedSheet, PreservedSheetKind,
-    PreservedTable, PreservedTableColumn, PreservedTheme, PreservedXml,
+    Preserved, PreservedCellMeta, PreservedChartShapes, PreservedControlProxies, PreservedIndex, PreservedIndexed, PreservedMetadata,
+    PreservedName, PreservedNoteFill, PreservedNoteFills, PreservedObjectLink, PreservedObjectLinks, PreservedPart, PreservedPivot, PreservedRel,
+    PreservedSheet, PreservedSheetKind, PreservedTable, PreservedTableColumn, PreservedTheme, PreservedXml,
 };
 pub use python::{PyCode, PyOutput};
 pub use sheet::{DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, LineIndex, Sheet, SheetUid, SheetViewMode, Visibility, points_to_chars};

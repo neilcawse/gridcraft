@@ -167,25 +167,43 @@ pub(super) fn insert(app: &mut SheetApp, ui: &mut Ui) {
         }
     });
     sep(ui);
-    // Form controls: draw a button, slider or spin button on the sheet (a click places it at its
-    // default size). Their key tips run the command at the active cell.
+    // Form controls: draw a button, slider, spin button, drop-down or check box on the sheet (a
+    // click places it at its default size). Their key tips run the command at the active cell.
     use gridcraft_engine::model::ControlKind;
     let placing = app.grid.placing;
-    ui.vertical(|ui| {
-        for (icon, kind, label, tip, id) in [
-            (Icon::Button, ControlKind::Button, "Button", "Draw a button that runs a macro or a command", "insert.button"),
-            (Icon::Slider, ControlKind::Slider, "Slider", "Draw a slider that sets a whole number in a linked cell", "insert.slider"),
-            (Icon::Spin, ControlKind::Spin, "Spin Button", "Draw a spin button that steps a whole number in a linked cell", "insert.spinButton"),
-        ] {
-            let on = placing == Some(kind);
-            let r = small_toggle_button(ui, icon, label, tip, on);
-            control_keytip(app, ui, &r, id);
-            if r.clicked() {
-                app.grid.placing = if placing == Some(kind) { None } else { Some(kind) };
-                app.selected_object = None;
+    // Three to a column, as the ribbon's small buttons stack.
+    let controls = [
+        (Icon::Button, ControlKind::Button, "Button", "Draw a button that runs a macro or a command", "insert.button"),
+        (Icon::Slider, ControlKind::Slider, "Slider", "Draw a slider that sets a whole number in a linked cell", "insert.slider"),
+        (Icon::Spin, ControlKind::Spin, "Spin Button", "Draw a spin button that steps a whole number in a linked cell", "insert.spinButton"),
+        (
+            Icon::DropDown,
+            ControlKind::Drop,
+            "Drop-down",
+            "Draw a drop-down that writes the position of the chosen item to a linked cell",
+            "insert.dropDown",
+        ),
+        (
+            Icon::Checkbox,
+            ControlKind::Check,
+            "Check Box",
+            "Draw a check box that writes TRUE or FALSE to a linked cell (a form control; Checkbox puts checkboxes in cells)",
+            "insert.checkBoxControl",
+        ),
+    ];
+    for column in controls.chunks(3) {
+        ui.vertical(|ui| {
+            for &(icon, kind, label, tip, id) in column {
+                let on = placing == Some(kind);
+                let r = small_toggle_button(ui, icon, label, tip, on);
+                control_keytip(app, ui, &r, id);
+                if r.clicked() {
+                    app.grid.placing = if placing == Some(kind) { None } else { Some(kind) };
+                    app.selected_object = None;
+                }
             }
-        }
-    });
+        });
+    }
     sep(ui);
     // Cell Controls.
     if big_button(ui, Icon::Checkbox, "Checkbox", "Insert checkboxes in the selected cells", false).clicked() {

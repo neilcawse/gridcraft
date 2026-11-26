@@ -906,20 +906,43 @@ pub(crate) fn rewrite_all_formulas_many(
             n.formula = text;
         }
     }
-    rewrite_cell_links(wb, |host, expr| edits.iter().fold(expr, |expr, e| gridcraft_formula::adjust::adjust(expr, host, target, e)));
+    rewrite_cell_links(wb, None, |host, expr| edits.iter().fold(expr, |expr, e| gridcraft_formula::adjust::adjust(expr, host, target, e)));
     rewrite_python_refs(wb, &|host, expr| edits.iter().fold(expr, |expr, e| gridcraft_formula::adjust::adjust(expr, host, target, e)))?;
     Ok((forgotten, moved, changed))
 }
 
 /// Runs `f` over every reference a floating object holds (a chart's series values, categories,
 /// name and bubble sizes, and the source block it was made from, and a form control's linked
-/// cell). Every edit that moves
+/// cell and drop-down source range). Every edit that moves
 /// references calls it: inserting and deleting lines and cells and cut-moves (through
 /// [`rewrite_all_formulas`]), and renaming and deleting sheets. `f` maps a reference held by an
 /// object on the sheet named `host` to its new form; text that does not parse is kept. A source
-/// block that no longer exists is dropped.
-pub(crate) fn rewrite_cell_links(wb: &mut gridcraft_model::Workbook, f: impl Fn(&str, gridcraft_formula::Expr) -> gridcraft_formula::Expr) {
-    for si in 0..wb.sheets.len() {
+/// block that no longer exists is dropped. If the edit shortens a drop-down's list, its present
+/// scroll offsets are clamped. Call this before removing a source sheet so its old list resolves,
+/// naming that sheet as `doomed`: its own objects are left alone, so the sheet (shared with the
+/// undo copy) is not copied only to be dropped.
+pub(crate) fn rewrite_cell_links(
+    wb: &mut gridcraft_model::Workbook,
+    doomed: Option<usize>,
+    f: impl Fn(&str, gridcraft_formula::Expr) -> gridcraft_formula::Expr,
+) {
+    // Only resolved lists with a nonzero offset can need clamping. Keep lengths, not range text.
+    let before: Vec<(usize, usize, u32)> = (0..wb.sheets.len())
+        .filter(|&si| Some(si) != doomed)
+        .flat_map(|si| {
+            let controls = wb.sheets.get(si).map(|sh| sh.controls.as_slice()).unwrap_or_default();
+            let wb = &*wb;
+            controls.iter().enumerate().filter_map(move |(i, c)| {
+                let has_offset = c.drop_display.scroll_offset.unwrap_or(0) > 0 || c.drop_vml_display.scroll_offset.unwrap_or(0) > 0;
+                if !has_offset {
+                    return None;
+                }
+                let len = crate::cmd::controls::drop_len(wb, si, c);
+                (len > 0).then_some((si, i, len))
+            })
+        })
+        .collect();
+    for si in (0..wb.sheets.len()).filter(|&si| Some(si) != doomed) {
         let Some(host) = wb.sheets.get(si).filter(|s| !s.charts.is_empty() || !s.controls.is_empty()).map(|s| s.name.clone()) else { continue };
         let Some(sh) = wb.sheet_mut(si) else { continue };
         let fix = |text: &str| -> String {
@@ -939,6 +962,16 @@ pub(crate) fn rewrite_cell_links(wb: &mut gridcraft_model::Workbook, f: impl Fn(
         }
         for c in sh.controls.iter_mut() {
             c.link = c.link.as_deref().map(fix);
+            c.list_range = c.list_range.as_deref().map(fix);
+        }
+    }
+    for (si, i, was) in before {
+        let Some(c) = wb.sheet(si).and_then(|sh| sh.controls.get(i)) else { continue };
+        let len = crate::cmd::controls::drop_len(wb, si, c);
+        if len < was
+            && let Some(c) = wb.sheet_mut(si).and_then(|sh| sh.controls.get_mut(i))
+        {
+            crate::cmd::controls::clamp_scroll_offsets(c, len);
         }
     }
 }

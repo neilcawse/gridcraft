@@ -8,7 +8,7 @@
 //! XML, links to external workbooks with their `<externalReferences>`, data connections, the Power
 //! Pivot data model, XML maps,
 //! shared-workbook revision logs…) and each sheet (query tables, cells mapped to XML elements,
-//! form controls other than the buttons, scroll bars and spin buttons `controls.rs` models,
+//! form controls other than the buttons, scroll bars, spin buttons and drop-downs `controls.rs` models,
 //! ActiveX controls, OLE objects, the sheet background, custom sheet properties and
 //! printer settings, with the sheet's `<picture>`, `<oleObjects>` and `<controls>` XML, the `r:id`
 //! of `<pageSetup>`, every shape of the legacy VML drawing that isn't a note or a modelled
@@ -78,9 +78,9 @@ use std::sync::Arc;
 
 use gridcraft_core::{CellRef, MAX_COLS, MAX_ROWS};
 use gridcraft_model::{
-    Cell, Preserved, PreservedCellMeta, PreservedIndex, PreservedIndexed, PreservedMetadata, PreservedName, PreservedNoteFill, PreservedNoteFills,
-    PreservedPart, PreservedRel, PreservedSheet, PreservedSheetKind, PreservedTable, PreservedTableColumn, PreservedTheme, PreservedXml, Sheet,
-    Table, Visibility, Workbook,
+    Cell, Preserved, PreservedCellMeta, PreservedControlProxies, PreservedIndex, PreservedIndexed, PreservedMetadata, PreservedName,
+    PreservedNoteFill, PreservedNoteFills, PreservedPart, PreservedRel, PreservedSheet, PreservedSheetKind, PreservedTable, PreservedTableColumn,
+    PreservedTheme, PreservedXml, Sheet, Table, Visibility, Workbook,
 };
 use quick_xml::events::attributes::Attribute;
 use quick_xml::events::{BytesStart, Event};
@@ -103,7 +103,7 @@ mod write;
 
 pub use names::rewrite_kept_names;
 pub use pivots::{kept_pivot, kept_pivot_out, write_pivot_cache, write_pivot_table};
-pub use read::{KeptReader, seal_cell_meta};
+pub use read::{KeptReader, drawing_fragments, seal_cell_meta};
 pub use rebase::{SheetKept, TableBinding, rebase_links};
 #[cfg(test)]
 pub(crate) use write::sheet_names_in;

@@ -868,18 +868,130 @@ pub enum ControlKind {
     Button,
     Slider,
     Spin,
+    /// A drop-down list: picks one item of a source range and writes its 1-based position to
+    /// the linked cell.
+    Drop,
+    /// A check box: unchecked, checked or mixed ([`CheckState`]), written to the linked cell as
+    /// FALSE, TRUE or #N/A.
+    Check,
 }
 
 impl ControlKind {
-    /// The kind's name in the window: Button, Slider, Spin Button.
+    /// The kind's name in the window: Button, Slider, Spin Button, Drop-down, Check Box.
     pub fn label(self) -> &'static str {
         match self {
             ControlKind::Button => "Button",
             ControlKind::Slider => "Slider",
             ControlKind::Spin => "Spin Button",
+            ControlKind::Drop => "Drop-down",
+            ControlKind::Check => "Check Box",
         }
     }
 }
+
+/// A check box's state (`checked`: `Unchecked`, `Checked`, `Mixed`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CheckState {
+    #[default]
+    Unchecked,
+    Checked,
+    /// Neither: the box is shaded, and the linked cell holds #N/A.
+    Mixed,
+}
+
+impl CheckState {
+    /// The state's name in `control.list`: `unchecked`, `checked`, `mixed`.
+    pub fn name(self) -> &'static str {
+        match self {
+            CheckState::Unchecked => "unchecked",
+            CheckState::Checked => "checked",
+            CheckState::Mixed => "mixed",
+        }
+    }
+
+    /// The state's number, as legacy VML writes it (`x:Checked`): 0, 1, 2.
+    pub fn number(self) -> u32 {
+        match self {
+            CheckState::Unchecked => 0,
+            CheckState::Checked => 1,
+            CheckState::Mixed => 2,
+        }
+    }
+
+    /// The state with [`CheckState::number`] `n`.
+    pub fn from_number(n: u32) -> Option<CheckState> {
+        match n {
+            0 => Some(CheckState::Unchecked),
+            1 => Some(CheckState::Checked),
+            2 => Some(CheckState::Mixed),
+            _ => None,
+        }
+    }
+
+    /// The state a click leaves: a checked box clears, any other is checked.
+    pub fn toggled(self) -> CheckState {
+        if self == CheckState::Checked { CheckState::Unchecked } else { CheckState::Checked }
+    }
+}
+
+/// How a check box's caption is set in its legacy VML text box, kept as read for saving: the
+/// `style` of the `<div>` around it and the attributes of the `<font>` inside that, if any.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CaptionMarkup {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub div_style: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font: Option<Vec<(String, String)>>,
+}
+
+/// How a check box's legacy VML shape is drawn, kept as read for saving, so a check box from a
+/// file is written back with the look it had: the shape's paint attributes (`filled`,
+/// `fillcolor`, `stroked`, `strokecolor`, `strokeweight`), the attributes of its `v:fill`,
+/// `o:lock` and `v:path` (`None`: the file left that element out; names without their prefix),
+/// and whether its client data said `x:AutoFill False`, `x:AutoLine False` and
+/// `x:TextVAlign Center`. The reader only keeps a check box editable when all of these hold
+/// values it knows.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CheckVmlLook {
+    pub paint: Vec<(String, String)>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill: Option<Vec<(String, String)>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lock: Option<Vec<(String, String)>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<Vec<(String, String)>>,
+    pub auto_fill_off: bool,
+    pub auto_line_off: bool,
+    pub text_v_center: bool,
+}
+
+/// Which automatic formatting flags the worksheet `<controlPr>` explicitly sets to false.
+/// An unset flag is omitted on save. These flags are independent of the legacy VML shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckSheetAutoFlags {
+    pub fill_off: bool,
+    pub line_off: bool,
+}
+
+/// How a drop-down list is drawn and edited (`dropStyle`). Spreadsheet applications write
+/// `combo` for the form drop-down; the others are kept as read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DropStyle {
+    /// A closed box with an arrow that opens the list.
+    #[default]
+    Combo,
+    /// As `Combo`, with an editable box.
+    ComboEdit,
+    /// The list always open.
+    Simple,
+}
+
+/// The rows a new drop-down list shows before it scrolls.
+pub const DROP_LINES_DEFAULT: u32 = 8;
 
 /// The largest value a slider or spin button takes (Excel's scroll bar limit). Values are whole
 /// numbers from 0 to this.
@@ -916,7 +1028,30 @@ pub enum MacroInput {
     Fixed(String),
 }
 
-/// A form control (button, slider, spin button) floating over the sheet.
+/// Drop-down display settings from one file representation. Presence is significant: the
+/// worksheet control properties and its legacy VML fallback need not specify the same settings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DropDisplay {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_three_d: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_three_d2: Option<bool>,
+    /// Scroll bar width in pixels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scroll_width: Option<u32>,
+    /// Number of top list entries hidden by scrolling (not the selected row).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scroll_offset: Option<u32>,
+}
+
+impl DropDisplay {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// A form control (button, slider, spin button, drop-down, check box) floating over the sheet.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FormControl {
@@ -925,7 +1060,7 @@ pub struct FormControl {
     pub anchor: Anchor,
     /// The name shown in the Selection Pane (`Button 3`); empty means the kind and id.
     pub name: String,
-    /// The caption of a button.
+    /// The caption of a button or a check box.
     pub text: String,
     /// The linked cell as reference text: `$B$2` on the control's own sheet, or `Sheet2!$B$2`.
     /// Structural edits rewrite it like a formula reference.
@@ -946,6 +1081,48 @@ pub struct FormControl {
     pub print: bool,
     /// Locked when the sheet is protected.
     pub locked: bool,
+    /// The cells a drop-down lists, as reference text (`$AJ$6:$AJ$12`, or `Lists!$A$1:$A$9`).
+    /// Structural edits rewrite it like [`FormControl::link`].
+    pub list_range: Option<String>,
+    /// A drop-down's chosen item, 1-based (0: none). The linked cell holds it too.
+    pub selected: u32,
+    /// The rows a drop-down's open list shows before it scrolls (at least 1).
+    pub drop_lines: u32,
+    /// How a drop-down is drawn (`dropStyle`), kept for saving.
+    pub drop_style: DropStyle,
+    #[serde(skip_serializing_if = "DropDisplay::is_empty")]
+    pub drop_display: DropDisplay,
+    #[serde(skip_serializing_if = "DropDisplay::is_empty")]
+    pub drop_vml_display: DropDisplay,
+    /// A check box's state. The linked cell holds it too (TRUE, FALSE, #N/A).
+    pub checked: CheckState,
+    /// A check box drawn flat (`noThreeD`), as the file says it; `None` when it says nothing
+    /// (3-D shading).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_three_d: Option<bool>,
+    /// The x14 caption lock; `None` uses the new-control default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_lock_text: Option<bool>,
+    /// The legacy VML caption lock, when the file explicitly gives one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_vml_lock_text: Option<bool>,
+    /// The legacy shape explicitly requests tight wrapping.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub check_vml_wrap_tight: bool,
+    /// The legacy shape's look as read (paint, `v:fill`, `o:lock` with its aspect-ratio lock,
+    /// `v:path`, text fitting); `None`: GridCraft's own look for a new check box.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_vml_look: Option<CheckVmlLook>,
+    /// Worksheet flags as read; `None`: generate them from the VML settings or new-control defaults.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_sheet_auto_flags: Option<CheckSheetAutoFlags>,
+    /// The macro a check box's file assigns it, as written (`[0]!Toggled`): kept for saving,
+    /// never run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kept_macro: Option<String>,
+    /// How a check box's caption is set in its VML text box, as read; `None`: a plain caption.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caption_markup: Option<CaptionMarkup>,
 }
 
 impl Default for FormControl {
@@ -966,12 +1143,27 @@ impl Default for FormControl {
             action: None,
             print: true,
             locked: true,
+            list_range: None,
+            selected: 0,
+            drop_lines: DROP_LINES_DEFAULT,
+            drop_style: DropStyle::Combo,
+            drop_display: DropDisplay::default(),
+            drop_vml_display: DropDisplay::default(),
+            checked: CheckState::Unchecked,
+            no_three_d: None,
+            check_lock_text: None,
+            check_vml_lock_text: None,
+            check_vml_wrap_tight: false,
+            check_vml_look: None,
+            check_sheet_auto_flags: None,
+            kept_macro: None,
+            caption_markup: None,
         }
     }
 }
 
 impl FormControl {
-    /// The name shown for the control: its own, else `Button 3`, `Slider 4`, `Spin Button 5`.
+    /// The name shown for the control: its own, else `Button 3`, `Slider 4`, `Check Box 5`.
     pub fn display_name(&self) -> String {
         if self.name.trim().is_empty() { format!("{} {}", self.kind.label(), self.id) } else { self.name.clone() }
     }
@@ -979,7 +1171,7 @@ impl FormControl {
     /// Checks the numbers of a slider or spin button: 0 ≤ min < max ≤ 30000, 1 ≤ step ≤ max − min,
     /// and (sliders) page ≥ step. Each rule has its own message.
     pub fn check_numbers(&self) -> Result<(), String> {
-        if self.kind == ControlKind::Button {
+        if matches!(self.kind, ControlKind::Button | ControlKind::Drop | ControlKind::Check) {
             return Ok(());
         }
         if self.max > CONTROL_MAX {
