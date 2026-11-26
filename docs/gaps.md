@@ -215,9 +215,11 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
   sort, validation, AutoFit, sheet operations, spelling, forecast, what-if analysis and macros.
   In particular, Excel's default print and CSV bounds for bare or geometry-only lines are unmeasured.
   A separate reported extent for inspection and navigation would avoid changing those work bounds.
-- Whole-line Paste Special (including All), Insert Copied Cells, drag-and-drop and filtered or
-  packed paste retain their previous behavior; the X25 probes measured direct Copy/Cut, not these
-  paths. Ordinary whole-column paste now transfers inherited column styles and a cut resets the
+- Whole-line Paste Special modes other than plain All, drag-and-drop, and filtered or packed
+  pastes retain their previous behavior; Excel's line-format behavior on these paths is unmeasured.
+  See [X32](parity/INTEGRATION_NOTES.md#x32--paste-special-all-and-insert-copied-cells-carry-line-formatting)
+  for the measured whole-row Paste Special All and Insert Copied Cells paths.
+  Ordinary whole-column paste transfers inherited column styles and a cut resets the
   source column's; Excel readbacks of blank cells confirmed both. GridCraft also resets the
   destination style when copying an unstyled source column. That Excel probe did not measure
   the destination column's aggregate style or sample a blank destination cell.
@@ -228,6 +230,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-25 | minor | §25: Paste Special All and Insert Copied Cells now transfer whole-line formatting; other modes remain unmeasured. |
 | 2026-11-25 | minor | §25: transfer and reset inherited column styles on ordinary whole-column paste, as Excel's blank-cell readbacks show for copy and cut. |
 | 2026-11-25 | minor | §25: copy and cut whole-line geometry and inherited row style on ordinary paste; record the remaining extent and Paste Special gaps. |
 | 2026-11-02 | minor | §17: equations (Insert › Equation, LaTeX source, gallery, editor) |

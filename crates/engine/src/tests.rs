@@ -7767,19 +7767,123 @@ fn whole_line_cut_paste_restores_source_defaults() {
     }
 }
 
-#[test]
-fn paste_special_all_keeps_whole_line_sizes() {
-    use gridcraft_model::LineInfo;
+/// Synthetic input for the X32 clipboard cases. Heights are stored in pixels; hidden flags
+/// and outline levels here come from the input fixture, not the Excel action's readbacks.
+fn whole_row_clipboard_fixture(s: &mut Session) {
+    use gridcraft_model::{Color, Fill, LineInfo, Style};
 
+    for (cell, input) in [("A3", "S-A3"), ("A4", "S-A4"), ("A5", "S-A5 summary"), ("A8", "D-A8"), ("A9", "D-A9")] {
+        s.execute("cell.set", json!({"cell": cell, "input": input})).unwrap();
+    }
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let mut style = |rgb, bold, italic| {
+        let mut st = Style { fill: Fill::solid(Color::Rgb(rgb)), ..Default::default() };
+        st.font.bold = bold;
+        st.font.italic = italic;
+        wb.styles.intern(st)
+    };
+    let (red, blue, green, yellow) =
+        (style(0xFF0000, true, false), style(0x0000FF, true, false), style(0x00B050, false, false), style(0xFFFF00, false, true));
+    let sh = wb.sheet_mut(0).unwrap();
+    for (row, points, style, hidden, outline) in
+        [(2, 30., Some(red), true, 0), (3, 38., None, true, 1), (7, 12., Some(green), false, 2), (8, 45., Some(yellow), true, 0)]
+    {
+        sh.rows.insert(row, LineInfo { size: Some(points * 4. / 3.), custom: true, style, hidden, outline, ..Default::default() });
+        if let Some(style) = style {
+            sh.set_style(CellRef::new(row, 0), style);
+        }
+    }
+    sh.cols.insert(2, LineInfo { style: Some(blue), hidden: true, ..Default::default() });
+}
+
+fn check_whole_row_clipboard_all(insert: bool) {
     let mut s = s();
-    s.execute("cell.set", json!({"cell": "A3", "input": "source"})).unwrap();
-    let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
-    sh.rows.insert(2, LineInfo { hidden: true, ..Default::default() });
-    sh.rows.insert(7, LineInfo { size: Some(80.), custom: true, ..Default::default() });
-    s.execute("edit.copy", json!({"range": "3:3"})).unwrap();
-    s.execute("edit.pasteSpecial", json!({"what": "all", "at": "A8"})).unwrap();
-    assert_eq!(v(&s, "A8"), Value::from("source"));
-    assert_eq!(s.doc().unwrap().wb.active().unwrap().row_height(7), 80.);
+    whole_row_clipboard_fixture(&mut s);
+    let before = s.doc().unwrap().wb.active().unwrap().rows.clone();
+    let check_values = |s: &Session, dest: [Option<&str>; 4]| {
+        for (cell, expected) in
+            ["A3", "A4", "A5", "A8", "A9", "A10", "A11"].into_iter().zip([Some("S-A3"), Some("S-A4"), Some("S-A5 summary")].into_iter().chain(dest))
+        {
+            assert_eq!(v(s, cell), expected.map(Value::from).unwrap_or(Value::Empty), "{cell}");
+        }
+    };
+    let applied = |s: &Session| {
+        let shifted = if insert { [Some("D-A8"), Some("D-A9")] } else { [None, None] };
+        check_values(s, [Some("S-A3"), Some("S-A4"), shifted[0], shifted[1]]);
+        let wb = &s.doc().unwrap().wb;
+        let sh = wb.active().unwrap();
+        assert_eq!([sh.row_height(7), sh.row_height(8)], [0., 0.]);
+        for (source, target) in [(2, 7), (3, 8)] {
+            // As with ordinary Paste, size, visibility and style transfer, not outline.
+            let outline = if insert { 0 } else { before[&target].outline };
+            assert_eq!(sh.rows[&target], gridcraft_model::LineInfo { outline, ..before[&source] });
+        }
+        if insert {
+            assert_eq!([sh.row_height(9), sh.row_height(10)], [16., 0.]);
+            assert_eq!([sh.rows[&9], sh.rows[&10]], [before[&7], before[&8]]);
+        } else {
+            // Inferred from Excel's whole-column C Bold readback, not individual samples.
+            for row in [7, 8] {
+                let cell = CellRef::new(row, 2);
+                assert!(sh.cell(cell).is_none(), "{} should inherit its style", cell.a1());
+                assert!(wb.styles.get(sh.style_id(cell)).font.bold, "{} should be bold", cell.a1());
+            }
+        }
+    };
+    s.execute("edit.copy", json!({"range": "3:4"})).unwrap();
+    if insert {
+        s.execute("home.insertCopiedCells", json!({"at": "A8", "shift": "down"})).unwrap();
+    } else {
+        s.execute("edit.pasteSpecial", json!({"what": "all", "at": "A8"})).unwrap();
+    }
+    applied(&s);
+    s.execute("edit.undo", json!({})).unwrap();
+    check_values(&s, [Some("D-A8"), Some("D-A9"), None, None]);
+    assert_eq!(s.doc().unwrap().wb.active().unwrap().rows, before);
+    s.execute("edit.redo", json!({})).unwrap();
+    applied(&s);
+}
+
+#[test]
+fn x32_paste_special_all_carries_whole_row_formatting() {
+    check_whole_row_clipboard_all(false);
+}
+
+#[test]
+fn x32_insert_copied_cells_carries_whole_row_formatting() {
+    check_whole_row_clipboard_all(true);
+}
+
+#[test]
+fn x32_paste_special_partial_and_non_all_modes_keep_line_formatting() {
+    for (range, what) in [("A3:A4", "all"), ("3:4", "values"), ("3:4", "formulas"), ("3:4", "formats"), ("3:4", "allExceptBorders")] {
+        let mut s = s();
+        whole_row_clipboard_fixture(&mut s);
+        let before = s.doc().unwrap().wb.active().unwrap().rows.clone();
+        s.execute("edit.copy", json!({"range": range})).unwrap();
+        s.execute("edit.pasteSpecial", json!({"what": what, "at": "A8"})).unwrap();
+        assert_eq!(v(&s, "A8"), Value::from(if what == "formats" { "D-A8" } else { "S-A3" }));
+        assert_eq!(s.doc().unwrap().wb.active().unwrap().rows, before, "{range}, {what}");
+    }
+}
+
+#[test]
+fn x32_whole_row_special_paste_and_insert_obey_protection() {
+    use gridcraft_model::{LineInfo, SheetProtection};
+
+    for (command, params) in [("edit.pasteSpecial", json!({"at": "A8", "what": "all"})), ("home.insertCopiedCells", json!({"at": "A8"}))] {
+        let mut s = s();
+        let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+        sh.rows.insert(2, LineInfo { size: Some(40.), custom: true, ..Default::default() });
+        // Leave an existing redo entry: refusal during the insert's paste must not clear it.
+        s.execute("cell.set", json!({"cell": "A8", "input": "redo me"})).unwrap();
+        s.execute("edit.undo", json!({})).unwrap();
+        let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+        sh.protection = Some(SheetProtection { insert_rows: true, ..Default::default() });
+        s.execute("edit.copy", json!({"range": "3:3"})).unwrap();
+        assert_line_edit_refused(&mut s, command, params, "Formatting rows");
+        assert!(s.clipboard.is_some(), "the copy must remain pending");
+    }
 }
 
 /// A Cut stays pending across edits and moves its cells as they are when pasted. The lines it

@@ -81,9 +81,9 @@ a cell's explicit style masks a line style; it does not change protection on oth
 
 Zero size demonstrates effective geometry; the probes did not recover `Hidden`, `OutlineLevel`
 or `ShowDetail` values, nor did they save XML. Outline/collapse, thickness and bare markers stay
-on their existing lines. Paste Special (including All), the system clipboard, drag-and-drop,
-Insert Copied Cells, filtered and packed copies, and tiled pastes remain unmeasured and retain
-their previous behavior.
+on their existing lines. The system clipboard, drag-and-drop, filtered and packed copies, and
+tiled pastes remain unmeasured and retain their previous behavior. See X32 for Paste Special All
+and Insert Copied Cells.
 
 ## X29 — Cut source sheet identity
 
@@ -149,3 +149,31 @@ Inferred, not measured:
 
 Partial-range AutoFill (any source that is not entire rows or entire columns) and Fill
 Down/Right/Up/Left keep their previous behaviour and leave line formatting alone.
+
+## X32 — Paste Special All and Insert Copied Cells carry line formatting
+
+**Measured (`x25-paste-special-all-rows`, `x25-insert-copied-rows`):** In Excel for Mac 16.115.2,
+copying `S!3:4` then using Paste Special All or Insert Copied Cells at `S!A8` gave rows 8 and 9
+an effective height of 0 pt. Row 8 took row 3's red, bold style; cell A9 took A4's Normal style.
+A3–A5 were unchanged and A8/A9 took A3/A4's values. With Insert, the old A8/A9 and their row
+formats moved to rows 10/11 (12 pt green and 0 pt yellow); with Paste Special All, A10/A11 stayed blank.
+
+GridCraft's internal Paste Special All now shares the ordinary whole-line Paste path. It copies
+the line style, size (including saved size and custom-height flag) and visibility. The shared
+protection guard also applies. Insert Copied Cells uses Paste Special All after shifting the
+existing lines; one undo or redo restores both cell and line changes. The rules for reporting
+UsedRange and Last Cell are unchanged by this lane.
+
+**Inferred or unmeasured:** Column C's whole-column Bold readback changed from `false` to `true`
+after Paste Special All; GridCraft tests C8/C9's inherited bold as an inference, not as a sampled
+Excel cell result. The whole-column readback stayed `false` after Insert. Excel did not return
+hidden, outline or a named style for row 9, and did not save XML. GridCraft follows ordinary
+Paste: visibility transfers and an unstyled source line clears the destination's line style,
+but outline/collapse, boundary edges and bare-row markers stay on their own lines.
+Whole columns use the same rule as rows; the clipboard cases only exercised rows. Protection,
+undo/redo, Insert Cut Cells and the system clipboard were not compared in these probes.
+
+Other Paste Special modes (including Values, Formulas, Formats and All Except Borders), arithmetic
+operations, Skip Blanks, Transpose, Paste Link and partial-range paste retain their previous
+behavior. Drag-and-drop and filtered, packed, tiled or full-sheet sources do not transfer line
+formats via this change.

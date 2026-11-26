@@ -11,7 +11,7 @@ use super::{
 };
 
 pub(super) fn paste_special(s: &mut Session, p: &Json) -> Result<Json> {
-    paste_internal(s, p, false)
+    paste_internal(s, p, true)
 }
 
 #[allow(clippy::cognitive_complexity)] // The command applies the selected paste mode in one atomic edit.
@@ -98,7 +98,9 @@ pub(super) fn paste_internal(s: &mut Session, p: &Json, transfer_lines: bool) ->
     let shared = if same_doc { vec![] } else { shared_links(&src_wb, &s.doc()?.wb) };
     // A geometric full-width or full-height source counts regardless of how it was selected.
     // Packed/filtered, tiled and full-sheet copies are outside the contiguous line case.
-    let line_axis = if transfer_lines && whole && !clip.filtered && !tile {
+    // Only plain Paste All transfers line formats; modifiers keep their cell-only behavior.
+    let line_axis = if transfer_lines && what == What::All && op == "none" && !skip_blanks && !transpose && !link && whole && !clip.filtered && !tile
+    {
         match (src.is_full_rows(), src.is_full_cols()) {
             (true, false) => Some(LineAxis::Rows),
             (false, true) => Some(LineAxis::Columns),

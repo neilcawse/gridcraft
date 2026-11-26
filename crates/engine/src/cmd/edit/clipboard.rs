@@ -1,5 +1,5 @@
 use super::cell::input_to_cell;
-use super::paste_special::paste_special;
+use super::paste_special::paste_internal;
 use super::{
     Cell, CellRef, Clipboard, EngineError, Json, RangeRef, Result, Session, Value, bad, bool_param, cell_param_on, edit, json, ok, str_param,
     target_ranges, target_sheet,
@@ -268,7 +268,7 @@ pub(super) fn paste(s: &mut Session, p: &Json) -> Result<Json> {
     if s.clipboard.is_none() {
         return Err(EngineError::Other("Nothing to paste.".into()));
     }
-    super::paste_special::paste_internal(s, &json!({"what": "all", "at": p.get("at").cloned().unwrap_or(Json::Null)}), true)
+    paste_internal(s, &json!({"what": "all", "at": p.get("at").cloned().unwrap_or(Json::Null)}), true)
 }
 
 /// Drag and drop (dragging the selection's border): moves `range` so its top-left cell lands on
@@ -293,7 +293,7 @@ pub(super) fn range_move(s: &mut Session, p: &Json) -> Result<Json> {
         // On the range's sheet, which `paste` would leave to the active one. The selection
         // belongs to the active sheet: it follows the moved cells only when they are on it.
         let selection = s.doc()?.selection.clone();
-        let pasted = paste_special(s, &json!({"what": "all", "at": to.a1(), "sheet": sheet}))?;
+        let pasted = paste_internal(s, &json!({"what": "all", "at": to.a1(), "sheet": sheet}), false)?;
         if sheet != s.doc()?.wb.active_sheet() {
             s.doc_mut()?.selection = selection;
         }

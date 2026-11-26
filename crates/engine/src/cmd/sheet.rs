@@ -873,29 +873,17 @@ fn insert_copied_cells(s: &mut Session, p: &Json) -> Result<Json> {
             return Err(EngineError::Other("The cut rows or columns can't be inserted inside themselves.".into()));
         }
     }
-    let revision = d.revision;
-    let before = (d.wb.clone(), d.selection.clone());
-    // Inside an undo group the nested steps add no undo entries of their own.
-    let nested_entries = !s.in_group(d.uid);
-    let result = insert_copied_steps(s, &clip, sheet, at, shift, cut);
-    let d = s.doc_mut()?;
-    // The nested steps collapse into this command's single undo step.
-    if nested_entries {
-        for _ in 0..d.revision.saturating_sub(revision) {
-            d.undo.pop();
-        }
-    }
-    match result {
+    // Paste All can refuse line formatting after the insertion step has shifted the sheet.
+    // Group the two so a refusal also preserves the existing undo and redo history.
+    match s.grouped("Insert Copied Cells", |s| insert_copied_steps(s, &clip, sheet, at, shift, cut)) {
         Ok((final_range, out)) => {
+            let d = s.doc_mut()?;
             d.selection = crate::Selection { active: final_range.start, anchor: final_range.start, ranges: vec![final_range] };
             // Like inserting cells, this ends copy mode (the copied block may have moved).
             cancel_copy_mode(s);
             Ok(out)
         }
         Err(e) => {
-            d.wb = before.0;
-            d.selection = before.1;
-            d.calc.rebuild(&d.wb);
             s.clipboard = Some(clip);
             Err(e)
         }
