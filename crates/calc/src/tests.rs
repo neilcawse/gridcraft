@@ -944,6 +944,19 @@ fn lookups_distinguish_failed_linked_caches_from_local_index_errors() {
 }
 
 #[test]
+fn lookup_error_precedence_applies_to_each_lifted_index() {
+    let mut t = T::new();
+    t.set("A1", "x");
+    t.set("B1", "1");
+    for (col, table) in [("D", "A1:B1"), ("E", r#"{"x",1}"#)] {
+        t.set(&format!("{col}1"), &format!(r#"=VLOOKUP("z",{table},{{#DIV/0!;2;9}},FALSE)"#));
+        t.set(&format!("{col}4"), &format!(r#"=VLOOKUP("z",{table},1/0,#NAME?)"#));
+        let got = [1, 2, 3, 4].map(|r| t.get(&format!("{col}{r}")));
+        assert_eq!(got, [CellError::Div0, CellError::NA, CellError::NA, CellError::Name].map(Value::Error), "{table}");
+    }
+}
+
+#[test]
 fn lookups_into_unreadable_links_still_lift_over_arrays() {
     use gridcraft_model::{ExternalBook, ExternalSheet};
     let mut t = T::new();
@@ -953,10 +966,12 @@ fn lookups_into_unreadable_links_still_lift_over_arrays() {
     t.set("C1", "=HLOOKUP(1,[1]Data!A1:B2,2,{TRUE,FALSE})");
     t.set("E1", "=VLOOKUP(1,[1]Data!A1:B2,{#REF!;#DIV/0!},FALSE)");
     t.set("F1", "=HLOOKUP(1,[1]Data!A1:B2,2,#NAME?)");
+    t.set("G1", "=VLOOKUP(1,[1]Data!A1:B2,#REF!,#NAME?)");
     let na = Value::Error(CellError::NA);
     assert_eq!([t.get("A1"), t.get("A2")], [na.clone(), Value::Error(CellError::Div0)]);
     assert_eq!([t.get("C1"), t.get("D1")], [na.clone(), na]);
     assert_eq!([t.get("E1"), t.get("E2"), t.get("F1")], [Value::Error(CellError::NA), Value::Error(CellError::Div0), Value::Error(CellError::Name)]);
+    assert_eq!(t.get("G1"), Value::Error(CellError::Ref));
 }
 
 /// X15's argument coercion holds over a linked table too: an index read from a cell as text that

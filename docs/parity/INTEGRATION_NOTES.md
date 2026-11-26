@@ -537,10 +537,11 @@ Documented, not measured (Microsoft's form check box documentation, ECMA-376, [M
 ## X14b–X38 integration (`wip/integration-x38`)
 
 **X15 lookup criteria and X20 external names.** For VLOOKUP and HLOOKUP over a readable local table or array:
-- An error lookup value or error index is returned before the search, whether or not the key is found. A computed error is returned as itself, and an error read from a cell is `#REF!` by X15's index rule. Evidence: Excel's trusted cache in the public Enron workbook `larry_may__21911__larryoptmodel.xlsx` (sheet `nymex`, 200 cells such as H31) shows `#DIV/0!` for `VLOOKUP($A31,skewtable,HLOOKUP(ROUND(I31-AO31,1),skewtable,2,FALSE),FALSE)`, where `$A31` is not in `skewtable`.
-- A non-error index is resolved only once the key is found, so a miss is `#N/A` even for an index past the table (X15).
-- Unmeasured: whether an error read from a cell is `#REF!` or `#N/A` when the key is missing.
+- After resolving the lookup value and table, validate `range_lookup` first (X15). An invalid mode returns its error before the search and before an error-valued index.
+- Next, return any error-valued index: a computed error is returned as itself, and an error read from a cell becomes `#REF!` under X15's index rule. Excel's trusted cache in the public Enron workbook `larry_may__21911__larryoptmodel.xlsx` (sheet `nymex`, 200 cells such as H31) shows `#DIV/0!` for `VLOOKUP($A31,skewtable,HLOOKUP(ROUND(I31-AO31,1),skewtable,2,FALSE),FALSE)`, where `$A31` is not in `skewtable`.
+- Then search. A miss is `#N/A` even for a numeric index past the table; a non-error index is validated only on a hit (X15).
+- Unmeasured in Excel: invalid mode combined with an error index, and whether an error read from a cell becomes `#REF!` or `#N/A` when the key is missing.
 
-Linked tables keep X20's order: the index and search mode are resolved before the search, with X15's coercion of arguments read from cells. X20's failed-cache results are unchanged. Unmeasured, and kept from X20: whether a *readable* linked table follows that order or X15's.
+Linked tables keep X20's index-first order, with X15's coercion of arguments read from cells. The index and search mode are resolved before the search. A failed, empty cache returns `#N/A` for a `#REF!` index only when the mode is valid or omitted. Unmeasured: whether Excel uses that same order on a readable linked table.
 
 **Residual: `COUNTIF` over a whole column in an Excel 97 cache.** EUSES `TRAMP.xls` (sheet `Unknown Data Entry`, C9:M9) caches 6, 11, 10, 12, 0 and 0 for `=COUNTIF(ThresholdCalc!A:A,"<> 9999")-1`; GridCraft gives 1048531 and similar. ThresholdCalc's columns are filled through row 51 and empty below. The cache was written by Excel 97 (producer 8.0), which counted only the used cells. That conflicts with X15's Excel 365 probe, where `COUNTIF($G:$G,"<>23")` counts the blanks of the whole column. GridCraft follows current Excel. The current-Excel value for this file has not been measured, and neither has the `.xls` whole-column extent (65,536 rows in Compatibility Mode); the grid size is unchanged here.
