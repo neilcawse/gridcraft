@@ -198,10 +198,14 @@ pub fn legacy_check_boxes(x14: bool) -> Vec<u8> {
         r#"<?xml version="1.0"?><worksheet xmlns="{NS_MAIN}" xmlns:r="{NS_R}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"><sheetData><row r="2"><c r="B2" t="b"><v>1</v></c></row></sheetData><legacyDrawing r:id="rId1"/>{controls}</worksheet>"#
     );
     let types = r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="vml" ContentType="application/vnd.openxmlformats-officedocument.vmlDrawing"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#;
-    let rels = |body: &str| format!(r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{body}</Relationships>"#);
+    let rels = |body: &str| {
+        format!(r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{body}</Relationships>"#)
+    };
     let root = rels(&format!(r#"<Relationship Id="rId1" Type="{REL}/officeDocument" Target="xl/workbook.xml"/>"#));
     let wb_rels = rels(&format!(r#"<Relationship Id="rId1" Type="{REL}/worksheet" Target="worksheets/sheet1.xml"/>"#));
-    let workbook = format!(r#"<?xml version="1.0"?><workbook xmlns="{NS_MAIN}" xmlns:r="{NS_R}"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>"#);
+    let workbook = format!(
+        r#"<?xml version="1.0"?><workbook xmlns="{NS_MAIN}" xmlns:r="{NS_R}"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>"#
+    );
     let sheet_rels = rels(&sheet_rels);
     let mut entries = vec![
         Entry::Intact("[Content_Types].xml", types.as_bytes()),

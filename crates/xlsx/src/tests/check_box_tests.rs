@@ -63,7 +63,8 @@ fn legacy_check_boxes_are_modelled_and_round_trip() {
         assert!(!kept.contains("ObjectType=\"Checkbox\""), "{x14}: a modelled check box is not kept: {kept}");
         assert!(kept.contains("ObjectType=\"Radio\""), "{x14}: the option button is kept: {kept}");
         if x14 {
-            let controls = wb.sheet(0).unwrap().preserved.as_ref().and_then(|p| p.elements.iter().find(|e| e.slot == "controls")).map(|e| e.xml.clone());
+            let controls =
+                wb.sheet(0).unwrap().preserved.as_ref().and_then(|p| p.elements.iter().find(|e| e.slot == "controls")).map(|e| e.xml.clone());
             let controls = controls.unwrap_or_default();
             assert!(controls.contains("shapeId=\"1028\"") && !controls.contains("GC Check"), "{controls}");
         }
@@ -100,7 +101,11 @@ fn saved_check_boxes_write_state_link_shading_and_caption_in_both_parts() {
     let props: Vec<String> = props.iter().map(|p| text(&mut pkg, p)).collect();
     assert_eq!(props.len(), 3, "{props:?}");
     assert!(props.iter().all(|p| p.contains("objectType=\"CheckBox\"") && p.contains("lockText=\"1\"")), "{props:?}");
-    assert!(props[0].contains("checked=\"Checked\"") && props[0].contains("fmlaLink=\"$B$2\"") && props[0].contains("noThreeD=\"1\""), "{}", props[0]);
+    assert!(
+        props[0].contains("checked=\"Checked\"") && props[0].contains("fmlaLink=\"$B$2\"") && props[0].contains("noThreeD=\"1\""),
+        "{}",
+        props[0]
+    );
     assert!(!props[1].contains("checked=") && !props[1].contains("noThreeD"), "{}", props[1]);
     assert!(props[2].contains("checked=\"Mixed\""), "{}", props[2]);
     let sheet = text(&mut pkg, "xl/worksheets/sheet1.xml");
@@ -172,7 +177,14 @@ fn rebuild_with_vml(whole: &str) -> Vec<u8> {
     let vml = &whole[start..end];
     let original = legacy_check_boxes(false);
     let mut pkg = Package::open(&original).unwrap();
-    let names = ["[Content_Types].xml", "_rels/.rels", "xl/workbook.xml", "xl/_rels/workbook.xml.rels", "xl/worksheets/sheet1.xml", "xl/worksheets/_rels/sheet1.xml.rels"];
+    let names = [
+        "[Content_Types].xml",
+        "_rels/.rels",
+        "xl/workbook.xml",
+        "xl/_rels/workbook.xml.rels",
+        "xl/worksheets/sheet1.xml",
+        "xl/worksheets/_rels/sheet1.xml.rels",
+    ];
     let parts: Vec<(String, Vec<u8>)> = names.iter().map(|n| (n.to_string(), pkg.read(n).unwrap().unwrap())).collect();
     let mut entries: Vec<(&str, &[u8])> = parts.iter().map(|(n, d)| (n.as_str(), d.as_slice())).collect();
     entries.push(("xl/drawings/vmlDrawing1.vml", vml.as_bytes()));

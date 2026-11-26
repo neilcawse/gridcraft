@@ -30,8 +30,8 @@ use std::fmt::Write as _;
 
 use gridcraft_core::CellRef;
 use gridcraft_model::{
-    Anchor, AnchorMode, CONTROL_MAX, CaptionMarkup, CheckState, ControlAction, ControlKind, DROP_LINES_DEFAULT, DropDisplay, DropStyle,
-    FormControl, MacroInput, Sheet,
+    Anchor, AnchorMode, CONTROL_MAX, CaptionMarkup, CheckState, ControlAction, ControlKind, DROP_LINES_DEFAULT, DropDisplay, DropStyle, FormControl,
+    MacroInput, Sheet,
 };
 
 use crate::package::Rel;
@@ -382,7 +382,10 @@ fn vml_shape(sheet: &Sheet, c: &FormControl, id: u64, z: usize) -> String {
     data.push_str("</x:ClientData>");
     let text = match c.kind {
         ControlKind::Button => {
-            format!("<v:textbox style=\"mso-direction-alt:auto\" o:singleclick=\"f\"><div style=\"text-align:center\">{}</div></v:textbox>", esc(&c.text))
+            format!(
+                "<v:textbox style=\"mso-direction-alt:auto\" o:singleclick=\"f\"><div style=\"text-align:center\">{}</div></v:textbox>",
+                esc(&c.text)
+            )
         }
         ControlKind::Check => check_caption(c),
         _ => String::new(),
@@ -661,7 +664,11 @@ fn check_caption_of(shape: &El) -> Option<(String, Option<CaptionMarkup>)> {
     };
     let (holder, font) = match div.children.as_slice() {
         [] => (div, None),
-        [f] if f.name == "font" && f.children.is_empty() && blank(div) && f.attrs.iter().all(|(k, _)| matches!(k.as_str(), "face" | "size" | "color")) => {
+        [f] if f.name == "font"
+            && f.children.is_empty()
+            && blank(div)
+            && f.attrs.iter().all(|(k, _)| matches!(k.as_str(), "face" | "size" | "color")) =>
+        {
             (f, Some(f.attrs.clone()))
         }
         _ => return None,

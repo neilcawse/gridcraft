@@ -13,8 +13,7 @@
 
 use gridcraft_core::{CellError, CellRef, RangeRef, Value};
 use gridcraft_model::{
-    Anchor, AnchorMode, CONTROL_MAX, CheckState, ControlAction, ControlKind, FormControl, MAX_MACRO_NAME, MacroInput, ObjKind, Sheet,
-    Workbook,
+    Anchor, AnchorMode, CONTROL_MAX, CheckState, ControlAction, ControlKind, FormControl, MAX_MACRO_NAME, MacroInput, ObjKind, Sheet, Workbook,
 };
 use serde_json::{Value as Json, json};
 

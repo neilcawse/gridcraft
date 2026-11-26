@@ -240,7 +240,8 @@ pub fn paint(p: &Painter, r: Rect, c: &FormControl, z: f32, look: Look, shown: &
             clip.rect_stroke(mark, 0.0, frame, StrokeKind::Inside);
             if c.checked != CheckState::Unchecked {
                 let (m, s) = (mark.shrink(side * 0.22), side * 0.12);
-                let tick = vec![pos2(m.left(), m.center().y), pos2(m.left() + m.width() * 0.4, m.bottom() - s * 0.5), pos2(m.right(), m.top() + s * 0.5)];
+                let tick =
+                    vec![pos2(m.left(), m.center().y), pos2(m.left() + m.width() * 0.4, m.bottom() - s * 0.5), pos2(m.right(), m.top() + s * 0.5)];
                 let ink = if mixed { t.sheet_thumb } else { t.sheet_control_text };
                 clip.add(PathShape::line(tick, Stroke::new((1.6 * z).max(1.0), ink)));
             }
