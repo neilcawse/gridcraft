@@ -373,7 +373,7 @@ pub(crate) fn dispatch(app: &mut SheetApp, ctx: &egui::Context, key: Key, physic
         }
         Shortcut::ExtendToStart => extend(app, anchor, active, CellRef::new(0, 0)),
         Shortcut::ExtendToEnd => {
-            let end = sh.used_range().map(|u| u.end).unwrap_or_default();
+            let end = sh.last_cell();
             extend(app, anchor, active, end);
         }
         Shortcut::ExtendToRowStart => extend(app, anchor, active, CellRef::new(active.row, 0)),

@@ -200,21 +200,32 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 
 ### 25. Used worksheet extent and whole-line Paste Special (F)
 
-- The extent reported by workbook inspection and CLI `info` includes stored cells (including cell
-  formatting) and spills, not row or column records. The same extent backs Ctrl+End, Go To Special
-  (Last Cell), the review report's end-of-sheet field and grid navigation. In X25 measurements
-  on Excel for Mac 16.115.2, from a base extent of `C3:E5`, a height-only or styled row extended
-  it to `C3:E40` and a styled column to `C3:J5`. A width-only column and a bare XLSX row did not
-  extend it in these cases; a separate sizing probe did count a trailing bare row. After whole-row
-  paste in the X25 fixture, Excel reported UsedRange `A1:I10` and Last Cell `H10`, not `I10`.
-  See the [X25 case results](parity/INTEGRATION_NOTES.md#x25--whole-row-and-whole-column-paste)
+- Workbook inspection (`document.inspect` and CLI `info`) reports Excel's UsedRange, and Ctrl+End,
+  Ctrl+Shift+End, Go To Special (Last Cell) and the Workbook Statistics end-of-sheet field go to
+  Excel's Last Cell (X33). The reported extent is the shared work extent (stored cells, including
+  cell formatting, and spills) grown along each axis by the row and column records Excel counts:
+  a row with a height, a row style, hidden, or an outline level or collapsed mark; a column with
+  a column style, an outline level or a collapsed mark. A width-only column and a bare XLSX row do
+  not count. Last Cell is its bottom-right corner, stepped back over trailing hidden or zero-size
+  rows and columns. See the [X33 entry](parity/INTEGRATION_NOTES.md#x33--reported-usedrange-and-last-cell)
   and [Microsoft's last-cell guidance](https://support.microsoft.com/en-us/excel/locate-and-reset-the-last-cell-on-a-worksheet).
-- Do not widen the shared extent based on those observations alone. It also bounds default and
-  selected-area print/PDF layout, CSV and range/text/HTML export, calculation, charts and pivots
-  (including XLSX serialization ranges), conditional formatting, selection, clipboard, fill, clear,
-  sort, validation, AutoFit, sheet operations, spelling, forecast, what-if analysis and macros.
-  In particular, Excel's default print and CSV bounds for bare or geometry-only lines are unmeasured.
-  A separate reported extent for inspection and navigation would avoid changing those work bounds.
+- The shared work extent is unchanged. It bounds default and selected-area print/PDF layout, CSV
+  and range/text/HTML export, calculation, charts and pivots (including XLSX serialization ranges),
+  conditional formatting, selection, clipboard, fill, clear, sort, validation, AutoFit, sheet
+  operations, spelling, forecast, what-if analysis, macros, Ctrl+arrow navigation and the grid's
+  scroll extent. Excel's default print and CSV bounds for bare or geometry-only lines are unmeasured.
+- Two residual extent differences come from the paste payload, not the extent rule. After
+  whole-row or whole-column Copy/Cut of an outlined hidden group (`x25-copy-*`, `x25-cut-*`, Paste
+  Special All), Excel's extent includes the line after the group (`A1:I10`, `A1:J9`). The
+  inferred cause is that Excel transfers the source outline level and marks that summary line
+  collapsed; GridCraft keeps outline and collapse on the destination lines, so after a GridCraft
+  `edit.paste` the reported extent stays `A1:I9` and Last Cell, with both pasted lines hidden, is
+  `H7` (rows) or `G8` (columns); Paste Special All transfers no line formatting and stays at
+  `A1:I9` / `H8`. Excel's outline getters returned no value, so this cause is unmeasured. And
+  Copy of a bare or absent whole row onto untouched rows grows Excel's extent to those rows
+  (`A1:I11`, `A1:I12`) with no readable line change; GridCraft keeps no record for them. Pending
+  probes: OutlineLevel/ShowDetail after a whole-row copy, and save/reopen of pasted bare or
+  absent rows. A persisted record found there belongs in paste, not in the extent rule.
 - Whole-line Paste Special (including All), Insert Copied Cells, drag-and-drop and filtered or
   packed paste retain their previous behavior; the X25 probes measured direct Copy/Cut, not these
   paths. Ordinary whole-column paste now transfers inherited column styles and a cut resets the
@@ -228,6 +239,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-26 | minor | §25: inspection reports Excel's UsedRange and Ctrl+End, Go To Special and Workbook Statistics use its Last Cell; the shared work extent is unchanged; record the residual paste-payload differences and pending probes. |
 | 2026-11-25 | minor | §25: transfer and reset inherited column styles on ordinary whole-column paste, as Excel's blank-cell readbacks show for copy and cut. |
 | 2026-11-25 | minor | §25: copy and cut whole-line geometry and inherited row style on ordinary paste; record the remaining extent and Paste Special gaps. |
 | 2026-11-02 | minor | §17: equations (Insert › Equation, LaTeX source, gallery, editor) |

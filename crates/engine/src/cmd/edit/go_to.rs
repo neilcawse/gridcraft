@@ -220,7 +220,7 @@ pub(super) fn go_to_special(s: &mut Session, p: &Json) -> Result<Json> {
     let Some(sheet) = d.wb.active() else { return Err(EngineError::NoDocument) };
     let scope = if d.selection.is_single_cell() { sheet.used_range().unwrap_or(RangeRef::cell(d.selection.active)) } else { d.selection.bounds() };
     if kind == "lastCell" {
-        let c = sheet.used_range().map(|r| r.end).unwrap_or_default();
+        let c = sheet.last_cell();
         return selection_set(s, &json!({"cell": c.a1()}));
     }
     if kind == "currentRegion" {

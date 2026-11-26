@@ -60,9 +60,9 @@ formulas. The observed styles of sampled populated cells moved with those cells.
 
 For the action cases the baseline Excel extent is `A1:I9` / `H8`; a sheet not receiving the paste
 retains that extent. Last Cell need not be UsedRange's bottom-right, including with hidden lines
-in these workbooks. GridCraft still uses stored cells (plus spills) for both reads; the extent
-gap belongs to [worksheet inspection and navigation](../gaps.md#25-used-worksheet-extent-and-whole-line-paste-special-f),
-not the shared bounds for print, export or calculation.
+in these workbooks. Since X33, inspection reports Excel's UsedRange and navigation uses its Last
+Cell, while print, export and calculation keep the shared work extent; see
+[X33](#x33--reported-usedrange-and-last-cell).
 
 GridCraft transfers size and effective visibility for contiguous whole-line `edit.paste`, and
 transfers inherited row and column styles. An absent source resets those fields. For a default
@@ -149,3 +149,66 @@ Inferred, not measured:
 
 Partial-range AutoFill (any source that is not entire rows or entire columns) and Fill
 Down/Right/Up/Left keep their previous behaviour and leave line formatting alone.
+
+## X33 — Reported UsedRange and Last Cell
+
+Evidence: the `used_range` and `last_cell` object-model readbacks of every X25 case in the three
+default-cohort run sets and the X25-clipboard run (Excel for Mac 16.115.2); all four agree. They
+are `UsedRange` and `SpecialCells(xlCellTypeLastCell)` readbacks, not Ctrl+End keypresses.
+
+| Final state | UsedRange / Last Cell |
+|---|---|
+| Fixture S and T before any action: cells to A1:I9, row 9 and column I hidden | `A1:I9` / `H8` |
+| Data `C3:E5` alone, plus a bare `<row r="40"/>`, plus a width-only column J | `C3:E5` / `E5` |
+| Data `C3:E5` plus a height-only or a style-only row 40 | `C3:E40` / `E40` |
+| Data `C3:E5` plus a style-only column J at the default width | `C3:J5` / `J5` |
+| Whole rows 3:4 copied, cut or Paste Special All to row 8 (rows 8:9 hidden) | `A1:I10` / `H10` |
+| Whole columns C:D copied or cut to column H (H:I hidden) | `A1:J9` / `J8` |
+| Insert Copied Cells at row 8 (old row 9, hidden, now row 11) | `A1:I11` / `H10` |
+| A3:B4 copied to A8; default row/column copied over custom row 8 / column H | `A1:I9` / `H8` |
+| Bare or absent row copied over untouched row 11 / 12 | `A1:I11` / `H11`, `A1:I12` / `H12` |
+
+**UsedRange rule** (`Sheet::reported_used_range`). The shared extent (stored cells, styled
+blanks included, and spills) grown along each axis by the line records Excel counts.
+
+- Measured: a row height or row style counts; a column style counts; a column width alone and a
+  bare row element do not. A row record grows only the row bounds (`C3:E40`, not `A3:E40` or a
+  full-width range), and a column record only the column bounds.
+- Inferred: a hidden row counts (its height is zero) but a hidden column does not (a width alone
+  does not count). An outline level or a collapsed mark counts on either axis; this is what
+  explains the extra line after a pasted hidden group (row 10, column J), whose readbacks show
+  only default geometry. A line above or left of the cells extends the top or left bound too.
+  With no cells and lines on only one axis, the other axis spans its first line. Thick-edge flags
+  do not count.
+- `saved_element` (a bare `<row>` kept for save and custom-default fitting) does not count, per
+  `x25-used-bare-row`. The sizing probe that saw a trailing bare row in UsedRange used a switched
+  custom-default sheet, where that row fits to a non-default height; GridCraft gives the fitted
+  row a size, so it counts there by the height rule.
+
+**Last Cell rule** (`Sheet::last_cell`). The bottom-right corner of the reported extent, stepped
+back over its trailing rows and columns of zero effective size. Measured: hidden trailing row 9,
+11 and column I are skipped (`H8`, `J8`, `H10`); a trailing row without a style or cells is not
+(`H10` after row paste), so only hidden lines are excluded. Inferred: zero-size lines that are not
+flagged hidden, and filtered rows, are skipped like hidden ones; when every line back to the
+extent's first is hidden, Last Cell stays on that first line; an empty sheet gives A1.
+
+**Consumers switched.** `document.inspect` `usedRange` (and so CLI `info`) reports the new
+extent. `edit.goToSpecial` `lastCell`, Ctrl+End and Ctrl+Shift+End in the grid, and
+`review.workbookStatistics` `endOfSheet` use Last Cell. The end-of-sheet field moved because
+[Microsoft documents it as "End of sheet / Last cell"](https://support.microsoft.com/en-us/excel/check-workbook-statistics);
+it is still `null` on an empty sheet. Every other `Sheet::used_range` caller is unchanged,
+including print/PDF, CSV and other exports, calculation, charts, pivots, Ctrl+arrow navigation,
+Go To Special's search scope, `sheet.read` and the grid's scroll extent. This changes published
+command output: `document.inspect` and `review.workbookStatistics` can report a larger range or a
+different end cell than before.
+
+**Residual differences** (paste payload, documented in `docs/gaps.md` §25). After GridCraft's own
+whole-row/column Copy or Cut the destination keeps its outline level and has no collapsed summary
+line, so it reports `A1:I9` where Excel reports `A1:I10` / `A1:J9`; Paste Special All still does not
+transfer line formatting at all. A copied bare or absent row leaves no GridCraft record, so
+`x25-bare-row-over-untouched` and `x25-absent-row-over-untouched` still report `A1:I9`. Pending
+Excel probes: OutlineLevel/ShowDetail after whole-row copy, and save/reopen of pasted bare or
+absent rows.
+
+Tests (`crates/engine/tests/it/inspect_extent.rs`) build each measured final state in code; the
+outlined-group states carry the inferred outline level and collapsed summary line.

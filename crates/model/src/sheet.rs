@@ -611,12 +611,59 @@ impl Sheet {
     pub fn table_at(&self, c: CellRef) -> Option<&Table> {
         self.tables.iter().find(|t| t.range.contains(c))
     }
+    /// The shared work extent: stored cells (styled blanks included) and spills. Print, export,
+    /// calculation, charts, pivots and the other work bounds use it; inspection and Last Cell
+    /// use [`Sheet::reported_used_range`] instead.
     pub fn used_range(&self) -> Option<RangeRef> {
         let mut r = self.cells.used_range();
         for sr in self.spill_ranges.values() {
             r = Some(r.map_or(*sr, |x| x.union(sr)));
         }
         r
+    }
+    /// The extent Excel reports as the worksheet's UsedRange: [`Sheet::used_range`] grown along
+    /// each axis by the line records Excel counts. A row counts with a height, a row style,
+    /// hidden, or an outline level or collapsed mark; a column with a column style, an outline
+    /// level or a collapsed mark, not with a width alone. A bare row (`saved_element` only) does
+    /// not count. A line grows only its own axis; an axis with no cells or counted lines spans
+    /// its first line.
+    pub fn reported_used_range(&self) -> Option<RangeRef> {
+        fn span(lines: &BTreeMap<u32, LineInfo>, counts: fn(&LineInfo) -> bool) -> Option<(u32, u32)> {
+            let first = lines.iter().find(|(_, l)| counts(l))?.0;
+            let last = lines.iter().rev().find(|(_, l)| counts(l))?.0;
+            Some((*first, *last))
+        }
+        fn join(cells: Option<(u32, u32)>, lines: Option<(u32, u32)>) -> (u32, u32) {
+            match (cells, lines) {
+                (Some((a, b)), Some((c, d))) => (a.min(c), b.max(d)),
+                (Some(x), None) | (None, Some(x)) => x,
+                (None, None) => (0, 0),
+            }
+        }
+        let rows = span(&self.rows, |l| l.size.is_some() || l.style.is_some() || l.hidden || l.outline > 0 || l.collapsed);
+        let cols = span(&self.cols, |l| l.style.is_some() || l.outline > 0 || l.collapsed);
+        let cells = self.used_range();
+        if cells.is_none() && rows.is_none() && cols.is_none() {
+            return None;
+        }
+        let (r0, r1) = join(cells.map(|u| (u.start.row, u.end.row)), rows);
+        let (c0, c1) = join(cells.map(|u| (u.start.col, u.end.col)), cols);
+        Some(RangeRef::new(CellRef::new(r0, c0), CellRef::new(r1, c1)))
+    }
+    /// Excel's Last Cell (Ctrl+End, Go To Special › Last cell): the bottom-right corner of
+    /// [`Sheet::reported_used_range`], stepped back over its trailing rows and columns of zero
+    /// size (hidden ones included), never past its first line; A1 on an empty sheet.
+    pub fn last_cell(&self) -> CellRef {
+        let Some(u) = self.reported_used_range() else { return CellRef::default() };
+        let mut row = u.end.row;
+        while row > u.start.row && self.row_height(row) <= 0.0 {
+            row -= 1;
+        }
+        let mut col = u.end.col;
+        while col > u.start.col && self.col_width(col) <= 0.0 {
+            col -= 1;
+        }
+        CellRef::new(row, col)
     }
     pub fn is_protected(&self) -> bool {
         self.protection.is_some()
