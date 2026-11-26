@@ -104,7 +104,7 @@ pub fn diff_workbooks(a: &Workbook, b: &Workbook, opts: &Options) -> Vec<Categor
 
 struct SheetSnap {
     raw_name: String,
-    cells: Vec<(CellRef, Value, gridcraft_engine::model::StyleId, Option<Box<str>>)>,
+    cells: Vec<(CellRef, Value, gridcraft_engine::model::StyleId, Option<std::sync::Arc<gridcraft_engine::model::Formula>>)>,
     merges: BTreeSet<String>,
     tables: BTreeSet<String>,
     cond_formats: Vec<String>,
@@ -166,10 +166,8 @@ impl WorkbookSnap {
             let raw_name = sh.name.clone();
             let mut cells = Vec::with_capacity(sh.cells.len());
             for (c, cell) in sh.cells.iter() {
-                let f = cell.formula.is_some().then(|| formula_text(cell).into_boxed_str());
-                cells.push((c, as_cached(cell.value.scalar()), cell.style, f));
+                cells.push((c, as_cached(cell.value.scalar()), cell.style, cell.formula.clone()));
             }
-            drop(sh);
             sheets.push(SheetSnap { raw_name, cells, merges, tables, cond_formats, validations, charts, comments, hyperlinks, pivots });
         }
         Self { styles, names, sheets }
@@ -205,6 +203,7 @@ fn diff_snap_with_workbook(a: WorkbookSnap, mut b: Workbook, opts: &Options) -> 
     let mut hyperlinks = Diffs::new("hyperlinks", m);
     let mut pivots = Diffs::new("pivots", m);
 
+    let mut pair_cache: std::collections::HashMap<(usize, usize, i32, i32), bool> = std::collections::HashMap::new();
     for (sa, sb_arc) in a.sheets.into_iter().zip(sheets_b) {
         let sb = std::sync::Arc::unwrap_or_clone(sb_arc);
         let name = quote_sheet(&sa.raw_name);
@@ -214,11 +213,33 @@ fn diff_snap_with_workbook(a: WorkbookSnap, mut b: Workbook, opts: &Options) -> 
             if *va != vb {
                 values.push(|| format!("{name}!{}: {} → {}", c.a1(), value_show(va), value_show(&vb)));
             }
-            let fa_str = fa.as_deref().unwrap_or("");
-            if !fa_str.is_empty() || cb.is_some_and(|x| x.formula.is_some()) {
-                let fb = opt_formula(cb);
-                if fa_str != fb {
-                    formulas.push(|| format!("{name}!{}: {fa_str} → {fb}", c.a1()));
+            let fb = cb.and_then(|x| x.formula.as_ref());
+            if fa.is_some() || fb.is_some() {
+                let same = match (fa, fb) {
+                    (Some(a_f), Some(b_f)) if a_f.array == b_f.array => {
+                        if let (Some((ba, dra, dca)), Some((bb, drb, dcb))) = (a_f.expr_shifted(), b_f.expr_shifted()) {
+                            let key = (
+                                std::sync::Arc::as_ptr(ba) as usize,
+                                std::sync::Arc::as_ptr(bb) as usize,
+                                dra.wrapping_sub(drb),
+                                dca.wrapping_sub(dcb),
+                            );
+                            *pair_cache.entry(key).or_insert_with(|| a_f.text() == b_f.text())
+                        } else {
+                            a_f.text() == b_f.text()
+                        }
+                    }
+                    _ => false,
+                };
+                if !same {
+                    let fa_str = fa
+                        .as_ref()
+                        .map(|f| if f.array.is_some() { format!("{{={}}}", f.text()) } else { format!("={}", f.text()) })
+                        .unwrap_or_default();
+                    let fb_str = opt_formula(cb);
+                    if fa_str != fb_str {
+                        formulas.push(|| format!("{name}!{}: {fa_str} → {fb_str}", c.a1()));
+                    }
                 }
             }
             let na = styles_a.get(style_a).num_fmt.as_str();

@@ -150,7 +150,7 @@ fn editing_a_name_renames_it_in_formulas() {
     let names: Vec<&str> = d.wb.names.iter().map(|n| n.name.as_str()).collect();
     assert_eq!(names, ["Other", "Cost"]);
     let b1 = d.wb.active().unwrap().cell(CellRef::parse("B1").unwrap()).and_then(|c| c.formula.clone()).unwrap();
-    assert_eq!(b1.text, "Cost*2");
+    assert_eq!(b1.text(), "Cost*2");
     assert_eq!(v(&s, "B1"), Value::number(42.0));
     assert!(s.execute("formulas.defineName", json!({"name": "X", "oldName": "Missing"})).is_err());
 }
@@ -398,7 +398,7 @@ fn typed_references_to_workbooks_that_are_not_linked_are_refused_on_entry() {
         s.execute("cell.set", json!({"cell": cell, "input": input})).unwrap();
         let d = s.doc().unwrap();
         let f = d.wb.active().unwrap().cell(CellRef::parse(cell).unwrap()).and_then(|c| c.formula.clone()).unwrap();
-        assert_eq!(f.text, text, "{input}");
+        assert_eq!(f.text(), text, "{input}");
     }
     assert_eq!((v(&s, "D1"), v(&s, "D2"), v(&s, "D3")), (Value::Number(14.0), Value::Number(7.0), Value::Number(14.0)));
     // A `[0]` name is stored as the local reference, so it follows a sheet rename.
@@ -738,9 +738,9 @@ fn bulk_formula_history_is_bounded_and_latest_edit_still_undoes() {
     doc.wb = current;
     doc.undo = history;
     session.execute("edit.undo", json!({})).unwrap();
-    assert_eq!(session.doc().unwrap().wb.active().unwrap().cells.get(CellRef::new(0, 0)).unwrap().formula.as_ref().unwrap().text, "B1+3");
+    assert_eq!(session.doc().unwrap().wb.active().unwrap().cells.get(CellRef::new(0, 0)).unwrap().formula.as_ref().unwrap().text(), "B1+3");
     session.execute("edit.redo", json!({})).unwrap();
-    assert_eq!(session.doc().unwrap().wb.active().unwrap().cells.get(CellRef::new(0, 0)).unwrap().formula.as_ref().unwrap().text, "B1+4");
+    assert_eq!(session.doc().unwrap().wb.active().unwrap().cells.get(CellRef::new(0, 0)).unwrap().formula.as_ref().unwrap().text(), "B1+4");
 }
 
 #[test]
@@ -2751,7 +2751,7 @@ fn autosum_over_whole_rows_is_one_undo_step_within_the_data() {
 }
 
 fn formula_at(s: &Session, a: &str) -> Option<String> {
-    s.doc().unwrap().wb.active().unwrap().cell(CellRef::parse(a).unwrap()).and_then(|c| c.formula.as_ref().map(|f| f.text.clone()))
+    s.doc().unwrap().wb.active().unwrap().cell(CellRef::parse(a).unwrap()).and_then(|c| c.formula.as_ref().map(|f| f.text().into_owned()))
 }
 
 #[test]
@@ -4503,8 +4503,8 @@ fn xlsb_import_keeps_cached_values_and_reports_limits() {
         assert_eq!(v(&s, "A1"), Value::Number(42.0));
         assert_eq!(v(&s, "B1"), Value::from("Original data"));
         assert_eq!(
-            s.doc().unwrap().wb.active().unwrap().cell(CellRef::parse("A1").unwrap()).unwrap().formula.as_ref().map(|f| f.text.as_str()),
-            Some("42")
+            s.doc().unwrap().wb.active().unwrap().cell(CellRef::parse("A1").unwrap()).unwrap().formula.as_ref().map(|f| f.text().into_owned()),
+            Some("42".to_string())
         );
         s.execute("cell.set", json!({"cell": "B1", "input": "Changed"})).unwrap();
         assert_eq!(v(&s, "A1"), Value::Number(42.0));
@@ -4692,8 +4692,8 @@ fn xls_formulas_calculate_with_legacy_implicit_intersection() {
     let saved = crate::io::base64_decode(r["base64"].as_str().unwrap()).unwrap();
     let (wb, _) = gridcraft_xlsx::read_xlsx(&saved).unwrap();
     let f = |a1: &str| wb.sheets[1].cell(CellRef::parse(a1).unwrap()).and_then(|c| c.formula.clone()).unwrap();
-    assert_eq!(f("A1").text, "@Data!A1:G1");
-    assert_eq!((f("H1").text.as_str(), f("H1").array), ("SUM(Data!$A$2:$A$3*2)", gridcraft_core::RangeRef::parse("H1")));
+    assert_eq!(f("A1").text(), "@Data!A1:G1");
+    assert_eq!((f("H1").text().into_owned(), f("H1").array), ("SUM(Data!$A$2:$A$3*2)".to_string(), gridcraft_core::RangeRef::parse("H1")));
     let mut sheet = String::new();
     std::io::Read::read_to_string(
         &mut zip::ZipArchive::new(std::io::Cursor::new(&saved)).unwrap().by_name("xl/worksheets/sheet2.xml").unwrap(),
@@ -8018,4 +8018,60 @@ fn history_charges_the_storage_of_empty_comment_replies() {
     let sheet = s.doc().unwrap().wb.sheet(0).unwrap().clone();
     // 500 replies of no text are still 500 elements.
     assert!(crate::sheet_text_bytes(&sheet) >= 500 * std::mem::size_of::<(String, String)>());
+}
+
+#[test]
+fn xlsx_shared_aggregate_filtered_div_matches_non_shared_cells() {
+    use std::io::{Cursor, Write};
+    let mut rows = String::new();
+    for r in 2..=21u32 {
+        let key = if r % 5 == 2 { 3 } else { 1 };
+        rows.push_str(&format!(
+            r#"<row r="{r}"><c r="A{r}"><v>{key}</v></c><c r="C{r}"><v>{}</v></c><c r="D{r}"><v>{}</v></c><c r="E{r}"><v>{}</v></c></row>"#,
+            r * 10,
+            r * 100,
+            r * 1000
+        ));
+    }
+    rows.push_str(
+        r#"<row r="30"><c r="G30"><f t="shared" ref="G30:I30" si="0">AGGREGATE(14,6,C$2:C$21/($A$2:$A$21=3),1)</f></c><c r="H30"><f t="shared" si="0"/></c><c r="I30"><f t="shared" si="0"/></c></row>"#,
+    );
+    rows.push_str(
+        r#"<row r="31"><c r="G31"><f>AGGREGATE(14,6,C$2:C$21/($A$2:$A$21=3),1)</f></c><c r="H31"><f>AGGREGATE(14,6,D$2:D$21/($A$2:$A$21=3),1)</f></c><c r="I31"><f>AGGREGATE(14,6,E$2:E$21/($A$2:$A$21=3),1)</f></c></row>"#,
+    );
+    let sheet_xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{rows}</sheetData></worksheet>"#
+    );
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let parts: &[(&str, &[u8])] = &[
+        (
+            "[Content_Types].xml",
+            br#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+        ),
+        (
+            "_rels/.rels",
+            br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+        ),
+        (
+            "xl/workbook.xml",
+            br#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+        ),
+        ("xl/worksheets/sheet1.xml", sheet_xml.as_bytes()),
+    ];
+    for (name, data) in parts {
+        zip.start_file(*name, opts).unwrap();
+        zip.write_all(data).unwrap();
+    }
+    let bytes = zip.finish().unwrap().into_inner();
+    let (mut wb, _) = crate::io::open_bytes("shared_agg.xlsx", &bytes).unwrap();
+    gridcraft_calc::Calc::new().recalc_all(&mut wb);
+    let sh = wb.sheet(0).unwrap();
+    let val = |a1: &str| sh.value(CellRef::parse(a1).unwrap());
+    assert_eq!([val("G30"), val("H30"), val("I30")], [Value::Number(170.0), Value::Number(1700.0), Value::Number(17000.0)]);
+    assert_eq!([val("G30"), val("H30"), val("I30")], [val("G31"), val("H31"), val("I31")]);
 }

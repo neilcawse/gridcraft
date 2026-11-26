@@ -173,8 +173,26 @@ pub struct NumberIndex {
 }
 
 /// Canonical IEEE-754 bit pattern for exact numeric lookup (`-0.0` normalized to `+0.0`).
+#[inline]
 fn number_bits(n: f64) -> u64 {
     if n == 0.0 { 0.0f64.to_bits() } else { n.to_bits() }
+}
+
+/// Rounds `x` to 15 significant digits identically to [`compare_numbers`], with an O(1) fast path
+/// for exact integers below 1e15 (which already have <= 15 significant digits).
+#[inline]
+fn round15_bits(x: f64) -> u64 {
+    if x == 0.0 {
+        return 0.0f64.to_bits();
+    }
+    if !x.is_finite() {
+        return x.to_bits();
+    }
+    if x.fract() == 0.0 && x.abs() < 1e15 {
+        return x.to_bits();
+    }
+    let r: f64 = format!("{x:.14e}").parse().unwrap_or(x);
+    number_bits(r)
 }
 
 impl NumberIndex {
@@ -197,6 +215,39 @@ impl NumberIndex {
             return &[];
         }
         self.by_bits.get(&number_bits(n)).map_or(&[], Vec::as_slice)
+    }
+}
+
+/// 15-significant-digit numeric equality index for `COUNTIF`/`SUMIF`/`*IFS` criteria matching:
+/// indexes both `Value::Number` and numeric-text `Value::Text` cells (matching Excel's criteria
+/// rule that `"1"` equals `1` and 15-sig-digit rounding).
+#[derive(Default, Debug)]
+#[doc(hidden)]
+pub struct CriteriaNumberIndex {
+    by_round15: std::collections::HashMap<u64, Vec<u32>>,
+}
+
+impl CriteriaNumberIndex {
+    fn build(data: &[Value]) -> Self {
+        let mut by_round15: std::collections::HashMap<u64, Vec<u32>> = std::collections::HashMap::new();
+        for (i, v) in data.iter().enumerate() {
+            let n = match v {
+                Value::Number(x) if x.is_finite() => Some(*x),
+                Value::Text(t) => crate::parse::parse_number_text(t).filter(|x| x.is_finite()),
+                _ => None,
+            };
+            if let Some(n) = n {
+                by_round15.entry(round15_bits(n)).or_default().push(i as u32);
+            }
+        }
+        Self { by_round15 }
+    }
+
+    fn positions(&self, n: f64) -> &[u32] {
+        if !n.is_finite() {
+            return &[];
+        }
+        self.by_round15.get(&round15_bits(n)).map_or(&[], Vec::as_slice)
     }
 }
 
@@ -223,6 +274,16 @@ pub struct Array {
     #[serde(skip)]
     #[doc(hidden)]
     pub number_queries: std::sync::atomic::AtomicU32,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub criteria_number_index: std::sync::OnceLock<CriteriaNumberIndex>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub criteria_number_queries: std::sync::atomic::AtomicU32,
+    /// Cached error scan: 0 = unknown, 1 = no errors, 2 = has at least one `Value::Error`.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub error_state: std::sync::atomic::AtomicU8,
 }
 
 impl Default for Array {
@@ -241,10 +302,12 @@ impl Clone for Array {
             text_queries: std::sync::atomic::AtomicU32::new(0),
             number_index: std::sync::OnceLock::new(),
             number_queries: std::sync::atomic::AtomicU32::new(0),
+            criteria_number_index: std::sync::OnceLock::new(),
+            criteria_number_queries: std::sync::atomic::AtomicU32::new(0),
+            error_state: std::sync::atomic::AtomicU8::new(0),
         }
     }
 }
-
 impl PartialEq for Array {
     fn eq(&self, other: &Self) -> bool {
         self.rows == other.rows && self.cols == other.cols && self.data == other.data
@@ -261,6 +324,9 @@ impl Array {
             text_queries: std::sync::atomic::AtomicU32::new(0),
             number_index: std::sync::OnceLock::new(),
             number_queries: std::sync::atomic::AtomicU32::new(0),
+            criteria_number_index: std::sync::OnceLock::new(),
+            criteria_number_queries: std::sync::atomic::AtomicU32::new(0),
+            error_state: std::sync::atomic::AtomicU8::new(0),
         }
     }
     pub fn new(rows: usize, cols: usize, data: Vec<Value>) -> Option<Array> {
@@ -335,9 +401,35 @@ impl Array {
         }
         Some(self.number_index.get_or_init(|| NumberIndex::build(&self.data)).positions(n))
     }
+    /// Positions (0-based into `data`, ascending) whose value satisfies Excel numeric criteria
+    /// equality (`COUNTIF`/`SUMIF`/`*IFS`: `Value::Number` or numeric `Value::Text` equal under
+    /// 15-significant-digit [`compare_numbers`]), or `None` when too small or only queried once.
+    pub fn criteria_number_positions(&self, n: f64) -> Option<&[u32]> {
+        if self.data.len() < 64 || !n.is_finite() {
+            return None;
+        }
+        if self.criteria_number_index.get().is_none() && self.criteria_number_queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+            return None;
+        }
+        Some(self.criteria_number_index.get_or_init(|| CriteriaNumberIndex::build(&self.data)).positions(n))
+    }
+    /// Whether any element of `data` is `Value::Error` (cached after first check).
+    pub fn has_errors(&self) -> bool {
+        match self.error_state.load(std::sync::atomic::Ordering::Relaxed) {
+            1 => false,
+            2 => true,
+            _ => {
+                let found = self.data.iter().any(Value::is_error);
+                self.error_state.store(if found { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
+                found
+            }
+        }
+    }
     /// Whether a text or number lookup index has been built on this array.
     pub fn has_lookup_index(&self) -> bool {
-        self.text_index.get().is_some_and(|idx| idx.by_text.is_some()) || self.number_index.get().is_some()
+        self.text_index.get().is_some_and(|idx| idx.by_text.is_some())
+            || self.number_index.get().is_some()
+            || self.criteria_number_index.get().is_some()
     }
 }
 

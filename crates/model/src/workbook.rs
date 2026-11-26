@@ -7,7 +7,6 @@ use gridcraft_core::{CellRef, DateSystem, RangeRef, Value};
 use gridcraft_formula::Expr;
 use serde::{Deserialize, Serialize};
 
-use crate::cell::Formula;
 use crate::sheet::Sheet;
 use crate::style::{StyleTable, Theme};
 
@@ -542,7 +541,7 @@ impl Workbook {
                     let f = cell.formula.as_ref()?;
                     let e = f.expr()?;
                     let ne = spell_calls(e.clone(), &lambdas);
-                    (ne != e).then(|| (c, Formula { array: f.array, ..f.rewritten(ne) }))
+                    (ne != e).then(|| (c, f.rewritten(ne).with_array(f.array)))
                 })
                 .collect();
             if fixed.is_empty() {

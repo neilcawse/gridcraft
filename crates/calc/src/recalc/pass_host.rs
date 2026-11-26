@@ -20,10 +20,10 @@ type BlockSums = std::collections::BTreeMap<u32, Option<(f64, u64)>>;
 /// Maximum cells in a single range array kept in [`PassHost::range_cache`], and total cells cached
 /// across all ranges before the cache is evicted to bound pass memory.
 const MAX_SINGLE_CACHE_CELLS: usize = 524_288;
-const MAX_RANGE_CACHE_CELLS: usize = 1_500_000;
+const MAX_RANGE_CACHE_CELLS: usize = 4_000_000;
 pub(super) struct PassHost<'a> {
     wb: &'a Workbook,
-    exprs: &'a HashMap<Key, std::sync::Arc<Expr>>,
+    exprs: &'a HashMap<Key, (std::sync::Arc<Expr>, i32, i32)>,
     pub(super) results: HashMap<Key, Value>,
     pending: HashSet<Key>,
     in_progress: HashSet<Key>,
@@ -36,9 +36,9 @@ pub(super) struct PassHost<'a> {
     /// Used range per sheet: the workbook doesn't change during a pass, and working it out walks
     /// every row, so once per sheet rather than once per range read.
     used: HashMap<usize, Option<RangeRef>>,
-    /// Evaluated range arrays (`(sheet, range)` → `Arc<Array>`) once every cell in the range has
-    /// finished evaluating; cleared if dynamic-array spills change.
-    range_cache: HashMap<(usize, RangeRef), std::sync::Arc<Array>>,
+    /// Evaluated range arrays (`(sheet, range)` → `(Arc<Array>, index_accounted)`) once every cell
+    /// in the range has finished evaluating; cleared if dynamic-array spills change.
+    range_cache: HashMap<(usize, RangeRef), (std::sync::Arc<Array>, bool)>,
     range_cache_cells: usize,
     range_cache_spills: usize,
     rng: &'a mut u64,
@@ -111,7 +111,7 @@ pub(super) struct PassHost<'a> {
 impl<'a> PassHost<'a> {
     pub(super) fn new(
         wb: &'a Workbook,
-        exprs: &'a HashMap<Key, std::sync::Arc<Expr>>,
+        exprs: &'a HashMap<Key, (std::sync::Arc<Expr>, i32, i32)>,
         rng: &'a mut u64,
         now: f64,
         saved: Option<&'a HashMap<Key, Value>>,
@@ -329,9 +329,10 @@ impl PassHost<'_> {
         if let Some(result) = self.python.get(&k).cloned() {
             return self.python_result(k, result);
         }
-        let Some(expr) = self.exprs.get(&k) else {
+        let Some((expr, dr, dc)) = self.exprs.get(&k) else {
             return self.wb.sheet(k.0).map(|s| s.value(k.1)).unwrap_or_default();
         };
+        let (expr, shift) = (std::sync::Arc::clone(expr), (*dr, *dc));
         if self.suspend.is_some() {
             // Unwinding to `calculate`: the value is thrown away. A formula read at the limit is
             // calculated with the suspended one, so the evaluations are not restarted for each.
@@ -364,11 +365,10 @@ impl PassHost<'_> {
         if self.iterate {
             self.stack.push(k);
         }
-        let expr = std::sync::Arc::clone(expr);
         let outer_unknown = std::mem::replace(&mut self.unknown_link, false);
         let outer_out_of_stack = std::mem::replace(&mut self.out_of_stack, false);
         let v = {
-            let mut ev = Evaluator::new(self, k.0, k.1);
+            let mut ev = Evaluator::with_shift(self, k.0, k.1, shift);
             ev.value(&expr)
         };
         let out_of_stack = std::mem::replace(&mut self.out_of_stack, outer_out_of_stack);
@@ -777,12 +777,19 @@ impl Host for PassHost<'_> {
             self.clear_range_cache();
         }
         if !self.iterate
-            && let Some(arr) = self.range_cache.get(&(sheet, range))
+            && let Some((arr, accounted)) = self.range_cache.get_mut(&(sheet, range))
         {
             let arr = std::sync::Arc::clone(arr);
-            if arr.has_lookup_index() && self.range_cache_cells.saturating_add(arr.data.len()) > MAX_RANGE_CACHE_CELLS {
-                self.range_cache.clear();
-                self.range_cache_cells = 0;
+            if !*accounted && arr.has_lookup_index() {
+                *accounted = true;
+                self.range_cache_cells = self.range_cache_cells.saturating_add(arr.data.len());
+                if self.range_cache_cells > MAX_RANGE_CACHE_CELLS {
+                    // Keep the entry we just hit so an indexed range never evicts itself.
+                    self.range_cache.clear();
+                    let cost = arr.data.len().saturating_mul(2);
+                    self.range_cache.insert((sheet, range), (std::sync::Arc::clone(&arr), true));
+                    self.range_cache_cells = cost;
+                }
             }
             return Some(arr);
         }
@@ -804,7 +811,7 @@ impl Host for PassHost<'_> {
                 self.range_cache_cells = 0;
             }
             self.range_cache_cells = self.range_cache_cells.saturating_add(cells);
-            self.range_cache.insert((sheet, range), std::sync::Arc::clone(&arr));
+            self.range_cache.insert((sheet, range), (std::sync::Arc::clone(&arr), false));
         }
         Some(arr)
     }

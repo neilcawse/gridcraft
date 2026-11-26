@@ -47,17 +47,25 @@ pub(crate) fn read(cx: &mut Ctx<'_>, wb_xml: &El, wb_rels: &[Rel]) -> Result<Vec
 /// like any other.
 pub(crate) fn saved_as_read(formula: &gridcraft_model::Formula) -> bool {
     use gridcraft_formula::{Expr, SheetSel};
-    let Some(expr) = formula.expr_arc().filter(|_| formula.legacy && formula.array.is_none()) else { return false };
-    let mut linked = false;
-    expr.walk(&mut |e| {
-        linked |= match e {
-            Expr::Ref(r) => matches!(&r.sheet, SheetSel::Named(s) | SheetSel::Span(s, _) if s.starts_with('[')),
-            Expr::Name(n) => n.starts_with('['),
-            Expr::LinkedRefError(_) => true,
-            _ => false,
-        }
-    });
-    linked
+    if !formula.legacy || formula.array.is_some() {
+        return false;
+    }
+    let check = |expr: &Expr| {
+        let mut linked = false;
+        expr.walk(&mut |e| {
+            linked |= match e {
+                Expr::Ref(r) => matches!(&r.sheet, SheetSel::Named(s) | SheetSel::Span(s, _) if s.starts_with('[')),
+                Expr::Name(n) => n.starts_with('['),
+                Expr::LinkedRefError(_) => true,
+                _ => false,
+            }
+        });
+        linked
+    };
+    if let Some((base, _, _)) = formula.expr_shifted() {
+        return check(base);
+    }
+    formula.with_expr(check).unwrap_or(false)
 }
 
 /// The items of a `<ddeLink>` that were saved with values (`<values rows cols>`, row-major): one

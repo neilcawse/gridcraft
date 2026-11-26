@@ -271,7 +271,7 @@ pub(super) fn draw_text(pg: &mut Page, b: &Block, placement: TextPlacement<'_>) 
         && let Some(f) = sh.cell(c).and_then(|x| x.formula.as_ref())
         && !crate::display::formula_hidden(wb, sh, c)
     {
-        format!("={}", f.text)
+        format!("={}", f.text())
     } else if code == "General"
         && let Value::Number(n) = v
     {

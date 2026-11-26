@@ -558,7 +558,7 @@ fn assert_sheet_cells_and_settings(wb: &Workbook, back: &Workbook, a: &Sheet, b:
     for (c, cell) in a.cells.iter() {
         let got = b.cell(c).unwrap_or_else(|| panic!("missing {c}"));
         assert_eq!(got.value, cell.value, "value at {c}");
-        assert_eq!(got.formula.as_ref().map(|f| (&f.text, f.array)), cell.formula.as_ref().map(|f| (&f.text, f.array)), "formula at {c}");
+        assert_eq!(got.formula.as_ref().map(|f| (f.text(), f.array)), cell.formula.as_ref().map(|f| (f.text(), f.array)), "formula at {c}");
         assert_eq!(back.styles.get(got.style), wb.styles.get(cell.style), "style at {c}");
     }
     for (c, _) in b.cells.iter() {
@@ -1184,7 +1184,7 @@ fn implicit_intersection_is_written_as_legacy_or_single() {
     assert!(metadata);
     let (back, _) = read_xlsx(&bytes).unwrap();
     let sh = back.sheet(0).unwrap();
-    let text = |a: &str| sh.cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone());
+    let text = |a: &str| sh.cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text().into_owned());
     assert_eq!(text("D3").as_deref(), Some("@A1:A3*2"));
     assert_eq!(text("D4").as_deref(), Some("A1*2"));
     assert_eq!(text("D5").as_deref(), Some("@(A1:A3*2)"));
@@ -1201,7 +1201,8 @@ fn legacy_and_dynamic_formulas_keep_their_kind() {
       <row r="3"><c r="A3"><v>3</v></c><c r="B3"><f>SUM(A1:A3)</f><v>6</v></c></row>
     </sheetData>"#;
     let (wb, _) = read_xlsx(&super::minimal(body, &[], "", "")).unwrap();
-    let text = |wb: &Workbook, a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| (f.text.clone(), f.array)).unwrap();
+    let text =
+        |wb: &Workbook, a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| (f.text().into_owned(), f.array)).unwrap();
     assert_eq!(text(&wb, "B2"), ("TANH(@A1:A3)+@A1:A3".to_string(), None));
     let bytes = write_xlsx(&wb).unwrap();
     let (xml, _) = sheet1_xml(&bytes);
@@ -1260,7 +1261,7 @@ fn long_and_deeply_nested_legacy_formulas_never_gain_single() {
     let defs: String = (1..=30).map(|i| format!(r#"<definedName name="Part_{i}">{part}</definedName>"#)).collect();
     let names = format!(r#"<definedNames><definedName name="Big">{big}</definedName>{defs}</definedNames>"#);
     let (wb, _) = read_xlsx(&super::minimal(&body, &[], "", &names)).unwrap();
-    let text = |wb: &Workbook, a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone()).unwrap();
+    let text = |wb: &Workbook, a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text().into_owned()).unwrap();
     assert_eq!(text(&wb, "D2"), chain);
     assert_eq!(text(&wb, "D3"), format!("@A1:A3+{chain}"));
     assert_eq!(text(&wb, "D4"), nested(64, "@A1:A3"));
@@ -1306,7 +1307,7 @@ fn implicit_intersection_keeps_its_parentheses() {
     let (back, _) = read_xlsx(&bytes).unwrap();
     for (i, f) in formulas.iter().enumerate() {
         let cell = back.sheet(0).unwrap().cell(CellRef::new(4 + i as u32, 4)).and_then(|c| c.formula.as_ref());
-        assert_eq!(cell.map(|c| (c.text.as_str(), c.expr().is_some())), Some((*f, true)), "{f}");
+        assert_eq!(cell.map(|c| (c.text().into_owned(), c.expr().is_some())), Some(((*f).to_string(), true)), "{f}");
     }
 }
 
@@ -1327,7 +1328,7 @@ fn legacy_unions_in_parentheses_and_names_with_if_save_as_read() {
     </sheetData>"#;
     let names = r#"<definedNames><definedName name="Flag">IF(Data!$A$1:$A$3&gt;1,1,0)</definedName></definedNames>"#;
     let (wb, _) = read_xlsx(&super::minimal(body, &[], "", names)).unwrap();
-    let text = |a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone()).unwrap();
+    let text = |a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text().into_owned()).unwrap();
     let bytes = write_xlsx(&wb).unwrap();
     let cases = [
         ("E1", "SQRT((A1:A2,C1:C2))"),
@@ -1359,7 +1360,7 @@ fn implied_intersection_made_redundant_by_an_edit_saves_legacy() {
     </sheetData>"#;
     let names = r#"<definedNames><definedName name="Rng">Data!$A$1:$A$3</definedName></definedNames>"#;
     let (mut wb, _) = read_xlsx(&super::minimal(body, &[], "", names)).unwrap();
-    let text = |wb: &Workbook, a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone()).unwrap();
+    let text = |wb: &Workbook, a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text().into_owned()).unwrap();
     assert_eq!(text(&wb, "B5"), "SQRT(@A1:A3)");
     assert_eq!(text(&wb, "C5"), "SQRT(@Rng)");
     // What deleting rows 2:3 leaves.
@@ -1388,7 +1389,7 @@ fn single_in_a_legacy_formula_saves_as_read() {
     </sheetData>"#;
     let names = r#"<definedNames><definedName name="RelativeRow">Data!$H1</definedName></definedNames>"#;
     let (mut wb, _) = read_xlsx(&super::minimal(body, &[], "", names)).unwrap();
-    let text = |wb: &Workbook, a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone()).unwrap();
+    let text = |wb: &Workbook, a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text().into_owned()).unwrap();
     let shown = [
         ("O6", "@SUM(F5#)"),
         ("J6", "@F5#%"),
@@ -1446,7 +1447,7 @@ fn formulas_into_linked_workbooks_save_back_as_written() {
         cell("F1", "SUM('[1]My Data'!B2:B4)"),
     );
     let (wb, _) = read_xlsx(&super::minimal(&body, &[], "", "")).unwrap();
-    let text = |a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone()).unwrap();
+    let text = |a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text().into_owned()).unwrap();
     assert_eq!(text("E1"), "Data!B2");
     let (xml, _) = sheet1_xml(&write_xlsx(&wb).unwrap());
     for (r, f) in [
@@ -1545,7 +1546,7 @@ fn let_lambda_parameters_drop_xlpm_on_read() {
     assert!(xml.contains("_xlpm.v"), "{xml}");
     let (back, _) = read_xlsx(&bytes).unwrap();
     let sh = back.sheet(0).unwrap();
-    let text = |a: &str| sh.cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone());
+    let text = |a: &str| sh.cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text().into_owned());
     assert_eq!(text("A1").as_deref(), Some("LET(x,1,x+1)"));
     assert_eq!(text("A2").as_deref(), Some("LAMBDA(a,a*2)(3)"));
     assert_eq!(text("C1").as_deref(), Some("MAP(B1:B2,LAMBDA(v,v+1))"));
@@ -1584,7 +1585,7 @@ fn table_newline_column_and_backslash_name_survive() {
     assert_eq!(s.tables[0].name, "\\_Prime.1");
     assert_eq!(s.tables[0].columns[0].name, "Handle\nBars");
     assert_eq!(s.value(at("A1")), Value::text("Handle\nBars"));
-    assert_eq!(s.cell(at("D1")).and_then(|c| c.formula.as_ref()).map(|f| f.text.as_str()), Some("COUNTA(\\_Prime.1[Name])"));
+    assert_eq!(s.cell(at("D1")).and_then(|c| c.formula.as_ref()).map(|f| f.text()), Some(std::borrow::Cow::Borrowed("COUNTA(\\_Prime.1[Name])")));
     assert!(gridcraft_formula::parse("COUNTA(\\_Prime.1[Name])").is_ok(), "backslash table name parses as a structured reference");
 }
 
@@ -2335,7 +2336,7 @@ fn issue_778_xlsx_xml_import_save_reopen_roundtrip() {
     let sh = &again.sheets[0];
     assert_eq!(sh.cells.get(at("A2")).unwrap().value, Value::text("Alpha"));
     assert_eq!(sh.cells.get(at("B3")).unwrap().value, Value::Number(85.0));
-    assert_eq!(sh.cells.get(at("B3")).unwrap().formula.as_ref().map(|f| f.text.as_str()), Some("B2*2"));
+    assert_eq!(sh.cells.get(at("B3")).unwrap().formula.as_ref().map(|f| f.text().into_owned()), Some("B2*2".to_string()));
     assert_eq!(sh.merges, vec![rr("A4:B4")]);
     assert_eq!(sh.hyperlinks.get(&at("A2")).map(|h| h.target.as_str()), Some("https://example.com"));
     assert_eq!(sh.comments.get(&at("B2")).map(|c| c.text.as_str()), Some("Checked"));
@@ -2422,11 +2423,11 @@ fn issue_778_full_workbook_import_save_reopen_roundtrip() {
 
     let sh = &again.sheets[0];
     assert_eq!(sh.cells.get(at("B3")).unwrap().value, Value::Number(85.0));
-    assert_eq!(sh.cells.get(at("B3")).unwrap().formula.as_ref().map(|f| f.text.as_str()), Some("B2*2"));
+    assert_eq!(sh.cells.get(at("B3")).unwrap().formula.as_ref().map(|f| f.text().into_owned()), Some("B2*2".to_string()));
     assert_eq!(sh.cells.get(at("C2")).unwrap().value, Value::Number(10.0));
-    assert_eq!(sh.cells.get(at("C2")).unwrap().formula.as_ref().map(|f| f.text.as_str()), Some("[1]Sheet1!$A$1"));
+    assert_eq!(sh.cells.get(at("C2")).unwrap().formula.as_ref().map(|f| f.text().into_owned()), Some("[1]Sheet1!$A$1".to_string()));
     assert_eq!(sh.cells.get(at("C3")).unwrap().value, Value::Number(60.0));
-    assert_eq!(sh.cells.get(at("C3")).unwrap().formula.as_ref().map(|f| f.text.as_str()), Some("SUM([1]Sheet1!A1:A3)*2"));
+    assert_eq!(sh.cells.get(at("C3")).unwrap().formula.as_ref().map(|f| f.text().into_owned()), Some("SUM([1]Sheet1!A1:A3)*2".to_string()));
 
     assert_eq!(sh.images.len(), 1);
     assert_eq!(sh.images[0].data.as_ref(), png.as_slice());
@@ -2451,4 +2452,58 @@ fn issue_778_full_workbook_import_save_reopen_roundtrip() {
     assert!(out_ext_rels.contains("file:///C:/never/opened/Book2.xlsx") && out_ext_rels.contains("TargetMode=\"External\""), "{out_ext_rels}");
     let out_chart = read_part("xl/charts/chart1.xml");
     assert!(out_chart.contains("<c:numCache>") && out_chart.contains("<c:v>42.5</c:v>"), "{out_chart}");
+}
+
+#[test]
+fn streaming_xlsx_deduplicates_column_formulas_and_emits_shared_runs() {
+    let mut body = String::from("<sheetData>");
+    for r in 1..=100u32 {
+        body.push_str(&format!(
+            r#"<row r="{r}"><c r="A{r}"><v>{r}</v></c><c r="B{r}"><f>if(A{r}&gt;50,A{r}*2,A{r}+1)</f><v>{}</v></c></row>"#,
+            if r > 50 { r * 2 } else { r + 1 }
+        ));
+    }
+    body.push_str("</sheetData>");
+    let bytes = super::minimal(&body, &[], "", "");
+    let (wb, _) = read_xlsx(&bytes).unwrap();
+    let sh = wb.sheet(0).unwrap();
+    let first_base = sh.cell(at("B1")).unwrap().formula.as_ref().unwrap().expr_shifted().unwrap().0;
+    for r in 1..=100u32 {
+        let f = sh.cell(CellRef::new(r - 1, 1)).unwrap().formula.as_ref().unwrap();
+        let (base, dr, dc) = f.expr_shifted().unwrap();
+        assert!(std::sync::Arc::ptr_eq(base, first_base), "row {r} should share master AST");
+        assert_eq!((dr, dc), ((r - 1) as i32, 0));
+        assert_eq!(f.text(), format!("IF(A{r}>50,A{r}*2,A{r}+1)"));
+    }
+    let saved = write_xlsx(&wb).unwrap();
+    let (xml, _) = sheet1_xml(&saved);
+    assert!(xml.contains(r#"t="shared" ref="B1:B100" si="0""#), "{xml}");
+    assert!(xml.contains(r#"<f t="shared" si="0"/>"#), "{xml}");
+    let (reopened, _) = read_xlsx(&saved).unwrap();
+    for r in 1..=100u32 {
+        let f = reopened.sheet(0).unwrap().cell(CellRef::new(r - 1, 1)).unwrap().formula.as_ref().unwrap();
+        assert_eq!(f.text(), format!("IF(A{r}>50,A{r}*2,A{r}+1)"));
+    }
+}
+
+#[test]
+fn shared_formula_export_skips_members_shifting_off_grid_to_ref() {
+    let mut wb = Workbook::new();
+    let base = std::sync::Arc::new(gridcraft_formula::parse("A2+1").unwrap());
+    {
+        let sh = wb.sheet_mut(0).unwrap();
+        // Row 0 shifts A2 by dr=-2 -> #REF!; rows 1..=70 shift A2 by dr=-1..=68 -> A1..=A70.
+        for r in 0..=70u32 {
+            sh.cells.set(CellRef::new(r, 1), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base), r as i32 - 2, 0)));
+        }
+    }
+    let saved = write_xlsx(&wb).unwrap();
+    let (xml, _) = sheet1_xml(&saved);
+    assert!(xml.contains(r#"<c r="B1"><f>#REF!+1</f></c>"#), "{xml}");
+    assert!(xml.contains(r#"t="shared" ref="B2:B71" si="0">A1+1</f>"#), "{xml}");
+    let (reopened, _) = read_xlsx(&saved).unwrap();
+    let sh = reopened.sheet(0).unwrap();
+    assert_eq!(sh.cell(at("B1")).unwrap().formula.as_ref().unwrap().text(), "#REF!+1");
+    assert_eq!(sh.cell(at("B2")).unwrap().formula.as_ref().unwrap().text(), "A1+1");
+    assert_eq!(sh.cell(at("B71")).unwrap().formula.as_ref().unwrap().text(), "A70+1");
 }

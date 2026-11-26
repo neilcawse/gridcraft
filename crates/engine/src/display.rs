@@ -123,7 +123,7 @@ pub fn cell_text(wb: &Workbook, sheet: &Sheet, c: CellRef) -> String {
         && let Some(f) = sheet.cell(c).and_then(|x| x.formula.as_ref())
         && !formula_hidden(wb, sheet, c)
     {
-        return format!("={}", f.text);
+        return format!("={}", f.text());
     }
     shown_text(wb, sheet, c)
 }
@@ -135,7 +135,7 @@ pub fn cell_text_with_cf(wb: &Workbook, sheet: usize, sh: &Sheet, c: CellRef, cf
         && let Some(f) = sh.cell(c).and_then(|x| x.formula.as_ref())
         && !formula_hidden(wb, sh, c)
     {
-        return format!("={}", f.text);
+        return format!("={}", f.text());
     }
     let code = cf.effective_num_fmt(wb, sheet, sh, c);
     value_text_as(wb, &sh.value(c), &code)

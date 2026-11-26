@@ -268,7 +268,7 @@ fn remap_workbook_external_ordinals(wb: &mut Workbook, remap: &[Option<usize>], 
         for pos in coords {
             let Some(cell) = sheet.cells.get_mut(pos) else { continue };
             let Some(fm) = &cell.formula else { continue };
-            match remap_external_formula(&fm.text, remap) {
+            match remap_external_formula(&fm.text(), remap) {
                 Ok(Some(rewritten)) => {
                     let mut updated = Formula::new(&rewritten);
                     updated.array = fm.array;

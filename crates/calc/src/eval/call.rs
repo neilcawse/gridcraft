@@ -60,7 +60,7 @@ impl<'h> Evaluator<'h> {
                     Ev::V(Value::Bool(f.is_some()))
                 } else {
                     match f {
-                        Some(f) if !hidden => Ev::V(Value::text(format!("={}", f.text))),
+                        Some(f) if !hidden => Ev::V(Value::text(format!("={}", f.text()))),
                         _ => err(CellError::NA),
                     }
                 }
@@ -69,6 +69,7 @@ impl<'h> Evaluator<'h> {
             "OFFSET" => self.offset(args),
             "INDIRECT" => self.indirect(args),
             "INDEX" => self.index(args),
+            "FILTER" => self.filter_call(args),
             "XLOOKUP" => self.xlookup(args),
             "VLOOKUP" | "HLOOKUP" => self.vh_lookup(name == "VLOOKUP", args),
             "LOOKUP" => self.lookup_call(args),
@@ -111,7 +112,7 @@ impl<'h> Evaluator<'h> {
                     }
                 }
                 let Some(body) = args.last() else { return err(CellError::Value) };
-                Ev::L(Arc::new(Lambda { params, body: body.clone(), env: self.env.clone() }))
+                Ev::L(Arc::new(Lambda { params, body: body.clone(), env: self.env.clone(), shift: self.shift }))
             }
             "ISOMITTED" => {
                 let r = matches!(args.first(), Some(Expr::Name(n)) if self.env.iter().rev().find(|(k, _)| gridcraft_formula::same_name(k, n)).is_some_and(|(_, v)| matches!(v, Ev::V(Value::Empty))));

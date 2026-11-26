@@ -37,9 +37,11 @@ impl<'h> Evaluator<'h> {
         };
         self.calls += 1;
         let saved = std::mem::replace(&mut self.env, l.env.clone());
+        let saved_shift = std::mem::replace(&mut self.shift, l.shift);
         self.env.extend(bound);
         let r = self.eval(&l.body);
         self.env = saved;
+        self.shift = saved_shift;
         self.calls -= 1;
         r
     }
@@ -71,7 +73,7 @@ impl<'h> Evaluator<'h> {
         if let Some(f) = e.and_then(|x| self.function_by_name(x)) {
             let params: Vec<String> = (0..arity).map(|i| format!("_xleta.{i}")).collect();
             let body = Expr::Call(f, params.iter().map(|p| Expr::Name(p.clone())).collect());
-            return Some(Arc::new(Lambda { params, body, env: Vec::new() }));
+            return Some(Arc::new(Lambda { params, body, env: Vec::new(), shift: (0, 0) }));
         }
         match e.map(|x| self.eval(x)) {
             Some(Ev::L(l)) => Some(l),

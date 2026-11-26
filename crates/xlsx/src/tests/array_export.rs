@@ -89,7 +89,7 @@ fn nonspilling_formulas_preserve_array_evaluation_and_metadata() {
     for (address, text, value) in cases {
         let c = results.cell(at(address)).unwrap();
         let f = c.formula.as_ref().unwrap();
-        assert_eq!(f.text, text);
+        assert_eq!(f.text(), text);
         assert_eq!(f.array, None, "dynamic formula must not become legacy CSE");
         assert_eq!(c.value, Value::Number(value));
     }
@@ -293,7 +293,7 @@ fn this_row_references_are_written_in_long_form() {
     let (back, _) = read_xlsx(&bytes).unwrap();
     let sh = back.sheet(0).unwrap();
     assert_eq!(sh.tables[0].columns[1].formula.as_deref(), Some("[@Input]*2"));
-    assert_eq!(sh.cell(at("B2")).unwrap().formula.as_ref().unwrap().text, "Data[@Input]*2");
+    assert_eq!(sh.cell(at("B2")).unwrap().formula.as_ref().unwrap().text(), "Data[@Input]*2");
 }
 
 /// Compare both cell and formula metadata, collecting all boundaries in the group on failure.
@@ -500,6 +500,7 @@ fn export_text(wb: &Workbook, at: CellRef, text: &str, names: &mut crate::array_
         Export::Unchanged => "unchanged".into(),
         Export::Dynamic => "dynamic".into(),
         Export::Legacy(e) => format!("legacy {}", gridcraft_formula::print(&e)),
+        Export::LegacyShared(e) => format!("legacy {}", gridcraft_formula::print(&e)),
     }
 }
 

@@ -5,6 +5,7 @@ use super::{Arg, Array, CellError, Criterion, Ctx, R, Value, as_array, has, num_
 
 enum MatchedPositions<'a> {
     Indexed(&'a [u32]),
+    Owned(Vec<u32>),
     Mask(Vec<bool>),
 }
 
@@ -12,8 +13,14 @@ enum MatchedPositions<'a> {
 fn criteria_positions<'a>(pairs: &'a [(std::borrow::Cow<'a, Array>, Criterion)], rows: usize, cols: usize) -> MatchedPositions<'a> {
     let mut best_indexed: Option<(usize, &'a [u32])> = None;
     for (idx, (r, c)) in pairs.iter().enumerate() {
-        if let Some(pat) = c.exact_text()
-            && let Some(pos) = r.text_positions(pat)
+        let pos = if let Some(pat) = c.exact_text() {
+            r.text_positions(pat)
+        } else if let Some(n) = c.exact_number() {
+            r.criteria_number_positions(n)
+        } else {
+            None
+        };
+        if let Some(pos) = pos
             && best_indexed.is_none_or(|(_, prev)| pos.len() < prev.len())
         {
             best_indexed = Some((idx, pos));
@@ -23,7 +30,7 @@ fn criteria_positions<'a>(pairs: &'a [(std::borrow::Cow<'a, Array>, Criterion)],
         if pairs.len() == 1 {
             return MatchedPositions::Indexed(candidates);
         }
-        let mut mask = vec![false; rows.saturating_mul(cols)];
+        let mut matched = Vec::with_capacity(candidates.len().min(64));
         'cand: for &pos in candidates {
             let i = pos as usize;
             for (pair_idx, (r, c)) in pairs.iter().enumerate() {
@@ -34,11 +41,9 @@ fn criteria_positions<'a>(pairs: &'a [(std::borrow::Cow<'a, Array>, Criterion)],
                     }
                 }
             }
-            if let Some(slot) = mask.get_mut(i) {
-                *slot = true;
-            }
+            matched.push(pos);
         }
-        return MatchedPositions::Mask(mask);
+        return MatchedPositions::Owned(matched);
     }
     let mut mask = vec![true; rows.saturating_mul(cols)];
     for (r, c) in pairs {
@@ -87,6 +92,15 @@ fn masked_numbers(target: &Array, matched: MatchedPositions<'_>) -> R<Vec<f64>> 
                 }
             }
         }
+        MatchedPositions::Owned(positions) => {
+            for pos in positions {
+                match target.data.get(pos as usize) {
+                    Some(Value::Number(n)) => out.push(*n),
+                    Some(Value::Error(e)) => return Err(*e),
+                    _ => {}
+                }
+            }
+        }
         MatchedPositions::Mask(mask) => {
             for (v, m) in target.iter().zip(mask.iter()) {
                 if !*m {
@@ -108,6 +122,7 @@ pub(super) fn countifs(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     let pairs = parse_criteria_pairs(a, 0, first.rows, first.cols)?;
     let count = match criteria_positions(&pairs, first.rows, first.cols) {
         MatchedPositions::Indexed(pos) => pos.len(),
+        MatchedPositions::Owned(pos) => pos.len(),
         MatchedPositions::Mask(mask) => mask.iter().filter(|m| **m).count(),
     };
     num_val(count as f64)
@@ -151,6 +166,11 @@ pub(super) fn countif(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     {
         return num_val(pos.len() as f64);
     }
+    if let Some(n) = c.exact_number()
+        && let Some(pos) = range.criteria_number_positions(n)
+    {
+        return num_val(pos.len() as f64);
+    }
     num_val(range.iter().filter(|v| c.matches(v)).count() as f64)
 }
 
@@ -162,10 +182,18 @@ fn if_numbers(a: &[Arg]) -> R<Vec<f64>> {
     let c = Criterion::parse_arg(&crate::util::arg(a, 1)?.value.scalar())?;
     let sum_range = if has(a, 2) { Some(as_array(&crate::util::arg(a, 2)?.value)) } else { None };
     let mut out = Vec::new();
-    if range.cols != 0
-        && let Some(pat) = c.exact_text()
-        && let Some(positions) = range.text_positions(pat)
-    {
+    let indexed_positions = if range.cols != 0 {
+        if let Some(pat) = c.exact_text() {
+            range.text_positions(pat)
+        } else if let Some(n) = c.exact_number() {
+            range.criteria_number_positions(n)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if let Some(positions) = indexed_positions {
         for &pos in positions {
             let idx = pos as usize;
             let r = idx / range.cols;

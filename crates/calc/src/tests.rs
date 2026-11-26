@@ -193,7 +193,7 @@ fn references_into_linked_workbooks_read_the_saved_values() {
     );
     // Linked sheets print as Excel writes them: quoted only when the sheet name needs it.
     let f = t.wb.sheet(0).unwrap().cells.get(c("A3")).and_then(|x| x.formula.clone()).unwrap();
-    assert_eq!(gridcraft_formula::print(f.expr.as_ref().unwrap()), "SUM('[2]P&L Prices'!B1:B9)+[2]Rates!C3");
+    assert_eq!(gridcraft_formula::print(&f.expr().unwrap()), "SUM('[2]P&L Prices'!B1:B9)+[2]Rates!C3");
 }
 
 #[test]
@@ -3292,7 +3292,7 @@ fn graph_built_from_text_only_formulas_matches_cached() {
             // E1 does not parse, so it has no tree either way and only covers the `None` branch.
             let mut formula = Formula::new(f);
             if !cached {
-                formula.expr = None;
+                formula.drop_cached_expr();
             }
             t.wb.sheet_mut(0).unwrap().cells.set(c(at), Cell::formula(formula));
         }
@@ -3305,7 +3305,7 @@ fn graph_built_from_text_only_formulas_matches_cached() {
         // A text-only formula that is rewritten through `cells_changed` joins the graph too.
         let mut formula = Formula::new("=A1+100");
         if !cached {
-            formula.expr = None;
+            formula.drop_cached_expr();
         }
         t.wb.sheet_mut(0).unwrap().cells.set(c("F1"), Cell::formula(formula));
         t.calc.cells_changed(&mut t.wb, &[(0, c("F1"))]);
@@ -4091,4 +4091,126 @@ fn sum_and_average_prioritize_direct_expression_errors_over_range_errors() {
     assert_eq!(t.num("D4"), 1.0);
     // Two range/cell references (no direct expression error): left-to-right range error wins.
     assert_eq!(t.get("D5"), Value::Error(CellError::Div0));
+}
+
+#[test]
+fn shared_formula_eval_indexed_countif_and_indexed_filter_match_exact_semantics() {
+    let mut t = T::new();
+    for r in 1..=120u32 {
+        t.set(&format!("A{r}"), &(r % 10).to_string());
+        t.set(&format!("B{r}"), if r % 2 == 0 { "good" } else { "bad" });
+        t.set(&format!("C{r}"), &(r * 10).to_string());
+    }
+    t.set("A121", "'5");
+    t.set("B121", "good");
+    t.set("C121", "9999");
+    let base_cf = std::sync::Arc::new(gridcraft_formula::parse("COUNTIF($A$1:$A$121,A1)").unwrap());
+    let base_flt = std::sync::Arc::new(gridcraft_formula::parse("INDEX(FILTER($C$1:$C$121,($A$1:$A$121=A1)*($B$1:$B$121=\"good\")),1)").unwrap());
+    {
+        let sh = t.wb.sheet_mut(0).unwrap();
+        for r in 0..120u32 {
+            sh.cells.set(CellRef::new(r, 3), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_cf), r as i32, 0)));
+            sh.cells.set(CellRef::new(r, 4), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_flt), r as i32, 0)));
+        }
+    }
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!(t.num("D5"), 13.0);
+    assert_eq!(t.num("D15"), 13.0);
+    assert_eq!(t.num("D2"), 12.0);
+    assert_eq!(t.num("E2"), 20.0);
+    assert_eq!(t.num("E12"), 20.0);
+    assert_eq!(t.get("E5"), Value::Error(CellError::Calc));
+    t.set("F1", "=COUNTIFS($A$1:$A$121,5,$B$1:$B$121,\"good\")");
+    t.set("F2", "=COUNTIFS($A$1:$A$121,2,$B$1:$B$121,\"good\")");
+    assert_eq!(t.num("F1"), 1.0);
+    assert_eq!(t.num("F2"), 12.0);
+}
+
+#[test]
+fn shared_aggregate_filtered_div_applies_shift_identically_to_owned() {
+    let mut t = T::new();
+    for r in 2..=21u32 {
+        t.set(&format!("A{r}"), if r % 5 == 2 { "3" } else { "1" });
+        t.set(&format!("C{r}"), &(r * 10).to_string());
+        t.set(&format!("D{r}"), &(r * 100).to_string());
+        t.set(&format!("E{r}"), &(r * 1000).to_string());
+    }
+    let base = std::sync::Arc::new(gridcraft_formula::parse("AGGREGATE(14,6,C$2:C$21/($A$2:$A$21=3),1)").unwrap());
+    {
+        let sh = t.wb.sheet_mut(0).unwrap();
+        for dc in 0..3i32 {
+            sh.cells.set(CellRef::new(29, 6 + dc as u32), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base), 0, dc)));
+        }
+    }
+    t.set("G31", "=AGGREGATE(14,6,C$2:C$21/($A$2:$A$21=3),1)");
+    t.set("H31", "=AGGREGATE(14,6,D$2:D$21/($A$2:$A$21=3),1)");
+    t.set("I31", "=AGGREGATE(14,6,E$2:E$21/($A$2:$A$21=3),1)");
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!([t.num("G30"), t.num("H30"), t.num("I30")], [170.0, 1700.0, 17000.0]);
+    assert_eq!([t.num("G30"), t.num("H30"), t.num("I30")], [t.num("G31"), t.num("H31"), t.num("I31")]);
+}
+
+#[test]
+fn shared_external_name_ignores_caller_shift() {
+    use gridcraft_model::{ExternalBook, ExternalName, ExternalSheet};
+    let mut t = T::new();
+    let data = ExternalSheet {
+        name: "Data".into(),
+        cells: vec![(c("A1"), Value::Number(10.0)), (c("A2"), Value::Number(20.0)), (c("A3"), Value::Number(30.0))],
+        refresh_error: false,
+    };
+    let book2 = ExternalBook {
+        sheets: vec![data],
+        names: vec![ExternalName { name: "RelExt".into(), sheet: None, refers_to: "Data!A1".into() }],
+        ..Default::default()
+    };
+    t.wb.external_books = vec![ExternalBook::default(), book2].into();
+    t.set("B1", "1");
+    t.set("B2", "2");
+    t.set("B3", "3");
+    let base_bare = std::sync::Arc::new(gridcraft_formula::parse("[2]!RelExt").unwrap());
+    let base_plus = std::sync::Arc::new(gridcraft_formula::parse("B1+[2]!RelExt").unwrap());
+    {
+        let sh = t.wb.sheet_mut(0).unwrap();
+        for dr in 0..3i32 {
+            sh.cells.set(CellRef::new(dr as u32, 2), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_bare), dr, 0)));
+            sh.cells.set(CellRef::new(dr as u32, 3), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_plus), dr, 0)));
+        }
+    }
+    t.set("E1", "=[2]!RelExt");
+    t.set("E2", "=[2]!RelExt");
+    t.set("E3", "=[2]!RelExt");
+    t.set("F1", "=B1+[2]!RelExt");
+    t.set("F2", "=B2+[2]!RelExt");
+    t.set("F3", "=B3+[2]!RelExt");
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!([t.num("C1"), t.num("C2"), t.num("C3")], [10.0, 10.0, 10.0]);
+    assert_eq!([t.num("C1"), t.num("C2"), t.num("C3")], [t.num("E1"), t.num("E2"), t.num("E3")]);
+    assert_eq!([t.num("D1"), t.num("D2"), t.num("D3")], [11.0, 12.0, 13.0]);
+    assert_eq!([t.num("D1"), t.num("D2"), t.num("D3")], [t.num("F1"), t.num("F2"), t.num("F3")]);
+}
+
+#[test]
+fn shared_if_family_shifted_off_grid_ref_returns_ref_error() {
+    let mut t = T::new();
+    t.set("A2", "x");
+    t.set("B2", "5");
+    let formulas = [
+        ("C1", "SUMIFS(B2:B5,A2:A5,\"x\")"),
+        ("C2", "COUNTIFS(A2:A5,\"x\")"),
+        ("C3", "MAXIFS(B2:B5,A2:A5,\"x\")"),
+        ("C4", "SUMIF(A2:A5,\"x\",B2:B5)"),
+        ("C5", "COUNTIF(A2:A5,\"x\")"),
+    ];
+    {
+        let sh = t.wb.sheet_mut(0).unwrap();
+        for (at, text) in formulas {
+            let base = std::sync::Arc::new(gridcraft_formula::parse(text).unwrap());
+            sh.cells.set(c(at), Cell::formula(Formula::from_shared(base, -2, 0)));
+        }
+    }
+    t.calc.recalc_all(&mut t.wb);
+    for (at, text) in formulas {
+        assert_eq!(t.get(at), Value::Error(CellError::Ref), "{at}: {text}");
+    }
 }

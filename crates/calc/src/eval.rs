@@ -24,8 +24,8 @@ pub use array::{binary_values, zip2};
 pub use format::r1c1_to_a1;
 pub(crate) use special::used_range_of;
 pub use special::{
-    DynamicReads, SPECIAL_FUNCTIONS, dynamic_reads, is_known_function, linked_parts, linked_value, precedents, precedents_at, resized_sum_range,
-    takes_reference,
+    DynamicReads, PrecedentTemplate, SPECIAL_FUNCTIONS, dynamic_reads, is_known_function, linked_parts, linked_value, precedents, precedents_at,
+    precedents_at_shifted, resized_sum_range, takes_reference,
 };
 use special::{external_name, external_sheet, linked_definition_readable, linked_sheet_number};
 
@@ -74,6 +74,8 @@ pub struct Lambda {
     pub params: Vec<String>,
     pub body: Expr,
     pub env: Vec<(String, Ev)>,
+    /// Relative reference shift captured from a shared formula (0, 0 for owned formulas/names).
+    pub shift: (i32, i32),
 }
 
 #[derive(Clone, Debug)]
@@ -179,9 +181,10 @@ pub struct Evaluator<'h> {
     pub host: &'h mut dyn Host,
     pub sheet: usize,
     pub at: CellRef,
+    /// Relative reference shift applied on the fly to `Expr::Ref` (for shared formulas).
+    pub shift: (i32, i32),
     env: Vec<(String, Ev)>,
     depth: usize,
-    /// LAMBDA calls in progress.
     calls: usize,
     /// `stack_position()` at the outermost `eval`.
     stack_top: usize,
@@ -246,6 +249,7 @@ impl Ctx for FnCtx<'_, '_> {
             host: &mut *self.ev.host,
             sheet: area.sheet,
             at,
+            shift: (0, 0),
             env,
             depth: self.ev.depth,
             calls: self.ev.calls,
@@ -286,10 +290,15 @@ impl Ctx for FnCtx<'_, '_> {
 
 impl<'h> Evaluator<'h> {
     pub fn new(host: &'h mut dyn Host, sheet: usize, at: CellRef) -> Self {
+        Self::with_shift(host, sheet, at, (0, 0))
+    }
+
+    pub fn with_shift(host: &'h mut dyn Host, sheet: usize, at: CellRef, shift: (i32, i32)) -> Self {
         Evaluator {
             host,
             sheet,
             at,
+            shift,
             env: Vec::new(),
             depth: 0,
             calls: 0,
@@ -342,9 +351,23 @@ impl<'h> Evaluator<'h> {
         }
     }
 
+    fn shifted_range(&self, r: &Reference) -> Result<RangeRef, CellError> {
+        if self.shift == (0, 0) {
+            Ok(r.range())
+        } else {
+            gridcraft_formula::adjust::shift_ref_kind(&r.kind, i64::from(self.shift.0), i64::from(self.shift.1))
+                .map(|kind| Reference { sheet: SheetSel::Current, kind }.range())
+                .ok_or(CellError::Ref)
+        }
+    }
+
     pub fn reference_areas(&self, r: &Reference) -> Result<Vec<Area>, CellError> {
-        let range = r.range();
-        Ok(self.resolve_sheet(&r.sheet)?.into_iter().map(|sheet| Area { sheet, range }).collect())
+        let range = self.shifted_range(r)?;
+        self.reference_areas_raw(&r.sheet, range)
+    }
+
+    fn reference_areas_raw(&self, sheet_sel: &SheetSel, range: RangeRef) -> Result<Vec<Area>, CellError> {
+        Ok(self.resolve_sheet(sheet_sel)?.into_iter().map(|sheet| Area { sheet, range }).collect())
     }
 
     /// A reference into a linked workbook (`'[2]Prices'!B2`, `[2]Prices!A:A`): an area that keeps
@@ -352,8 +375,8 @@ impl<'h> Evaluator<'h> {
     /// calculates while the source is closed (see [`LINKED_SHEETS`]). `None` = not a reference
     /// into a linked workbook; `#REF!` = the link didn't save that workbook or sheet, noted to the
     /// host when the link has no saved workbook to look in (see [`Host::note_unknown_link`]).
-    fn linked_area(&mut self, r: &Reference) -> Option<Result<Area, CellError>> {
-        let SheetSel::Named(name) = &r.sheet else { return None };
+    fn linked_area_raw(&mut self, sheet_sel: &SheetSel, range: RangeRef) -> Option<Result<Area, CellError>> {
+        let SheetSel::Named(name) = sheet_sel else { return None };
         let (book, sheet) = external_sheet(name)?;
         let wb = self.host.workbook();
         let linked = book.checked_sub(1).and_then(|b| Some((b, wb.external_books.get(b)?)));
@@ -362,7 +385,7 @@ impl<'h> Evaluator<'h> {
             return Some(Err(CellError::Ref));
         }
         let found = linked.and_then(|(b, l)| Some((b, l.sheet_index(sheet)?)));
-        Some(found.and_then(|(b, s)| linked_sheet_number(b, s)).map(|sheet| Area { sheet, range: r.range() }).ok_or(CellError::Ref))
+        Some(found.and_then(|(b, s)| linked_sheet_number(b, s)).map(|sheet| Area { sheet, range }).ok_or(CellError::Ref))
     }
 
     /// The saved sheet of a linked workbook that an area's sheet number stands for.
@@ -445,7 +468,10 @@ impl<'h> Evaluator<'h> {
             Expr::Struct(_) => Expr::Error(CellError::Ref),
             e => e,
         });
-        self.eval(&expr)
+        let saved_shift = std::mem::take(&mut self.shift);
+        let r = self.eval(&expr);
+        self.shift = saved_shift;
+        r
     }
 
     /// Dereferences: one cell → its value; a block → an array (trimmed to the used range);
@@ -569,14 +595,20 @@ impl<'h> Evaluator<'h> {
                 }
                 Ev::V(Array::new(h, w, data).map(Value::from).unwrap_or(Value::Error(CellError::Value)))
             }
-            Expr::Ref(r) => match self.reference_areas(r) {
-                Ok(a) => Ev::R(a),
-                Err(x) => match self.linked_area(r) {
-                    Some(Ok(a)) => Ev::R(vec![a]),
-                    Some(Err(e)) => err(e),
-                    None => err(x),
-                },
-            },
+            Expr::Ref(r) => {
+                let range = match self.shifted_range(r) {
+                    Ok(range) => range,
+                    Err(e) => return err(e),
+                };
+                match self.reference_areas_raw(&r.sheet, range) {
+                    Ok(a) => Ev::R(a),
+                    Err(x) => match self.linked_area_raw(&r.sheet, range) {
+                        Some(Ok(a)) => Ev::R(vec![a]),
+                        Some(Err(e)) => err(e),
+                        None => err(x),
+                    },
+                }
+            }
             Expr::Name(n) => self.name(n),
             Expr::Struct(s) => self.structured(s),
             Expr::Unary(op, x) => self.unary(*op, x),
@@ -627,11 +659,14 @@ impl<'h> Evaluator<'h> {
                     } else {
                         expr
                     };
-                    let saved = self.sheet;
-                    // Unqualified references in a name refer to the scope sheet.
+                    let saved_sheet = self.sheet;
+                    let saved_shift = self.shift;
+                    // Unqualified references in a name refer to the scope sheet with no shared-formula shift.
                     self.sheet = scope;
+                    self.shift = (0, 0);
                     let r = self.eval(&expr);
-                    self.sheet = saved;
+                    self.sheet = saved_sheet;
+                    self.shift = saved_shift;
                     r
                 }
                 Err(_) => err(CellError::Name),

@@ -756,7 +756,7 @@ fn same_content(a: Option<&gridcraft_model::Cell>, b: Option<&gridcraft_model::C
     let empty = |c: Option<&gridcraft_model::Cell>| c.is_none_or(|c| !c.has_content());
     match (a, b) {
         (Some(a), Some(b)) => match (&a.formula, &b.formula) {
-            (Some(x), Some(y)) => x.text == y.text && x.array == y.array,
+            (Some(x), Some(y)) => x.text() == y.text() && x.array == y.array,
             (None, None) => match (&a.py, &b.py) {
                 (Some(x), Some(y)) => x.code == y.code && x.object == y.object,
                 (None, None) => a.value == b.value,
@@ -890,6 +890,12 @@ impl MergeSweep {
 
 /// [`auto_row_height`] with the sheet's merges taken from `sweep`.
 pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut MergeSweep) {
+    let mut cf = crate::cf::CfCache::new();
+    fit_row_height_with_cf(wb, si, row, sweep, &mut cf);
+}
+
+/// [`fit_row_height`] reusing a caller-owned [`crate::cf::CfCache`] across all rows of a sheet.
+pub(crate) fn fit_row_height_with_cf(wb: &mut Workbook, si: usize, row: u32, sweep: &mut MergeSweep, cf: &mut crate::cf::CfCache) {
     // Out of budget: the row keeps the height it has.
     if sweep.left() == 0 {
         return;
@@ -927,7 +933,6 @@ pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut
     // the sheet's merges sorted once, not from a scan of all of them. Out of budget: the row keeps
     // the height it has.
     let Some(row_merges) = sweep.at(sh, row) else { return };
-    let mut cf = crate::cf::CfCache::new();
     for (c, cell) in sh.cells.row(row, 0, gridcraft_core::MAX_COLS - 1) {
         if !sweep.charge(row_merges.len()) {
             return;
@@ -951,7 +956,7 @@ pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut
                 // unhidden width (matching Excel AutoFit), skipping wrap only if that is <= 0.
                 let col_w = sh.cols.get(&c).and_then(|i| i.size).unwrap_or(sh.default_col_width);
                 if col_w > 0.0 {
-                    let text = crate::display::cell_text_with_cf(wb, si, sh, CellRef::new(row, c), &mut cf);
+                    let text = crate::display::cell_text_with_cf(wb, si, sh, CellRef::new(row, c), cf);
                     let w = (col_w - 6.0).max(1.0);
                     lines = text.lines().map(|l| wrapped_line_count(l, w, size, st.font.bold)).sum::<f32>().max(1.0);
                 }
