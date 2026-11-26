@@ -9727,8 +9727,8 @@ fn a_script_cannot_switch_windows() {
 mod chart_data;
 mod check_boxes;
 mod controls;
-mod drop_downs;
 mod drawing_lines;
+mod drop_downs;
 mod equation;
 mod json_golden;
 mod macros;

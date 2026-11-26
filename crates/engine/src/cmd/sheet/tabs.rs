@@ -205,7 +205,8 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
             // Object ids are unique across the workbook (selection and the `{kind, id}` commands
             // rely on it), so the copied objects get fresh ones (free ones, even when a file used
             // the largest id).
-            let count = sh.charts.len() + sh.images.len() + sh.shapes.len() + sh.tables.len() + sh.slicers.len() + sh.controls.len() + sh.groups.len();
+            let count =
+                sh.charts.len() + sh.images.len() + sh.shapes.len() + sh.tables.len() + sh.slicers.len() + sh.controls.len() + sh.groups.len();
             let ids = cx.wb.free_object_ids(count);
             if ids.len() < count {
                 return Err(bad("sheet.move", "no free object ids are left for the copied objects"));

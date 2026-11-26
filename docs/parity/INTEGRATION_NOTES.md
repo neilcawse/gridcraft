@@ -120,7 +120,7 @@ One check, `Workbook::table_name_taken(name, except)`, now decides for every edi
 | `insert.table`, `home.formatAsTable` with `name` | tables, `wb.names` | shared check |
 | `insert.table`, `home.formatAsTable` without `name`, `data.fromTextCsv` | `Table<n>` free among tables | `next_table_name` |
 | `data.forecastSheet` | `Table<n>` free among tables | `next_table_name` |
-| `sheet.move` with `copy` | the copy's tables are dropped at this base, so no name is given | unchanged here. When X23 (`parity/X23-sheet-copy-tables`) merges, its copied-table allocator (`copied_table_names` in `cmd/sheet/tabs.rs`) should switch to `table_name_taken`, which already covers the kept-sheet definitions and marker-less slicer-cache names its review found missing |
+| `sheet.move` with `copy` | the copy's tables are dropped at this base, so no name is given | unchanged by X27 itself. The integrated `copied_table_names` allocator uses `table_name_taken`, including kept-sheet definitions and marker-less slicer-cache names found by X23's review |
 | Paste, duplicate | no path creates a table | unchanged |
 | XLSX import and save repair | X17 already counts kept sheets' names | reads the stored name instead of re-parsing attributes, and assigns the first free `Table<n>` instead of preserving or suffixing a reserved prefix; XLSB, ODS and CSV import create no tables |
 

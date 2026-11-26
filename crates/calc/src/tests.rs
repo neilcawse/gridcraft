@@ -927,10 +927,7 @@ fn lookups_distinguish_failed_linked_caches_from_local_index_errors() {
     t.set("B5", "=VLOOKUP(\"y\",D1:E2,1/0,FALSE)");
     t.set("B6", "=VLOOKUP(\"z\",D1:E2,1/0,FALSE)");
     t.set("B7", "=VLOOKUP(\"z\",{\"x\",1;\"y\",2},#NAME?,FALSE)");
-    assert_eq!(
-        [t.get("B5"), t.get("B6"), t.get("B7")],
-        [Value::Error(CellError::Div0), Value::Error(CellError::NA), Value::Error(CellError::NA)]
-    );
+    assert_eq!([t.get("B5"), t.get("B6"), t.get("B7")], [Value::Error(CellError::Div0), Value::Error(CellError::NA), Value::Error(CellError::NA)]);
 }
 
 #[test]

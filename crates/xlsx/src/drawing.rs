@@ -1357,9 +1357,13 @@ pub fn write_drawing(
         groups_done: HashSet::new(),
         next_id: 2,
         used_ids: opaque_ids.iter().copied().chain(stand_ins.iter().filter_map(|&(_, n)| usize::try_from(n).ok())).collect(),
-        reserved_ids: sheet.drawing_names.values().map(|(id, _)| *id)
+        reserved_ids: sheet
+            .drawing_names
+            .values()
+            .map(|(id, _)| *id)
             .chain(opaque_ids.iter().copied())
-            .chain(stand_ins.iter().filter_map(|&(_, n)| usize::try_from(n).ok())).collect(),
+            .chain(stand_ins.iter().filter_map(|&(_, n)| usize::try_from(n).ok()))
+            .collect(),
     };
     let mut order: Vec<_> = (0..objs.len()).collect();
     if !sheet.drawing_order.is_empty() {
@@ -1495,14 +1499,7 @@ fn write_obj(s: &mut String, theme: &Theme, o: &Obj<'_>, id: usize, name: Option
         }
         Obj::Slicer(sl, slicer_name) => {
             let table = matches!(sl.source, gridcraft_model::SlicerSource::Table { .. });
-            s.push_str(&crate::slicer::frame_xml(
-                id,
-                slicer_name,
-                name,
-                table,
-                &xfrm("xdr:xfrm", transform),
-                &xfrm("a:xfrm", transform),
-            ));
+            s.push_str(&crate::slicer::frame_xml(id, slicer_name, name, table, &xfrm("xdr:xfrm", transform), &xfrm("a:xfrm", transform)));
         }
         Obj::Chart(_, rid) => {
             let _ = write!(

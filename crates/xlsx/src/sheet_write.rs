@@ -539,13 +539,7 @@ fn write_sheet_drawing_rel(
     };
     let mut drels = Rels::default();
     let proxies = kept.control_proxies(&mut drels);
-    if images.is_empty()
-        && sheet.charts.is_empty()
-        && shapes.is_empty()
-        && slicers.is_empty()
-        && stand_ins.is_empty()
-        && proxies.is_empty()
-    {
+    if images.is_empty() && sheet.charts.is_empty() && shapes.is_empty() && slicers.is_empty() && stand_ins.is_empty() && proxies.is_empty() {
         return None;
     }
     out.drawings += 1;
