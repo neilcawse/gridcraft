@@ -911,8 +911,8 @@ pub struct CaptionMarkup {
 /// `fillcolor`, `stroked`, `strokecolor`, `strokeweight`), the attributes of its `v:fill`,
 /// `o:lock` and `v:path` (`None`: the file left that element out; names without their prefix),
 /// and whether its client data said `x:AutoFill False`, `x:AutoLine False` and
-/// `x:TextVAlign Center` (the properties part's `autoFill="0"` and `autoLine="0"` follow the
-/// first two). The reader only keeps a check box editable when all of these hold values it knows.
+/// `x:TextVAlign Center`. The reader only keeps a check box editable when all of these hold
+/// values it knows.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CheckVmlLook {
@@ -926,6 +926,14 @@ pub struct CheckVmlLook {
     pub auto_fill_off: bool,
     pub auto_line_off: bool,
     pub text_v_center: bool,
+}
+
+/// Which automatic formatting flags the worksheet `<controlPr>` explicitly sets to false.
+/// An unset flag is omitted on save. These flags are independent of the legacy VML shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckSheetAutoFlags {
+    pub fill_off: bool,
+    pub line_off: bool,
 }
 
 /// How a drop-down list is drawn and edited (`dropStyle`). Spreadsheet applications write
@@ -1065,6 +1073,9 @@ pub struct FormControl {
     /// `v:path`, text fitting); `None`: GridCraft's own look for a new check box.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub check_vml_look: Option<CheckVmlLook>,
+    /// Worksheet flags as read; `None`: generate them from the VML settings or new-control defaults.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_sheet_auto_flags: Option<CheckSheetAutoFlags>,
     /// The macro a check box's file assigns it, as written (`[0]!Toggled`): kept for saving,
     /// never run.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1104,6 +1115,7 @@ impl Default for FormControl {
             check_vml_lock_text: None,
             check_vml_wrap_tight: false,
             check_vml_look: None,
+            check_sheet_auto_flags: None,
             kept_macro: None,
             caption_markup: None,
         }

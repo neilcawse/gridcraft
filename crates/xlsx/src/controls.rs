@@ -31,8 +31,8 @@ use std::fmt::Write as _;
 
 use gridcraft_core::CellRef;
 use gridcraft_model::{
-    Anchor, AnchorMode, CONTROL_MAX, CaptionMarkup, CheckState, CheckVmlLook, ControlAction, ControlKind, DROP_LINES_DEFAULT, DropDisplay, DropStyle,
-    FormControl, MacroInput, Sheet,
+    Anchor, AnchorMode, CONTROL_MAX, CaptionMarkup, CheckSheetAutoFlags, CheckState, CheckVmlLook, ControlAction, ControlKind, DROP_LINES_DEFAULT,
+    DropDisplay, DropStyle, FormControl, MacroInput, Sheet,
 };
 
 use crate::package::Rel;
@@ -193,18 +193,21 @@ pub fn write(out: &mut Out, rels: &mut Rels, sheet: &Sheet, shape_id: impl Fn(us
                 emu(dy)
             )
         };
-        // A drop-down's box is not sized to its text (`autoLine`), as Excel writes it; a check
-        // box's is neither filled nor sized to its text, unless its file's VML says otherwise.
+        // A drop-down uses explicit line properties. A check box keeps its worksheet flags;
+        // only when generating an entry from scratch do its flags follow the VML.
         let mut pr = String::from(match c.kind {
             ControlKind::Drop => " defaultSize=\"0\" autoLine=\"0\" autoPict=\"0\"",
             _ => " defaultSize=\"0\"",
         });
         if c.kind == ControlKind::Check {
-            let look = c.check_vml_look.as_ref();
-            if look.is_none_or(|l| l.auto_fill_off) {
+            let flags = c.check_sheet_auto_flags.unwrap_or_else(|| {
+                let look = c.check_vml_look.as_ref();
+                CheckSheetAutoFlags { fill_off: look.is_none_or(|l| l.auto_fill_off), line_off: look.is_none_or(|l| l.auto_line_off) }
+            });
+            if flags.fill_off {
                 pr.push_str(" autoFill=\"0\"");
             }
-            if look.is_none_or(|l| l.auto_line_off) {
+            if flags.line_off {
                 pr.push_str(" autoLine=\"0\"");
             }
         }
@@ -534,6 +537,7 @@ struct Props {
     check_vml_lock_text: Option<bool>,
     check_vml_wrap_tight: bool,
     check_vml_look: Option<CheckVmlLook>,
+    check_sheet_auto_flags: Option<CheckSheetAutoFlags>,
     check_ctrl_prop_opaque: bool,
     /// Payload that the drop-down or check box model cannot faithfully rewrite.
     opaque: bool,
@@ -619,6 +623,7 @@ fn props_from_ctrl_prop(e: &El) -> Props {
         check_vml_lock_text: None,
         check_vml_wrap_tight: false,
         check_vml_look: None,
+        check_sheet_auto_flags: None,
         check_ctrl_prop_opaque: matches!(kind, Some(ControlKind::Check) | None)
             && (check_ctrl_prop_payload(e) || e.attr("objectType").is_some_and(|_| kind.is_none())),
         opaque: match kind {
@@ -932,6 +937,7 @@ fn build(p: Props, kind: ControlKind, anchor: Anchor, name: Option<&str>, id: u3
         c.check_vml_lock_text = p.check_vml_lock_text;
         c.check_vml_wrap_tight = p.check_vml_wrap_tight;
         c.check_vml_look = p.check_vml_look;
+        c.check_sheet_auto_flags = p.check_sheet_auto_flags;
         c.kept_macro = p.macro_;
         c.caption_markup = p.markup;
     }
@@ -1114,17 +1120,13 @@ pub fn read(cx: &mut Ctx<'_>, controls: Option<&El>, vml_rid: Option<&str>, rels
                 });
         }
         if p.kind == Some(ControlKind::Check) {
-            // The writer gives the control `defaultSize="0"` and `autoPict="0"`, and `autoFill="0"`
-            // and `autoLine="0"` as the VML says them (or always, without VML): a check box whose
-            // entry says otherwise keeps it by staying in pass-through.
+            // Keep the worksheet flags independent of the VML, which can omit different flags.
+            // Default sizing and automatic pictures remain opaque (both default to true).
             let off = |k: &str| pr.and_then(|pr| pr.attr_bool(k)) == Some(false);
-            let look = p.check_vml_look.as_ref();
-            let entry_differs = !off("defaultSize")
-                || !off("autoPict")
-                || off("autoFill") != look.is_none_or(|l| l.auto_fill_off)
-                || off("autoLine") != look.is_none_or(|l| l.auto_line_off);
+            p.check_sheet_auto_flags = pr.map(|_| CheckSheetAutoFlags { fill_off: off("autoFill"), line_off: off("autoLine") });
             p.opaque |= p.check_ctrl_prop_opaque
-                || entry_differs
+                || !off("defaultSize")
+                || !off("autoPict")
                 || (ctl.attr("id").is_some() && p.check_lock_text.is_none())
                 || check_sheet_control_payload(ctl, pr)
                 || shape.is_some_and(|s| s.child("ClientData").and_then(|d| d.attr("ObjectType")).and_then(kind_of) != Some(ControlKind::Check));

@@ -508,21 +508,49 @@ fn an_editable_check_box_writes_back_the_look_it_was_read_with() {
     }
 }
 
-/// A check box whose worksheet control entry says something about sizing or fitting that the
-/// writer wouldn't write again (no `defaultSize="0"`, or an `autoFill` its VML doesn't share)
-/// stays in pass-through, unchanged.
+/// The two formats can disagree about automatic fill and line properties. Both keep their own
+/// flags when the control is edited and saved.
 #[test]
-fn a_control_entry_that_disagrees_with_the_written_one_stays_kept() {
+fn worksheet_and_vml_auto_flags_round_trip_independently() {
     let sheet_part = "xl/worksheets/sheet1.xml";
     let vml_part = "xl/drawings/vmlDrawing1.vml";
     let original = legacy_check_boxes(true);
     let sheet = text(&mut Package::open(&original).unwrap(), sheet_part);
     let vml = text(&mut Package::open(&original).unwrap(), vml_part);
+    for (sheet_flag, vml_flag) in [("autoFill", "AutoLine"), ("autoLine", "AutoFill")] {
+        let sheet_attr = format!(" {sheet_flag}=\"0\"");
+        let vml_element = format!("<x:{vml_flag}>False</x:{vml_flag}>");
+        let bytes = replace_part(&original, sheet_part, &sheet.replacen(&sheet_attr, "", 1));
+        let bytes = replace_part(&bytes, vml_part, &vml.replacen(&vml_element, "", 1));
+        let (mut wb, _) = read_xlsx(&bytes).unwrap();
+        assert_eq!(check_boxes(&wb), expected(), "worksheet omits {sheet_flag}, VML omits {vml_flag}");
+        wb.sheet_mut(0).unwrap().controls[0].checked = CheckState::Unchecked;
+        for _ in 0..2 {
+            let out = write_xlsx(&wb).unwrap();
+            let saved_sheet = text(&mut Package::open(&out).unwrap(), sheet_part);
+            let entry = saved_sheet.split("</control>").find(|e| e.contains(CHECK_BOX_NAMES[0])).unwrap();
+            let shape = ship_it_shape(&out);
+            for (sheet_name, vml_name) in [("autoFill", "AutoFill"), ("autoLine", "AutoLine")] {
+                assert_eq!(entry.contains(&format!(" {sheet_name}=\"0\"")), sheet_name != sheet_flag, "{entry}");
+                assert_eq!(shape.contains(&format!("<x:{vml_name}>False</x:{vml_name}>")), vml_name != vml_flag, "{shape}");
+            }
+            (wb, _) = read_xlsx(&out).unwrap();
+            let controls = &wb.sheet(0).unwrap().controls;
+            assert_eq!(controls.len(), expected().len());
+            assert_eq!(controls[0].checked, CheckState::Unchecked);
+        }
+    }
+}
+
+/// Default sizing and automatic pictures are outside the editable model.
+#[test]
+fn a_control_entry_with_unsupported_sizing_or_picture_stays_kept() {
+    let sheet_part = "xl/worksheets/sheet1.xml";
+    let original = legacy_check_boxes(true);
+    let sheet = text(&mut Package::open(&original).unwrap(), sheet_part);
     for bytes in [
         replace_part(&original, sheet_part, &sheet.replacen("defaultSize=\"0\" ", "", 1)),
         replace_part(&original, sheet_part, &sheet.replacen(" autoPict=\"0\"", "", 1)),
-        replace_part(&original, vml_part, &vml.replacen("<x:AutoFill>False</x:AutoFill>", "", 1)),
-        replace_part(&original, sheet_part, &sheet.replacen(" autoLine=\"0\"", "", 1)),
     ] {
         let (wb, _) = read_xlsx(&bytes).unwrap();
         assert_eq!(check_boxes(&wb), expected()[1..]);
