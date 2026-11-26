@@ -148,6 +148,32 @@ fn keyboard_navigation_keeps_the_sheet_edge_visible_after_the_reveal_frame() {
     fully_visible(&h);
 }
 
+#[test]
+fn wheeling_down_over_the_scrollbar_at_the_sheet_edge_does_not_scroll_back_up() {
+    let mut s = Session::new();
+    s.new_workbook();
+    let builder = crate::common::builder().with_os(egui::os::OperatingSystem::Nix).with_size(egui::vec2(600.0, 420.0));
+    let mut h = crate::common::harness_with(builder, crate::common::app(s), 4);
+    key(&mut h, Key::ArrowDown, CTRL);
+    h.run_steps(3);
+    let geo = h.state().grid.geo.clone().unwrap();
+    let revealed = geo.scroll.y;
+    // The vertical scrollbar's track runs just right of the cells.
+    let at = egui::pos2(geo.cells.right() + 4.0, geo.cells.center().y);
+    h.input_mut().events.push(Event::PointerMoved(at));
+    h.run_steps(2);
+    h.input_mut().events.push(Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -120.0),
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Unknown,
+        modifiers: Modifiers::NONE,
+    });
+    h.run_steps(30);
+    let after = h.state().grid.geo.as_ref().unwrap().scroll.y;
+    assert!(after >= revealed, "wheeling down moved the view up: {revealed} → {after}");
+}
+
 fn control(h: &mut Harness, method: &str, params: Json) -> Json {
     let ctx = h.ctx.clone();
     let out = match handle(h.state_mut(), &ctx, method, &params) {

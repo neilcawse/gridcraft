@@ -574,10 +574,9 @@ fn vertical_scrollbar(app: &mut SheetApp, ui: &mut egui::Ui, sh: &Sheet, geo: &G
     if resp.hovered() {
         next -= ui.input(|i| i.smooth_scroll_delta.y) / geo.z;
     }
-    // An idle scrollbar must not undo a keyboard reveal beyond its nominal extent.
-    if next != scroll {
-        next = next.clamp(0.0, limit);
-    }
+    // A keyboard reveal can sit past the nominal limit; the bar may move up from there, never
+    // back towards the limit when asked to go further down.
+    next = next.clamp(0.0, limit.max(scroll));
     if next != scroll {
         if let Some(v) = app.view_mut() {
             v.scroll.y = next;
