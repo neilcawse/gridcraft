@@ -163,6 +163,28 @@ impl Sheet {
             || self.cols != other.cols
     }
 
+    /// The groups and every object they contain, named as in [`Sheet::object_refs`], each with
+    /// whether its outermost group overlaps `area`: that group's own box or the box around its
+    /// members does (a box without extent counts where it starts; an `area` without extent
+    /// overlaps nothing).
+    pub fn grouped_objects(&self, area: ObjectRect) -> HashMap<ObjRef, bool> {
+        let overlaps = |lo: f64, len: f64, a_lo: f64, a_len: f64| a_len > 0.0 && lo < a_lo + a_len && (lo >= a_lo || lo + len > a_lo);
+        let overlap = |r: ObjectRect| overlaps(r.x, r.w, area.x, area.w) && overlaps(r.y, r.h, area.y, area.h);
+        let mut out: HashMap<_, _> = self.groups.iter().flat_map(|g| g.members.iter().copied()).map(|m| (drawing_obj(m), false)).collect();
+        for g in &self.groups {
+            let group = DrawingRef::Group(g.id);
+            // A group in the member map has a parent. Cycles without a root stay false.
+            if out.contains_key(&drawing_obj(group)) {
+                continue;
+            }
+            let held = overlap(self.anchor_rect(&g.anchor)) || self.drawing_rect(group).is_some_and(overlap);
+            for m in std::iter::once(group).chain(self.group_contents(g.id)) {
+                out.insert(drawing_obj(m), held);
+            }
+        }
+        out
+    }
+
     /// Floating objects outside any group, then each one's anchor.
     fn floating(&self) -> Vec<(Floating, Anchor)> {
         let grouped: HashSet<DrawingRef> = self.groups.iter().flat_map(|g| g.members.iter().copied()).collect();

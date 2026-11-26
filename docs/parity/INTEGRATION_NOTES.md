@@ -55,6 +55,14 @@ Base: Neil's `origin/integrated` at `2e8dc12384775b61675a918863c79a632773e9cc`.
 - Before the row fit, sort drops a placed drawing's saved markers if they no longer describe its editable anchor on the sorted grid. An unchanged anchor alone does not make the old markers valid.
 - Which objects a sort moves, and where it puts them, are unchanged. Excel's own sort-with-shapes behaviour is unmeasured.
 - Groups straddling the sort block are unmeasured. On the base, a group followed the pre-fit line changes when all its editable anchors were unchanged. X28 skips that follow if the sort placed any member, even when the member's editable anchor is unchanged.
+- X34 below supersedes X28's member-level sort placement for grouped drawings.
+
+## X34 — Grouped shapes stay in place during sort
+
+- **Measured:** In the Batch 4 `x28-group-sort` case (Excel for Mac 16.115.2), sorting `A5:D10` ascending by A with no header left both group boxes and their move-and-size placement unchanged. One group straddled the top of the block; the other was wholly inside it. All six rows sorted intact.
+- **Behavior change from X28:** Grouped drawings no longer follow their individual rows during the permutation. Sort holds the group's geometry and every member's sheet position, including when permuted row heights require different cell-relative anchors. Ungrouped drawings keep X28's placement behavior. A separate automatic row fit after the permutation still follows each group's anchor mode; save/reopen persists the resulting placement and undo/redo restores the corresponding workbook state.
+- **Inferred, not measured:** Unchanged group bounds are consistent with unmoved members, but lookup by name failed and a swap within the same bounds cannot be ruled out. The probe used uniform row heights and did not measure permuted unequal heights, a post-sort fit that changes heights, horizontal sorts, other placement modes, or nested groups. GridCraft applies the same group policy to those permutations and treats any subsequent fit as a resize, using its existing X24 placement behavior. Excel did not write anchors or child offsets; the round-trip tests use synthetic GridCraft workbooks.
+- **Scope (inferred):** The hold applies when either the outermost group's own box or the box around its members overlaps the visible sorted block. The gap between those two boxes does not count, and a block whose rows or columns are all collapsed has no visible area to overlap. A zero-size group axis counts at its start, including the near edge of the block but not the far edge. Nested groups and members follow their outermost group. Other groups follow line changes by their placement mode, such as when row heights travel with the sorted rows or a hidden row takes another height and moves the rows below it. Excel did not measure these cases.
 
 ## X38 — XLSX group projection
 
