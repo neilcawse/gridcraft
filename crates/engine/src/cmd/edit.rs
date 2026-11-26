@@ -19,6 +19,7 @@ mod go_to;
 mod paste_special;
 mod selection;
 
+pub use cell::parse_cell_input;
 use cell::{cell_set, range_fill, range_set_values};
 pub(crate) use cell::{
     check_arg_counts, check_linked_books, drop_linked_books, input_to_cell, is_formula_input, json_to_input, parse_typed_formula,

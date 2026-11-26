@@ -103,7 +103,7 @@ fn read(s: &mut Session, p: &Json) -> Result<Json> {
         for col in r.start.col..=r.end.col {
             let c = CellRef::new(row, col);
             let v = if formulas && let Some(f) = sh.cell(c).and_then(|x| x.formula.as_ref()) {
-                json!(format!("={}", f.text))
+                json!(crate::display::formula_text(&d.wb, sh, c, f))
             } else if formatted {
                 json!(crate::display::cell_text(&d.wb, sh, c))
             } else {
@@ -123,13 +123,16 @@ fn cell_get(s: &mut Session, p: &Json) -> Result<Json> {
     let c = cell_param_on(s, p, "cell", sheet)?.unwrap_or(d.selection.active);
     let cell = sh.cell(c);
     let style = d.wb.styles.get(sh.style_id(c));
+    let formula = cell.and_then(|x| x.formula.as_ref()).map(|f| crate::display::formula_text(&d.wb, sh, c, f));
+    let input = formula.as_deref().filter(|_| !sh.cell_pictures.contains_key(&c) && cell.is_some_and(|x| x.py.is_none()));
+    let input = input.map_or_else(|| std::borrow::Cow::Owned(sh.input_text(c)), std::borrow::Cow::Borrowed);
     Ok(json!({
         "cell": c.a1(),
         "value": value_json(&sh.value(c)),
         "type": if sh.cell_pictures.contains_key(&c) { "picture" } else { match sh.value(c) { Value::Empty => "empty", Value::Number(_) => "number", Value::Text(_) => "text", Value::Bool(_) => "boolean", Value::Error(_) => "error", Value::Array(_) => "array" } },
-        "formula": cell.and_then(|x| x.formula.as_ref()).map(|f| format!("={}", f.text)),
+        "formula": formula,
         "text": crate::display::cell_text(&d.wb, sh, c),
-        "input": sh.input_text(c),
+        "input": input,
         "picture": sh.cell_pictures.get(&c).map(|picture| json!({"mime": picture.mime, "alt": picture.alt, "bytes": picture.data.len()})),
         "spilledFrom": sh.spill_anchor(c).map(|a| a.a1()),
         "spill": sh.spill_ranges.get(&c).map(|r| r.a1()),

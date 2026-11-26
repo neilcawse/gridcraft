@@ -138,13 +138,17 @@ fn range_r1c1(r: &Reference, at: CellRef, sep: &str) -> String {
 }
 
 pub fn struct_ref(s: &StructRef) -> String {
-    write_struct_ref(s, true)
+    let mut out = String::new();
+    write_struct_ref(&mut out, s, true, &s.table);
+    out
 }
 
 /// Structured reference as files spell it: `[@Col]` is only Excel's display shorthand, files
 /// hold `[[#This Row],[Col]]` (and `[#This Row]` for `[@]`).
 pub fn struct_ref_file(s: &StructRef) -> String {
-    write_struct_ref(s, false)
+    let mut out = String::new();
+    write_struct_ref(&mut out, s, false, &s.table);
+    out
 }
 
 /// Splits a sheet-qualified name at its last `!` outside brackets. A `!` inside brackets
@@ -169,7 +173,7 @@ fn sheet_split(n: &str) -> Option<(&str, &str)> {
     at.and_then(|i| Some((n.get(..i)?, n.get(i + 1..)?)))
 }
 
-fn write_struct_ref(s: &StructRef, at_shorthand: bool) -> String {
+fn write_struct_ref(out: &mut String, s: &StructRef, at_shorthand: bool, table: &str) {
     let esc = |c: &str| c.replace('\'', "''").replace('[', "'[").replace(']', "']").replace('#', "'#");
     let item = |i: &StructItem| match i {
         StructItem::All => "#All",
@@ -179,7 +183,7 @@ fn write_struct_ref(s: &StructRef, at_shorthand: bool) -> String {
         StructItem::ThisRow => "#This Row",
     };
     let this_row = at_shorthand && s.specifiers == [StructItem::ThisRow];
-    let mut out = s.table.clone();
+    out.push_str(table);
     let simple_col = |c: &str| !c.chars().any(|ch| matches!(ch, ' ' | '[' | ']' | '#' | '\'' | ',' | ':'));
     match (&s.col_start, &s.col_end) {
         (None, None) if s.specifiers.is_empty() => out.push_str("[]"),
@@ -212,7 +216,6 @@ fn write_struct_ref(s: &StructRef, at_shorthand: bool) -> String {
             let _ = write!(out, "[{}]", parts.join(","));
         }
     }
-    out
 }
 
 fn number(n: f64) -> String {
@@ -231,18 +234,24 @@ fn number(n: f64) -> String {
 /// Prints an expression in A1 notation.
 pub fn print(e: &Expr) -> String {
     let mut s = String::new();
-    write_expr(&mut s, e, None);
+    write_expr(&mut s, e, None, None);
     s
+}
+
+/// Appends a cell formula in A1 notation, omitting references' table identifier when it
+/// names the formula cell's own table. The expression is not changed.
+pub fn write_in_table(s: &mut String, e: &Expr, table: &str) {
+    write_expr(s, e, None, Some(table));
 }
 
 /// Prints an expression in R1C1 notation relative to `at`.
 pub fn print_r1c1(e: &Expr, at: CellRef) -> String {
     let mut s = String::new();
-    write_expr(&mut s, e, Some(at));
+    write_expr(&mut s, e, Some(at), None);
     s
 }
 
-fn write_expr(s: &mut String, e: &Expr, r1c1: Option<CellRef>) {
+fn write_expr(s: &mut String, e: &Expr, r1c1: Option<CellRef>, local_table: Option<&str>) {
     match e {
         Expr::Number(n) => s.push_str(&number(*n)),
         Expr::Text(t) => {
@@ -262,7 +271,7 @@ fn write_expr(s: &mut String, e: &Expr, r1c1: Option<CellRef>) {
                     if ci > 0 {
                         s.push(',');
                     }
-                    write_expr(s, el, r1c1);
+                    write_expr(s, el, r1c1, local_table);
                 }
             }
             s.push('}');
@@ -286,26 +295,29 @@ fn write_expr(s: &mut String, e: &Expr, r1c1: Option<CellRef>) {
             }
             _ => s.push_str(n),
         },
-        Expr::Struct(st) => s.push_str(&struct_ref(st)),
+        Expr::Struct(st) => {
+            let table = if local_table.is_some_and(|name| name.eq_ignore_ascii_case(&st.table)) { "" } else { &st.table };
+            write_struct_ref(s, st, true, table);
+        }
         Expr::Unary(op, x) => match op {
             UnOp::Neg => {
                 s.push('-');
-                write_expr(s, x, r1c1);
+                write_expr(s, x, r1c1, local_table);
             }
             UnOp::Plus => {
                 s.push('+');
-                write_expr(s, x, r1c1);
+                write_expr(s, x, r1c1, local_table);
             }
             UnOp::At => {
                 s.push('@');
-                write_expr(s, x, r1c1);
+                write_expr(s, x, r1c1, local_table);
             }
             UnOp::Percent => {
-                write_expr(s, x, r1c1);
+                write_expr(s, x, r1c1, local_table);
                 s.push('%');
             }
             UnOp::Spill => {
-                write_expr(s, x, r1c1);
+                write_expr(s, x, r1c1, local_table);
                 // A reference that became #REF! (its sheet or cell was deleted) stays `#REF!`.
                 if !matches!(**x, Expr::Error(_)) {
                     s.push('#');
@@ -317,16 +329,16 @@ fn write_expr(s: &mut String, e: &Expr, r1c1: Option<CellRef>) {
                     None => push_range_a1(s, r, mode.symbol()),
                 },
                 Expr::Binary(BinOp::Range, a, b) => {
-                    write_expr(s, a, r1c1);
+                    write_expr(s, a, r1c1, local_table);
                     s.push_str(mode.symbol());
-                    write_expr(s, b, r1c1);
+                    write_expr(s, b, r1c1, local_table);
                 }
                 // A reference that became #REF! stays `#REF!`.
-                Expr::Error(_) => write_expr(s, x, r1c1),
+                Expr::Error(_) => write_expr(s, x, r1c1, local_table),
                 // No operator form (e.g. a range shrunk to one cell): the equivalent call.
                 other => {
                     s.push_str("TRIMRANGE(");
-                    write_expr(s, other, r1c1);
+                    write_expr(s, other, r1c1, local_table);
                     let _ = write!(s, ",{0},{0})", mode.code());
                 }
             },
@@ -340,10 +352,17 @@ fn write_expr(s: &mut String, e: &Expr, r1c1: Option<CellRef>) {
                 rest.push((op, b));
                 first = a;
             }
-            write_expr(s, first, r1c1);
+            write_expr(s, first, r1c1, local_table);
             for (op, right) in rest.into_iter().rev() {
                 s.push_str(op.symbol());
-                write_expr(s, right, r1c1);
+                // Group an elided right operand if its opening bracket could otherwise
+                // attach to the word before the intersection space.
+                let start = s.len();
+                write_expr(s, right, r1c1, local_table);
+                if local_table.is_some() && *op == BinOp::Intersect && s[start..].starts_with('[') {
+                    s.insert(start, '(');
+                    s.push(')');
+                }
             }
         }
         Expr::Call(name, args) => {
@@ -353,25 +372,25 @@ fn write_expr(s: &mut String, e: &Expr, r1c1: Option<CellRef>) {
                 if i > 0 {
                     s.push(',');
                 }
-                write_expr(s, a, r1c1);
+                write_expr(s, a, r1c1, local_table);
             }
             s.push(')');
         }
         Expr::Invoke(c, args) => {
-            write_expr(s, c, r1c1);
+            write_expr(s, c, r1c1, local_table);
             s.push('(');
             for (i, a) in args.iter().enumerate() {
                 if i > 0 {
                     s.push(',');
                 }
-                write_expr(s, a, r1c1);
+                write_expr(s, a, r1c1, local_table);
             }
             s.push(')');
         }
         Expr::Missing => {}
         Expr::Paren(x) => {
             s.push('(');
-            write_expr(s, x, r1c1);
+            write_expr(s, x, r1c1, local_table);
             s.push(')');
         }
     }

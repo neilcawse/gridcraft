@@ -31,7 +31,7 @@ pub fn parse(src: &str) -> Result<Expr, ParseError> {
 /// Parses a defined name's formula. Unlike a cell formula, a comma at the top level is the
 /// union operator: Excel stores and shows a name over several ranges as `Sheet1!$A$1,Sheet1!$C$1`.
 pub fn parse_name(src: &str) -> Result<Expr, ParseError> {
-    parse_top(src, crate::FormulaLocale::En, true)
+    parse_top(src, crate::FormulaLocale::En, true, None)
 }
 
 /// Most closing parentheses [`parse_closing_parens`] adds.
@@ -55,18 +55,20 @@ pub fn parse_closing_parens<T>(src: &str, parse: impl Fn(&str) -> Result<T, Pars
     Err(typed)
 }
 
+pub(crate) type TableOnSheet<'a> = Option<&'a dyn Fn(&str, &str) -> bool>;
+
 pub(crate) fn parse_syntax(src: &str, locale: crate::FormulaLocale) -> Result<Expr, ParseError> {
-    parse_top(src, locale, false)
+    parse_top(src, locale, false, None)
 }
 
-fn parse_top(src: &str, locale: crate::FormulaLocale, allow_union: bool) -> Result<Expr, ParseError> {
+pub(crate) fn parse_top(src: &str, locale: crate::FormulaLocale, allow_union: bool, table_on_sheet: TableOnSheet<'_>) -> Result<Expr, ParseError> {
     let body = src.strip_prefix('=').unwrap_or(src);
     if body.len() > MAX_FORMULA_LEN && body.chars().count() > MAX_FORMULA_LEN {
         return Err(ParseError { msg: format!("formula is longer than {MAX_FORMULA_LEN} characters"), pos: 0 });
     }
     let toks = tokenize_locale(body, locale).map_err(|e| ParseError { msg: e.msg, pos: e.pos })?;
     let toks = significant_spaces(toks);
-    let mut p = Parser { toks, i: 0, depth: 0, input: locale == crate::FormulaLocale::Es };
+    let mut p = Parser { toks, i: 0, depth: 0, input: locale == crate::FormulaLocale::Es, table_on_sheet };
     let e = p.expr(0, allow_union)?;
     match p.peek() {
         Tok::Eof if wrapper_height(&e) > MAX_DEPTH => Err(ParseError { msg: "formula is nested too deeply".into(), pos: 0 }),
@@ -126,11 +128,12 @@ fn significant_spaces(toks: Vec<Token>) -> Vec<Token> {
     out
 }
 
-struct Parser {
+struct Parser<'a> {
     toks: Vec<Token>,
     i: usize,
     depth: usize,
     input: bool,
+    table_on_sheet: TableOnSheet<'a>,
 }
 
 fn word_is_cols(w: &str) -> Option<(u32, bool)> {
@@ -167,7 +170,7 @@ pub fn normalize_function_name(name: &str) -> String {
     }
 }
 
-impl Parser {
+impl Parser<'_> {
     fn peek(&self) -> &Tok {
         self.toks.get(self.i).map(|t| &t.tok).unwrap_or(&Tok::Eof)
     }
@@ -364,6 +367,15 @@ impl Parser {
                     None => SheetSel::Named(a),
                 };
                 match self.next() {
+                    Tok::Word(w) if matches!(self.peek(), Tok::Struct(_)) && word_is_cell(&w).is_none() && self.table_on_sheet.is_some() => {
+                        if let SheetSel::Named(s) = &sheet
+                            && self.table_on_sheet.is_some_and(|belongs| belongs(s, &w))
+                        {
+                            self.structured_reference(&w)
+                        } else {
+                            Err(self.err("the table is not on the specified sheet"))
+                        }
+                    }
                     Tok::Word(w) => self.reference_from_word(sheet, &w),
                     // A reference Excel found deleted in a linked workbook keeps the link
                     // (`[1]Data!#REF!`), so it prints back as written.
@@ -378,15 +390,19 @@ impl Parser {
                 if let Tok::Struct(_) = self.peek()
                     && word_is_cell(&w).is_none()
                 {
-                    let pos = self.pos();
-                    let Tok::Struct(body) = self.next() else { return Err(self.err("internal")) };
-                    return parse_struct(&w, &body).map(Expr::Struct).map_err(|msg| ParseError { msg, pos });
+                    return self.structured_reference(&w);
                 }
                 self.reference_from_word(SheetSel::Current, &w)
             }
             Tok::Struct(body) => parse_struct("", &body).map(Expr::Struct).map_err(|msg| self.err(msg)),
             t => Err(self.err(format!("unexpected {}", describe(&t)))),
         }
+    }
+
+    fn structured_reference(&mut self, table: &str) -> Result<Expr, ParseError> {
+        let pos = self.pos();
+        let Tok::Struct(body) = self.next() else { return Err(self.err("expected a structured reference")) };
+        parse_struct(table, &body).map(Expr::Struct).map_err(|msg| ParseError { msg, pos })
     }
 
     /// A word after an optional sheet: a cell, a column/row range (`A:C`, `3:5`) or a name. A

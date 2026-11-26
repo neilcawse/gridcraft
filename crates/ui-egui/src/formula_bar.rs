@@ -297,7 +297,11 @@ fn active_input(app: &SheetApp) -> String {
         }
         return sh
             .cell(anchor)
-            .map(|c| crate::formula_locale::display(&c.input_text(), app.ui.language.formula_locale(), &d.wb, d.wb.active_sheet()))
+            .and_then(|c| c.formula.as_ref())
+            .map(|f| {
+                let text = gridcraft_engine::display::formula_text(&d.wb, sh, anchor, f);
+                crate::formula_locale::display(&text, app.ui.language.formula_locale(), &d.wb, d.wb.active_sheet())
+            })
             .unwrap_or_default();
     }
     if let Some(c) = sh.cell(a) {
@@ -306,7 +310,8 @@ fn active_input(app: &SheetApp) -> String {
             return String::new();
         }
         return if let Some(f) = &c.formula {
-            let shown = crate::formula_locale::display(&c.input_text(), app.ui.language.formula_locale(), &d.wb, d.wb.active_sheet());
+            let text = gridcraft_engine::display::formula_text(&d.wb, sh, a, f);
+            let shown = crate::formula_locale::display(&text, app.ui.language.formula_locale(), &d.wb, d.wb.active_sheet());
             // A legacy array formula shows in braces (`{=A1:A2*2}`), as `Cell::bar_text` does.
             if f.array.is_some() { format!("{{{shown}}}") } else { shown }
         } else {
@@ -1042,6 +1047,25 @@ mod spill_tests {
         select(&mut app, "A2");
         app.begin_edit(Some("replacement".into()), false);
         assert!(app.editor.is_some());
+    }
+
+    #[test]
+    fn x36_formula_bar_and_editor_use_table_local_syntax() {
+        let mut app = app();
+        app.run("sheet.rename", json!({"name": "Sales Data"})).unwrap();
+        app.run("range.setValues", json!({"range": "A1", "values": [["Qty", "Double"], [3], [4]]})).unwrap();
+        app.run("insert.table", json!({"range": "A1:B3", "hasHeaders": true})).unwrap();
+        set(&mut app, "B2", "=SUM(Table1[@Qty],Table1[@Qty])");
+        select(&mut app, "B2");
+        assert_eq!(active_input(&app), "=SUM([@Qty],[@Qty])");
+        app.ui.language = crate::i18n::Language::Es;
+        assert_eq!(active_input(&app), "=SUMA([@Qty];[@Qty])");
+        app.begin_edit(None, true);
+        assert_eq!(app.editor.as_ref().unwrap().text, "=SUMA([@Qty];[@Qty])");
+        app.editor.as_mut().unwrap().text = "=SUMA([@Qty];'Sales Data'!Table1[@Qty];1)".into();
+        assert!(app.commit_edit(0, 0, false, false));
+        assert_eq!(active_input(&app), "=SUMA([@Qty];[@Qty];1)");
+        assert_eq!(app.run("cell.get", json!({"cell": "B2"})).unwrap()["value"], 7.0);
     }
 
     #[test]

@@ -37,7 +37,7 @@ pub(crate) fn input_to_cell(input: &str, sheet: usize, at: CellRef, wb: &mut gri
     }
     if is_formula {
         let body = input.strip_prefix('=').unwrap_or(input);
-        let expr = wb.name_call_case(parse_typed_formula(body)?);
+        let expr = wb.name_call_case(parse_typed_formula(body, wb, sheet)?);
         check_linked_books(&expr, wb.external_books.len())?;
         check_arg_counts(&expr)?;
         let mut cell = Cell::formula(Formula::from_expr(expr));
@@ -217,9 +217,21 @@ pub(crate) fn drop_linked_books(expr: gridcraft_formula::Expr, shared: &[bool]) 
 
 /// Parses a formula as it is typed (without the `=`). Excel closes missing parentheses for you,
 /// and refuses a formula that still doesn't parse.
-pub(crate) fn parse_typed_formula(body: &str) -> Result<gridcraft_formula::Expr> {
-    let parsed = gridcraft_formula::parse_closing_parens(body, gridcraft_formula::parse);
-    parsed.map_err(|e| EngineError::Other(format!("There's a problem with this formula: {e}")))
+pub(crate) fn parse_typed_formula(body: &str, wb: &gridcraft_model::Workbook, sheet: usize) -> Result<gridcraft_formula::Expr> {
+    parse_cell_input(body, gridcraft_formula::FormulaLocale::En, wb, sheet)
+        .map_err(|e| EngineError::Other(format!("There's a problem with this formula: {e}")))
+}
+
+/// Parses canonical or localized cell entry, including an optional sheet qualifier on a table.
+pub fn parse_cell_input(
+    body: &str,
+    locale: gridcraft_formula::FormulaLocale,
+    wb: &gridcraft_model::Workbook,
+    sheet: usize,
+) -> std::result::Result<gridcraft_formula::Expr, gridcraft_formula::ParseError> {
+    let known = |name: &str| wb.name(name, sheet).is_some() || wb.table(name).is_some();
+    let table_on_sheet = |name: &str, table: &str| wb.table(table).is_some_and(|(si, _)| wb.sheet_index(name) == Some(si));
+    gridcraft_formula::parse_closing_parens(body, |text| gridcraft_formula::parse_cell_input(text, locale, known, table_on_sheet))
 }
 
 /// Like Excel, a formula that calls a built-in function with too few or too many arguments is

@@ -12,11 +12,12 @@ pub(crate) fn canonical(
 ) -> Result<String, ParseError> {
     // The editor hid the `_xludf.` prefixes of this cell's formula; confirming it unchanged keeps
     // the user-defined calls instead of binding them to the built-ins of the same name.
-    if let Some(stored) = wb.sheet(sheet).and_then(|sh| sh.cell(cell)).filter(|c| c.formula.is_some()).map(|c| c.input_text())
-        && has_udf_prefix(&stored)
-        && text == display(&stored, locale, wb, sheet)
+    if let Some(sh) = wb.sheet(sheet)
+        && let Some(f) = sh.cell(cell).and_then(|c| c.formula.as_ref())
+        && has_udf_prefix(&f.text)
+        && text == display(&gridcraft_engine::display::formula_text(wb, sh, cell, f), locale, wb, sheet)
     {
-        return Ok(stored);
+        return Ok(format!("={}", f.text));
     }
     if locale == FormulaLocale::En || wb.sheet(sheet).is_some_and(|sh| wb.styles.get(sh.style_id(cell)).num_fmt.as_str() == "@") {
         return Ok(text.to_string());
@@ -26,9 +27,7 @@ pub(crate) fn canonical(
     if body.starts_with('=')
         || ((body.starts_with('+') || body.starts_with('-')) && body.chars().nth(1).is_some_and(|c| c.is_ascii_alphabetic() || c == '('))
     {
-        let known = |name: &str| wb.name(name, sheet).is_some() || wb.table(name).is_some();
-        // Match the engine's existing convenience for missing closing parentheses.
-        let expr = formula::parse_closing_parens(body, |text| formula::parse_input(text, locale, known));
+        let expr = gridcraft_engine::cmd::edit::parse_cell_input(body, locale, wb, sheet);
         return Ok(format!("={}", formula::print(&expr?)));
     }
     // Decimal-comma number entry follows the same preference, without rewriting text or dates.

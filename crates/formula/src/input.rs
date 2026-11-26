@@ -59,7 +59,27 @@ impl FormulaLocale {
 /// Parses UI input using the selected function table and separators. Existing names and
 /// LET/LAMBDA bindings take precedence over aliases. File and API syntax uses [`crate::parse`].
 pub fn parse_input(src: &str, locale: FormulaLocale, known_name: impl Fn(&str) -> bool) -> Result<Expr, ParseError> {
-    let mut expr = parser::parse_syntax(src, locale)?;
+    parse_with_tables(src, locale, known_name, None)
+}
+
+/// Parses cell entry with a workbook lookup for `Sheet!Table[Column]`. A valid qualification
+/// is discarded before returning the tree, so neither the evaluator nor the file format sees it.
+pub fn parse_cell_input(
+    src: &str,
+    locale: FormulaLocale,
+    known_name: impl Fn(&str) -> bool,
+    table_on_sheet: impl Fn(&str, &str) -> bool,
+) -> Result<Expr, ParseError> {
+    parse_with_tables(src, locale, known_name, Some(&table_on_sheet))
+}
+
+fn parse_with_tables(
+    src: &str,
+    locale: FormulaLocale,
+    known_name: impl Fn(&str) -> bool,
+    table_on_sheet: parser::TableOnSheet<'_>,
+) -> Result<Expr, ParseError> {
+    let mut expr = parser::parse_top(src, locale, false, table_on_sheet)?;
     if locale == FormulaLocale::Es {
         normalize(&mut expr, &known_name, &mut Bindings::default(), 0, false)?;
     }
