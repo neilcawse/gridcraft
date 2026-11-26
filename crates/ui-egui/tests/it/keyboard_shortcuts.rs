@@ -94,6 +94,24 @@ fn formula_from_above_a_table_total_keeps_the_table_name() {
 }
 
 #[test]
+fn formula_from_above_localizes_a_table_formula_before_entry() {
+    let mut s = Session::new();
+    s.new_workbook();
+    s.execute("range.setValues", json!({"range": "A1", "values": [["Qty"], [3], [4]]})).unwrap();
+    s.execute("insert.table", json!({"range": "A1:A3", "hasHeaders": true})).unwrap();
+    s.execute("table.totalRow", json!({"table": "Table1", "on": true})).unwrap();
+    s.execute("cell.set", json!({"cell": "A4", "input": "=SUM(Table1[Qty],1.5)"})).unwrap();
+    s.execute("selection.set", json!({"range": "A5"})).unwrap();
+    let mut h = harness(s);
+    h.state_mut().run("app.language.set", json!({"language": "es"})).unwrap();
+    key(&mut h, Key::Quote, CTRL);
+    assert_eq!(h.state().editor.as_ref().map(|e| e.text.as_str()), Some("=SUMA(Table1[Qty];1,5)"));
+    key(&mut h, Key::Enter, Modifiers::NONE);
+    let sh = h.state().session.active().unwrap().wb.active().unwrap();
+    assert_eq!(sh.value(CellRef::parse("A5").unwrap()), gridcraft_engine::core::Value::Number(8.5));
+}
+
+#[test]
 fn windows_and_mac_variants() {
     let cmd = CTRL;
     let mac_cmd = Modifiers { mac_cmd: true, command: true, ..Modifiers::NONE };

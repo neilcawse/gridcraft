@@ -2548,6 +2548,22 @@ fn x36_shown_formula_reenters_to_the_stored_formula() {
 }
 
 #[test]
+fn x36_range_fill_binds_each_destination_and_follows_table_rename() {
+    let mut s = structured_ref_session();
+    s.execute("range.setValues", json!({"range": "E1", "values": [["Qty", "Double"], [10], [20]]})).unwrap();
+    s.execute("insert.table", json!({"range": "E1:F3", "hasHeaders": true})).unwrap();
+    s.execute("range.fill", json!({"range": "C2,D2,F2", "input": "=SUM([@Qty])*2"})).unwrap();
+    assert_eq!(v(&s, "C2"), Value::Number(6.0));
+    assert_eq!(v(&s, "F2"), Value::Number(20.0));
+    assert_eq!(v(&s, "D2"), Value::Error(gridcraft_core::CellError::Ref));
+    s.execute("table.rename", json!({"table": "Sales", "name": "Orders"})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    for (address, expected) in [("C2", "SUM(Orders[@Qty])*2"), ("D2", "SUM([@Qty])*2"), ("F2", "SUM(Table1[@Qty])*2")] {
+        assert_eq!(sh.cell(CellRef::parse(address).unwrap()).unwrap().formula.as_ref().unwrap().text, expected);
+    }
+}
+
+#[test]
 fn structured_refs_to_columns_with_edge_spaces() {
     let mut s = s();
     s.execute("range.setValues", json!({"range": "A1", "values": [["Item", "Qty "], ["a", 2], ["b", 3]]})).unwrap();

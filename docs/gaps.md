@@ -205,6 +205,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-26 | minor | §6, X36: range fill binds short structured references per destination; Ctrl+' uses localized formula syntax |
 | 2026-11-25 | minor | §3: table slicers are written to XLSX (they were dropped on save); OLAP slicers remain |
 | 2026-11-25 | minor | §6, X36: cell entry accepts same-workbook sheet qualifiers on structured references; formula readback omits the name of the containing table |
 | 2026-11-02 | minor | §17: equations (Insert › Equation, LaTeX source, gallery, editor) |

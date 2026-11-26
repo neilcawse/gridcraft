@@ -45,12 +45,18 @@ pub(crate) fn display(text: &str, locale: FormulaLocale, wb: &Workbook, sheet: u
     if locale == FormulaLocale::En {
         return hide_udf_prefix(text, locale);
     }
-    let Some(body) = text.strip_prefix('=') else { return text.to_string() };
-    let shown = formula::parse(body)
-        .and_then(|expr| formula::print_input(&expr, locale, |name| wb.name(name, sheet).is_some() || wb.table(name).is_some()))
-        .map(|body| format!("={body}"))
-        .unwrap_or_else(|_| text.to_string());
-    hide_udf_prefix(&shown, locale)
+    let shown = localize_for_entry(text, locale, wb, sheet);
+    hide_udf_prefix(shown.as_deref().unwrap_or(text), locale)
+}
+
+/// Localizes injected formula text without hiding prefixes needed when it is entered in another cell.
+pub(crate) fn localize_for_entry(text: &str, locale: FormulaLocale, wb: &Workbook, sheet: usize) -> Option<String> {
+    if locale == FormulaLocale::En {
+        return None;
+    }
+    let expr = formula::parse(text.strip_prefix('=')?).ok()?;
+    let body = formula::print_input(&expr, locale, |name| wb.name(name, sheet).is_some() || wb.table(name).is_some()).ok()?;
+    Some(format!("={body}"))
 }
 
 const UDF_PREFIX: &str = "_xludf.";

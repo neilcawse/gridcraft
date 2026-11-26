@@ -367,7 +367,11 @@ pub(crate) fn dispatch(app: &mut SheetApp, ctx: &egui::Context, key: Key, physic
                 app.session
                     .active()
                     .map(|d| match sh.cell(above).and_then(|c| c.formula.as_ref()).filter(|_| !sh.cell_pictures.contains_key(&above)) {
-                        Some(f) => gridcraft_engine::display::formula_text(&d.wb, sh, active, f),
+                        Some(f) => {
+                            let text = gridcraft_engine::display::formula_text(&d.wb, sh, active, f);
+                            crate::formula_locale::localize_for_entry(&text, app.ui.language.formula_locale(), &d.wb, d.wb.active_sheet())
+                                .unwrap_or(text)
+                        }
                         None => gridcraft_engine::display::edit_text(&d.wb, sh, above),
                     })
                     .unwrap_or_default()
