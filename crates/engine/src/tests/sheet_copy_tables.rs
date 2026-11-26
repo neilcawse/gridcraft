@@ -98,7 +98,7 @@ fn a_copied_sheet_has_its_tables_under_new_unique_names() {
     s.execute("sheet.move", json!({"sheet": "Data", "to": 2, "copy": true})).unwrap();
     assert_eq!(tables(&s, "Data (3)"), ["Sales5"]);
     s.execute("sheet.move", json!({"sheet": "Data (2)", "to": 3, "copy": true})).unwrap();
-    assert_eq!(tables(&s, "Data (2) (2)"), ["Sales46"]);
+    assert_eq!(tables(&s, "Data (4)"), ["Sales46"]);
 }
 
 #[test]
@@ -129,9 +129,9 @@ fn copy_numbers_multiple_tables_on_successive_copies() {
     s.execute("sheet.move", json!({"sheet": "Data", "to": 3, "copy": true})).unwrap();
     assert_eq!(tables(&s, "Data (3)"), ["Sales7", "Keys8"]);
     s.execute("sheet.move", json!({"sheet": "Data (2)", "to": 4, "copy": true})).unwrap();
-    assert_eq!(tables(&s, "Data (2) (2)"), ["Sales59", "Keys610"]);
-    assert_eq!(formula(&s, "Data (2) (2)", "H4"), "SUM(Sales59[Qty])");
-    assert_eq!(formula(&s, "Data (2) (2)", "H5"), "SUM(Keys610[K])");
+    assert_eq!(tables(&s, "Data (4)"), ["Sales59", "Keys610"]);
+    assert_eq!(formula(&s, "Data (4)", "H4"), "SUM(Sales59[Qty])");
+    assert_eq!(formula(&s, "Data (4)", "H5"), "SUM(Keys610[K])");
 }
 
 fn single_table(name: &str) -> Session {

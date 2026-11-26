@@ -7997,6 +7997,7 @@ fn text_to_columns_keeps_a_mid_field_quote() {
 }
 
 mod seams;
+mod sheet_copy_names;
 mod sheet_copy_tables;
 
 #[test]
