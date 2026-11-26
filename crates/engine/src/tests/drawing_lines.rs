@@ -456,7 +456,7 @@ fn a_sort_fit_discards_file_markers_for_a_group_beside_the_block() {
     assert!(!sh.drawing_files.contains_key(&group));
 }
 
-/// Only groups touching the sorted block keep their place on the sheet. A group beside it, or
+/// Only groups overlapping the sorted block keep their place on the sheet. A group beside it, or
 /// below it once a hidden row inside it takes another height, follows its moved rows like the
 /// ungrouped picture next to it.
 #[test]

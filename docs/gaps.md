@@ -162,7 +162,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
   conversion; cloud storage requested (#86). **Estimate:** 35–55 h (co-authoring scope needs the owner).
 
 ### 17. Insert objects (F)
-- Grouped shapes touching the sorted block stay in place during the sort permutation, including groups
+- Grouped shapes overlapping the sorted block stay in place during the sort permutation, including groups
   that straddle it; groups clear of the block and ungrouped drawings retain their existing sort behavior.
   Excel confirmed group bounds and placement, but individual member positions were unmeasured. See [X34](parity/INTEGRATION_NOTES.md#x34--grouped-shapes-stay-in-place-during-sort).
 - Ink strokes now survive XLSX save/reopen as editable polylines. Inserted icons still lose their

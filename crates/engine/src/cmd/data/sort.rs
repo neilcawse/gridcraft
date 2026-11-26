@@ -5,7 +5,7 @@ use super::{
 use gridcraft_model::ObjectRect;
 
 enum SortGeometry {
-    /// In a group touching the sorted block: keeps its place on the sheet.
+    /// In a group overlapping the sorted block: keeps its place on the sheet.
     Grouped {
         top: f64,
     },
@@ -236,7 +236,7 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
             v
         };
         // Read geometry before the row heights are permuted. Ungrouped objects may be refitted
-        // to their new lines using their bottom-right corner. Groups touching the sorted block,
+        // to their new lines using their bottom-right corner. Groups overlapping the sorted block,
         // and their members, keep their sheet position, not their position relative to the
         // permuted rows; other groups follow the line changes like any drawing outside it.
         let (x0, y0) = (sh.col_left(body.start.col), sh.row_top(body.start.row));
