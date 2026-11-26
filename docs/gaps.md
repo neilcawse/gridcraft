@@ -79,6 +79,9 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
   structural edits and cleared blockers (#133, #139; PRs #148, #157), 3-D span deletion (#140),
   and qualified names after a sheet rename (#134). Iterative calculation for circular references
   landed too, with its settings in File › Options › Formulas.
+- **Added:** cell entry accepts same-workbook sheet qualifiers on structured references. The
+  formula bar, editor and formula readback omit the containing table's name without changing
+  the stored formula. See X36 in [integration notes](parity/INTEGRATION_NOTES.md).
 - **Impact:** wrong numbers are worse than missing features, so this entry is kept until the
   oracle suite of §15 can say the category is clear rather than only these five reports being so.
 - **Estimate:** — [function-parity.md](function-parity.md#formula-language)
@@ -203,7 +206,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 | Date | Change | Summary |
 |---|---|---|
 | 2026-11-25 | minor | §3: table slicers are written to XLSX (they were dropped on save); OLAP slicers remain |
-| 2026-11-25 | minor | X36: cell entry accepts same-workbook sheet qualifiers on structured references; formula readback omits the name of the containing table |
+| 2026-11-25 | minor | §6, X36: cell entry accepts same-workbook sheet qualifiers on structured references; formula readback omits the name of the containing table |
 | 2026-11-02 | minor | §17: equations (Insert › Equation, LaTeX source, gallery, editor) |
 | 2026-11-02 | minor | §13: Solver Sensitivity report: shadow prices, reduced costs and allowable ranges for Simplex LP; Lagrange multipliers and reduced gradients for GRG Nonlinear |
 | 2026-11-02 | minor | §4: charts, like every floating object, move and resize from eight handles (#190), so resizing is no longer listed as missing; the evidence is one paragraph again, without the stale "PRs #158, #161 open" |
