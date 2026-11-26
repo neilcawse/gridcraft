@@ -629,6 +629,50 @@ fn collapsed_group_recovers_during_sort_row_fit() {
 }
 
 #[test]
+fn held_collapsed_group_ignores_rows_it_no_longer_spans_after_sort() {
+    use crate::{DocState, Session, Trust};
+    use gridcraft_model::{DrawingRef, LineInfo};
+    use serde_json::json;
+
+    let bytes = group_projection_book(0.0, r#"flipV="1" rot="16200000""#, "", true, true);
+    let (mut wb, _) = open_bytes("group.xlsx", &bytes).unwrap();
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.rows.insert(3, LineInfo { size: Some(60.0), custom: true, ..Default::default() });
+    for (row, key) in [2.0, 3.0, 4.0, 1.0].into_iter().enumerate() {
+        sh.set_value(CellRef::new(row as u32, 0), gridcraft_core::Value::Number(key));
+    }
+    let session = |wb| {
+        let mut session = Session::new();
+        session.add_document(DocState::from_saved(wb, None, "Group".to_owned(), Trust::FromFile));
+        session
+    };
+    let mut sorting = session(wb);
+    sorting.execute("data.sort", json!({"range": "A1:D4", "header": false, "keys": [{"column": "A"}]})).unwrap();
+    let sorted = sorting.doc().unwrap().wb.clone();
+    let root = |wb: &Workbook| {
+        let sh = wb.sheet(0).unwrap();
+        sh.anchor_rect(&sh.raw_drawing_anchor(DrawingRef::Group(1)).unwrap())
+    };
+    let held = root(&sorted);
+    assert_eq!(held.h, 0.0, "{held:?}");
+    let resized = |rows: &str, height: f64| {
+        let mut s = session((*sorted).clone());
+        s.execute("home.rowHeight", json!({"sheet": 0, "rows": rows, "height": height})).unwrap();
+        s.doc().unwrap().wb.clone()
+    };
+    // The short row sorted to the top, so the held group now sits inside the tall row (row 2)
+    // and the collapsed rows it was read over travelled to rows 3 and 4. Resizing row 2 is not
+    // growth of the group's collapsed span; growing rows 3 and 4 is, by both rows.
+    let after = root(&resized("2:2", 150.0));
+    assert_eq!((after.y, after.h), (held.y, 0.0), "{after:?}");
+    let wb = resized("3:4", 30.0);
+    let sh = wb.sheet(0).unwrap();
+    let span = sh.row_top(4) - sh.row_top(2);
+    let grown = root(&wb);
+    assert!(span > 0.0 && (grown.h - span).abs() < 0.01 && grown.y == held.y, "{grown:?} vs {span}");
+}
+
+#[test]
 fn non_quarter_group_keeps_unturned_layout_and_warning() {
     let (wb, warnings) = open_bytes("group.xlsx", &group_projection_book(20.0, r#"rot="3000000""#, "", false, false)).unwrap();
     assert_group_projection(&wb, [[0.10, 0.20, 0.20, 0.30], [0.60, 0.70, 0.15, 0.10]]);

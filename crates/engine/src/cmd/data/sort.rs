@@ -333,11 +333,13 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
         if let Some(before) = before {
             let changed = changed_lines(&before.rows, &shm.rows, (before.default_row_height, shm.default_row_height), MAX_ROWS);
             if !changed.is_empty() {
+                // `before` is only kept for a row sort, so `b0..=b1` are rows.
+                let row_to = |v: u32| if v >= b0 && v <= b1 { dst_of.get((v - b0) as usize).map_or(v, |&d| b0 + d) } else { v };
                 for &(o, _) in &new_anchors {
                     if o.kind == ObjKind::Group && grouped.get(&o) == Some(&true) {
                         let r = DrawingRef::Group(o.id);
                         let affected = before.drawing_files.get(&r).is_some_and(|file| drawing_placement_hits(&before, r, file, true, &changed));
-                        shm.keep_sorted_group_collapse(&before, o.id, affected);
+                        shm.keep_sorted_group_collapse(&before, o.id, affected, &row_to);
                     }
                 }
             }

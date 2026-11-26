@@ -274,8 +274,10 @@ impl Sheet {
 
     /// Keep layout recovery when a row permutation re-encodes a collapsed imported group's
     /// anchors without moving any of its boxes. Keep only the response of coincident spans
-    /// to later line sizing, not the old worksheet placement for export.
-    pub fn keep_sorted_group_collapse(&mut self, before: &Sheet, id: u32, placement_affected: bool) {
+    /// to later line sizing, not the old worksheet placement for export. `row_to` is where the
+    /// permutation put each row: the collapsed rows travel with it, so the retained pair names
+    /// them where they now are, and is dropped when they no longer form one run.
+    pub fn keep_sorted_group_collapse(&mut self, before: &Sheet, id: u32, placement_affected: bool, row_to: &dyn Fn(u32) -> u32) {
         let Some(g) = before.drawing_group(id) else { return };
         let Some(source) = &g.file else { return };
         let r = DrawingRef::Group(id);
@@ -310,6 +312,10 @@ impl Sheet {
                 coincident(true, a.height, from.row, to.row, from.row_off, to.row_off),
             ];
         }
+        spans[1] = spans[1].and_then(|(start, end)| {
+            let first = row_to(start);
+            (start < end && (start + 1..end).all(|row| row_to(row) == first + (row - start))).then_some((first, first + (end - start)))
+        });
         if spans.iter().all(Option::is_none) {
             return;
         }
