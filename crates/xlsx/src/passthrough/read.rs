@@ -1557,11 +1557,15 @@ pub(super) fn merge_vml(kept: &str, ours: &str) -> String {
     for (k, (a, b)) in spans.into_iter().enumerate() {
         let shape = ours.get(a..b).unwrap_or("");
         let id = block.saturating_mul(1024).saturating_add(1 + k as u64);
-        match (shape.find("id=\"_x0000_s"), shape.find("id=\"_x0000_s").and_then(|i| shape.get(i + 4..)?.find('"').map(|j| i + 4 + j))) {
-            (Some(i), Some(j)) => {
-                let _ = write!(add, "{}id=\"_x0000_s{id}\"{}", shape.get(..i).unwrap_or(""), shape.get(j + 1..).unwrap_or(""));
-            }
-            _ => add.push_str(shape),
+        // Generated shapes start with the numeric ID, in `id` or (for a named shape) `o:spid`.
+        if let Some((start, end)) = shape.strip_prefix("<v:shape ").and_then(|attrs| {
+            let id = attrs.strip_prefix("id=\"").or_else(|| attrs.strip_prefix("o:spid=\""))?;
+            let start = shape.len() - id.len();
+            Some((start, start + id.find('"')?))
+        }) {
+            let _ = write!(add, "{}_x0000_s{id}{}", &shape[..start], &shape[end..]);
+        } else {
+            add.push_str(shape);
         }
     }
     let mut head = kept.get(..close).unwrap_or("").to_string();

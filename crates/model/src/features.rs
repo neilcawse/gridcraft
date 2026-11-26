@@ -1030,6 +1030,9 @@ pub struct FormControl {
     /// (3-D shading).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_three_d: Option<bool>,
+    /// The x14 caption lock; `None` uses the new-control default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_lock_text: Option<bool>,
     /// The macro a check box's file assigns it, as written (`[0]!Toggled`): kept for saving,
     /// never run.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1065,6 +1068,7 @@ impl Default for FormControl {
             drop_vml_display: DropDisplay::default(),
             checked: CheckState::Unchecked,
             no_three_d: None,
+            check_lock_text: None,
             kept_macro: None,
             caption_markup: None,
         }

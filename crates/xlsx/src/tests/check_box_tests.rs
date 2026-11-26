@@ -141,8 +141,122 @@ fn edited_check_boxes_save_their_new_state() {
     assert_eq!((got[1].1, got[1].2.as_deref(), got[1].3.as_str()), (CheckState::Checked, Some("$C$4"), "Second & last"));
 }
 
-/// Check boxes with something the model can't write back as it was (a setting it doesn't hold,
-/// another look, a caption in several runs or lines) are left to pass-through, unchanged.
+#[test]
+fn check_box_caption_and_macro_round_trip_as_text() {
+    let (mut wb, _) = read_xlsx(&legacy_check_boxes(false)).unwrap();
+    let c = &mut wb.sheet_mut(0).unwrap().controls[0];
+    let caption = "  Pick <é>\nOr & choose\r  ";
+    let macro_ref = " [0]!Run\t ";
+    c.text = caption.into();
+    c.kept_macro = Some(macro_ref.into());
+    let bytes = write_xlsx(&wb).unwrap();
+    let vml_only = rebuild_with_vml(&written_vml(&bytes));
+    for input in [&bytes, &vml_only] {
+        let (back, _) = read_xlsx(input).unwrap();
+        let boxes = &back.sheet(0).unwrap().controls;
+        assert_eq!(boxes.len(), 3);
+        assert_eq!(boxes[0].text, caption);
+        assert_eq!(boxes[0].kept_macro.as_deref(), Some(macro_ref));
+    }
+}
+
+#[test]
+fn vml_only_reader_recovers_names_and_distinct_shape_numbers() {
+    let (mut wb, _) = read_xlsx(&legacy_check_boxes(false)).unwrap();
+    wb.sheet_mut(0).unwrap().controls[0].name = "First Box".into();
+    wb.sheet_mut(0).unwrap().controls[1].name = " Check \"<&>\" ".into();
+    wb.sheet_mut(0).unwrap().controls[2].name = "C".repeat(256);
+    let out = write_xlsx(&wb).unwrap();
+    let vml = written_vml(&out);
+    let (back, _) = read_xlsx(&rebuild_with_vml(&vml)).unwrap();
+    assert_eq!(check_boxes(&back), check_boxes(&wb));
+    let (back, _) = read_xlsx(&out).unwrap();
+    assert_eq!(check_boxes(&back), check_boxes(&wb));
+    assert_eq!(kept_vml(&back).matches("ObjectType=\"Radio\"").count(), 1);
+    assert!(!kept_vml(&back).contains("ObjectType=\"Checkbox\""));
+}
+
+#[test]
+fn explicit_false_vml_anchor_flags_move_and_size_with_cells() {
+    let base = legacy_check_boxes(false);
+    let target = "xl/drawings/vmlDrawing1.vml";
+    let vml = text(&mut Package::open(&base).unwrap(), target).replacen(
+        "ObjectType=\"Checkbox\"><x:Anchor>",
+        "ObjectType=\"Checkbox\"><x:MoveWithCells>False</x:MoveWithCells><x:SizeWithCells>False</x:SizeWithCells><x:Anchor>",
+        1,
+    );
+    let (wb, _) = read_xlsx(&replace_part(&base, target, &vml)).unwrap();
+    let (ordinary, _) = read_xlsx(&base).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().controls[0].anchor, ordinary.sheet(0).unwrap().controls[0].anchor);
+}
+
+#[test]
+fn x14_checkbox_properties_are_preserved_when_type_is_inferred() {
+    let original = legacy_check_boxes(true);
+    let target = "xl/ctrlProps/ctrlProp1.xml";
+    let props = text(&mut Package::open(&original).unwrap(), target);
+    let unknown = props.replace("objectType=\"CheckBox\"", "colored=\"1\"");
+    let (wb, _) = read_xlsx(&replace_part(&original, target, &unknown)).unwrap();
+    assert_eq!(check_boxes(&wb), expected()[1..]);
+    let out = write_xlsx(&wb).unwrap();
+    let mut pkg = Package::open(&out).unwrap();
+    let rels = pkg.rels("xl/worksheets/sheet1.xml").unwrap();
+    assert!(rels.iter().filter(|r| r.kind == "ctrlProp").any(|r| text(&mut pkg, &r.target).contains("colored=\"1\"")));
+}
+
+#[test]
+fn x14_default_caption_lock_is_not_changed_on_save() {
+    let original = legacy_check_boxes(true);
+    let target = "xl/ctrlProps/ctrlProp1.xml";
+    let props = text(&mut Package::open(&original).unwrap(), target).replace(" lockText=\"1\"", "");
+    let (wb, _) = read_xlsx(&replace_part(&original, target, &props)).unwrap();
+    assert_eq!(check_boxes(&wb), expected());
+    let out = write_xlsx(&wb).unwrap();
+    let mut pkg = Package::open(&out).unwrap();
+    let rels = pkg.rels("xl/worksheets/sheet1.xml").unwrap();
+    let checked = rels
+        .iter()
+        .filter(|r| r.kind == "ctrlProp")
+        .filter_map(|r| pkg.read_xml(&r.target).unwrap())
+        .find(|p| p.attr("checked") == Some("Checked"))
+        .unwrap();
+    assert_ne!(checked.attr_bool("lockText"), Some(true));
+}
+
+#[test]
+fn worksheet_anchor_settings_outside_the_model_remain_in_the_sheet() {
+    let base = legacy_check_boxes(true);
+    let target = "xl/worksheets/sheet1.xml";
+    let sheet = text(&mut Package::open(&base).unwrap(), target);
+    let anchor = "<anchor moveWithCells=\"1\" extra=\"data\">";
+    let (wb, _) = read_xlsx(&replace_part(&base, target, &sheet.replacen("<anchor moveWithCells=\"1\">", anchor, 1))).unwrap();
+    assert_eq!(check_boxes(&wb), expected()[1..]);
+    let out = write_xlsx(&wb).unwrap();
+    assert!(text(&mut Package::open(&out).unwrap(), target).contains(anchor));
+}
+
+/// Unsupported shape and client-data settings survive even when x14 declares a check box.
+#[test]
+fn unmodelled_vml_metadata_stays_in_the_saved_drawing() {
+    let base = legacy_check_boxes(true);
+    let target = "xl/drawings/vmlDrawing1.vml";
+    let original = text(&mut Package::open(&base).unwrap(), target);
+    let mut lost = Vec::new();
+    for (from, to) in [
+        ("ObjectType=\"Checkbox\"", "ObjectType=\"Radio\""),
+        ("z-index:1\"", "z-index:1;visibility:hidden\""),
+        ("<x:Checked>1</x:Checked>", "<x:Checked>1</x:Checked><x:Checked>2</x:Checked>"),
+        ("<x:FmlaLink>$B$2</x:FmlaLink>", "<x:FmlaLink extra=\"data\">$B$2</x:FmlaLink>"),
+        ("3, 0, 1, 0, 5, 0, 2, 0", "3, 0, 1, invalid, 0, 5, 0, 2, 0"),
+    ] {
+        let (wb, _) = read_xlsx(&replace_part(&base, target, &original.replacen(from, to, 1))).unwrap();
+        if check_boxes(&wb) != expected()[1..] || !written_vml(&write_xlsx(&wb).unwrap()).contains(to) {
+            lost.push(to);
+        }
+    }
+    assert!(lost.is_empty(), "rewritten VML: {lost:?}");
+}
+
 #[test]
 fn check_boxes_beyond_the_model_are_kept_unchanged() {
     let base = String::from_utf8_lossy(&legacy_check_boxes(false)).into_owned();
@@ -174,20 +288,23 @@ fn check_boxes_beyond_the_model_are_kept_unchanged() {
 fn rebuild_with_vml(whole: &str) -> Vec<u8> {
     let start = whole.find("<xml ").unwrap();
     let end = whole[start..].find("</xml>").unwrap() + start + "</xml>".len();
-    let vml = &whole[start..end];
-    let original = legacy_check_boxes(false);
-    let mut pkg = Package::open(&original).unwrap();
-    let names = [
-        "[Content_Types].xml",
-        "_rels/.rels",
-        "xl/workbook.xml",
-        "xl/_rels/workbook.xml.rels",
-        "xl/worksheets/sheet1.xml",
-        "xl/worksheets/_rels/sheet1.xml.rels",
-    ];
-    let parts: Vec<(String, Vec<u8>)> = names.iter().map(|n| (n.to_string(), pkg.read(n).unwrap().unwrap())).collect();
+    replace_part(&legacy_check_boxes(false), "xl/drawings/vmlDrawing1.vml", &whole[start..end])
+}
+
+fn replace_part(original: &[u8], target: &str, body: &str) -> Vec<u8> {
+    let mut pkg = Package::open(original).unwrap();
+    let key = crate::package::normalize(target);
+    let parts: Vec<_> = pkg
+        .names()
+        .into_iter()
+        .filter(|n| n != &key)
+        .map(|n| {
+            let data = pkg.read(&n).unwrap().unwrap();
+            (n, data)
+        })
+        .collect();
     let mut entries: Vec<(&str, &[u8])> = parts.iter().map(|(n, d)| (n.as_str(), d.as_slice())).collect();
-    entries.push(("xl/drawings/vmlDrawing1.vml", vml.as_bytes()));
+    entries.push((target, body.as_bytes()));
     super::make_zip(&entries)
 }
 

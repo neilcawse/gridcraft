@@ -20,11 +20,12 @@
 //! 0..30000 whole numbers sliders and spin buttons take, and a drop-down's chosen item and rows
 //! to the same range. Controls of other kinds (list boxes, option buttons, group boxes, labels,
 //! ActiveX controls), drop-downs with their own item list or a macro, and drop-downs and check
-//! boxes with settings the model doesn't hold (another look, a multi-line or mixed-format
-//! caption), are left to pass-through (`passthrough.rs`), which keeps them unchanged; a sheet can
+//! boxes with settings the model doesn't hold (another look or a rich-text caption) are left
+//! to pass-through (`passthrough.rs`), which keeps them unchanged; a sheet can
 //! hold both, in one `<controls>` element and one VML drawing. A check box's macro is kept as the
 //! file wrote it, and never run.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
@@ -119,12 +120,12 @@ fn drop_style_names(s: DropStyle) -> (&'static str, &'static str) {
 
 /// The macro a control runs, as the file writes it: a button's as Excel writes it, `[0]!Name`
 /// (this workbook); a check box's as it was read.
-fn macro_ref(c: &FormControl) -> Option<String> {
+fn macro_ref(c: &FormControl) -> Option<Cow<'_, str>> {
     if c.kind == ControlKind::Check {
-        return c.kept_macro.clone().filter(|m| !m.trim().is_empty());
+        return c.kept_macro.as_deref().map(Cow::Borrowed);
     }
     match &c.action {
-        Some(ControlAction::Macro { name, .. }) if !name.trim().is_empty() => Some(format!("[0]!{}", name.trim())),
+        Some(ControlAction::Macro { name, .. }) if !name.trim().is_empty() => Some(Cow::Owned(format!("[0]!{}", name.trim()))),
         _ => None,
     }
 }
@@ -279,7 +280,9 @@ fn ctrl_prop(c: &FormControl) -> String {
             if let Some(l) = &c.link {
                 let _ = write!(s, " fmlaLink=\"{}\"", esc_attr(l));
             }
-            s.push_str(" lockText=\"1\"");
+            if c.check_lock_text.unwrap_or(true) {
+                s.push_str(" lockText=\"1\"");
+            }
             if let Some(flat) = c.no_three_d {
                 let _ = write!(s, " noThreeD=\"{}\"", u8::from(flat));
             }
@@ -390,15 +393,23 @@ fn vml_shape(sheet: &Sheet, c: &FormControl, id: u64, z: usize) -> String {
         ControlKind::Check => check_caption(c),
         _ => String::new(),
     };
-    format!(
-        "<v:shape id=\"_x0000_s{id}\" type=\"#_x0000_t201\" style=\"position:absolute;margin-left:{:.2}pt;margin-top:{:.2}pt;width:{:.2}pt;height:{:.2}pt;z-index:{}\"{} o:insetmode=\"auto\"><o:lock v:ext=\"edit\" rotation=\"t\"/>{text}{data}</v:shape>",
+    let mut shape = String::from("<v:shape");
+    if c.kind == ControlKind::Check && !c.name.trim().is_empty() && shape_number(&c.name).is_none() {
+        let _ = write!(shape, " o:spid=\"_x0000_s{id}\" id=\"{}\"", esc_attr(&c.name));
+    } else {
+        let _ = write!(shape, " id=\"_x0000_s{id}\"");
+    }
+    let _ = write!(
+        shape,
+        " type=\"#_x0000_t201\" style=\"position:absolute;margin-left:{:.2}pt;margin-top:{:.2}pt;width:{:.2}pt;height:{:.2}pt;z-index:{}\"{} o:insetmode=\"auto\"><o:lock v:ext=\"edit\" rotation=\"t\"/>{text}{data}</v:shape>",
         pt(x),
         pt(y),
         pt(c.anchor.width.max(0.0) as f64),
         pt(c.anchor.height.max(0.0) as f64),
         z + 1,
         if c.kind == ControlKind::Button { " o:button=\"t\"" } else { " stroked=\"f\" filled=\"f\"" },
-    )
+    );
+    shape
 }
 
 /// A VML flag element as the file had it: `<x:Name/>` when on, `<x:Name>False</x:Name>` when
@@ -415,10 +426,8 @@ fn push_vml_flag(data: &mut String, name: &str, value: Option<bool>) {
     }
 }
 
-/// Whether `name` can be written as an XML attribute name as it is (a kept caption font's
-/// attributes come from the file, or from a native workbook that may have been edited).
-fn plain_attr_name(name: &str) -> bool {
-    !name.is_empty() && name.len() <= 64 && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':'))
+fn caption_font_attr(name: &str) -> bool {
+    matches!(name, "face" | "size" | "color")
 }
 
 /// A check box's caption text box: the caption in the `<div>` (and `<font>`) the file set it in,
@@ -438,7 +447,7 @@ fn check_caption(c: &FormControl) -> String {
     let font = markup.and_then(|m| m.font.as_ref());
     if let Some(attrs) = font {
         s.push_str("<font");
-        for (k, v) in attrs.iter().filter(|(k, _)| plain_attr_name(k)) {
+        for (k, v) in attrs.iter().filter(|(k, _)| caption_font_attr(k)) {
             let _ = write!(s, " {k}=\"{}\"", esc_attr(v));
         }
         s.push('>');
@@ -482,6 +491,8 @@ struct Props {
     /// A check box's state (`checked`, `x:Checked`) and how its caption is set.
     checked: Option<CheckState>,
     markup: Option<CaptionMarkup>,
+    check_lock_text: Option<bool>,
+    check_ctrl_prop_opaque: bool,
     /// Payload that the drop-down or check box model cannot faithfully rewrite.
     opaque: bool,
 }
@@ -519,15 +530,15 @@ fn drop_ctrl_prop_payload(e: &El) -> bool {
         })
 }
 
-/// Properties-part payload beyond the check box model: anything but its state, link, shading
-/// and the locked caption Excel writes (`lockText="1"`).
+/// Properties-part payload beyond the check box model (state, link, shading and caption lock).
 fn check_ctrl_prop_payload(e: &El) -> bool {
     !e.children.is_empty()
+        || !e.text.trim().is_empty()
         || e.attrs.iter().any(|(k, v)| match k.as_str() {
             "objectType" | "fmlaLink" => false,
             "checked" => check_state_of(v).is_none(),
             "noThreeD" => e.attr_bool(k).is_none(),
-            "lockText" => e.attr_bool(k) != Some(true),
+            "lockText" => e.attr_bool(k).is_none(),
             _ => true,
         })
 }
@@ -562,9 +573,11 @@ fn props_from_ctrl_prop(e: &El) -> Props {
         vml_display: DropDisplay::default(),
         checked: e.attr("checked").and_then(check_state_of),
         markup: None,
+        check_lock_text: Some(e.attr_bool("lockText").unwrap_or(false)),
+        check_ctrl_prop_opaque: matches!(kind, Some(ControlKind::Check) | None)
+            && (check_ctrl_prop_payload(e) || e.attr("objectType").is_some_and(|_| kind.is_none())),
         opaque: match kind {
             Some(ControlKind::Drop) => drop_ctrl_prop_payload(e),
-            Some(ControlKind::Check) => check_ctrl_prop_payload(e),
             _ => false,
         },
     }
@@ -575,7 +588,9 @@ fn props_from_vml(shape: &El) -> Option<Props> {
     let kind = data.attr("ObjectType").and_then(kind_of)?;
     let text_of = |n: &str| data.child(n).map(|c| c.text.trim().to_string());
     let int = |n: &str| text_of(n).and_then(|t| t.parse::<f64>().ok()).filter(|v| v.is_finite()).map(|v| v.round() as i64);
-    let truth = |n: &str| text_of(n).map(|t| !t.eq_ignore_ascii_case("false"));
+    let truth = |n: &str| {
+        data.child(n).and_then(|c| if kind == ControlKind::Check { vml_drop_bool(c) } else { Some(!c.text.trim().eq_ignore_ascii_case("false")) })
+    };
     let (text, markup, opaque) = match kind {
         ControlKind::Check => match check_caption_of(shape) {
             Some((text, markup)) => (text, markup, check_vml_payload(shape, data)),
@@ -596,7 +611,7 @@ fn props_from_vml(shape: &El) -> Option<Props> {
         page: int("Page"),
         val: int("Val"),
         horiz: data.child("Horiz").map(|_| true),
-        macro_: text_of("FmlaMacro"),
+        macro_: if kind == ControlKind::Check { data.child("FmlaMacro").map(|e| e.text.clone()) } else { text_of("FmlaMacro") },
         text,
         print: truth("PrintObject"),
         locked: truth("Locked"),
@@ -614,6 +629,7 @@ fn props_from_vml(shape: &El) -> Option<Props> {
         checked: data.child("Checked").and_then(|c| vml_check_state_of(&c.text)),
         markup,
         opaque,
+        ..Props::default()
     })
 }
 
@@ -622,34 +638,85 @@ fn props_from_vml(shape: &El) -> Option<Props> {
 /// about the shape, and client data other than its anchor, flags, link, macro, state and
 /// shading, is kept by leaving the check box to pass-through.
 fn check_vml_payload(shape: &El, data: &El) -> bool {
-    shape.attrs.iter().any(|(k, v)| match k.as_str() {
-        "id" | "spid" | "style" | "insetmode" => false,
-        "stroked" | "filled" => v != "f",
-        "type" => v != "#_x0000_t201",
-        "strokecolor" => !matches!(v.as_str(), "black [0]" | "black [64]" | "windowText [64]" | "windowText"),
-        "fillcolor" => !matches!(v.as_str(), "window [65]" | "windowText [64]"),
-        _ => true,
-    }) || shape.children.iter().any(|c| match c.name.as_str() {
-        "ClientData" | "textbox" => false,
-        "lock" => c.attrs.iter().any(|(k, v)| !matches!((k.as_str(), v.as_str()), ("ext", "edit") | ("rotation" | "text", "t"))),
-        "fill" => c.attrs.iter().any(|(k, v)| !matches!((k.as_str(), v.as_str()), ("color2", "window [65]") | ("detectmouseclick", "t"))),
-        "path" => c.attrs.iter().any(|(k, v)| !matches!((k.as_str(), v.as_str()), ("shadowok" | "strokeok" | "fillok", "t"))),
-        _ => true,
-    }) || data.attrs.iter().any(|(k, _)| k != "ObjectType")
-        || data.children.iter().any(|c| match c.name.as_str() {
-            "Anchor" | "MoveWithCells" | "SizeWithCells" | "FmlaLink" | "FmlaMacro" | "Locked" | "PrintObject" => false,
-            "AutoFill" | "AutoLine" => !c.text.trim().eq_ignore_ascii_case("false"),
-            "TextVAlign" => !c.text.trim().eq_ignore_ascii_case("center"),
-            "Checked" => vml_check_state_of(&c.text).is_none(),
-            "NoThreeD" => vml_drop_bool(c).is_none(),
+    shape.children.len() > 5
+        || data.children.len() > 12
+        || has_repeated_children(shape)
+        || has_repeated_children(data)
+        || shape.attrs.iter().any(|(k, v)| match k.as_str() {
+            "id" | "spid" => false,
+            "style" => v.split(';').map(str::trim).filter(|s| !s.is_empty()).any(|s| match s.split_once(':').map(|(k, v)| (k.trim(), v.trim())) {
+                Some(("position", "absolute")) => false,
+                Some(("margin-left" | "margin-top" | "width" | "height", v)) => {
+                    !v.strip_suffix("pt").unwrap_or(v).parse::<f64>().is_ok_and(f64::is_finite)
+                }
+                Some(("z-index", v)) => v.parse::<i64>().is_err(),
+                _ => true,
+            }),
+            "insetmode" => v != "auto",
+            "stroked" | "filled" => v != "f",
+            "type" => v != "#_x0000_t201",
+            "strokecolor" => !matches!(v.as_str(), "black [0]" | "black [64]" | "windowText [64]" | "windowText"),
+            "fillcolor" => !matches!(v.as_str(), "window [65]" | "windowText [64]"),
             _ => true,
+        })
+        || shape.children.iter().any(|c| match c.name.as_str() {
+            "ClientData" | "textbox" => false,
+            _ if !c.children.is_empty() || !c.text.trim().is_empty() => true,
+            "lock" => c.attrs.iter().any(|(k, v)| !matches!((k.as_str(), v.as_str()), ("ext", "edit") | ("rotation" | "text", "t"))),
+            "fill" => c.attrs.iter().any(|(k, v)| !matches!((k.as_str(), v.as_str()), ("color2", "window [65]") | ("detectmouseclick", "t"))),
+            "path" => c.attrs.iter().any(|(k, v)| !matches!((k.as_str(), v.as_str()), ("shadowok" | "strokeok" | "fillok", "t"))),
+            _ => true,
+        })
+        || data.attrs.iter().any(|(k, _)| k != "ObjectType")
+        || data.children.iter().any(|c| {
+            !c.attrs.is_empty()
+                || !c.children.is_empty()
+                || match c.name.as_str() {
+                    "Anchor" => vml_anchor_numbers(&c.text).is_none(),
+                    "FmlaLink" | "FmlaMacro" => false,
+                    "AutoFill" | "AutoLine" => !c.text.trim().eq_ignore_ascii_case("false"),
+                    "TextVAlign" => !c.text.trim().eq_ignore_ascii_case("center"),
+                    "Checked" => vml_check_state_of(&c.text).is_none(),
+                    "NoThreeD" | "MoveWithCells" | "SizeWithCells" | "Locked" | "PrintObject" => vml_drop_bool(c).is_none(),
+                    _ => true,
+                }
+        })
+}
+
+fn has_repeated_children(e: &El) -> bool {
+    // Only inspect known, bounded sets of children. A duplicate means the writer would drop one.
+    e.children.iter().enumerate().any(|(i, c)| e.children[..i].iter().any(|prior| prior.name == c.name))
+}
+
+fn check_sheet_control_payload(ctl: &El, pr: Option<&El>) -> bool {
+    ctl.attrs.iter().any(|(k, _)| !matches!(k.as_str(), "shapeId" | "id" | "name"))
+        || !ctl.text.trim().is_empty()
+        || ctl.children.len() > usize::from(pr.is_some())
+        || pr.is_some_and(|pr| {
+            !pr.text.trim().is_empty()
+                || pr.children.len() > 1
+                || pr.child("anchor").is_some_and(|a| {
+                    !a.text.trim().is_empty()
+                        || a.attrs.iter().any(|(k, _)| !matches!(k.as_str(), "moveWithCells" | "sizeWithCells") || a.attr_bool(k).is_none())
+                        || a.children.len() != 2
+                        || ["from", "to"].into_iter().any(|name| {
+                            a.child(name).is_none_or(|m| {
+                                !m.attrs.is_empty()
+                                    || !m.text.trim().is_empty()
+                                    || m.children.len() != 4
+                                    || ["col", "colOff", "row", "rowOff"].into_iter().any(|name| {
+                                        m.child(name)
+                                            .is_none_or(|e| !e.attrs.is_empty() || !e.children.is_empty() || e.text.trim().parse::<i64>().is_err())
+                                    })
+                            })
+                        })
+                })
         })
 }
 
 /// A check box's caption and how its VML text box sets it: one `<div>` (with at most a `style`)
 /// holding the text, or one `<font>` (face, size, colour) holding it. `None` for anything else
-/// (several runs, line breaks, other text box settings, a caption too long to keep), which the
-/// model can't write back as it was.
+/// (several runs, embedded line-break elements, other text box settings, or an oversized caption).
 fn check_caption_of(shape: &El) -> Option<(String, Option<CaptionMarkup>)> {
     let blank = |e: &El| e.text.trim().is_empty();
     let Some(tb) = shape.child("textbox") else { return Some((String::new(), None)) };
@@ -664,17 +731,13 @@ fn check_caption_of(shape: &El) -> Option<(String, Option<CaptionMarkup>)> {
     };
     let (holder, font) = match div.children.as_slice() {
         [] => (div, None),
-        [f] if f.name == "font"
-            && f.children.is_empty()
-            && blank(div)
-            && f.attrs.iter().all(|(k, _)| matches!(k.as_str(), "face" | "size" | "color")) =>
-        {
+        [f] if f.name == "font" && f.children.is_empty() && blank(div) && f.attrs.iter().all(|(k, _)| caption_font_attr(k)) => {
             (f, Some(f.attrs.clone()))
         }
         _ => return None,
     };
-    let text = holder.text.trim();
-    if text.chars().count() > 1_024 || text.contains(['\n', '\r']) {
+    let text = &holder.text;
+    if text.chars().count() > 1_024 {
         return None;
     }
     Some((text.to_string(), Some(CaptionMarkup { div_style: div.attr("style").map(str::to_string), font })))
@@ -746,6 +809,7 @@ fn all_text(e: &El, depth: usize) -> String {
 /// the model's rules (a hostile or odd file can't give a control it couldn't have).
 fn build(p: Props, kind: ControlKind, anchor: Anchor, name: Option<&str>, id: u32) -> FormControl {
     let clamp = |v: Option<i64>, d: u32| v.map_or(d, |v| v.clamp(0, CONTROL_MAX as i64) as u32);
+    let button_macro = if kind == ControlKind::Button { p.macro_.as_deref().and_then(macro_name) } else { None };
     let mut c = FormControl { id, kind, anchor, ..FormControl::default() };
     c.min = clamp(p.min, 0);
     c.max = clamp(p.max, 100);
@@ -773,18 +837,17 @@ fn build(p: Props, kind: ControlKind, anchor: Anchor, name: Option<&str>, id: u3
     if kind == ControlKind::Check {
         c.checked = p.checked.unwrap_or_default();
         c.no_three_d = p.display.no_three_d.or(p.vml_display.no_three_d);
-        c.kept_macro = p.macro_.clone().filter(|m| !m.trim().is_empty());
+        c.check_lock_text = p.check_lock_text;
+        c.kept_macro = p.macro_;
         c.caption_markup = p.markup;
     }
-    c.text = p.text.chars().take(1_024).collect();
+    c.text = if kind == ControlKind::Check { p.text } else { p.text.chars().take(1_024).collect() };
     if let Some(n) = name {
-        c.name = n.chars().take(255).collect();
+        c.name = if kind == ControlKind::Check { n.to_string() } else { n.chars().take(255).collect() };
     }
     c.print = p.print.unwrap_or(true);
     c.locked = p.locked.unwrap_or(true);
-    if kind == ControlKind::Button
-        && let Some(m) = p.macro_.as_deref().and_then(macro_name)
-    {
+    if let Some(m) = button_macro {
         c.action = Some(ControlAction::Macro { name: m, input: MacroInput::Selection, output: None });
     }
     c
@@ -829,6 +892,10 @@ pub(crate) fn shape_number(id: &str) -> Option<u64> {
 /// give the shape a named id (`id="Button 1"`) keep it.
 pub(crate) fn number_of(shape: &El) -> Option<u64> {
     shape.attr("id").and_then(shape_number).or_else(|| shape.attr("spid").and_then(shape_number))
+}
+
+fn vml_name(shape: &El) -> Option<&str> {
+    shape.attr("id").filter(|id| shape_number(id).is_none() && !id.trim().is_empty())
 }
 
 /// What [`read`] took from a sheet's form controls, for pass-through.
@@ -936,17 +1003,24 @@ pub fn read(cx: &mut Ctx<'_>, controls: Option<&El>, vml_rid: Option<&str>, rels
             (None, None) => continue,
         };
         if let Some(pr) = pr {
-            if let Some(m) = pr.attr("macro").filter(|m| !m.trim().is_empty()) {
+            if let Some(m) = pr.attr("macro").filter(|m| p.kind == Some(ControlKind::Check) || !m.trim().is_empty()) {
                 p.macro_ = Some(m.to_string());
             }
             p.print = pr.attr_bool("print").or(p.print);
             p.locked = pr.attr_bool("locked").or(p.locked);
             p.opaque |= pr.children.iter().any(|c| c.name != "anchor")
                 || pr.attrs.iter().any(|(k, _)| match k.as_str() {
-                    "macro" | "print" | "locked" => false,
+                    "macro" => false,
+                    "print" | "locked" => p.kind == Some(ControlKind::Check) && pr.attr_bool(k).is_none(),
                     "defaultSize" | "autoFill" | "autoLine" | "autoPict" | "disabled" => pr.attr_bool(k) != Some(false),
                     _ => true,
                 });
+        }
+        if p.kind == Some(ControlKind::Check) {
+            p.opaque |= p.check_ctrl_prop_opaque
+                || (ctl.attr("id").is_some() && p.check_lock_text.is_none())
+                || check_sheet_control_payload(ctl, pr)
+                || shape.is_some_and(|s| s.child("ClientData").and_then(|d| d.attr("ObjectType")).and_then(kind_of) != Some(ControlKind::Check));
         }
         // Other kinds (a list box, an option button), and drop-downs and check boxes the model
         // can't hold, stay with pass-through.
@@ -955,7 +1029,8 @@ pub fn read(cx: &mut Ctx<'_>, controls: Option<&El>, vml_rid: Option<&str>, rels
             pr.and_then(|pr| pr.child("anchor")).and_then(|a| anchor_from_markers(a, sheet)).or_else(|| shape.and_then(|s| vml_anchor(s, sheet)));
         let Some(anchor) = anchor else { continue };
         let id = cx.next_object_id();
-        sheet.controls.push(build(p, kind, anchor, ctl.attr("name"), id));
+        let name = ctl.attr("name").or_else(|| if kind == ControlKind::Check { shape.and_then(vml_name) } else { None });
+        sheet.controls.push(build(p, kind, anchor, name, id));
         read.insert(n);
     }
     // Controls known only from the VML. The ones not read (an option button, or past the limit)
@@ -975,7 +1050,7 @@ pub fn read(cx: &mut Ctx<'_>, controls: Option<&El>, vml_rid: Option<&str>, rels
             let kind = p.kind.filter(|&k| !beyond_model(&p, k))?;
             let anchor = vml_anchor(s, sheet)?;
             let id = cx.next_object_id();
-            let name = s.attr("id").filter(|id| shape_number(id).is_none() && !id.trim().is_empty());
+            let name = vml_name(s);
             sheet.controls.push(build(p, kind, anchor, name, id));
             known.insert(n, name.map(str::to_string));
             read.insert(n);
@@ -1004,28 +1079,38 @@ fn anchor_from_markers(a: &El, sheet: &Sheet) -> Option<Anchor> {
 /// BottomRow, BottomOffset`, offsets in pixels).
 fn vml_anchor(shape: &El, sheet: &Sheet) -> Option<Anchor> {
     let data = shape.child("ClientData")?;
-    let nums: Vec<i64> = data.child("Anchor")?.text.split(',').filter_map(|t| t.trim().parse::<i64>().ok()).collect();
-    let [c1, dx1, r1, dy1, c2, dx2, r2, dy2] = nums.as_slice() else { return None };
+    let is_check = data.attr("ObjectType").and_then(kind_of) == Some(ControlKind::Check);
+    let [c1, dx1, r1, dy1, c2, dx2, r2, dy2] = vml_anchor_numbers(&data.child("Anchor")?.text)?;
     let col = |c: i64| c.clamp(0, gridcraft_core::MAX_COLS as i64 - 1) as u32;
     let row = |r: i64| r.clamp(0, gridcraft_core::MAX_ROWS as i64 - 1) as u32;
     let off = |v: i64| v.clamp(0, 10_000) as f64;
-    let cell = CellRef::new(row(*r1), col(*c1));
-    let x1 = sheet.col_left(cell.col) + off(*dx1);
-    let y1 = sheet.row_top(cell.row) + off(*dy1);
-    let x2 = sheet.col_left(col(*c2)) + off(*dx2);
-    let y2 = sheet.row_top(row(*r2)) + off(*dy2);
-    // The elements are there when the object does *not* move (size) with its cells.
-    let mode = match (data.child("MoveWithCells").is_none(), data.child("SizeWithCells").is_none()) {
+    let cell = CellRef::new(row(r1), col(c1));
+    let x1 = sheet.col_left(cell.col) + off(dx1);
+    let y1 = sheet.row_top(cell.row) + off(dy1);
+    let x2 = sheet.col_left(col(c2)) + off(dx2);
+    let y2 = sheet.row_top(row(r2)) + off(dy2);
+    // Excel reverses the VML flag values (MS-OI29500 §19.4.2.42 and §19.4.2.59).
+    let moves = |name| data.child(name).is_none_or(|c| is_check && vml_drop_bool(c) == Some(false));
+    let mode = match (moves("MoveWithCells"), moves("SizeWithCells")) {
         (_, true) => AnchorMode::MoveAndSize,
         (true, false) => AnchorMode::MoveOnly,
         _ => AnchorMode::Absolute,
     };
     Some(Anchor {
         cell,
-        dx: off(*dx1) as f32,
-        dy: off(*dy1) as f32,
+        dx: off(dx1) as f32,
+        dy: off(dy1) as f32,
         width: (x2 - x1).clamp(1.0, 10_000.0) as f32,
         height: (y2 - y1).clamp(1.0, 10_000.0) as f32,
         mode,
     })
+}
+
+fn vml_anchor_numbers(text: &str) -> Option<[i64; 8]> {
+    let mut nums = text.split(',');
+    let mut anchor = [0; 8];
+    for n in &mut anchor {
+        *n = nums.next()?.trim().parse().ok()?;
+    }
+    nums.next().is_none().then_some(anchor)
 }
