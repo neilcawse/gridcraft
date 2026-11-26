@@ -270,6 +270,7 @@ fn measured_aggregate_reference_form_rejects_array_constants() {
                 formula: formula.into(),
                 comment: String::new(),
                 hidden: false,
+                uid: Default::default(),
             });
         }
         for (at, input) in [("A1", "1"), ("A2", "2"), ("A3", "3")] {
@@ -326,6 +327,7 @@ fn transition_arithmetic_in_a_sheet_scoped_name_follows_the_formula_worksheet() 
             formula: "\"text\"+2".into(),
             comment: String::new(),
             hidden: false,
+            uid: Default::default(),
         });
     }
     let ordinary = t.wb.sheet_mut(1).unwrap();
@@ -3058,6 +3060,7 @@ fn bare_trim_name_calls_a_workbook_lambda() {
         formula: "LAMBDA(x,x+1)".into(),
         comment: String::new(),
         hidden: false,
+        uid: Default::default(),
     });
     t.calc.rebuild(&t.wb);
     t.set("A1", "=_TRO_ALL(41)");
