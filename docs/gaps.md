@@ -237,10 +237,23 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
   Hidden/outline/show-detail and saved XML flags were not recovered; a size of zero
   established only effective geometry.
 
+### 26. Sheet copy: names on a copy of a copy (F)
+- **Missing:** Excel's bindings for the defined names of a copy of a copied sheet. In the X23 probe
+  (Excel for Mac 16.115.2), copying `Data (2)` left the copy's `Global` and `Local` at
+  `SUM(Sales5[Qty])` while its cells moved to `Sales59`. GridCraft deliberately keeps retargeting
+  both names to `SUM(Sales59[Qty])`. The Excel rule behind this mismatch remains unmeasured.
+- **Added (X35):** a copy of `Data (2)` is named `Data (4)` (was `Data (2) (2)`), and each copy
+  gets sheet-level copies of the workbook names that refer to its source, written with their
+  `localSheetId`. See [the X35 notes](parity/INTEGRATION_NOTES.md#x35--sheet-copy-names-tabs-and-sheet-level-copies-of-workbook-names).
+- **Impact:** only formulas using such names on a copy of a copy, which then read the copied
+  table instead of the first copy's.
+- **Estimate:** 1–3 h once the rule is chosen.
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-26 | minor | §26: sheet copy names a copy of `Data (2)` `Data (4)` and gives the copy sheet-level copies of workbook names that refer to its source; the copy-of-copy name binding remains |
 | 2026-11-25 | minor | §3: table slicers are written to XLSX (they were dropped on save); OLAP slicers remain |
 | 2026-11-25 | minor | §25: Paste Special All and Insert Copied Cells now transfer whole-line formatting; other modes remain unmeasured. |
 | 2026-11-26 | minor | §25: inspection reports Excel's UsedRange and Ctrl+End, Go To Special and Workbook Statistics use its Last Cell; the shared work extent is unchanged; record the residual paste-payload differences and pending probes. |

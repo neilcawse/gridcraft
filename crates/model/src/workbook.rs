@@ -12,29 +12,119 @@ use crate::sheet::Sheet;
 use crate::style::{StyleTable, Theme};
 
 struct TableRename<'a> {
-    wb: &'a Workbook,
+    /// Present on rename, absent on sheet copy (which only retargets structured references).
+    wb: Option<&'a Workbook>,
     old: &'a str,
     new: &'a str,
 }
 
 impl TableRename<'_> {
     fn replacement(&self, n: &str, sheet: usize, env: &[String]) -> Option<Expr> {
+        let wb = self.wb?;
         if n.starts_with('[') {
             return None;
         }
         let (scope, bare, qualifier) = match n.rsplit_once('!') {
-            Some((s, b)) => (self.wb.sheet_index(s)?, b, Some(s)),
+            Some((s, b)) => (wb.sheet_index(s)?, b, Some(s)),
             None => (sheet, n, None),
         };
-        if !bare.eq_ignore_ascii_case(self.old) || self.wb.name(bare, scope).is_some() {
+        if !bare.eq_ignore_ascii_case(self.old) || wb.name(bare, scope).is_some() {
             return None;
         }
         let renamed = qualifier.map_or_else(|| self.new.into(), |s| format!("{s}!{}", self.new));
-        Some(if env.iter().any(|local| gridcraft_formula::same_name(local, &renamed)) || self.wb.name(self.new, scope).is_some() {
+        Some(if env.iter().any(|local| gridcraft_formula::same_name(local, &renamed)) || wb.name(self.new, scope).is_some() {
             Expr::Struct(gridcraft_formula::StructRef { table: self.new.into(), specifiers: vec![], col_start: None, col_end: None })
         } else {
             Expr::Name(renamed)
         })
+    }
+
+    /// The replacement for a table token (`structured`) or a free name read on `sheet`.
+    fn token(&self, n: &str, structured: bool, sheet: usize, env: &[String]) -> Option<Expr> {
+        if structured {
+            return n.eq_ignore_ascii_case(self.old).then(|| Expr::Name(self.new.into()));
+        }
+        self.replacement(n, sheet, env)
+    }
+
+    /// Formula text read on `sheet` with the table renamed, when that changes it.
+    fn text(&self, text: &str, sheet: usize) -> Option<String> {
+        self.expression_text(gridcraft_formula::parse_name(text).ok()?, text, sheet)
+    }
+
+    fn expression_text(&self, mut e: Expr, text: &str, sheet: usize) -> Option<String> {
+        if !self.might_use_table(&e) || !rewrite_table_tokens(&mut e, &|n, structured, env| self.token(n, structured, sheet, env)) {
+            return None;
+        }
+        let prefix = if text.trim_start().starts_with('=') { "=" } else { "" };
+        Some(format!("{prefix}{}", gridcraft_formula::print(&e)))
+    }
+
+    /// Sheet `i`'s cell formulas that change with the table renamed.
+    fn cells(&self, sheet: &Sheet, i: usize) -> Vec<(CellRef, Formula)> {
+        sheet
+            .cells
+            .iter()
+            .filter_map(|(c, cell)| {
+                let f = cell.formula.as_ref()?;
+                f.with_expr(|e| {
+                    if !self.might_use_table(e) {
+                        return None;
+                    }
+                    let mut ne = e.clone();
+                    rewrite_table_tokens(&mut ne, &|n, structured, env| self.token(n, structured, i, env))
+                        .then(|| (c, Formula { array: f.array, ..f.rewritten(ne) }))
+                })?
+            })
+            .collect()
+    }
+
+    fn features(&self, sheet: &mut Sheet, si: usize) {
+        let text = |f: &mut String| {
+            if let Some(new) = self.text(f, si) {
+                *f = new;
+            }
+        };
+        let threshold = |v: &mut crate::CfValueKind| {
+            if let crate::CfValueKind::Formula(f) = v {
+                text(f);
+            }
+        };
+        for cf in &mut sheet.cond_formats {
+            match &mut cf.rule {
+                crate::CfRule::CellIs { a, b, .. } => {
+                    text(a);
+                    b.iter_mut().for_each(text);
+                }
+                crate::CfRule::Expression { formula, .. } => text(formula),
+                crate::CfRule::ColorScale { stops } => stops.iter_mut().for_each(|(v, _)| threshold(v)),
+                crate::CfRule::DataBar { min, max, .. } => {
+                    threshold(min);
+                    threshold(max);
+                }
+                crate::CfRule::IconSet { thresholds, .. } => thresholds.iter_mut().for_each(threshold),
+                _ => {}
+            }
+        }
+        for dv in &mut sheet.validations {
+            text(&mut dv.f1);
+            dv.f2.iter_mut().for_each(text);
+        }
+        for chart in &mut sheet.charts {
+            for series in &mut chart.series {
+                text(&mut series.values);
+                series.categories.iter_mut().for_each(text);
+                series.bubble_sizes.iter_mut().for_each(text);
+                // A bare series title can be literal text, even if it is the table name.
+                if let Some(name) = &mut series.name
+                    && let Ok(e) = gridcraft_formula::parse(name)
+                    && (name.trim_start().starts_with('=') || matches!(&e, Expr::Struct(r) if r.table.eq_ignore_ascii_case(self.old)))
+                    && let Some(new) = self.expression_text(e, name, si)
+                {
+                    *name = new;
+                }
+            }
+        }
     }
 }
 
@@ -800,36 +890,77 @@ impl Workbook {
             }
         }
         for i in 0..self.sheets.len() {
-            let rename = TableRename { wb: self, old: &old, new: name };
-            let rewritten: Vec<(CellRef, Formula)> = self.sheets[i]
-                .cells
-                .iter()
-                .filter_map(|(c, cell)| {
-                    let f = cell.formula.as_ref()?;
-                    f.with_expr(|e| {
-                        if !rename.might_use_table(e) {
-                            return None;
-                        }
-                        let mut ne = e.clone();
-                        rewrite_table_tokens(&mut ne, &|n, structured, env| {
-                            if structured {
-                                n.eq_ignore_ascii_case(rename.old).then(|| Expr::Name(rename.new.into()))
-                            } else {
-                                rename.replacement(n, i, env)
-                            }
-                        })
-                        .then(|| (c, Formula { array: f.array, ..f.rewritten(ne) }))
-                    })?
-                })
-                .collect();
-            if rewritten.is_empty() {
-                continue;
+            let rewritten = TableRename { wb: Some(self), old: &old, new: name }.cells(&self.sheets[i], i);
+            self.set_formulas(i, rewritten);
+        }
+    }
+
+    /// Points sheet `si`'s own references to table `old` at table `new`, as a sheet copy does for
+    /// each table it copies (`si` the copy, `old` the original table and `new` its copy). That
+    /// retargets structured references in formulas, names, formatting and validation rules, and
+    /// chart series. Table slicers also follow the copy. Bare table names are left alone, as are
+    /// references on other sheets and workbook-scoped names.
+    pub fn retarget_table_on_sheet(&mut self, si: usize, old: &str, new: &str) {
+        if si >= self.sheets.len() {
+            return;
+        }
+        let rename = TableRename { wb: None, old, new };
+        let names: Vec<(usize, String)> = self
+            .names
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.scope == Some(si))
+            .filter_map(|(at, n)| Some((at, rename.text(&n.formula, si)?)))
+            .collect();
+        let columns: Vec<(usize, usize, Option<String>, Option<String>)> = self.sheets[si]
+            .tables
+            .iter()
+            .enumerate()
+            .flat_map(|(ti, t)| t.columns.iter().enumerate().map(move |(ci, c)| (ti, ci, c)))
+            .filter_map(|(ti, ci, c)| {
+                let formula = c.formula.as_deref().and_then(|f| rename.text(f, si));
+                let label = c.totals_label.as_deref().filter(|_| c.totals == crate::TotalsFn::Custom).and_then(|f| rename.text(f, si));
+                (formula.is_some() || label.is_some()).then_some((ti, ci, formula, label))
+            })
+            .collect();
+        let cells = rename.cells(&self.sheets[si], si);
+        rename.features(Arc::make_mut(&mut self.sheets[si]), si);
+        self.set_formulas(si, cells);
+        for (at, formula) in names {
+            self.names[at].formula = formula;
+        }
+        let names_old = |s: &crate::Slicer| matches!(&s.source, crate::SlicerSource::Table { table, .. } if table.eq_ignore_ascii_case(old));
+        if columns.is_empty() && !self.sheets[si].slicers.iter().any(names_old) {
+            return;
+        }
+        let sheet = Arc::make_mut(&mut self.sheets[si]);
+        for (ti, ci, formula, label) in columns {
+            let c = &mut sheet.tables[ti].columns[ci];
+            if formula.is_some() {
+                c.formula = formula;
             }
-            let sheet = Arc::make_mut(&mut self.sheets[i]);
-            for (c, f) in rewritten {
-                if let Some(cell) = sheet.cells.get_mut(c) {
-                    cell.formula = Some(Arc::new(f));
-                }
+            if label.is_some() {
+                c.totals_label = label;
+            }
+        }
+        for sl in sheet.slicers.iter_mut() {
+            if let crate::SlicerSource::Table { table, .. } = &mut sl.source
+                && table.eq_ignore_ascii_case(old)
+            {
+                *table = new.to_string();
+            }
+        }
+    }
+
+    /// Puts rewritten formulas in sheet `i`'s cells.
+    fn set_formulas(&mut self, i: usize, rewritten: Vec<(CellRef, Formula)>) {
+        if rewritten.is_empty() {
+            return;
+        }
+        let sheet = Arc::make_mut(&mut self.sheets[i]);
+        for (c, f) in rewritten {
+            if let Some(cell) = sheet.cells.get_mut(c) {
+                cell.formula = Some(Arc::new(f));
             }
         }
     }
