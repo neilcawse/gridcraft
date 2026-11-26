@@ -108,12 +108,69 @@ fn copy_numbers_take_the_lowest_free_number_of_the_base() {
     copy(&mut long_book, &first, 2);
     assert_eq!(sheet_names(&long_book)[2], format!("{} (3)", "A".repeat(27)));
 
-    for (name, copied) in [("Q (2a)", "Q (2a) (2)"), ("Q(2)", "Q(2) (2)"), ("Q ()", "Q () (2)"), ("Q (12)", "Q (2)")] {
+    for (name, copied) in [
+        ("Q (2a)", "Q (2a) (2)"),
+        ("Q(2)", "Q(2) (2)"),
+        ("Q ()", "Q () (2)"),
+        ("Budget (2019)", "Budget (2)"),
+        ("(2)", "(2) (2)"),
+        ("Data (02)", "Data (2)"),
+        ("Q (999999999999999999999999999)", "Q (2)"),
+    ] {
         let mut one = s();
         one.execute("sheet.rename", json!({"sheet": 0, "name": name})).unwrap();
         copy(&mut one, name, 1);
         assert_eq!(sheet_names(&one), [name, copied]);
     }
+}
+
+#[test]
+fn copy_skips_case_insensitive_tabs_after_truncating_the_base() {
+    let mut s = s();
+    let stem = "É".repeat(26);
+    let source = format!("{stem} Data");
+    s.execute("sheet.rename", json!({"sheet": 0, "name": source})).unwrap();
+    for taken in [format!("{} (2)", stem.to_lowercase()), format!("{stem} (3)")] {
+        s.execute("home.insertSheet", json!({"name": taken})).unwrap();
+    }
+    copy(&mut s, &source, 3);
+    let made = &wb(&s).sheets[3].name;
+    assert_eq!(made, &format!("{stem} (4)"));
+    assert!(wb(&s).check_sheet_name(made, Some(3)).is_ok());
+}
+
+#[test]
+fn copied_tabs_remain_valid_when_the_truncated_base_is_only_spaces() {
+    let mut s = s();
+    let source = format!("{}Data", " ".repeat(27));
+    s.execute("home.insertSheet", json!({"name": source})).unwrap();
+    copy(&mut s, &source, 2);
+    let made = &wb(&s).sheets[2].name;
+    assert_eq!(made, "Sheet (2)");
+    assert_eq!(made, made.trim());
+    assert!(wb(&s).check_sheet_name(made, Some(2)).is_ok());
+}
+
+#[test]
+fn copy_skips_preserved_tab_names_so_export_keeps_them() {
+    let mut s = s();
+    s.execute("sheet.rename", json!({"sheet": 0, "name": "Data"})).unwrap();
+    std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).preserved = Some(std::sync::Arc::new(gridcraft_model::Preserved {
+        sheets: vec![gridcraft_model::PreservedSheet {
+            name: "data (2)".into(),
+            kind: gridcraft_model::PreservedSheetKind::Module,
+            before: 1,
+            sheet_id: 2,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }));
+    copy(&mut s, "Data", 1);
+    assert_eq!(sheet_names(&s), ["Data", "Data (3)"]);
+    let (bytes, warnings) = crate::io::save_bytes_reported(wb(&s), "book.xlsx", crate::io::FileKind::Xlsx).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    s.execute("file.open", json!({"name": "book.xlsx", "base64": crate::io::base64_encode(&bytes)})).unwrap();
+    assert_eq!(wb(&s).preserved.as_deref().unwrap().sheets[0].name, "data (2)");
 }
 
 #[test]
@@ -132,8 +189,8 @@ fn each_copy_gets_sheet_level_copies_of_the_workbook_names_that_use_the_sheet() 
     after_second.sort();
     assert_eq!(names(&s), after_second);
     // The copy of `Data (2)` gets that sheet's own `Global` (it shadows the workbook's there).
-    // Excel kept both at `Sales5` while the copied cells use `Sales59`; GridCraft retargets the
-    // names like the cells (X35 NEEDS DECISION: no single measured rule explains the difference).
+    // Known mismatch: Excel kept both names at `Sales5` while the cells use `Sales59`.
+    // Keep GridCraft's existing retargeting; the Excel rule behind this difference is unmeasured.
     copy(&mut s, "Data (2)", 4);
     let mut after_third = after_second.clone();
     after_third.extend([local("Data (4)", "Global", "SUM(Sales59[Qty])"), local("Data (4)", "Local", "SUM(Sales59[Qty])")]);
@@ -180,6 +237,72 @@ fn only_workbook_names_that_use_the_copied_sheet_get_sheet_level_copies() {
             ("Local".into(), "SUM(Sales5[Qty])".into())
         ]
     );
+}
+
+#[test]
+fn quoted_references_span_ends_and_hidden_names_follow_the_copy() {
+    let mut s = s();
+    let source = "O'Brien Data";
+    let dest = "O'Brien Data (2)";
+    s.execute("sheet.rename", json!({"sheet": 0, "name": source})).unwrap();
+    s.execute("home.insertSheet", json!({"name": "Report"})).unwrap();
+    for (name, refers) in [
+        ("Quoted", "='O''Brien Data'!$A$2"),
+        ("LeftEnd", "=SUM('O''Brien Data:Report'!$A$2)"),
+        ("RightEnd", "=SUM('Report:O''Brien Data'!$A$2)"),
+        ("Qualified", "='O''Brien Data'!Marker"),
+    ] {
+        s.execute("formulas.defineName", json!({"name": name, "refersTo": refers, "comment": "synthetic & hidden"})).unwrap();
+    }
+    let original = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).names.iter_mut().find(|n| n.name == "Quoted").unwrap();
+    original.hidden = true;
+    let uid = original.uid.get();
+    copy(&mut s, source, 1);
+    let wb = wb(&s);
+    for (name, expected) in [
+        ("Quoted", "'O''Brien Data (2)'!$A$2"),
+        ("LeftEnd", "SUM('O''Brien Data (2):Report'!$A$2)"),
+        ("RightEnd", "SUM('Report:O''Brien Data (2)'!$A$2)"),
+        ("Qualified", "'O''Brien Data (2)'!Marker"),
+    ] {
+        let n = wb.name_in_scope(name, wb.sheet_index(dest)).unwrap();
+        assert_eq!(n.formula, expected);
+        assert_eq!(n.comment, "synthetic & hidden");
+        assert_eq!(n.hidden, name == "Quoted");
+    }
+    assert_ne!(wb.name_in_scope("Quoted", Some(1)).unwrap().uid.get(), uid);
+    assert_eq!(wb.name_in_scope("Quoted", None).unwrap().formula, "'O''Brien Data'!$A$2");
+}
+
+#[test]
+fn copy_keeps_only_the_first_definition_per_name_and_scope() {
+    let mut s = book();
+    s.execute("formulas.defineName", json!({"name": "gLoBaL", "refersTo": "=42", "scope": "Data"})).unwrap();
+    s.execute("formulas.defineName", json!({"name": "SharedValue", "refersTo": "=Data!$B$2"})).unwrap();
+    s.execute("formulas.defineName", json!({"name": "Constant", "refersTo": "=17"})).unwrap();
+    // An imported workbook can carry redundant definitions; model lookup takes the first.
+    let names = &mut std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).names;
+    for (name, formula) in [("global", "99"), ("sharedvalue", "Data!$B$3"), ("constant", "Data!$B$4")] {
+        let scope = (name == "global").then_some(0);
+        names.push(gridcraft_model::DefinedName {
+            name: name.into(),
+            scope,
+            formula: formula.into(),
+            comment: String::new(),
+            hidden: false,
+            uid: Default::default(),
+        });
+    }
+    copy(&mut s, "Data", 1);
+    let copies = names_on_sheet(&s, "Data (2)");
+    assert_eq!(
+        copies,
+        [local("Data (2)", "Local", "SUM(Sales5[Qty])"), local("Data (2)", "SharedValue", "'Data (2)'!$B$2"), local("Data (2)", "gLoBaL", "42")]
+    );
+}
+
+fn names_on_sheet(s: &Session, sheet: &str) -> Vec<(Option<String>, String, String)> {
+    names(s).into_iter().filter(|n| n.0.as_deref() == Some(sheet)).collect()
 }
 
 #[test]
@@ -247,4 +370,29 @@ fn sheet_level_copies_save_with_their_sheet_and_reopen() {
     assert_eq!(saved_names(&bytes), expected);
     s.execute("file.open", json!({"name": "book.xlsx", "base64": crate::io::base64_encode(&bytes)})).unwrap();
     assert_eq!((sheet_names(&s), names(&s)), made);
+
+    // The first copy moves past the two others, then deleting Report shifts the indices again.
+    s.execute("sheet.move", json!({"sheet": "Data (2)", "to": 4})).unwrap();
+    s.execute("home.deleteSheet", json!({"sheet": "Report"})).unwrap();
+    assert_eq!(sheet_names(&s), ["Data", "Data (3)", "Data (4)", "Data (2)"]);
+    assert_eq!(names(&s), made.1);
+    let changed = (sheet_names(&s), names(&s));
+    let (bytes, warnings) = crate::io::save_bytes_reported(wb(&s), "book.xlsx", crate::io::FileKind::Xlsx).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let mut expected: Vec<_> = expected
+        .into_iter()
+        .map(|(name, scope, formula)| {
+            let scope = match scope.as_deref() {
+                Some("1") => sid("3"),
+                Some("3") => sid("1"),
+                Some("4") => sid("2"),
+                _ => scope,
+            };
+            (name, scope, formula)
+        })
+        .collect();
+    expected.sort();
+    assert_eq!(saved_names(&bytes), expected);
+    s.execute("file.open", json!({"name": "book.xlsx", "base64": crate::io::base64_encode(&bytes)})).unwrap();
+    assert_eq!((sheet_names(&s), names(&s)), changed);
 }

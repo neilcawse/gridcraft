@@ -201,8 +201,8 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 ### 26. Sheet copy: names on a copy of a copy (F)
 - **Missing:** Excel's bindings for the defined names of a copy of a copied sheet. In the X23 probe
   (Excel for Mac 16.115.2), copying `Data (2)` left the copy's `Global` and `Local` at
-  `SUM(Sales5[Qty])` while its cells moved to `Sales59`; GridCraft moves the names too. Several
-  rules fit the one measurement, so the choice waits on a decision.
+  `SUM(Sales5[Qty])` while its cells moved to `Sales59`. GridCraft deliberately keeps retargeting
+  both names to `SUM(Sales59[Qty])`. The Excel rule behind this mismatch remains unmeasured.
 - **Added (X35):** a copy of `Data (2)` is named `Data (4)` (was `Data (2) (2)`), and each copy
   gets sheet-level copies of the workbook names that refer to its source, written with their
   `localSheetId`. See [the X35 notes](parity/INTEGRATION_NOTES.md#x35--sheet-copy-names-tabs-and-sheet-level-copies-of-workbook-names).

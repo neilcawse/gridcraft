@@ -230,30 +230,38 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
             // The copy gets its own copies of the sheet's names, referring to the copy, and of
             // the workbook's names that refer to the sheet (`Data (2)!Global` beside workbook
             // `Global`), unless a name of the sheet shadows them there.
-            let local_copy = |nm: &gridcraft_model::DefinedName, formula: String| {
-                // Names of their own: nothing bound to the original's is bound to them.
-                gridcraft_model::DefinedName { scope: Some(at), formula, uid: Default::default(), ..nm.clone() }
+            let local_copy = |nm: &gridcraft_model::DefinedName, formula: String| gridcraft_model::DefinedName {
+                name: nm.name.clone(),
+                scope: Some(at),
+                formula,
+                comment: nm.comment.clone(),
+                hidden: nm.hidden,
+                // Nothing bound to the original's name is bound to its copy.
+                uid: Default::default(),
             };
             let rename = |e| gridcraft_formula::adjust::rename_sheet(e, &base, &sh.name);
-            let copies: Vec<gridcraft_model::DefinedName> = cx
-                .wb
-                .names
-                .iter()
-                .filter_map(|nm| match nm.scope {
-                    Some(sc) if sc == i => {
-                        let formula = gridcraft_formula::parse_name(&nm.formula)
-                            .map(|e| gridcraft_formula::print(&rename(e)))
-                            .unwrap_or_else(|_| nm.formula.clone());
-                        Some(local_copy(nm, formula))
-                    }
-                    None if !cx.wb.names.iter().any(|l| l.scope == Some(i) && l.name.eq_ignore_ascii_case(&nm.name)) => {
-                        let e = gridcraft_formula::parse_name(&nm.formula).ok()?;
-                        let renamed = rename(e.clone());
-                        refers_to_copied_sheet(nm, &e, &renamed, &retargets).then(|| local_copy(nm, gridcraft_formula::print(&renamed)))
-                    }
-                    _ => None,
-                })
-                .collect();
+            let mut seen = std::collections::HashSet::new();
+            let mut copies = Vec::new();
+            // Source locals take priority regardless of where they occur in the workbook's list.
+            // Readers can retain duplicate definitions; as in Workbook::name, the first wins.
+            for nm in cx.wb.names.iter().filter(|nm| nm.scope == Some(i)) {
+                if seen.insert(nm.name.to_ascii_lowercase()) {
+                    let formula = gridcraft_formula::parse_name(&nm.formula)
+                        .map(|e| gridcraft_formula::print(&rename(e)))
+                        .unwrap_or_else(|_| nm.formula.clone());
+                    copies.push(local_copy(nm, formula));
+                }
+            }
+            for nm in cx.wb.names.iter().filter(|nm| nm.scope.is_none()) {
+                if nm.name.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("_xl")) || !seen.insert(nm.name.to_ascii_lowercase()) {
+                    continue;
+                }
+                if let Ok(e) = gridcraft_formula::parse_name(&nm.formula)
+                    && refers_to_copied_sheet(&e, &base, &retargets)
+                {
+                    copies.push(local_copy(nm, gridcraft_formula::print(&rename(e))));
+                }
+            }
             for nm in cx.wb.names.iter_mut() {
                 if let Some(sc) = nm.scope.as_mut()
                     && *sc >= at
@@ -311,15 +319,32 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
 /// `Data (3)` taken, a copy of `Data (2)` is `Data (4)` (Excel for Mac, X23 probe P1). The base is
 /// shortened so the suffix fits in Excel's 31 characters.
 fn copied_sheet_name(wb: &gridcraft_model::Workbook, source: &str) -> String {
+    use std::fmt::Write;
+
     let base = copy_base(source);
-    (2..)
-        .map(|k| {
-            let suffix = format!(" ({k})");
-            let keep = 31usize.saturating_sub(suffix.chars().count());
-            format!("{}{suffix}", base.chars().take(keep).collect::<String>().trim_end())
-        })
-        .find(|nm| wb.sheet_index(nm).is_none())
-        .unwrap_or_else(|| source.to_string())
+    let mut candidate = String::new();
+    for k in 2usize.. {
+        let keep = 31 - (k.ilog10() as usize + 4); // ` (` + the digits + `)`
+        let end = base.char_indices().nth(keep).map_or(base.len(), |(i, _)| i);
+        let prefix = base[..end].trim_end();
+        candidate.clear();
+        candidate.push_str(if prefix.is_empty() { "Sheet" } else { prefix });
+        let tail = candidate.len();
+        let _ = write!(candidate, " ({k})");
+        let collides = |name: &str| name.ends_with(&candidate[tail..]) && gridcraft_formula::same_name(name, &candidate);
+        // Kept chart, dialog and macro tabs are absent from `wb.sheets`. A worksheet with the
+        // same name would displace the kept tab on export.
+        let kept_collision = wb.preserved.as_deref().is_some_and(|p| {
+            p.sheets.iter().any(|s| {
+                let end = s.name.char_indices().nth(31).map_or(s.name.len(), |(i, _)| i);
+                collides(&s.name[..end])
+            })
+        });
+        if !wb.sheets.iter().any(|sh| collides(&sh.name)) && !kept_collision {
+            break;
+        }
+    }
+    candidate
 }
 
 /// `name` without a trailing copy number ` (n)`, n decimal digits; `name` itself otherwise.
@@ -330,26 +355,23 @@ fn copy_base(name: &str) -> &str {
         .map_or(name, |(base, _)| base)
 }
 
-/// Whether workbook-scoped `name` (formula `e`, `renamed` on the copy) refers to the sheet being
-/// copied, so the copy gets a sheet-level copy of it: it names the sheet, or explicitly one of
-/// the sheet's tables (`retargets` holds their original and copied names). Excel's internal
-/// `_xl…` names stay with their features.
-fn refers_to_copied_sheet(
-    name: &gridcraft_model::DefinedName,
-    e: &gridcraft_formula::Expr,
-    renamed: &gridcraft_formula::Expr,
-    retargets: &[(String, String)],
-) -> bool {
-    if name.name.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("_xl")) {
-        return false;
-    }
-    if renamed != e {
-        return true;
-    }
+/// Whether a workbook name explicitly uses the source sheet or one of its tables. Match the
+/// sheet selectors rewritten by `rename_sheet`, and the structured tokens retargeted by X23.
+fn refers_to_copied_sheet(e: &gridcraft_formula::Expr, source: &str, retargets: &[(String, String)]) -> bool {
+    use gridcraft_formula::{Expr, SheetSel};
+    let matches_source = |name: &str| name.eq_ignore_ascii_case(source);
     let mut found = false;
-    e.walk(&mut |x| {
-        found |= matches!(x, gridcraft_formula::Expr::Struct(r) if retargets.iter().any(|(old, _)| r.table.eq_ignore_ascii_case(old)));
-    });
+    let uses_source = |x: &Expr| match x {
+        Expr::Ref(r) => match &r.sheet {
+            SheetSel::Named(n) => matches_source(n),
+            SheetSel::Span(a, b) if !a.starts_with('[') => matches_source(a) || matches_source(b),
+            _ => false,
+        },
+        Expr::Name(n) => n.rsplit_once('!').is_some_and(|(sheet, _)| matches_source(sheet)),
+        Expr::Struct(r) => retargets.iter().any(|(old, _)| r.table.eq_ignore_ascii_case(old)),
+        _ => false,
+    };
+    e.walk(&mut |x| found = found || uses_source(x));
     found
 }
 
