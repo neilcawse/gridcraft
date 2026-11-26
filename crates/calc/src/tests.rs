@@ -946,6 +946,32 @@ fn lookups_into_unreadable_links_still_lift_over_arrays() {
     assert_eq!([t.get("E1"), t.get("E2"), t.get("F1")], [Value::Error(CellError::NA), Value::Error(CellError::Div0), Value::Error(CellError::Name)]);
 }
 
+/// X15's argument coercion holds over a linked table too: an index read from a cell as text that
+/// isn't a whole number is `#REF!`, and a search mode read from a cell as text is `#VALUE!`.
+#[test]
+fn lookups_into_linked_tables_coerce_cell_arguments_as_local_ones() {
+    use gridcraft_model::{ExternalBook, ExternalSheet};
+    let mut t = T::new();
+    let data = ExternalSheet { name: "Data".into(), cells: vec![(c("A1"), Value::text("x")), (c("B1"), Value::Number(10.0))], ..Default::default() };
+    t.wb.external_books = vec![ExternalBook { sheets: vec![data], ..Default::default() }].into();
+    t.set("D1", "abc");
+    t.set("D2", "=\"TRUE\"");
+    t.set("D3", "=\"2\"");
+    t.set("D4", "=1/0");
+    for (at, table) in [("A", "[1]Data!A1:B2"), ("B", "F1:G2")] {
+        t.set(&format!("{at}1"), &format!("=VLOOKUP(\"x\",{table},D1,FALSE)"));
+        t.set(&format!("{at}2"), &format!("=VLOOKUP(\"x\",{table},2,D2)"));
+        t.set(&format!("{at}3"), &format!("=VLOOKUP(\"x\",{table},D3,FALSE)"));
+        t.set(&format!("{at}4"), &format!("=VLOOKUP(\"x\",{table},D4,FALSE)"));
+    }
+    t.set("F1", "x");
+    t.set("G1", "10");
+    for col in ["A", "B"] {
+        let got = [1, 2, 3, 4].map(|r| t.get(&format!("{col}{r}")));
+        assert_eq!(got, [Value::Error(CellError::Ref), Value::Error(CellError::Value), Value::Number(10.0), Value::Error(CellError::Ref)], "{col}");
+    }
+}
+
 #[test]
 fn linked_blank_cells_are_not_uncached_cells() {
     use gridcraft_model::{ExternalBook, ExternalSheet};

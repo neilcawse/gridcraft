@@ -182,12 +182,15 @@ pub fn vh_lookup_pos(
     };
     let (approx, linked_idx) = if linked_len.is_some() {
         // A failed, empty linked table reports no match when the index is #REF! and
-        // the search mode is valid. Other errors keep the linked lookup's precedence.
-        if keys_val.is_none() && matches!(idx.0, Value::Error(CellError::Ref)) && approx.is_none_or(|(v, _)| v.to_bool().is_ok()) {
+        // the search mode is valid. Other errors keep the linked lookup's precedence:
+        // the index and search mode are resolved before the search, with the same
+        // argument coercion as any other table.
+        if keys_val.is_none() && matches!(idx.0, Value::Error(CellError::Ref)) && approx.is_none_or(|(v, from_ref)| range_lookup_arg(v, from_ref).is_ok())
+        {
             return Err(CellError::NA);
         }
-        let index = zero_based_lookup_index(idx.0.to_number()?)?;
-        let approx = approx.map_or(Ok(true), |(v, _)| v.to_bool())?;
+        let index = lookup_index_number(idx.0, idx.1)?;
+        let approx = approx.map_or(Ok(true), |(v, from_ref)| range_lookup_arg(v, from_ref))?;
         if index >= max_len {
             return Err(CellError::Ref);
         }
@@ -227,17 +230,18 @@ fn range_lookup_arg(v: &Value, from_ref: bool) -> R<bool> {
 /// A computed index keeps normal numeric coercion, including propagation of a computed error.
 /// Below 1 (a blank, FALSE) it is `#VALUE!`; past the table `#REF!`.
 fn lookup_index(v: &Value, from_ref: bool, len: usize) -> R<usize> {
+    let idx = lookup_index_number(v, from_ref)?;
+    if idx >= len { Err(CellError::Ref) } else { Ok(idx) }
+}
+
+/// [`lookup_index`] without the table bound.
+fn lookup_index_number(v: &Value, from_ref: bool) -> R<usize> {
     let idx = match v.scalar() {
         Value::Error(_) if from_ref => return Err(CellError::Ref),
         Value::Error(e) => return Err(e),
         Value::Text(t) if from_ref => parse_number_text(&t).filter(|n| n.fract() == 0.0).ok_or(CellError::Ref)?,
         v => v.to_number()?,
     };
-    let idx = zero_based_lookup_index(idx)?;
-    if idx >= len { Err(CellError::Ref) } else { Ok(idx) }
-}
-
-fn zero_based_lookup_index(idx: f64) -> R<usize> {
     // NaN too: it would pass `idx < 1.0` and become index 0 (#2163).
     if idx.is_nan() || idx < 1.0 {
         return Err(CellError::Value);
