@@ -199,6 +199,17 @@ fn copy_reserves_kept_sheet_defined_names() {
     assert_eq!(tables(&s, "Data (2)"), ["Sales5"]);
 }
 
+/// X27 reserves `_xlnm.` and `_xlchart.` for every table name, so a copied table whose name
+/// already has such a prefix (stored before the rule) can't be suffixed from it: every candidate
+/// would stay reserved. It is named from `Table`, as X27's import repair names such tables.
+#[test]
+fn copy_of_a_table_with_a_reserved_name_is_named_from_table() {
+    let mut s = book();
+    std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap().tables[0].name = "_xlnm.Sales".into();
+    copy_data(&mut s);
+    assert_eq!(tables(&s, "Data (2)"), ["Table4"]);
+}
+
 #[test]
 fn copy_reserves_an_imported_slicer_cache_without_a_defined_name_marker() {
     let mut s = book();
