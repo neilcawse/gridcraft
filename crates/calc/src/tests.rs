@@ -3942,3 +3942,153 @@ fn computed_criterion_that_reenters_itself_is_not_met() {
     t.set("B60", "=DCOUNT($F$2:$G$7,\"age\",N46:N47)");
     assert_eq!(t.num("B60"), 0.0);
 }
+
+#[test]
+fn getpivotdata_matches_blank_items_and_numeric_tolerance_and_captions() {
+    use gridcraft_model::{PivotDataCell, PivotField, PivotFunc, PivotItemRef, PivotTable, PivotValue};
+    let mut t = T::new();
+    // Synthetic rendered PivotTable at A3:C6 with an empty intersection cell (B5) and a (blank) row item (A6).
+    t.set("A3", "Row Labels");
+    t.set("B3", "1");
+    t.set("C3", "Grand Total");
+    t.set("A4", "Alpha");
+    t.set("B4", "42");
+    t.set("C4", "42");
+    t.set("A5", "Beta");
+    t.set("C5", "10");
+    t.set("A6", "(blank)");
+    t.set("B6", "7");
+    t.set("C6", "7");
+    let pt = PivotTable {
+        id: 1,
+        name: "Pivot1".into(),
+        anchor: CellRef::parse("A3").unwrap(),
+        last_range: gridcraft_core::RangeRef::parse("A3:C6"),
+        rows: vec![PivotField { source_col: "Group".into(), caption: Some("DisplayGroup".into()), ..Default::default() }],
+        columns: vec![PivotField { source_col: "Bin".into(), ..Default::default() }],
+        values: vec![PivotValue { source_col: "Amt".into(), func: PivotFunc::Sum, name: "Sum of Amt".into(), ..Default::default() }],
+        ..Default::default()
+    };
+    let it = |f: &str, l: &str, v: Value| PivotItemRef { field: f.into(), label: l.into(), value: v };
+    pt.data_index.set_cells(vec![
+        PivotDataCell {
+            data_field: "Sum of Amt".into(),
+            source_col: "Amt".into(),
+            items: vec![it("Group", "Alpha", Value::text("Alpha")), it("Bin", "1", Value::Number(1.0 + 1e-13))],
+            row: 1,
+            col: 1,
+        },
+        PivotDataCell {
+            data_field: "Sum of Amt".into(),
+            source_col: "Amt".into(),
+            items: vec![it("Group", "Beta", Value::text("Beta")), it("Bin", "1", Value::Number(1.0))],
+            row: 2,
+            col: 1,
+        },
+        PivotDataCell {
+            data_field: "Sum of Amt".into(),
+            source_col: "Amt".into(),
+            items: vec![it("Group", "(blank)", Value::Empty), it("Bin", "1", Value::Number(1.0))],
+            row: 3,
+            col: 1,
+        },
+        PivotDataCell {
+            data_field: "Sum of Amt".into(),
+            source_col: "Amt".into(),
+            items: vec![it("Group", "Zero", Value::text("Zero")), it("Bin", "0", Value::Number(0.0))],
+            row: 1,
+            col: 2,
+        },
+    ]);
+    t.wb.sheet_mut(0).unwrap().pivots.push(pt);
+
+    // Omitted item arg `,,` and `""` both match the `(blank)` item.
+    t.set("E1", r#"=GETPIVOTDATA("Sum of Amt",$A$3,"Group",,"Bin",1)"#);
+    t.set("E2", r#"=GETPIVOTDATA("Sum of Amt",$A$3,"Group","","Bin",1)"#);
+    // 1e-12 relative numeric tolerance matches `1` against `1 + 1e-13`, and field caption matches `Group`.
+    t.set("E3", r#"=GETPIVOTDATA("Amt",$A$3,"DisplayGroup","Alpha","Bin",1)"#);
+    // Empty intersection cell in the report returns Empty (coercing to 0 in `<>0`), not `#REF!`.
+    t.set("E4", r#"=IF(GETPIVOTDATA("Amt",$A$3,"Group","Beta","Bin",1)<>0,1,0)"#);
+    // Pure relative tolerance (no 1.0 absolute floor): `0` matches `0`, NOT `1e-13`.
+    t.set("E5", r#"=GETPIVOTDATA("Amt",$A$3,"Group","Zero","Bin",0)"#);
+    t.set("E6", r#"=GETPIVOTDATA("Amt",$A$3,"Group","Zero","Bin",1E-13)"#);
+    assert_eq!((t.num("E1"), t.num("E2"), t.num("E3"), t.num("E4"), t.num("E5")), (7.0, 7.0, 42.0, 0.0, 42.0));
+    assert_eq!(t.get("E6"), Value::Error(CellError::Ref));
+}
+
+#[test]
+fn criteria_range_error_propagates_through_ifs_functions() {
+    let mut t = T::new();
+    for (r, (k, v)) in [("a", "10"), ("a", "20"), ("b", "30")].iter().enumerate() {
+        t.set(&format!("A{}", r + 1), k);
+        t.set(&format!("B{}", r + 1), v);
+    }
+    t.set("D1", "missing");
+    t.set("E1", r#"=AVERAGEIFS(B1:B3,A1:A3,"a",OFFSET(B1:B3,0,MATCH(D1,A1:A3,0)),">0")"#);
+    t.set("E2", r#"=SUMIFS(B1:B3,A1:A3,"a",OFFSET(B1:B3,0,MATCH(D1,A1:A3,0)),">0")"#);
+    t.set("E3", r#"=COUNTIFS(A1:A3,"a",OFFSET(B1:B3,0,MATCH(D1,A1:A3,0)),">0")"#);
+    t.set("E4", r#"=MAXIFS(B1:B3,OFFSET(B1:B3,0,MATCH(D1,A1:A3,0)),">0")"#);
+    t.set("E5", r#"=MINIFS(B1:B3,OFFSET(B1:B3,0,MATCH(D1,A1:A3,0)),">0")"#);
+    for cell in ["E1", "E2", "E3", "E4", "E5"] {
+        assert_eq!(t.get(cell), Value::Error(CellError::NA), "{cell} should propagate #N/A");
+    }
+}
+
+#[test]
+fn array_if_dereferences_selected_blank_cells_to_zero() {
+    let mut t = T::new();
+    // A1:A4 are flags (1, 1, 1, 0); B1:B4 are (10, 20, <blank>, 99).
+    t.set("A1", "1");
+    t.set("A2", "1");
+    t.set("A3", "1");
+    t.set("A4", "0");
+    t.set("B1", "10");
+    t.set("B2", "20");
+    t.set("B4", "99");
+    // Array-mode IF selects {10, 20, 0, FALSE}: COUNT sees 3 numbers (including 0 from blank B3),
+    // AVERAGE is (10 + 20 + 0) / 3 = 10, and STDEV.P is sqrt(((0)^2 + 10^2 + (-10)^2) / 3) = sqrt(200/3).
+    t.set("D1", "=COUNT(IF(A1:A4=1,B1:B4))");
+    t.set("D2", "=AVERAGE(IF(A1:A4=1,B1:B4))");
+    t.set("D3", "=STDEV.P(IF(A1:A4=1,B1:B4))");
+    assert_eq!(t.num("D1"), 3.0);
+    assert_eq!(t.num("D2"), 10.0);
+    assert!((t.num("D3") - (200.0_f64 / 3.0).sqrt()).abs() < 1e-12);
+}
+
+#[test]
+fn binary_arithmetic_coerces_left_operand_before_right_error() {
+    let mut t = T::new();
+    t.set("A1", "no");
+    t.set("B1", "=NA()");
+    t.set("C1", "=A1-#REF!");
+    t.set("C2", "=A1-B1");
+    t.set("C3", "=A1+1/0");
+    t.set("C4", "=(1/0)-#REF!");
+    t.set("C5", "=1-#REF!");
+    assert_eq!(t.get("C1"), Value::Error(CellError::Value));
+    assert_eq!(t.get("C2"), Value::Error(CellError::Value));
+    assert_eq!(t.get("C3"), Value::Error(CellError::Value));
+    assert_eq!(t.get("C4"), Value::Error(CellError::Div0));
+    assert_eq!(t.get("C5"), Value::Error(CellError::Ref));
+}
+
+#[test]
+fn sum_and_average_prioritize_direct_expression_errors_over_range_errors() {
+    let mut t = T::new();
+    t.set("A1", "10");
+    t.set("A2", "=1/0");
+    t.set("B1", "=1/0");
+    t.set("C1", "=#REF!");
+    t.set("C2", "text");
+    t.set("D1", "=SUM(A1:A2,#REF!,B1)");
+    t.set("D2", "=AVERAGE(A1:A2,#REF!)");
+    t.set("D3", "=SUM(C1,-C2)");
+    t.set("D4", "=COUNT(A1:A2,#REF!)");
+    t.set("D5", "=SUM(A1:A2,C1)");
+    assert_eq!(t.get("D1"), Value::Error(CellError::Ref));
+    assert_eq!(t.get("D2"), Value::Error(CellError::Ref));
+    assert_eq!(t.get("D3"), Value::Error(CellError::Value));
+    assert_eq!(t.num("D4"), 1.0);
+    // Two range/cell references (no direct expression error): left-to-right range error wins.
+    assert_eq!(t.get("D5"), Value::Error(CellError::Div0));
+}

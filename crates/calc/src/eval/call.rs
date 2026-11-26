@@ -148,9 +148,10 @@ impl<'h> Evaluator<'h> {
         if let Value::Array(array) = &condition {
             let when_true = self.arg_val(args, 1).unwrap_or(Value::Bool(true));
             let when_false = if args.len() > 2 { self.arg_val(args, 2).unwrap_or(Value::Bool(false)) } else { Value::Bool(false) };
+            let deref_empty = |v: &Value| if matches!(v, Value::Empty) { Value::Number(0.0) } else { v.clone() };
             return Ev::V(zip3(array, &when_true, &when_false, |condition, when_true, when_false| match condition.to_bool() {
-                Ok(true) => when_true.clone(),
-                Ok(false) => when_false.clone(),
+                Ok(true) => deref_empty(when_true),
+                Ok(false) => deref_empty(when_false),
                 Err(error) => Value::Error(error),
             }));
         }
@@ -349,7 +350,9 @@ impl<'h> Evaluator<'h> {
             // workbook is closed. A written error (`#REF!` left by a deleted range, here or in a
             // linked workbook: `[1]Data!#REF!`) is that error.
             let linked = matches!(&ev, Ev::R(areas) if areas.iter().any(|x| linked_parts(x.sheet).is_some()));
-            if takes_reference(spec.name, i) && (linked || matches!(a, Expr::Error(_) | Expr::LinkedRefError(_))) {
+            if takes_reference(spec.name, i)
+                && (linked || matches!(ev, Ev::V(Value::Error(_))) || matches!(a, Expr::Error(_) | Expr::LinkedRefError(_)))
+            {
                 return err(match self.deref(ev) {
                     Value::Error(e) => e,
                     _ => CellError::Value,
@@ -407,11 +410,18 @@ impl<'h> Evaluator<'h> {
     /// Only `SUM`, `COUNT` and `AVG` are supported currently.
     fn aggregate(&mut self, kind: Agg, args: &[Expr]) -> Ev {
         let mut acc = Acc::default();
+        let mut direct_error = None;
         let mut first_error = None;
         for a in args {
             let ev = self.eval(a);
             let steps = match ev {
                 Ev::R(areas) => areas.iter().map(|area| self.aggregate_area(kind, area, &mut acc)).collect(),
+                Ev::V(Value::Error(e)) => {
+                    if kind != Agg::Count && direct_error.is_none() {
+                        direct_error = Some(e);
+                    }
+                    vec![self.aggregate_value(kind, Value::Error(e), false, &mut acc)]
+                }
                 ev => {
                     let value = self.deref(ev);
                     vec![self.aggregate_value(kind, value, false, &mut acc)]
@@ -421,7 +431,7 @@ impl<'h> Evaluator<'h> {
                 first_error = steps.into_iter().find_map(Result::err);
             }
         }
-        first_error.unwrap_or_else(|| Ev::V(acc.finish(kind)))
+        direct_error.map(err).or(first_error).unwrap_or_else(|| Ev::V(acc.finish(kind)))
     }
 
     /// Adds one area to `acc`; `Err` is the result the function ends with.

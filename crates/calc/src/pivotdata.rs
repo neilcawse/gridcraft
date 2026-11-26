@@ -6,7 +6,7 @@
 
 use gridcraft_core::{CellError, CellRef, Value};
 use gridcraft_formula::Expr;
-use gridcraft_model::{PIVOT_INDEXER, PivotDataCell, PivotItemRef, PivotLookup, PivotTable};
+use gridcraft_model::{PIVOT_INDEXER, PivotDataCell, PivotIndexError, PivotItemRef, PivotLookup, PivotTable};
 
 use crate::eval::{Ev, Evaluator};
 
@@ -19,10 +19,17 @@ fn same_text(a: &str, b: &str) -> bool {
 
 /// A number matches an item with that value (dates as serials) or with that label; anything
 /// else matches the label as text. With `exact`, a number matches only an item of that value.
+fn is_blank_query(v: &Value) -> bool {
+    matches!(v, Value::Empty) || matches!(v, Value::Text(t) if t.is_empty())
+}
+
 fn item_matches(item: &PivotItemRef, v: &Value, exact: bool) -> bool {
+    if is_blank_query(v) {
+        return matches!(item.value, Value::Empty) || same_text(&item.label, "(blank)");
+    }
     if let Value::Number(n) = v {
         if let Value::Number(x) = &item.value
-            && n == x
+            && (n - x).abs() <= 1e-12 * n.abs().max(x.abs())
         {
             return true;
         }
@@ -44,7 +51,7 @@ fn cell_matches(cell: &PivotDataCell, data_field: &str, pairs: &[(String, Value)
 }
 
 fn is_axis_field(pt: &PivotTable, field: &str) -> bool {
-    pt.rows.iter().chain(pt.columns.iter()).any(|f| same_text(&f.source_col, field))
+    pt.rows.iter().chain(pt.columns.iter()).any(|f| same_text(&f.source_col, field) || f.caption.as_deref().is_some_and(|c| same_text(c, field)))
 }
 
 /// The value cell whose value field and items are exactly those asked for. Text items hit the
@@ -52,8 +59,16 @@ fn is_axis_field(pt: &PivotTable, field: &str) -> bool {
 /// A number prefers the item of that value: two numeric items can show the same label (0.6 and 1
 /// formatted as `0`), so a label hit counts only when no item has the exact value.
 fn find<'a>(cells: &'a PivotLookup, data_field: &str, pairs: &[(String, Value)]) -> Option<&'a PivotDataCell> {
-    let labels: Option<Vec<(&str, String, bool)>> =
-        pairs.iter().map(|(f, v)| v.to_text().ok().map(|t| (f.as_str(), t, matches!(v, Value::Bool(_))))).collect();
+    let labels: Option<Vec<(&str, String, bool)>> = pairs
+        .iter()
+        .map(|(f, v)| {
+            if is_blank_query(v) {
+                Some((f.as_str(), "(blank)".to_string(), false))
+            } else {
+                v.to_text().ok().map(|t| (f.as_str(), t, matches!(v, Value::Bool(_))))
+            }
+        })
+        .collect();
     let hit = labels.as_ref().and_then(|labels| {
         let refs: Vec<(&str, &str, bool)> = labels.iter().map(|(f, t, b)| (*f, t.as_str(), *b)).collect();
         cells.find(data_field, &refs)
@@ -124,14 +139,29 @@ impl Evaluator<'_> {
                 axis_pairs.push((field, item));
                 continue;
             }
-            let filter = pt.filters.iter().find(|f| same_text(&f.source_col, &field)).ok_or(CellError::Ref)?;
-            let shown = match filter.selected.as_deref() {
-                Some([one]) => item.to_text().is_ok_and(|t| same_text(&t, one)),
-                _ => false,
-            };
-            if !shown {
-                return Err(CellError::Ref);
+            if let Some(filter) = pt.filters.iter().find(|f| same_text(&f.source_col, &field)) {
+                let shown = match filter.selected.as_deref() {
+                    Some([one]) => {
+                        if is_blank_query(&item) {
+                            same_text(one, "(blank)")
+                        } else {
+                            item.to_text().is_ok_and(|t| same_text(&t, one))
+                        }
+                    }
+                    _ => false,
+                };
+                if !shown {
+                    return Err(CellError::Ref);
+                }
+                continue;
             }
+            // A grouped/renamed axis field present in a pre-built OOXML index may not appear in
+            // `pt.rows`/`pt.columns`; let the index lookup decide whether it exists.
+            if pt.data_index.cells().is_some() {
+                axis_pairs.push((field, item));
+                continue;
+            }
+            return Err(CellError::Ref);
         }
         // The report's value cells. A pivot loaded without them builds them once; a stored report
         // that no longer matches its source gets no index at all, so the lookup is #REF! until a
@@ -145,11 +175,42 @@ impl Evaluator<'_> {
                     _ => Err(CellError::Ref),
                 };
             };
-            if let Ok(cells) = build(wb, area.sheet, pt) {
-                pt.data_index.set_cells(cells);
+            match build(wb, area.sheet, pt) {
+                Ok(cells) => {
+                    pt.data_index.set_cells(cells);
+                }
+                Err(PivotIndexError::Other(_)) => {
+                    return match self.getpivotdata_fallback(args) {
+                        Ev::V(Value::Error(e)) => Err(e),
+                        Ev::V(v) => Ok(v),
+                        _ => Err(CellError::Ref),
+                    };
+                }
+                Err(PivotIndexError::Stale) => {}
             }
         }
-        let cell = find(&pt.data_index, &data_field, &axis_pairs).ok_or(CellError::Ref)?;
+        let cell = find(&pt.data_index, &data_field, &axis_pairs)
+            .or_else(|| {
+                let mut mapped = false;
+                let alt: Vec<(String, Value)> = axis_pairs
+                    .iter()
+                    .map(|(f, v)| {
+                        if let Some(af) = pt
+                            .rows
+                            .iter()
+                            .chain(pt.columns.iter())
+                            .find(|af| af.caption.as_deref().is_some_and(|c| same_text(c, f)) && !same_text(&af.source_col, f))
+                        {
+                            mapped = true;
+                            (af.source_col.clone(), v.clone())
+                        } else {
+                            (f.clone(), v.clone())
+                        }
+                    })
+                    .collect();
+                mapped.then(|| find(&pt.data_index, &data_field, &alt)).flatten()
+            })
+            .ok_or(CellError::Ref)?;
         // The value is the one the sheet shows, so the formula and the report cell always agree.
         let report = pt.last_range.ok_or(CellError::Ref)?;
         let at = CellRef::new(report.start.row.saturating_add(cell.row), report.start.col.saturating_add(cell.col));

@@ -1491,3 +1491,309 @@ fn hostile_row_item_repeat_count_does_not_overflow_and_empty_custom_table_style_
     let grid = pt.style_grid.0.as_ref().expect("style grid parsed without overflow");
     assert_eq!(grid.row_roles, vec![PivotRowRole::Data]);
 }
+
+#[test]
+fn ooxml_row_col_items_build_getpivotdata_index_and_page_field_uses_pivot_item_order() {
+    let mut wb = workbook();
+    wb.sheet_mut(1).unwrap().pivots.truncate(1);
+    let raw = write_xlsx(&wb).unwrap();
+    let mut parts = unzip(&raw);
+
+    // Patch pivotCacheDefinition1.xml to give field 0 (Region) sharedItems [East, West, North],
+    // field 1 (Product) sharedItems [Apples, Pears], and field 2 (Type) sharedItems [Alpha, Beta].
+    // Reorder field 2's `<pivotField><items>` so `item="1"` points to `x="0"` ("Alpha"), not
+    // cache index 1 ("Beta"), and add `<rowItems>` + `<colItems>` matching a 2-row + grand report.
+    let cache_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" refreshOnLoad="0" recordCount="2">
+  <cacheSource type="worksheet"><worksheetSource ref="A1:D4" sheet="Data"/></cacheSource>
+  <cacheFields count="4">
+    <cacheField name="Region" numFmtId="0"><sharedItems count="2"><s v="East"/><s v="West"/></sharedItems></cacheField>
+    <cacheField name="Product" numFmtId="0"><sharedItems count="2"><s v="Apples"/><s v="Pears"/></sharedItems></cacheField>
+    <cacheField name="Type" numFmtId="0"><sharedItems count="2"><s v="Alpha"/><s v="Beta"/></sharedItems></cacheField>
+    <cacheField name="Sales" numFmtId="0"><sharedItems containsNumber="1" count="0"/></cacheField>
+  </cacheFields>
+</pivotCacheDefinition>"#;
+    parts.insert("xl/pivotCache/pivotCacheDefinition1.xml".into(), cache_xml.as_bytes().to_vec());
+
+    let pt_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" name="PivotTable1" cacheId="1" dataCaption="Values">
+  <location ref="A3:D7" firstHeaderRow="1" firstDataRow="2" firstDataCol="1" rowPageCount="1" colPageCount="1"/>
+  <pivotFields count="4">
+    <pivotField axis="axisRow" showAll="0"><items count="3"><item x="1"/><item x="0"/><item t="default"/></items></pivotField>
+    <pivotField axis="axisCol" showAll="0"><items count="3"><item x="0"/><item x="1"/><item t="default"/></items></pivotField>
+    <pivotField axis="axisPage" showAll="0"><items count="3"><item x="1"/><item x="0"/><item t="default"/></items></pivotField>
+    <pivotField dataField="1" showAll="0"/>
+  </pivotFields>
+  <rowFields count="1"><field x="0"/></rowFields>
+  <rowItems count="3">
+    <i><x v="0"/></i>
+    <i><x v="1"/></i>
+    <i t="grand"><x/></i>
+  </rowItems>
+  <colFields count="1"><field x="1"/></colFields>
+  <colItems count="3">
+    <i><x v="0"/></i>
+    <i><x v="1"/></i>
+    <i t="grand"><x/></i>
+  </colItems>
+  <pageFields count="1"><pageField fld="2" item="1" hier="-1"/></pageFields>
+  <dataFields count="1"><dataField name="Sum of Sales" fld="3"/></dataFields>
+</pivotTableDefinition>"#;
+    parts.insert("xl/pivotTables/pivotTable1.xml".into(), pt_xml.as_bytes().to_vec());
+
+    let mut buf = std::io::Cursor::new(Vec::new());
+    {
+        let mut zw = zip::ZipWriter::new(&mut buf);
+        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (name, data) in &parts {
+            zw.start_file(name, opts).unwrap();
+            std::io::Write::write_all(&mut zw, data).unwrap();
+        }
+        zw.finish().unwrap();
+    }
+    let (back, _) = read_xlsx(buf.get_ref()).unwrap();
+    let pt = &back.sheet(1).unwrap().pivots[0];
+
+    // `pageField item="1"` must resolve via `<pivotField><items>`[1] (`x="0"`) -> "Alpha", not "Beta".
+    let page = pt.filters.iter().find(|f| f.source_col == "Type").expect("page filter read");
+    assert_eq!(page.selected.as_deref(), Some(&["Alpha".to_string()][..]));
+
+    // `<rowItems>`/`<colItems>` must populate `data_index` directly on read, with `above = 2`
+    // (`rowPageCount=1` + spacer) + `firstDataRow=2` => data starts at relative row 4, col 1.
+    assert!(pt.data_index.cells().is_some());
+    let west_apples = pt.data_index.find("Sales", &[("Region", "West", false), ("Product", "Apples", false)]).unwrap();
+    assert_eq!((west_apples.row, west_apples.col), (4, 1));
+    let east_pears = pt.data_index.find("Sum of Sales", &[("Region", "East", false), ("Product", "Pears", false)]).unwrap();
+    assert_eq!((east_pears.row, east_pears.col), (5, 2));
+    let grand = pt.data_index.find("Sales", &[]).unwrap();
+    assert_eq!((grand.row, grand.col), (6, 3));
+}
+
+fn repack_pivot1(wb: &Workbook, cache_xml: &str, pt_xml: &str) -> Workbook {
+    let raw = write_xlsx(wb).unwrap();
+    let mut parts = unzip(&raw);
+    parts.insert("xl/pivotCache/pivotCacheDefinition1.xml".into(), cache_xml.as_bytes().to_vec());
+    parts.insert("xl/pivotTables/pivotTable1.xml".into(), pt_xml.as_bytes().to_vec());
+    let mut buf = std::io::Cursor::new(Vec::new());
+    {
+        let mut zw = zip::ZipWriter::new(&mut buf);
+        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (name, data) in &parts {
+            zw.start_file(name, opts).unwrap();
+            std::io::Write::write_all(&mut zw, data).unwrap();
+        }
+        zw.finish().unwrap();
+    }
+    read_xlsx(buf.get_ref()).unwrap().0
+}
+
+#[test]
+fn ooxml_bottom_subtotals_and_subtotals_off_skip_blank_item_headers() {
+    let mut wb = workbook();
+    wb.sheet_mut(1).unwrap().pivots.truncate(1);
+    let cache_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" refreshOnLoad="0" recordCount="2">
+  <cacheSource type="worksheet"><worksheetSource ref="A1:C4" sheet="Data"/></cacheSource>
+  <cacheFields count="3">
+    <cacheField name="Region" numFmtId="0"><sharedItems count="2"><s v="East"/><s v="West"/></sharedItems></cacheField>
+    <cacheField name="Product" numFmtId="0"><sharedItems count="2"><s v="Apples"/><s v="Pears"/></sharedItems></cacheField>
+    <cacheField name="Sales" numFmtId="0"><sharedItems containsNumber="1" count="0"/></cacheField>
+  </cacheFields>
+</pivotCacheDefinition>"#;
+
+    // 1. Outline/compact layout with bottom subtotals (`subtotalTop="0"`):
+    // row 0: blank East header, row 1: East/Apples, row 2: East/Pears, row 3: East Total, row 4: Grand Total.
+    // `firstDataRow="1"`, `rowPageCount="0"` => relative rows are 1, 2, 3, 4, 5.
+    let bottom_pt = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" name="PivotTable1" cacheId="1" dataCaption="Values">
+  <location ref="A1:B6" firstHeaderRow="1" firstDataRow="1" firstDataCol="1" rowPageCount="0" colPageCount="0"/>
+  <pivotFields count="3">
+    <pivotField axis="axisRow" subtotalTop="0" showAll="0"><items count="3"><item x="0"/><item x="1"/><item t="default"/></items></pivotField>
+    <pivotField axis="axisRow" showAll="0"><items count="3"><item x="0"/><item x="1"/><item t="default"/></items></pivotField>
+    <pivotField dataField="1" showAll="0"/>
+  </pivotFields>
+  <rowFields count="2"><field x="0"/><field x="1"/></rowFields>
+  <rowItems count="5">
+    <i><x v="0"/></i>
+    <i r="1"><x v="0"/></i>
+    <i r="1"><x v="1"/></i>
+    <i t="default"><x v="0"/></i>
+    <i t="grand"><x/></i>
+  </rowItems>
+  <colItems count="1"><i><x/></i></colItems>
+  <dataFields count="1"><dataField name="Sum of Sales" fld="2"/></dataFields>
+</pivotTableDefinition>"#;
+    let back = repack_pivot1(&wb, cache_xml, bottom_pt);
+    let pt = &back.sheet(1).unwrap().pivots[0];
+    // East subtotal MUST point to rel row 4 (the `<i t="default">` row), NOT rel row 1 (blank header)!
+    let east_sub = pt.data_index.find("Sales", &[("Region", "East", false)]).expect("East subtotal indexed");
+    assert_eq!((east_sub.row, east_sub.col), (4, 1));
+    let east_apples = pt.data_index.find("Sales", &[("Region", "East", false), ("Product", "Apples", false)]).unwrap();
+    assert_eq!((east_apples.row, east_apples.col), (2, 1));
+    let grand = pt.data_index.find("Sales", &[]).unwrap();
+    assert_eq!((grand.row, grand.col), (5, 1));
+
+    // 2. Outline/compact layout with subtotals OFF (`defaultSubtotal="0"`):
+    // row 0: blank East header, row 1: East/Apples, row 2: East/Pears, row 3: Grand Total.
+    let no_sub_pt = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" name="PivotTable1" cacheId="1" dataCaption="Values">
+  <location ref="A1:B5" firstHeaderRow="1" firstDataRow="1" firstDataCol="1" rowPageCount="0" colPageCount="0"/>
+  <pivotFields count="3">
+    <pivotField axis="axisRow" defaultSubtotal="0" showAll="0"><items count="2"><item x="0"/><item x="1"/></items></pivotField>
+    <pivotField axis="axisRow" showAll="0"><items count="2"><item x="0"/><item x="1"/></items></pivotField>
+    <pivotField dataField="1" showAll="0"/>
+  </pivotFields>
+  <rowFields count="2"><field x="0"/><field x="1"/></rowFields>
+  <rowItems count="4">
+    <i><x v="0"/></i>
+    <i r="1"><x v="0"/></i>
+    <i r="1"><x v="1"/></i>
+    <i t="grand"><x/></i>
+  </rowItems>
+  <colItems count="1"><i><x/></i></colItems>
+  <dataFields count="1"><dataField name="Sum of Sales" fld="2"/></dataFields>
+</pivotTableDefinition>"#;
+    let back = repack_pivot1(&wb, cache_xml, no_sub_pt);
+    let pt = &back.sheet(1).unwrap().pivots[0];
+    // Subtotals are OFF, so Region=East MUST NOT resolve to the blank header row (returns #REF!).
+    assert!(pt.data_index.find("Sales", &[("Region", "East", false)]).is_none());
+    let east_pears = pt.data_index.find("Sales", &[("Region", "East", false), ("Product", "Pears", false)]).unwrap();
+    assert_eq!((east_pears.row, east_pears.col), (3, 1));
+
+    // 3. Top subtotals ON (default `subtotalTop="1"`, `defaultSubtotal="1"`):
+    // row 0 holds the top subtotal for East, so Region=East MUST resolve to rel row 1.
+    let top_sub_pt = bottom_pt.replace(r#"subtotalTop="0""#, "");
+    let back = repack_pivot1(&wb, cache_xml, &top_sub_pt.replace("<i t=\"default\"><x v=\"0\"/></i>", ""));
+    let pt = &back.sheet(1).unwrap().pivots[0];
+    let east_top = pt.data_index.find("Sales", &[("Region", "East", false)]).expect("top subtotal indexed");
+    assert_eq!((east_top.row, east_top.col), (1, 1));
+}
+
+#[test]
+fn ooxml_values_on_rows_skips_blank_item_header_row() {
+    let mut wb = workbook();
+    wb.sheet_mut(1).unwrap().pivots.truncate(1);
+    let cache_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" refreshOnLoad="0" recordCount="2">
+  <cacheSource type="worksheet"><worksheetSource ref="A1:C4" sheet="Data"/></cacheSource>
+  <cacheFields count="3">
+    <cacheField name="Region" numFmtId="0"><sharedItems count="2"><s v="East"/><s v="West"/></sharedItems></cacheField>
+    <cacheField name="Sales" numFmtId="0"><sharedItems containsNumber="1" count="0"/></cacheField>
+    <cacheField name="Units" numFmtId="0"><sharedItems containsNumber="1" count="0"/></cacheField>
+  </cacheFields>
+</pivotCacheDefinition>"#;
+    // Σ Values (`-2`) on rows with 2 data fields (`Sum of Sales`, `Sum of Units`):
+    // row 0 (rel 1): blank East header `<i><x v="0"/></i>` (no @i)
+    // row 1 (rel 2): East / Sum of Sales `<i r="1"><x/></i>`
+    // row 2 (rel 3): East / Sum of Units `<i r="1" i="1"><x v="1"/></i>`
+    // row 3 (rel 4): Grand Total Sum of Sales
+    // row 4 (rel 5): Grand Total Sum of Units
+    let pt_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" name="PivotTable1" cacheId="1" dataOnRows="1" dataCaption="Values">
+  <location ref="A1:B6" firstHeaderRow="1" firstDataRow="1" firstDataCol="1" rowPageCount="0" colPageCount="0"/>
+  <pivotFields count="3">
+    <pivotField axis="axisRow" showAll="0"><items count="3"><item x="0"/><item x="1"/><item t="default"/></items></pivotField>
+    <pivotField dataField="1" showAll="0"/>
+    <pivotField dataField="1" showAll="0"/>
+  </pivotFields>
+  <rowFields count="2"><field x="0"/><field x="-2"/></rowFields>
+  <rowItems count="5">
+    <i><x v="0"/></i>
+    <i r="1"><x/></i>
+    <i r="1" i="1"><x v="1"/></i>
+    <i t="grand"><x/></i>
+    <i t="grand" i="1"><x/></i>
+  </rowItems>
+  <colItems count="1"><i><x/></i></colItems>
+  <dataFields count="2">
+    <dataField name="Sum of Sales" fld="1"/>
+    <dataField name="Sum of Units" fld="2"/>
+  </dataFields>
+</pivotTableDefinition>"#;
+    let back = repack_pivot1(&wb, cache_xml, pt_xml);
+    let pt = &back.sheet(1).unwrap().pivots[0];
+    let east_sales = pt.data_index.find("Sum of Sales", &[("Region", "East", false)]).expect("Sales row indexed");
+    assert_eq!((east_sales.row, east_sales.col), (2, 1), "must hit Sales row (2), not blank header (1)");
+    let east_units = pt.data_index.find("Sum of Units", &[("Region", "East", false)]).expect("Units row indexed");
+    assert_eq!((east_units.row, east_units.col), (3, 1));
+    assert_eq!(pt.data_index.find("Sum of Sales", &[]).unwrap().row, 4);
+    assert_eq!(pt.data_index.find("Sum of Units", &[]).unwrap().row, 5);
+}
+
+#[test]
+fn ooxml_renamed_axis_field_uses_source_col_and_malformed_items_bail_out() {
+    let mut wb = workbook();
+    wb.sheet_mut(1).unwrap().pivots.truncate(1);
+    let cache_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" refreshOnLoad="0" recordCount="2">
+  <cacheSource type="worksheet"><worksheetSource ref="A1:B4" sheet="Data"/></cacheSource>
+  <cacheFields count="2">
+    <cacheField name="Region" numFmtId="0"><sharedItems count="2"><s v="East"/><s v="West"/></sharedItems></cacheField>
+    <cacheField name="Sales" numFmtId="0"><sharedItems containsNumber="1" count="0"/></cacheField>
+  </cacheFields>
+</pivotCacheDefinition>"#;
+
+    // M1: `<pivotField name="Area">` on cache field `"Region"` must store `"Region"` in `PivotItemRef.field`.
+    let renamed_pt = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" name="PivotTable1" cacheId="1" dataCaption="Values">
+  <location ref="A1:B4" firstHeaderRow="1" firstDataRow="1" firstDataCol="1" rowPageCount="0" colPageCount="0"/>
+  <pivotFields count="2">
+    <pivotField name="Area" axis="axisRow" showAll="0"><items count="3"><item x="0"/><item x="1"/><item t="default"/></items></pivotField>
+    <pivotField dataField="1" showAll="0"/>
+  </pivotFields>
+  <rowFields count="1"><field x="0"/></rowFields>
+  <rowItems count="3"><i><x v="0"/></i><i><x v="1"/></i><i t="grand"><x/></i></rowItems>
+  <colItems count="1"><i><x/></i></colItems>
+  <dataFields count="1"><dataField name="Sum of Sales" fld="1"/></dataFields>
+</pivotTableDefinition>"#;
+    let back = repack_pivot1(&wb, cache_xml, renamed_pt);
+    let pt = &back.sheet(1).unwrap().pivots[0];
+    assert_eq!(pt.rows[0].source_col, "Region");
+    assert_eq!(pt.rows[0].caption.as_deref(), Some("Area"));
+    let east = pt.data_index.find("Sales", &[("Region", "East", false)]).expect("source name resolves");
+    assert_eq!((east.row, east.col), (1, 1));
+
+    // M2: axis `<pivotField>` without `<items>` must return `None` from `build_ooxml_data_index`
+    // instead of pushing truncated keys that claim the Grand Total!
+    let missing_items_pt = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" name="PivotTable1" cacheId="1" dataCaption="Values">
+  <location ref="A1:B4" firstHeaderRow="1" firstDataRow="1" firstDataCol="1" rowPageCount="0" colPageCount="0"/>
+  <pivotFields count="2">
+    <pivotField axis="axisRow" showAll="0"/>
+    <pivotField dataField="1" showAll="0"/>
+  </pivotFields>
+  <rowFields count="1"><field x="0"/></rowFields>
+  <rowItems count="3"><i><x v="0"/></i><i><x v="1"/></i><i t="grand"><x/></i></rowItems>
+  <colItems count="1"><i><x/></i></colItems>
+  <dataFields count="1"><dataField name="Sum of Sales" fld="1"/></dataFields>
+</pivotTableDefinition>"#;
+    let back = repack_pivot1(&wb, cache_xml, missing_items_pt);
+    assert!(back.sheet(1).unwrap().pivots[0].data_index.cells().is_none(), "missing <items> must bail out cleanly");
+
+    // L6: invalid/negative `@r` or `@v` must bail out cleanly rather than defaulting to 0.
+    let bad_attr_pt = renamed_pt.replace("<i><x v=\"0\"/></i>", "<i r=\"-1\"><x v=\"0\"/></i>");
+    let back = repack_pivot1(&wb, cache_xml, &bad_attr_pt);
+    assert!(back.sheet(1).unwrap().pivots[0].data_index.cells().is_none(), "negative @r must bail out");
+
+    // L1: a skipped `<dataField>` (OOB `fld="99"`) must NOT fall back to `pt_values[0]`.
+    let skipped_df_pt = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" name="PivotTable1" cacheId="1" dataCaption="Values">
+  <location ref="A1:C4" firstHeaderRow="1" firstDataRow="1" firstDataCol="1" rowPageCount="0" colPageCount="0"/>
+  <pivotFields count="2">
+    <pivotField axis="axisRow" showAll="0"><items count="3"><item x="0"/><item x="1"/><item t="default"/></items></pivotField>
+    <pivotField dataField="1" showAll="0"/>
+  </pivotFields>
+  <rowFields count="1"><field x="0"/></rowFields>
+  <rowItems count="3"><i><x v="0"/></i><i><x v="1"/></i><i t="grand"><x/></i></rowItems>
+  <colFields count="1"><field x="-2"/></colFields>
+  <colItems count="2"><i><x v="0"/></i><i i="1"><x v="1"/></i></colItems>
+  <dataFields count="2">
+    <dataField name="Broken" fld="99"/>
+    <dataField name="Sum of Sales" fld="1"/>
+  </dataFields>
+</pivotTableDefinition>"#;
+    let back = repack_pivot1(&wb, cache_xml, skipped_df_pt);
+    let pt = &back.sheet(1).unwrap().pivots[0];
+    let east = pt.data_index.find("Sum of Sales", &[("Region", "East", false)]).expect("valid dataField indexed");
+    assert_eq!((east.row, east.col), (1, 2), "skipped dataField 0 must not claim col 1");
+}

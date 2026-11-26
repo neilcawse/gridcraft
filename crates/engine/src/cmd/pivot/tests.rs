@@ -2561,3 +2561,55 @@ fn changing_pivot_style_clears_imported_custom_style() {
     assert_eq!(pt.style, "PivotStyleMedium9");
     assert!(pt.custom_style.is_none(), "switching pivot style must clear imported custom_style");
 }
+
+#[test]
+fn getpivotdata_renamed_axis_field_works_with_source_and_caption_before_and_after_refresh() {
+    use std::io::Read;
+
+    let mut s = sales();
+    s.execute("insert.pivotTable", json!({"rows": ["Region"], "values": ["Sales"]})).unwrap();
+    edit_pt(&mut s, |p| p.rows[0].caption = Some("Area".into()));
+    let raw = gridcraft_xlsx::write_xlsx(&s.doc().unwrap().wb).unwrap();
+
+    // Patch OOXML `<rowItems>`/`<colItems>` into pivotTable1.xml as Excel writes them,
+    // keeping `<pivotField name="Area">` on cache field `"Region"`.
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(&raw)).unwrap();
+    let mut parts: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+    for i in 0..z.len() {
+        let mut f = z.by_index(i).unwrap();
+        let mut b = Vec::new();
+        f.read_to_end(&mut b).unwrap();
+        parts.insert(f.name().to_string(), b);
+    }
+    let pt_xml = String::from_utf8(parts["xl/pivotTables/pivotTable1.xml"].clone()).unwrap();
+    assert!(pt_xml.contains(r#"name="Area""#), "pivotField caption written: {pt_xml}");
+    let injected = r#"<rowItems count="4"><i><x v="0"/></i><i><x v="1"/></i><i><x v="2"/></i><i t="grand"><x/></i></rowItems><colItems count="1"><i><x/></i></colItems>"#;
+    let patched_pt = pt_xml.replace("<dataFields", &format!("{injected}<dataFields"));
+    parts.insert("xl/pivotTables/pivotTable1.xml".into(), patched_pt.into_bytes());
+    let mut buf = std::io::Cursor::new(Vec::new());
+    {
+        let mut zw = zip::ZipWriter::new(&mut buf);
+        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (name, data) in &parts {
+            zw.start_file(name, opts).unwrap();
+            std::io::Write::write_all(&mut zw, data).unwrap();
+        }
+        zw.finish().unwrap();
+    }
+
+    let mut reopened = Session::new();
+    reopened.execute("file.open", json!({"name": "x.xlsx", "base64": crate::io::base64_encode(buf.get_ref())})).unwrap();
+    reopened.execute("sheet.activate", json!({"sheet": "Sheet2"})).unwrap();
+    let eval_gp = |s: &mut Session, cell: &str, f: &str| {
+        s.execute("cell.set", json!({"cell": cell, "input": f})).unwrap();
+        val(s, cell)
+    };
+    // Freshly opened from XML (before refresh): BOTH source name ("Region") and caption ("Area") work.
+    assert!(pt(&reopened).data_index.cells().is_some(), "OOXML data_index populated on open");
+    assert_eq!(eval_gp(&mut reopened, "G1", r#"=GETPIVOTDATA("Sales",$A$3,"Region","East")"#), Value::Number(415.0));
+    assert_eq!(eval_gp(&mut reopened, "G2", r#"=GETPIVOTDATA("Sales",$A$3,"Area","East")"#), Value::Number(415.0));
+    // After pivot.refresh: BOTH continue to work identically.
+    reopened.execute("pivot.refresh", json!({})).unwrap();
+    assert_eq!(eval_gp(&mut reopened, "G3", r#"=GETPIVOTDATA("Sales",$A$3,"Region","East")"#), Value::Number(415.0));
+    assert_eq!(eval_gp(&mut reopened, "G4", r#"=GETPIVOTDATA("Sales",$A$3,"Area","East")"#), Value::Number(415.0));
+}
