@@ -753,7 +753,7 @@ fn table_rename_follows_names_scoped_to_retained_sheets() {
 
     let mut wb = book("rData", true);
     Arc::make_mut(&mut wb.sheets[1]).tables.push(kv_table("Sales"));
-    let attrs = r#" name="KeptAmounts" hidden="1""#;
+    let attrs = r#" hidden="1""#;
     let part = "xl/chartsheets/sheet1.xml";
     let content = br#"<chartsheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"/></sheetViews></chartsheet>"#;
     wb.preserved = Some(Arc::new(Preserved {
@@ -774,7 +774,7 @@ fn table_rename_follows_names_scoped_to_retained_sheets() {
             rel_id: "rIdKept".into(),
             before: 1,
             sheet_id: 4,
-            names: vec![PreservedName { attrs: attrs.into(), formula: "Sales[V]".into() }],
+            names: vec![PreservedName { name: "KeptAmounts".into(), attrs: attrs.into(), formula: "Sales[V]".into() }],
             ..Default::default()
         }],
         ..Default::default()
@@ -782,6 +782,7 @@ fn table_rename_follows_names_scoped_to_retained_sheets() {
     let check = |wb: &Workbook, table: &str| {
         let kept = wb.preserved.as_ref().unwrap();
         let name = &kept.sheets[0].names[0];
+        assert_eq!(name.name, "KeptAmounts");
         assert_eq!(name.formula, format!("{table}[V]"));
         assert_eq!(name.attrs, attrs);
         assert_eq!(kept.parts.iter().find(|p| p.name == part).unwrap().data.as_ref(), content);
