@@ -91,16 +91,39 @@ pub struct Arg {
     /// A written argument whose value came out blank (a lookup of an empty cell): given, not
     /// omitted, although its value is `Value::Empty`.
     pub blank_value: bool,
+    /// A reference read only inside its sheet's used range (`A:A`, `1:1`): the reference's full
+    /// (height, width). Its array holds the top-left part; every cell past it is blank. `None`
+    /// when the value has the reference's shape.
+    pub full_shape: Option<(usize, usize)>,
 }
 
 impl Arg {
     /// A literal (non-reference) argument.
     pub fn val(value: impl Into<Value>) -> Arg {
-        Arg { value: value.into(), from_ref: false, blank_value: false }
+        Arg { value: value.into(), from_ref: false, blank_value: false, full_shape: None }
     }
     /// An argument that came from a cell or range reference.
     pub fn reference(value: impl Into<Value>) -> Arg {
-        Arg { value: value.into(), from_ref: true, blank_value: false }
+        Arg { value: value.into(), from_ref: true, blank_value: false, full_shape: None }
+    }
+
+    /// (height, width) of the argument as written: the reference's full shape when its value was
+    /// cut to the used range, else the shape of its value (1×1 for a scalar).
+    pub fn shape(&self) -> (usize, usize) {
+        self.full_shape.unwrap_or(match &self.value {
+            Value::Array(a) => (a.rows, a.cols),
+            _ => (1, 1),
+        })
+    }
+
+    /// Cells of the reference past its value: blanks the used range cut off.
+    pub fn cut_blanks(&self) -> u64 {
+        let (h, w) = self.shape();
+        let read = match &self.value {
+            Value::Array(a) => a.data.len(),
+            _ => 1,
+        };
+        (h as u64).saturating_mul(w as u64).saturating_sub(read as u64)
     }
 }
 

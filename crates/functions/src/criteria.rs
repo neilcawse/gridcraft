@@ -132,20 +132,18 @@ impl Criterion {
         match self.op {
             Op::Eq => blank,
             Op::Ne => !blank,
-            // "<" / ">" with nothing: Excel compares against "" for text cells, but an
-            // empty string never matches ("<=" and ">=" count it in neither).
-            _ => match v {
-                Value::Text(t) if !t.is_empty() => cmp_op(self.op, compare_text(t, "")),
-                _ => false,
-            },
+            // "<", "<=", ">" and ">=" with nothing after them match no cell, text included
+            // (Excel 365: `COUNTIF` of ">" & an empty cell over numbers, text and logicals is 0).
+            _ => false,
         }
     }
 
     fn matches_number(&self, v: &Value, n: f64) -> bool {
         let cell = match v {
             Value::Number(x) => Some(*x),
-            // Numeric text matches only for equality (COUNTIF("1") counts text "1").
-            Value::Text(t) if matches!(self.op, Op::Eq | Op::Ne) => parse_number_text(t),
+            // Numeric text matches only `=` (COUNTIF("1") counts text "1"); for `<>` it is never
+            // equal (Excel 365: over {23; "23"}, "23" and "=23" count 2 but "<>23" counts 1).
+            Value::Text(t) if self.op == Op::Eq => parse_number_text(t),
             _ => None,
         };
         match cell {
@@ -443,6 +441,23 @@ mod tests {
         assert!(!m("<=", Value::from("")));
         assert!(!m(">=", Value::from("")));
         // A bare "<=" or ">=" never matches an empty string (Excel 365: COUNTIF(="", "<=") is 0).
+    }
+
+    #[test]
+    fn numeric_text_is_never_equal_for_not_equal() {
+        assert!(m("23", Value::from("23")));
+        assert!(m("=23", Value::from("23")));
+        assert!(m("<>23", Value::from("23")));
+        assert!(!m("<>23", Value::Number(23.0)));
+    }
+
+    #[test]
+    fn comparison_with_nothing_matches_no_cell() {
+        for op in ["<", "<=", ">", ">="] {
+            for v in [Value::from("hey"), Value::from(""), Value::Number(1.0), Value::Bool(true), Value::Empty] {
+                assert!(!m(op, v.clone()), "{op} {v:?}");
+            }
+        }
     }
 
     #[test]

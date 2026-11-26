@@ -10,6 +10,52 @@ fn ev2(name: &str, x: f64, y: f64) -> Value {
 }
 
 #[test]
+fn criteria_reads_crossed_clipped_rectangles_without_padding() {
+    const SIDE: usize = 16_384;
+    let mut tall = vec![Value::Empty; SIDE];
+    tall[SIDE - 1] = nv(7.0);
+    let mut wide = vec![Value::Empty; SIDE];
+    wide[SIDE - 1] = nv(9.0);
+    let clipped = |value| Arg { full_shape: Some((SIDE, SIDE)), ..rf(value) };
+    let tall = clipped(Value::Array(Array::column(tall).into()));
+    let wide = clipped(Value::Array(Array::row(wide).into()));
+    close(ev("COUNTIFS", vec![tall.clone(), t(""), wide.clone(), t("")]), (SIDE as u64 * SIDE as u64 - 2) as f64);
+    close(ev("COUNTIFS", vec![tall.clone(), t(""), wide.clone(), n(9.0)]), 1.0);
+    close(ev("SUMIFS", vec![tall.clone(), wide.clone(), t("")]), 7.0);
+    close(ev("AVERAGEIFS", vec![wide, tall, t("")]), 9.0);
+}
+
+#[test]
+fn criteria_index_hits_keep_the_source_stride() {
+    let mut keys = vec![Value::Empty; 64];
+    keys[61] = tv("selected");
+    let keys = Arg { full_shape: Some((32, 3)), ..rf(arr(keys.chunks(2).map(<[Value]>::to_vec).collect())) };
+    let target = arr((0..32).map(|r| vec![nv(0.0), nv(r as f64), Value::Error(NA)]).collect());
+    for _ in 0..2 {
+        close(ev("SUMIFS", vec![rf(target.clone()), keys.clone(), t("selected")]), 30.0);
+    }
+    is_err(ev("COUNTIFS", vec![keys, t("selected"), rf(row(&[1.0, 2.0])), n(2.0)]), CellError::Value);
+}
+
+/// Blank-accepting COUNTIFS over reads of equal width and uneven height counts each cell of the
+/// union once, and only errors at matched target cells propagate.
+#[test]
+fn criteria_union_of_uneven_reads_and_error_precedence() {
+    let clipped = |rows: Vec<Vec<Value>>| Arg { full_shape: Some((10, 2)), ..rf(arr(rows)) };
+    let short = clipped(vec![vec![nv(1.0), nv(2.0)]]);
+    let long = clipped(vec![vec![nv(5.0), Value::Empty], vec![Value::Empty, nv(5.0)], vec![nv(5.0), nv(5.0)]]);
+    // Misses: 1 at (0,0) in short; 5 at (0,0), (1,1), (2,0), (2,1) in long; (0,0) is shared.
+    close(ev("COUNTIFS", vec![short.clone(), t("<>1"), long.clone(), t("<>5")]), 16.0);
+    close(ev("COUNTIFS", vec![long, t("<>5"), short, t("<>1")]), 16.0);
+    let target = arr(vec![vec![Value::Error(NA), nv(4.0)], vec![nv(3.0), Value::Error(Div0)]]);
+    let keys = arr(vec![vec![tv("y"), tv("x")], vec![tv("x"), tv("y")]]);
+    close(ev("SUMIFS", vec![rf(target.clone()), rf(keys.clone()), t("x")]), 7.0);
+    is_err(ev("SUMIFS", vec![rf(target.clone()), rf(keys.clone()), t("y")]), NA);
+    close(ev("SUMIF", vec![rf(keys.clone()), t("x"), rf(target.clone())]), 7.0);
+    is_err(ev("SUMIF", vec![rf(keys), t("y"), rf(target)]), NA);
+}
+
+#[test]
 fn percentof() {
     // SUM(subset) / SUM(all): text, booleans and blanks inside ranges are skipped like SUM.
     let all = arr(vec![vec![nv(10.0)], vec![nv(30.0)], vec![tv("x")], vec![Value::Empty], vec![nv(60.0)]]);

@@ -16,14 +16,20 @@ use crate::criteria::Criterion;
 use crate::util::{A, R, as_array, has, num_val};
 use crate::{Arg, Ctx, FnSpec};
 
-/// Column index of a label in the header row.
+/// A header's comparison text: trimmed text, a General number, or a logical's name.
+fn label_text(v: &Value) -> Option<Cow<'_, str>> {
+    match v {
+        Value::Text(t) => Some(Cow::Borrowed(t.trim())),
+        Value::Number(n) => Some(Cow::Owned(gridcraft_core::number_to_text(*n))),
+        Value::Bool(b) => Some(Cow::Borrowed(if *b { "TRUE" } else { "FALSE" })),
+        _ => None,
+    }
+}
+
+/// Column index of a label in the header row: the first header that reads the same, ignoring case.
 fn find_column(db: &Array, label: &str) -> Option<usize> {
     let label = label.trim();
-    (0..db.cols).find(|&c| match db.get(0, c) {
-        Some(Value::Text(t)) => compare_text(t.trim(), label).is_eq(),
-        Some(Value::Number(n)) => gridcraft_core::number_to_text(*n) == label,
-        _ => false,
-    })
+    (0..db.cols).find(|&c| db.get(0, c).and_then(label_text).is_some_and(|h| compare_text(&h, label).is_eq()))
 }
 
 /// Resolves the field argument: a label or a 1-based column number. `None` when omitted.
@@ -31,18 +37,25 @@ fn field_index(db: &Array, a: &[Arg]) -> R<Option<usize>> {
     if !has(a, 1) {
         return Ok(None);
     }
-    let v = a.get(1).map(|x| x.value.scalar()).unwrap_or(Value::Empty);
-    match v {
-        Value::Number(n) => {
-            let i = n.trunc();
-            // NaN too: it would pass both comparisons and become index 0 (#2163).
-            if i.is_nan() || i < 1.0 || i > db.cols as f64 {
-                return Err(CellError::Value);
-            }
-            Ok(Some((i as usize).saturating_sub(1)))
+    let Some(field) = a.get(1) else { return Ok(None) };
+    // A field must be one cell, even if a larger reference was read as a clipped 1×1 array.
+    if field.shape() != (1, 1) {
+        return Err(CellError::Value);
+    }
+    let v = field.value.scalar();
+    let column_number = |n: f64| {
+        let i = n.trunc();
+        // NaN too: it would pass both comparisons and become index 0 (#2163).
+        if i.is_nan() || i < 1.0 || i > db.cols as f64 {
+            return Err(CellError::Value);
         }
+        Ok(Some((i as usize).saturating_sub(1)))
+    };
+    match v {
+        Value::Number(n) => column_number(n),
+        // A logical is a column number: TRUE the first column, FALSE none (Excel 365).
+        Value::Bool(b) => column_number(if b { 1.0 } else { 0.0 }),
         Value::Text(t) => find_column(db, &t).map(Some).ok_or(CellError::Value),
-        Value::Bool(_) => Err(CellError::Value),
         Value::Error(e) => Err(e),
         _ => Ok(None),
     }
@@ -84,13 +97,7 @@ const SELECTION_WORK_BUDGET: usize = 500_000_000;
 /// Rows (1-based within the database, excluding the header) of matching records.
 fn matching_records(db: &Array, crit: &Array, ctx: &mut dyn Ctx) -> R<Vec<usize>> {
     // The database column under each criteria label, found once per label rather than per cell.
-    let columns: Vec<Option<usize>> = (0..crit.cols)
-        .map(|c| match crit.get(0, c) {
-            Some(Value::Text(t)) => find_column(db, t),
-            Some(Value::Number(n)) => find_column(db, &gridcraft_core::number_to_text(*n)),
-            _ => None,
-        })
-        .collect();
+    let columns: Vec<Option<usize>> = (0..crit.cols).map(|c| crit.get(0, c).and_then(label_text).and_then(|l| find_column(db, &l))).collect();
     // Per criteria row: its index and a list of (criteria column, database column or None when
     // the label is unknown, criterion).
     let mut rows: Vec<CriteriaRow> = Vec::new();
@@ -147,17 +154,30 @@ fn select<'a>(a: &'a [Arg], ctx: &mut dyn Ctx) -> R<Selection<'a>> {
         return Err(*e);
     }
     let db = as_array(dbv);
+    // A database is its label row and at least one record: a label row alone is `#VALUE!`.
+    if db.rows < 2 {
+        return Err(CellError::Value);
+    }
     let crit = as_array(critv);
     let field = field_index(&db, a)?;
     let records = matching_records(&db, &crit, ctx)?;
     Ok(Selection { db, field, records })
 }
 
-/// Numbers of the field among matching records (field required).
+/// Numbers of the field among matching records (field required). An error there is the result,
+/// as for SUM over the field's cells: DSUM and DAVERAGE over records holding `#N/A` are `#N/A`.
 fn field_numbers(a: &[Arg], c: &mut dyn Ctx) -> R<Vec<f64>> {
     let s = select(a, c)?;
     let f = s.field.ok_or(CellError::Value)?;
-    Ok(s.records.iter().filter_map(|&r| s.db.get(r, f).and_then(Value::as_f64)).collect())
+    let mut out = Vec::with_capacity(s.records.len());
+    for &r in &s.records {
+        match s.db.get(r, f) {
+            Some(Value::Error(e)) => return Err(*e),
+            Some(v) => out.extend(v.as_f64()),
+            None => {}
+        }
+    }
+    Ok(out)
 }
 
 fn dsum(a: &[Arg], c: &mut dyn Ctx) -> R<Value> {
@@ -376,6 +396,52 @@ mod tests {
         close(d("DCOUNT", empty()), 3.0);
         is_err(d("DSUM", t("Nope")), CellError::Value);
         is_err(d("DSUM", n(9.0)), CellError::Value);
+    }
+
+    /// Excel 365 on a table whose labels include the logical TRUE, the number 1 and the text
+    /// "true": labels compare as they read, a logical field is a column number, a label row alone
+    /// or a field of two cells is `#VALUE!`, and an error in a summed field is the result.
+    #[test]
+    fn labels_fields_and_errors() {
+        let table = arr(vec![
+            vec![tv("Region"), Value::Bool(true), nv(1.0), tv("true"), tv("Revenue")],
+            vec![tv("East"), tv("a"), tv("b"), tv("b"), nv(10.0)],
+            vec![tv("West"), tv("b"), Value::Empty, tv("a"), nv(20.0)],
+            vec![tv("East"), tv("A"), tv("b"), tv("x"), nv(40.0)],
+        ]);
+        let crit = |label: Value, cond: &str| arr(vec![vec![label], vec![tv(cond)]]);
+        let dsum = |c: Value| ev("DSUM", vec![rf(table.clone()), t("Revenue"), rf(c)]);
+        // The logical TRUE and the text "true" both name the column headed TRUE, the first that
+        // reads "TRUE"; the number 1 names the column headed 1.
+        close(dsum(crit(Value::Bool(true), "a")), 50.0);
+        close(dsum(crit(tv("true"), "<>a")), 20.0);
+        close(dsum(crit(nv(1.0), "b")), 50.0);
+        // TRUE as the field is column 1; "true" the column headed TRUE.
+        let all = crit(tv("Region"), "*");
+        close(ev("DCOUNTA", vec![rf(table.clone()), b(true), rf(all.clone())]), 3.0);
+        close(ev("DCOUNT", vec![rf(table.clone()), b(true), rf(all.clone())]), 0.0);
+        close(ev("DCOUNTA", vec![rf(table.clone()), t("true"), rf(all.clone())]), 3.0);
+        // A field of two cells, and a database that is only its labels.
+        let two = arr(vec![vec![tv("Region"), tv("Revenue")]]);
+        is_err(ev("DSUM", vec![rf(table.clone()), rf(two), rf(all.clone())]), CellError::Value);
+        let clipped_field = crate::Arg { full_shape: Some((1_048_576, 1)), ..rf(arr(vec![vec![tv("Revenue")]])) };
+        is_err(ev("DSUM", vec![rf(table.clone()), clipped_field, rf(all.clone())]), CellError::Value);
+        let labels = arr(vec![vec![tv("Region"), tv("Revenue")]]);
+        for f in ["DSUM", "DCOUNT", "DCOUNTA", "DAVERAGE", "DMIN", "DPRODUCT"] {
+            is_err(ev(f, vec![rf(labels.clone()), t("Revenue"), rf(all.clone())]), CellError::Value);
+        }
+        // An error in the field of a matching record is the result of the numeric functions;
+        // DCOUNT skips it and DCOUNTA counts it.
+        let with_error =
+            arr(vec![vec![tv("Month"), tv("Avg")], vec![nv(1.0), nv(30.0)], vec![nv(2.0), Value::Error(CellError::NA)], vec![nv(2.0), nv(40.0)]]);
+        let feb = arr(vec![vec![tv("Month")], vec![nv(2.0)]]);
+        let jan = arr(vec![vec![tv("Month")], vec![nv(1.0)]]);
+        for f in ["DSUM", "DAVERAGE", "DMAX", "DMIN", "DPRODUCT"] {
+            is_err(ev(f, vec![rf(with_error.clone()), t("Avg"), rf(feb.clone())]), CellError::NA);
+        }
+        close(ev("DAVERAGE", vec![rf(with_error.clone()), t("Avg"), rf(jan)]), 30.0);
+        close(ev("DCOUNT", vec![rf(with_error.clone()), t("Avg"), rf(feb.clone())]), 1.0);
+        close(ev("DCOUNTA", vec![rf(with_error), t("Avg"), rf(feb)]), 2.0);
     }
 
     /// Computed criteria are no longer asked for once the host is out of work.

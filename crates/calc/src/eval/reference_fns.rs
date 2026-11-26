@@ -29,12 +29,14 @@ impl<'h> Evaluator<'h> {
             Ok(n) => n.trunc() as i64,
             Err(e) => return err(e),
         };
+        // Excel accepts a positive fractional width below one as one column; apply the same minimum to height.
+        let size = |n: f64| if n > 0.0 && n < 1.0 { 1 } else { n.trunc() as i64 };
         let h = match self.arg_num(args, 3, base.range.height() as f64) {
-            Ok(n) => n.trunc() as i64,
+            Ok(n) => size(n),
             Err(e) => return err(e),
         };
         let w = match self.arg_num(args, 4, base.range.width() as f64) {
-            Ok(n) => n.trunc() as i64,
+            Ok(n) => size(n),
             Err(e) => return err(e),
         };
         if h == 0 || w == 0 {
@@ -60,12 +62,15 @@ impl<'h> Evaluator<'h> {
             Some(Err(e)) => return err(e),
             None => return err(CellError::Value),
         };
+        // An a1 left empty (`INDIRECT("R2C2",)`) is FALSE, like any blank; text other than TRUE
+        // or FALSE is #VALUE! and an error is that error (Excel 365).
         let a1 = match args.get(1) {
-            None | Some(Expr::Missing) => true,
-            Some(e) => {
-                let v = self.value(e);
-                v.scalar().to_bool().unwrap_or(true)
-            }
+            None => true,
+            Some(Expr::Missing) => false,
+            Some(e) => match self.value(e).scalar().to_bool() {
+                Ok(b) => b,
+                Err(e) => return err(e),
+            },
         };
         // With a1 = FALSE, text that isn't R1C1 can still be a name, but never an A1 reference.
         let (text, a1_ok) = if a1 {
@@ -125,7 +130,7 @@ impl<'h> Evaluator<'h> {
                         // A position that picks several cells is #CALC!. That is decided from the
                         // shape: reading the block first, for every position, let a short formula
                         // read one large range over and over only to discard it.
-                        (Ok(row), Ok(col)) if index_picks_several_values(&src, row, col, two) => Value::Error(CellError::Calc),
+                        (Ok(row), Ok(col)) if area_n == 1 && index_picks_several_values(&src, row, col, two) => Value::Error(CellError::Calc),
                         (Ok(row), Ok(col)) => {
                             let one = self.index_one(src.clone(), row, col, area_n, two);
                             let cells = match &one {
@@ -196,7 +201,7 @@ impl<'h> Evaluator<'h> {
                 let (c0, c1) = if col == 0 { (r.start.col, r.end.col) } else { (r.start.col + col as u32 - 1, r.start.col + col as u32 - 1) };
                 Ev::R(vec![Area { sheet: a.sheet, range: RangeRef::new(CellRef::new(r0, c0), CellRef::new(r1, c1)) }])
             }
-            Ev::V(Value::Array(arr)) => {
+            Ev::V(Value::Array(arr)) if area_n == 1 => {
                 let (row, col) = if two_args && arr.rows == 1 { (1, row) } else { (row, col) };
                 if row as usize > arr.rows || col as usize > arr.cols {
                     return err(CellError::Ref);
@@ -209,6 +214,9 @@ impl<'h> Evaluator<'h> {
                 }
             }
             Ev::V(Value::Error(e)) => err(e),
+            // An array or value is a single area: any other area_num is #REF! (Excel 365:
+            // `INDEX({1,2,3},1,0,2)` is #REF!).
+            Ev::V(_) if area_n != 1 => err(CellError::Ref),
             Ev::V(v) => {
                 if row <= 1 && col <= 1 {
                     Ev::V(v)
@@ -255,7 +263,7 @@ impl<'h> Evaluator<'h> {
                             Some(e) => {
                                 let value = self.value(e);
                                 let blank_value = value == Value::Empty;
-                                xargs.push(Arg { value, from_ref: false, blank_value });
+                                xargs.push(Arg { value, from_ref: false, blank_value, full_shape: None });
                             }
                         }
                     }
@@ -301,8 +309,12 @@ impl<'h> Evaluator<'h> {
             {
                 let area = *area;
                 let v0 = self.deref(ev0);
-                let v2 = self.value(&args[2]);
-                let v3 = args.get(3).map(|e| self.value(e));
+                let e2 = self.eval(&args[2]);
+                let r2 = matches!(e2, Ev::R(_));
+                let v2 = self.deref(e2);
+                let e3 = args.get(3).map(|e| self.eval(e));
+                let r3 = matches!(e3, Some(Ev::R(_)));
+                let v3 = e3.map(|e| self.deref(e));
                 let max_len = if vertical { area.range.width() } else { area.range.height() } as usize;
                 let eff = self.read_range(&area);
                 let key_area = Area {
@@ -324,7 +336,7 @@ impl<'h> Evaluator<'h> {
                 };
                 let lifted = matches!(v0, Value::Array(_)) || matches!(v2, Value::Array(_)) || matches!(v3, Some(Value::Array(_)));
                 if !lifted {
-                    return Ev::V(match gridcraft_functions::vh_lookup_pos(&v0, &keys_val, &v2, v3.as_ref(), max_len) {
+                    return Ev::V(match gridcraft_functions::vh_lookup_pos(&v0, &keys_val, (&v2, r2), v3.as_ref().map(|v| (v, r3)), max_len) {
                         Ok((pos, idx)) => read_hit(self, pos, idx),
                         Err(e) => Value::Error(e),
                     });
@@ -351,7 +363,7 @@ impl<'h> Evaluator<'h> {
                         let n0 = a0.get_broadcast(r, c);
                         let n2 = a2.get_broadcast(r, c);
                         let n3 = a3.as_ref().map(|a| a.get_broadcast(r, c));
-                        let v = match gridcraft_functions::vh_lookup_pos(&n0, &keys_val, &n2, n3.as_ref(), max_len) {
+                        let v = match gridcraft_functions::vh_lookup_pos(&n0, &keys_val, (&n2, r2), n3.as_ref().map(|v| (v, r3)), max_len) {
                             Ok((pos, idx)) => read_hit(self, pos, idx),
                             Err(e) => Value::Error(e),
                         };

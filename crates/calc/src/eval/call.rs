@@ -347,9 +347,13 @@ impl<'h> Evaluator<'h> {
             // Range parameters of the *IF(S) family take only references, and not references into
             // a linked workbook: Excel answers `#VALUE!` (or the cell's error) while the source
             // workbook is closed. A written error (`#REF!` left by a deleted range, here or in a
-            // linked workbook: `[1]Data!#REF!`) is that error.
+            // linked workbook: `[1]Data!#REF!`) is that error, and so is an error computed where
+            // the reference should be (`COUNTIF(INDIRECT("bad"),…)` is `#REF!`, not a count over
+            // a one-cell range holding the error).
             let linked = matches!(&ev, Ev::R(areas) if areas.iter().any(|x| linked_parts(x.sheet).is_some()));
-            if takes_reference(spec.name, i) && (linked || matches!(a, Expr::Error(_) | Expr::LinkedRefError(_))) {
+            if takes_reference(spec.name, i)
+                && (linked || matches!(a, Expr::Error(_) | Expr::LinkedRefError(_)) || matches!(ev, Ev::V(Value::Error(_))))
+            {
                 return err(match self.deref(ev) {
                     Value::Error(e) => e,
                     _ => CellError::Value,
@@ -366,6 +370,13 @@ impl<'h> Evaluator<'h> {
                 }
             }
             let from_ref = matches!(ev, Ev::R(_));
+            let written_shape = match &ev {
+                Ev::R(areas) => match areas.as_slice() {
+                    [area] => Some((area.range.height() as usize, area.range.width() as usize)),
+                    _ => None,
+                },
+                _ => None,
+            };
             let value = match ev {
                 Ev::R(areas) if areas.len() > 1 => {
                     // Multi-area references (unions): flatten into one row for aggregates.
@@ -380,10 +391,16 @@ impl<'h> Evaluator<'h> {
                 }
                 ev => self.deref(ev),
             };
+            // A large reference is read inside the used range only (`A:A`): its full shape goes
+            // with it, for functions that count the blanks past it (COUNTIF, COUNTBLANK).
+            let full_shape = match (&value, written_shape) {
+                (Value::Array(a), Some(shape)) if (a.rows, a.cols) != shape => Some(shape),
+                _ => None,
+            };
             // Only an argument left out (`f(a,,b)`) is omitted; one that computes a blank is given.
             let blank_value = !from_ref && value == Value::Empty && lambda_at != Some(i) && !matches!(a, Expr::Missing);
             let value = one_cell_reference_as_array(self.host.one_cell_reading(), spec.name, from_ref, value);
-            evaluated.push(Arg { value, from_ref, blank_value });
+            evaluated.push(Arg { value, from_ref, blank_value, full_shape });
         }
         // The function may go through every value it is given (a SUM inside each call of a
         // LAMBDA over a large array): the values count against the cell's work.
@@ -478,7 +495,7 @@ impl<'h> Evaluator<'h> {
         let (Some(sum), Some(count)) = (gridcraft_functions::lookup("SUM"), gridcraft_functions::lookup("COUNT")) else {
             return Err(err(CellError::Name));
         };
-        let args = [Arg { value, from_ref, blank_value: false }];
+        let args = [Arg { value, from_ref, blank_value: false, full_shape: None }];
         if kind != Agg::Count {
             match gridcraft_functions::call(sum, &args, &mut FnCtx { ev: self, criteria: None, lambda: None }) {
                 Value::Number(n) => acc.sum += n,

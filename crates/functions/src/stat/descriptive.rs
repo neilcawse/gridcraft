@@ -345,13 +345,14 @@ pub(super) fn counta_impl(a: &[Arg]) -> f64 {
 }
 
 pub(super) fn countblank(a: &[Arg], _: C) -> R<Value> {
-    let v = &arg(a, 0)?.value;
+    let range = arg(a, 0)?;
     let blank = |x: &Value| matches!(x, Value::Empty) || matches!(x, Value::Text(t) if t.is_empty());
-    let c = match v {
+    let c = match &range.value {
         Value::Array(arr) => arr.iter().filter(|x| blank(x)).count(),
         x => usize::from(blank(x)),
     };
-    num_val(c as f64)
+    // A whole-column reference is read inside the used range; the cells past it are blank.
+    num_val((c as u64).saturating_add(range.cut_blanks()) as f64)
 }
 
 pub(super) fn mode_mult(a: &[Arg], _: C) -> R<Value> {
