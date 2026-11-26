@@ -191,16 +191,14 @@ pub fn vh_lookup_pos(
         {
             return Err(CellError::NA);
         }
-        let index = lookup_index_number(idx.0, idx.1)?;
+        let index = lookup_index_number(idx.0, idx.1, true)?;
         let approx = approx.map_or(Ok(true), |(v, from_ref)| range_lookup_arg(v, from_ref))?;
         if index >= max_len {
             return Err(CellError::Ref);
         }
         (approx, Some(index))
     } else {
-        let approx = approx.map_or(Ok(true), |(v, from_ref)| range_lookup_arg(v, from_ref))?;
-        index_error(idx.0, idx.1)?;
-        (approx, None)
+        (local_lookup_mode(idx, approx)?, None)
     };
     let keys = as_array(keys_val.ok_or(CellError::NA)?);
     let pos = if approx {
@@ -227,36 +225,42 @@ fn range_lookup_arg(v: &Value, from_ref: bool) -> R<bool> {
     }
 }
 
-/// The 0-based column (VLOOKUP) or row (HLOOKUP) of the index argument in a table `len` wide.
-/// Excel resolves a non-error index only once the key is found: a lookup that finds nothing is
-/// `#N/A` whatever the number (Excel 2013: `HLOOKUP(x, E45:AB49, 43, 0)` without x in the first
-/// row is `#N/A`). An error index is checked before the search ([`index_error`]).
-/// An error or text that does not parse as a whole number returns `#REF!` when read from a cell.
-/// A computed index keeps normal numeric coercion, including propagation of a computed error.
-/// Below 1 (a blank, FALSE) it is `#VALUE!`; past the table `#REF!`.
+/// The 0-based column (VLOOKUP) or row (HLOOKUP) in a local table of width or height `len`.
+/// Resolve a cell-read index and check the bounds only after a hit. An error read from a cell
+/// returns `#REF!`; a numeric index below 1 returns `#VALUE!`, and one past the table `#REF!`.
 fn lookup_index(v: &Value, from_ref: bool, len: usize) -> R<usize> {
-    let idx = lookup_index_number(v, from_ref)?;
+    let idx = lookup_index_number(v, from_ref, false)?;
     if idx >= len { Err(CellError::Ref) } else { Ok(idx) }
 }
 
-/// An error-valued index is the answer before any search, as [`lookup_index`] resolves it
-/// (a computed error itself, one read from a cell `#REF!`). Excel's trusted cache in the public
-/// Enron workbook `larry_may__21911__larryoptmodel.xlsx` shows `#DIV/0!` for
-/// `VLOOKUP($A31,skewtable,HLOOKUP(ROUND(I31-AO31,1),skewtable,2,FALSE),FALSE)` where `$A31` is
-/// not in the table and the HLOOKUP's needle is `#DIV/0!`.
-fn index_error(v: &Value, from_ref: bool) -> R<()> {
-    match v.scalar() {
-        Value::Error(_) => lookup_index_number(v, from_ref).map(drop),
-        _ => Ok(()),
+/// Batch 5 (Excel for Mac 16.115.2): an index expression's error wins over invalid mode text
+/// and a missed key. An error read from a cell is not an expression error. An error-valued
+/// mode paired with an error-valued index was not measured, so retain mode-error precedence.
+fn local_lookup_mode(idx: (&Value, bool), mode: Option<(&Value, bool)>) -> R<bool> {
+    let (index, from_ref) = idx;
+    if !from_ref && let Some(error) = scalar_error(index) {
+        return Err(mode.and_then(|(v, _)| scalar_error(v)).unwrap_or(error));
+    }
+    mode.map_or(Ok(true), |(v, from_ref)| range_lookup_arg(v, from_ref))
+}
+
+fn scalar_error(v: &Value) -> Option<CellError> {
+    match v {
+        Value::Array(a) => a.data.first().and_then(Value::as_error),
+        v => v.as_error(),
     }
 }
 
 /// [`lookup_index`] without the table bound.
-fn lookup_index_number(v: &Value, from_ref: bool) -> R<usize> {
+fn lookup_index_number(v: &Value, from_ref: bool, linked: bool) -> R<usize> {
     let idx = match v.scalar() {
         Value::Error(_) if from_ref => return Err(CellError::Ref),
         Value::Error(e) => return Err(e),
-        Value::Text(t) if from_ref => parse_number_text(&t).filter(|n| n.fract() == 0.0).ok_or(CellError::Ref)?,
+        Value::Text(t) if from_ref => {
+            // Batch 5 G2 (text "0.9"): local lookups report #VALUE! below 1. Retain the
+            // whole-number requirement for other fractional text and for linked tables.
+            parse_number_text(&t).filter(|n| n.fract() == 0.0 || (!linked && (0.0..1.0).contains(n))).ok_or(CellError::Ref)?
+        }
         v => v.to_number()?,
     };
     // NaN too: it would pass `idx < 1.0` and become index 0 (#2163).
@@ -289,13 +293,10 @@ fn vh_lookup(args: &[Arg], vertical: bool) -> R<Value> {
         Value::Text(_) if !table_arg.from_ref => return Err(CellError::Value),
         _ => {}
     }
-    let table = as_array(&table_arg.value);
+    let mode = args.get(3).map(|a| (&a.value, a.from_ref));
     let idx_arg = arg(args, 2)?;
-    let approx = match args.get(3) {
-        Some(a) => range_lookup_arg(&a.value, a.from_ref)?,
-        None => true,
-    };
-    index_error(&idx_arg.value, idx_arg.from_ref)?;
+    let approx = local_lookup_mode((&idx_arg.value, idx_arg.from_ref), mode)?;
+    let table = as_array(&table_arg.value);
     let len = if vertical { table.cols } else { table.rows };
     // An exact text or numeric key is found through the table's index without copying its first
     // column or row: the first indexed position in it, as positions ascend in row-major order.
@@ -806,20 +807,19 @@ mod tests {
         close(ev("VLOOKUP", vec![t("?pple"), rf(names()), n(2.0), b(false)]), 1.0);
         close(ev("VLOOKUP", vec![t("Bz"), rf(names()), n(2.0)]), 2.0);
         is_err(ev("VLOOKUP", vec![e(CellError::Div0), rf(names()), n(2.0)]), CellError::Div0);
-        // A non-error index is resolved once the key is found (Excel): a key not found is #N/A
-        // whatever the number; an error read from a cell or text that isn't a whole number there
-        // is #REF!, an error computed in the formula is that error. An error index is the answer
-        // before the search, found or not (Excel's cache in Enron's larryoptmodel.xlsx).
+        // A miss returns #N/A before validating a cell-read or numeric index. A computed error
+        // instead wins before a miss, as in Excel's cache in Enron's larryoptmodel.xlsx.
         is_err(ev("VLOOKUP", vec![n(3.0), rf(table()), e(CellError::NA), b(false)]), CellError::NA);
         is_err(ev("VLOOKUP", vec![n(0.5), rf(table()), n(9.0), b(false)]), CellError::NA);
         is_err(ev("VLOOKUP", vec![n(0.5), rf(table()), n(0.0), b(false)]), CellError::NA);
         is_err(ev("HLOOKUP", vec![n(0.5), rf(table()), n(9.0), b(false)]), CellError::NA);
         is_err(ev("VLOOKUP", vec![n(0.5), rf(table()), e(CellError::Div0), b(false)]), CellError::Div0);
         is_err(ev("HLOOKUP", vec![n(0.5), rf(table()), e(CellError::Div0), b(false)]), CellError::Div0);
-        is_err(ev("VLOOKUP", vec![n(0.5), rf(table()), rf(Value::Error(CellError::Div0)), b(false)]), CellError::Ref);
-        for idx in [rf(Value::Error(CellError::Div0)), rf(Value::Error(CellError::NA)), rf(tv("abc")), rf(tv("0.9")), rf(tv("29.9e-1"))] {
+        is_err(ev("VLOOKUP", vec![n(0.5), rf(table()), rf(Value::Error(CellError::Div0)), b(false)]), CellError::NA);
+        for idx in [rf(Value::Error(CellError::Div0)), rf(Value::Error(CellError::NA)), rf(tv("abc")), rf(tv("29.9e-1"))] {
             is_err(ev("VLOOKUP", vec![n(3.0), rf(table()), idx, b(false)]), CellError::Ref);
         }
+        is_err(ev("VLOOKUP", vec![n(3.0), rf(table()), rf(tv("0.9")), b(false)]), CellError::Value);
         is_text(ev("VLOOKUP", vec![n(3.0), rf(table()), rf(tv("2")), b(false)]), "three");
         close(ev("VLOOKUP", vec![n(3.0), rf(table()), t("3"), b(false)]), 30.0);
         is_err(ev("VLOOKUP", vec![n(3.0), rf(table()), t("invalid"), b(false)]), CellError::Value);
@@ -827,7 +827,7 @@ mod tests {
         close(ev("VLOOKUP", vec![n(1.0), rf(table()), b(true), b(false)]), 1.0);
         is_err(ev("VLOOKUP", vec![n(3.0), rf(table()), b(false), b(false)]), CellError::Value);
         is_err(ev("VLOOKUP", vec![n(3.0), rf(table()), rf(Value::Empty), b(false)]), CellError::Value);
-        // A range_lookup error comes before the index; text in a cell there is #VALUE!.
+        // An error in the mode wins over text in the index; text in the mode cell is #VALUE!.
         is_err(ev("VLOOKUP", vec![n(3.0), rf(table()), rf(tv("x")), rf(Value::Error(CellError::NA))]), CellError::NA);
         is_err(ev("VLOOKUP", vec![n(3.0), rf(table()), n(2.0), rf(tv("TRUE"))]), CellError::Value);
         is_text(ev("VLOOKUP", vec![n(3.0), rf(table()), n(2.0), t("TRUE")]), "three");
