@@ -886,7 +886,7 @@ fn linked_sheets_saved_without_cells_keep_the_saved_values() {
 }
 
 #[test]
-fn lookups_into_an_unreadable_linked_sheet_are_na_and_error_indexes_come_first_elsewhere() {
+fn lookups_distinguish_failed_linked_caches_from_local_index_errors() {
     use gridcraft_model::{ExternalBook, ExternalSheet};
     let mut t = T::new();
     // Synthetic failed sheet with no cached cells. The opspackage cache shows #N/A when the
@@ -909,7 +909,7 @@ fn lookups_into_an_unreadable_linked_sheet_are_na_and_error_indexes_come_first_e
         [t.get("B9"), t.get("B10"), t.get("B11")],
         [Value::Error(CellError::Div0), Value::Error(CellError::Name), Value::Error(CellError::Ref)]
     );
-    // Over any other table an error index is the answer, whether or not the key is found.
+    // For local tables and arrays, a miss takes precedence over an error index.
     for (at, v) in [("D1", "x"), ("D2", "y"), ("E1", "1"), ("E2", "2")] {
         t.set(at, v);
     }
@@ -918,7 +918,7 @@ fn lookups_into_an_unreadable_linked_sheet_are_na_and_error_indexes_come_first_e
     t.set("B7", "=VLOOKUP(\"z\",{\"x\",1;\"y\",2},#NAME?,FALSE)");
     assert_eq!(
         [t.get("B5"), t.get("B6"), t.get("B7")],
-        [Value::Error(CellError::Div0), Value::Error(CellError::Div0), Value::Error(CellError::Name)]
+        [Value::Error(CellError::Div0), Value::Error(CellError::NA), Value::Error(CellError::NA)]
     );
 }
 
