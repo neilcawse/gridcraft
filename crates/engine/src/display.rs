@@ -113,7 +113,7 @@ pub fn grid_text(wb: &Workbook, sh: &Sheet, c: CellRef, v: &Value, code: &str, w
     if sh.show_formulas
         && let Some(f) = sh.cell(c).and_then(|x| x.formula.as_ref())
     {
-        return plain(format!("={}", f.text), false);
+        return plain(formula_text(wb, sh, c, f), false);
     }
     if (!sh.show_zeros && v.as_f64() == Some(0.0)) || (code == "checkbox" && matches!(v, Value::Bool(_) | Value::Empty)) {
         return plain(String::new(), false);
@@ -146,12 +146,40 @@ fn text_needs_quote_prefix(t: &str, sys: gridcraft_core::date::DateSystem) -> bo
     !matches!(gridcraft_core::parse::parse_input(t, sys).value, Value::Text(ref x) if x.as_ref() == t)
 }
 
-/// What the cell editor and the formula bar start from. Same as `Cell::input_text`, except that a
-/// constant number in a date or time format is shown as a date (as the grid shows it), not as its
+/// The table holding `c`, when that table's name finds it: a structured reference without a
+/// table name means this table there, and one naming it can be shown without the name.
+pub(crate) fn containing_table<'a>(wb: &Workbook, sheet: &'a Sheet, c: CellRef) -> Option<&'a gridcraft_model::Table> {
+    let table = sheet.table_at(c)?;
+    wb.table(&table.name).and_then(|(si, ti)| wb.sheet(si)?.tables.get(ti)).is_some_and(|found| std::ptr::eq(found, table)).then_some(table)
+}
+
+/// The A1 formula `f` as shown for cell `c` (its own cell, or the cell it is about to be entered
+/// in), without changing the stored text or expression: references to the table holding `c` omit
+/// the table name.
+pub fn formula_text(wb: &Workbook, sheet: &Sheet, c: CellRef, f: &gridcraft_model::Formula) -> String {
+    let mut text = String::with_capacity(f.text.len() + 1);
+    text.push('=');
+    if f.text.contains('[')
+        && let Some(table) = containing_table(wb, sheet, c)
+        && f.with_expr(|expr| gridcraft_formula::printer::write_in_table(&mut text, expr, &table.name)).is_some()
+    {
+        return text;
+    }
+    text.push_str(&f.text);
+    text
+}
+
+/// What the cell editor and formula bar start from: contextual formula text, or the cell's input.
+/// A constant number in a date or time format is shown as a date (as the grid shows it), not as its
 /// serial. When the formatted text would not read back as the same date (for example
 /// `dddd, mmmm d`), an ISO `yyyy-mm-dd` (with `hh:mm:ss` for a time of day; just `hh:mm:ss`
 /// for a time alone) is used instead, and if even that would not read back, the serial.
 pub fn edit_text(wb: &Workbook, sheet: &Sheet, c: CellRef) -> String {
+    if !sheet.cell_pictures.contains_key(&c)
+        && let Some(f) = sheet.cell(c).and_then(|cell| cell.formula.as_ref())
+    {
+        return formula_text(wb, sheet, c, f);
+    }
     let raw = sheet.input_text(c);
     let Some(cell) = sheet.cell(c) else { return raw };
     if let Value::Text(t) = &cell.value
@@ -207,7 +235,7 @@ pub fn cell_text(wb: &Workbook, sheet: &Sheet, c: CellRef) -> String {
         && let Some(f) = sheet.cell(c).and_then(|x| x.formula.as_ref())
         && !formula_hidden(wb, sheet, c)
     {
-        return format!("={}", f.text);
+        return formula_text(wb, sheet, c, f);
     }
     shown_text(wb, sheet, c)
 }

@@ -2425,6 +2425,156 @@ fn tables_and_structured_refs() {
     assert_eq!(v(&s, "B4"), Value::Number(7.0));
 }
 
+fn structured_ref_session() -> Session {
+    let mut s = s();
+    s.execute("sheet.rename", json!({"name": "Data"})).unwrap();
+    s.execute("range.setValues", json!({"range": "A1", "values": [["Item", "Qty", "Double"], ["a", 3], ["b", 4], ["c", 5], ["d", 6]]})).unwrap();
+    s.execute("insert.table", json!({"range": "A1:C5", "hasHeaders": true})).unwrap();
+    s.execute("table.rename", json!({"table": "Table1", "name": "Sales"})).unwrap();
+    s.execute("table.totalRow", json!({"table": "Sales", "on": true})).unwrap();
+    s
+}
+
+#[test]
+fn x36_sheet_qualified_structured_ref_entry() {
+    let mut s = structured_ref_session();
+    s.execute("cell.set", json!({"cell": "H4", "input": "=SUM(Data!Sales[Qty])"})).unwrap();
+    let get = |s: &mut Session, c| s.execute("cell.get", json!({"cell": c})).unwrap();
+    assert_eq!(get(&mut s, "H4")["formula"], "=SUM(Sales[Qty])");
+    assert_eq!(v(&s, "H4"), Value::Number(18.0));
+    assert_eq!(s.execute("formulas.evaluate", json!({"formula": "=SUM([0]Data!Sales[Qty])"})).unwrap(), 18.0);
+
+    s.execute("sheet.rename", json!({"name": "O'Brien Data"})).unwrap();
+    s.execute("home.insertSheet", json!({"name": "Report"})).unwrap();
+    s.execute("cell.set", json!({"sheet": "Report", "cell": "H5", "input": "=SUM('o''brien data'!Sales[Qty])"})).unwrap();
+    let report = s.execute("cell.get", json!({"sheet": "Report", "cell": "H5"})).unwrap();
+    assert_eq!(report["formula"], "=SUM(Sales[Qty])");
+    assert_eq!(report["value"], 18.0);
+    for input in [
+        "=SUM(Report!Sales[Qty])",
+        "=SUM(Missing!Sales[Qty])",
+        "=SUM(Report!MissingTable[Qty])",
+        "=SUM('[1]O''Brien Data'!Sales[Qty])",
+        "=SUM('Report:O''Brien Data'!Sales[Qty])",
+    ] {
+        assert!(s.execute("cell.set", json!({"sheet": "Report", "cell": "H5", "input": input})).is_err(), "{input}");
+    }
+    assert_eq!(s.execute("cell.get", json!({"sheet": "Report", "cell": "H5"})).unwrap(), report);
+}
+
+#[test]
+fn x36_structured_ref_display_leaves_xlsx_formulas_qualified() {
+    let mut s = structured_ref_session();
+    for (addr, input) in [("B6", "=SUBTOTAL(109,Sales[Qty])"), ("C2", "=Sales[[#This Row],[Qty]]*2"), ("H4", "=SUM(Sales[Qty])")] {
+        s.execute("cell.set", json!({"cell": addr, "input": input})).unwrap();
+    }
+    let assert_display = |s: &mut Session| {
+        for (addr, formula, value) in [("B6", "=SUBTOTAL(109,[Qty])", 18.0), ("C2", "=[@Qty]*2", 6.0), ("H4", "=SUM(Sales[Qty])", 18.0)] {
+            let result = s.execute("cell.get", json!({"sheet": "Data", "cell": addr})).unwrap();
+            assert_eq!(result["formula"], formula, "{addr}");
+            assert_eq!(result["input"], formula, "{addr}");
+            assert_eq!(result["value"], value, "{addr}");
+            let read = s.execute("sheet.read", json!({"sheet": "Data", "range": addr, "formulas": true})).unwrap();
+            assert_eq!(read["values"][0][0], formula, "{addr}");
+        }
+    };
+    let bytes = gridcraft_xlsx::write_xlsx(&s.doc().unwrap().wb).unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("xl/worksheets/sheet1.xml").unwrap(), &mut xml).unwrap();
+    assert!(xml.contains(">SUBTOTAL(109,Sales[Qty])</f>"), "{xml}");
+    assert!(xml.contains(">Sales[[#This Row],[Qty]]*2</f>"), "{xml}");
+    s.execute("file.open", json!({"name": "synthetic.xlsx", "base64": crate::io::base64_encode(&bytes)})).unwrap();
+    assert_display(&mut s);
+
+    // Re-enter the exact readback, including the totals-row form.
+    for (addr, input) in [("B6", "=SUBTOTAL(109,[Qty])"), ("C2", "=[@Qty]*2")] {
+        s.execute("cell.set", json!({"cell": addr, "input": input})).unwrap();
+    }
+    assert_display(&mut s);
+}
+
+#[test]
+fn x36_display_elides_only_references_to_the_containing_table() {
+    let mut s = structured_ref_session();
+    s.execute("range.setValues", json!({"range": "J1", "values": [["Qty"], [2], [3]]})).unwrap();
+    s.execute("insert.table", json!({"range": "J1:J3", "hasHeaders": true})).unwrap();
+    s.execute("cell.set", json!({"cell": "C2", "input": "=sAlEs[@Qty]+SUM(Table1[Qty])+LEN(\"Sales[Qty]\")"})).unwrap();
+    let result = s.execute("cell.get", json!({"cell": "C2"})).unwrap();
+    assert_eq!(result["formula"], "=[@Qty]+SUM(Table1[Qty])+LEN(\"Sales[Qty]\")");
+    assert_eq!(result["value"], 18.0);
+
+    // A right operand that would start with a bare `[` keeps its table name: entered, the
+    // bracket would attach to the word before the intersection space.
+    s.execute("cell.set", json!({"cell": "C2", "input": "=SUM($B$2:$B$3 Sales[Qty])"})).unwrap();
+    let result = s.execute("cell.get", json!({"cell": "C2"})).unwrap();
+    assert_eq!(result["formula"], "=SUM($B$2:$B$3 Sales[Qty])");
+    assert_eq!(result["value"], 7.0);
+}
+
+#[test]
+fn x36_shown_formula_reenters_to_the_stored_formula() {
+    let mut s = structured_ref_session();
+    let stored = |s: &Session, a: &str| {
+        s.doc().unwrap().wb.sheet(0).unwrap().cell(CellRef::parse(a).unwrap()).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone())
+    };
+    for input in [
+        "=Sales[@Qty]*2",
+        "=COUNTA(Sales[@])",
+        "=COUNTA(Sales[[#Headers],[Qty]])",
+        "=COUNTA(Sales[#All])",
+        "=COUNTA(Sales[])",
+        "=COUNTA(Sales[[Item]:[Qty]])",
+        "=SUM(Sales[[#Data],[#Totals],[Qty]])",
+        "=@Sales[Qty]",
+        "=SUM(Sales[Qty] Sales[@])",
+        "=LET(x,Sales[Qty],SUM(x))",
+        "=SUM(B2:Sales[Qty])",
+    ] {
+        s.execute("cell.set", json!({"cell": "C3", "input": input})).unwrap();
+        let (before, value) = (stored(&s, "C3"), v(&s, "C3"));
+        let shown = s.execute("cell.get", json!({"cell": "C3"})).unwrap()["formula"].clone();
+        assert_ne!(shown, input, "{input} is shown without its table");
+        s.execute("cell.set", json!({"cell": "C3", "input": shown})).unwrap();
+        assert_eq!(stored(&s, "C3"), before, "{input} shown as {shown}");
+        assert_eq!(v(&s, "C3"), value, "{input}");
+    }
+
+    // The total formula as the formula bar shows it, confirmed again: still saved with its table
+    // name, and still that table's total once cut out of the table.
+    s.execute("cell.set", json!({"cell": "B6", "input": "=SUBTOTAL(109,[Qty])"})).unwrap();
+    assert_eq!(stored(&s, "B6").as_deref(), Some("SUBTOTAL(109,Sales[Qty])"));
+    let bytes = gridcraft_xlsx::write_xlsx(&s.doc().unwrap().wb).unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("xl/worksheets/sheet1.xml").unwrap(), &mut xml).unwrap();
+    assert!(xml.contains(">SUBTOTAL(109,Sales[Qty])</f>"), "{xml}");
+    s.execute("edit.cut", json!({"range": "B6"})).unwrap();
+    s.execute("selection.set", json!({"range": "H10"})).unwrap();
+    s.execute("edit.paste", json!({})).unwrap();
+    assert_eq!(v(&s, "H10"), Value::Number(18.0));
+
+    // Outside every table a bare reference is still entered as typed.
+    s.execute("cell.set", json!({"cell": "H11", "input": "=SUM([Qty])"})).unwrap();
+    assert_eq!(stored(&s, "H11").as_deref(), Some("SUM([Qty])"));
+}
+
+#[test]
+fn x36_range_fill_binds_each_destination_and_follows_table_rename() {
+    let mut s = structured_ref_session();
+    s.execute("range.setValues", json!({"range": "E1", "values": [["Qty", "Double"], [10], [20]]})).unwrap();
+    s.execute("insert.table", json!({"range": "E1:F3", "hasHeaders": true})).unwrap();
+    s.execute("range.fill", json!({"range": "C2,D2,F2", "input": "=SUM([@Qty])*2"})).unwrap();
+    assert_eq!(v(&s, "C2"), Value::Number(6.0));
+    assert_eq!(v(&s, "F2"), Value::Number(20.0));
+    assert_eq!(v(&s, "D2"), Value::Error(gridcraft_core::CellError::Ref));
+    s.execute("table.rename", json!({"table": "Sales", "name": "Orders"})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    for (address, expected) in [("C2", "SUM(Orders[@Qty])*2"), ("D2", "SUM([@Qty])*2"), ("F2", "SUM(Table1[@Qty])*2")] {
+        assert_eq!(sh.cell(CellRef::parse(address).unwrap()).unwrap().formula.as_ref().unwrap().text, expected);
+    }
+}
+
 #[test]
 fn structured_refs_to_columns_with_edge_spaces() {
     let mut s = s();
@@ -3024,6 +3174,39 @@ fn lambda_names_keep_their_case_in_calls() {
     let quad = s.doc().unwrap().wb.names.iter().find(|n| n.name == "Quad").unwrap().formula.clone();
     assert_eq!(quad, "LAMBDA(x,Double(Double(x)))");
     assert_eq!(v(&s, "A1"), Value::Number(13.0));
+}
+
+fn assert_builtin_and_lambda_entry(s: &mut Session) {
+    s.execute("cell.set", json!({"cell": "A1", "input": "1"})).unwrap();
+    for (cell, input) in [("B1", "=ISREF(A1)"), ("C1", "=isref(A1)"), ("D1", "=myfn(1)")] {
+        s.execute("cell.set", json!({"cell": cell, "input": input})).unwrap();
+    }
+    assert_eq!(s.execute("cell.get", json!({"cell": "D1"})).unwrap()["formula"], "=MyFn(1)");
+    assert_eq!(v(s, "D1"), Value::Number(2.0));
+    for cell in ["B1", "C1"] {
+        let read = s.execute("cell.get", json!({"cell": cell})).unwrap();
+        assert_eq!((read["formula"].as_str(), v(s, cell)), (Some("=ISREF(A1)"), Value::Bool(true)), "{cell}");
+    }
+}
+
+#[test]
+fn builtin_call_spelling_after_name_edit() {
+    let mut s = s();
+    s.execute("formulas.defineName", json!({"name": "IsRef", "refersTo": "=LAMBDA(x,FALSE)"})).unwrap();
+    s.execute("formulas.defineName", json!({"name": "MyFn", "refersTo": "=LAMBDA(x,x+1)"})).unwrap();
+    assert_builtin_and_lambda_entry(&mut s);
+}
+
+#[test]
+fn builtin_call_spelling_after_name_import() {
+    let mut seed = s();
+    seed.execute("formulas.defineName", json!({"name": "IsRef", "refersTo": "=LAMBDA(x,FALSE)"})).unwrap();
+    seed.execute("formulas.defineName", json!({"name": "MyFn", "refersTo": "=LAMBDA(x,x+1)"})).unwrap();
+    let saved = seed.execute("file.saveBytes", json!({"format": "xlsx"})).unwrap();
+    let mut opened = s();
+    opened.execute("file.open", json!({"name": "names.xlsx", "base64": saved["base64"]})).unwrap();
+    assert!(opened.doc().unwrap().wb.names.iter().any(|n| n.name == "IsRef" && n.formula == "LAMBDA(x,FALSE)"));
+    assert_builtin_and_lambda_entry(&mut opened);
 }
 
 #[test]

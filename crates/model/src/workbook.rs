@@ -126,6 +126,18 @@ impl TableRename<'_> {
             }
         }
     }
+
+    fn might_use_table(&self, e: &Expr) -> bool {
+        let mut found = false;
+        e.walk(&mut |e| {
+            found |= match e {
+                Expr::Name(n) => n.rsplit('!').next().is_some_and(|n| n.eq_ignore_ascii_case(self.old)),
+                Expr::Struct(r) => r.table.eq_ignore_ascii_case(self.old),
+                _ => false,
+            };
+        });
+        found
+    }
 }
 
 /// Rewrites table tokens and free names, leaving LET/LAMBDA binders, bound names and text alone.
@@ -201,20 +213,6 @@ pub fn rewrite_table_tokens(e: &mut Expr, replacement: &impl Fn(&str, bool, &[St
             }
     }
     visit(e, &mut Vec::new(), replacement)
-}
-
-impl TableRename<'_> {
-    fn might_use_table(&self, e: &Expr) -> bool {
-        let mut found = false;
-        e.walk(&mut |e| {
-            found |= match e {
-                Expr::Name(n) => n.rsplit('!').next().is_some_and(|n| n.eq_ignore_ascii_case(self.old)),
-                Expr::Struct(r) => r.table.eq_ignore_ascii_case(self.old),
-                _ => false,
-            };
-        });
-        found
-    }
 }
 
 /// Most equation source, in bytes, one [`Workbook::refresh_equations`] lays out: about 2,500
@@ -831,10 +829,10 @@ impl Workbook {
             }
         }
     }
-    /// Names of the defined names holding a LAMBDA (callable like functions).
-    fn lambda_names(&self) -> Vec<String> {
+    /// Defined LAMBDA names eligible for call respelling. Built-ins keep the parser's spelling.
+    pub(crate) fn lambda_names(&self) -> Vec<String> {
         let is_lambda = |f: &str| f.trim_start_matches('=').trim_start().get(..7).is_some_and(|p| p.eq_ignore_ascii_case("LAMBDA("));
-        self.names.iter().filter(|n| is_lambda(&n.formula)).map(|n| n.name.clone()).collect()
+        self.names.iter().filter(|n| is_lambda(&n.formula) && !gridcraft_functions::is_known_function(&n.name)).map(|n| n.name.clone()).collect()
     }
     /// Table by name across sheets: (sheet index, table index).
     pub fn table(&self, name: &str) -> Option<(usize, usize)> {
@@ -868,30 +866,12 @@ impl Workbook {
     pub fn next_table_name(&self) -> String {
         next_table_name_with(&mut 1, |name| self.table_name_taken(name, None))
     }
-    /// Renames the `ti`th table of the `si`th sheet to `name` (Table Design > Table Name).
-    /// Bound PivotTables, slicers and cell references to the table follow the rename.
+    /// Renames a table using the original workbook to resolve references. Callers with an
+    /// existing original snapshot can apply [`crate::table_refs::TableRename`] directly.
     pub fn rename_table(&mut self, si: usize, ti: usize, name: &str) {
-        let Some(t) = self.sheets.get(si).and_then(|s| s.tables.get(ti)) else { return };
-        let (old, uid) = (t.name.clone(), t.uid);
-        let found_by_name = self.table(&old) == Some((si, ti));
-        Arc::make_mut(&mut self.sheets[si]).tables[ti].name = name.to_string();
-        self.follow_renamed_definition(uid);
-        if !found_by_name {
-            return;
-        }
-        let names_old = |s: &crate::Slicer| matches!(&s.source, crate::SlicerSource::Table { table, .. } if table.eq_ignore_ascii_case(&old));
-        for sheet in self.sheets.iter_mut().filter(|sh| sh.slicers.iter().any(names_old)) {
-            for sl in Arc::make_mut(sheet).slicers.iter_mut() {
-                if let crate::SlicerSource::Table { table, .. } = &mut sl.source
-                    && table.eq_ignore_ascii_case(&old)
-                {
-                    *table = name.to_string();
-                }
-            }
-        }
-        for i in 0..self.sheets.len() {
-            let rewritten = TableRename { wb: Some(self), old: &old, new: name }.cells(&self.sheets[i], i);
-            self.set_formulas(i, rewritten);
+        let original = self.clone();
+        if let Some(rename) = crate::table_refs::TableRename::new(&original, (si, ti), name) {
+            rename.apply(self);
         }
     }
 

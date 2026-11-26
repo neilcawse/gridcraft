@@ -22,6 +22,10 @@ pub(crate) fn is_formula_input(input: &str) -> bool {
 /// format). Inherits the destination's cell, row or column style, including its number
 /// format, before parsing. Errors when the formula can't be parsed.
 pub(crate) fn input_to_cell(input: &str, sheet: usize, at: CellRef, wb: &mut gridcraft_model::Workbook) -> Result<Option<Cell>> {
+    input_to_cell_impl(input, sheet, at, wb, true)
+}
+
+fn input_to_cell_impl(input: &str, sheet: usize, at: CellRef, wb: &mut gridcraft_model::Workbook, bind_tables: bool) -> Result<Option<Cell>> {
     let style = wb.sheet(sheet).map(|sh| sh.style_id(at)).unwrap_or_default();
     if input.is_empty() {
         let c = Cell { value: Value::Empty, formula: None, style, py: None };
@@ -37,7 +41,10 @@ pub(crate) fn input_to_cell(input: &str, sheet: usize, at: CellRef, wb: &mut gri
     }
     if is_formula {
         let body = input.strip_prefix('=').unwrap_or(input);
-        let expr = wb.name_call_case(parse_typed_formula(body)?);
+        let mut expr = wb.name_call_case(parse_typed_formula(body, wb, sheet)?);
+        if bind_tables && body.contains('[') && has_bare_table_refs(&expr) {
+            expr = bind_local_tables(expr, wb, sheet, at);
+        }
         check_linked_books(&expr, wb.external_books.len())?;
         check_arg_counts(&expr)?;
         let mut cell = Cell::formula(Formula::from_expr(expr));
@@ -215,11 +222,45 @@ pub(crate) fn drop_linked_books(expr: gridcraft_formula::Expr, shared: &[bool]) 
     })
 }
 
+fn has_bare_table_refs(expr: &gridcraft_formula::Expr) -> bool {
+    let mut bare = false;
+    expr.walk(&mut |e| bare |= matches!(e, gridcraft_formula::Expr::Struct(st) if st.table.is_empty()));
+    bare
+}
+
+/// Binds structured references typed without a table name (`[@Qty]`, as the formula bar shows
+/// them inside their own table) to the table holding `at`, so re-entering the shown text stores
+/// the formula it came from and the formula keeps its table when it is moved out of it. Left
+/// unbound when `at` is in no table, or its table's name finds another table first.
+fn bind_local_tables(expr: gridcraft_formula::Expr, wb: &gridcraft_model::Workbook, sheet: usize, at: CellRef) -> gridcraft_formula::Expr {
+    use gridcraft_formula::Expr;
+    let Some(table) = wb.sheet(sheet).and_then(|sh| crate::display::containing_table(wb, sh, at)) else { return expr };
+    expr.map(&mut |e| match e {
+        Expr::Struct(mut st) if st.table.is_empty() => {
+            st.table.clone_from(&table.name);
+            Expr::Struct(st)
+        }
+        other => other,
+    })
+}
+
 /// Parses a formula as it is typed (without the `=`). Excel closes missing parentheses for you,
 /// and refuses a formula that still doesn't parse.
-pub(crate) fn parse_typed_formula(body: &str) -> Result<gridcraft_formula::Expr> {
-    let parsed = gridcraft_formula::parse_closing_parens(body, gridcraft_formula::parse);
-    parsed.map_err(|e| EngineError::Other(format!("There's a problem with this formula: {e}")))
+pub(crate) fn parse_typed_formula(body: &str, wb: &gridcraft_model::Workbook, sheet: usize) -> Result<gridcraft_formula::Expr> {
+    parse_cell_input(body, gridcraft_formula::FormulaLocale::En, wb, sheet)
+        .map_err(|e| EngineError::Other(format!("There's a problem with this formula: {e}")))
+}
+
+/// Parses canonical or localized cell entry, including an optional sheet qualifier on a table.
+pub fn parse_cell_input(
+    body: &str,
+    locale: gridcraft_formula::FormulaLocale,
+    wb: &gridcraft_model::Workbook,
+    sheet: usize,
+) -> std::result::Result<gridcraft_formula::Expr, gridcraft_formula::ParseError> {
+    let known = |name: &str| wb.name(name, sheet).is_some() || wb.table(name).is_some();
+    let table_on_sheet = |name: &str, table: &str| wb.table(table).is_some_and(|(si, _)| wb.sheet_index(name) == Some(si));
+    gridcraft_formula::parse_closing_parens(body, |text| gridcraft_formula::parse_cell_input(text, locale, known, table_on_sheet))
 }
 
 /// Like Excel, a formula that calls a built-in function with too few or too many arguments is
@@ -459,10 +500,9 @@ pub(super) fn range_fill(s: &mut Session, p: &Json) -> Result<Json> {
     let input = str_param(p, "input").unwrap_or("").to_string();
     let origin = s.doc()?.selection.active;
     edit(s, |cx| {
-        // Each cell gets what typing the input there gives: the automatic number format where
-        // it's General, its own format otherwise, text where it's Text. That depends only on
-        // the cell's style, so the input is parsed once per style.
-        let mut by_style: std::collections::HashMap<StyleId, Option<Cell>> = std::collections::HashMap::new();
+        // Cache parsing and automatic formats by style, but defer local table binding until
+        // the destination is known. Cells of the same style can belong to different tables.
+        let mut by_style: std::collections::HashMap<StyleId, (Option<Cell>, bool)> = std::collections::HashMap::new();
         for r in &ranges {
             if r.count() > 2_000_000 {
                 return Err(bad("range.fill", "range too large"));
@@ -473,18 +513,21 @@ pub(super) fn range_fill(s: &mut Session, p: &Json) -> Result<Json> {
                     continue;
                 }
                 let style = cx.wb.sheet(sheet).map(|sh| sh.style_id(at)).unwrap_or_default();
-                let base = match by_style.get(&style) {
+                let (base, bare_table_refs) = match by_style.get(&style) {
                     Some(c) => c.clone(),
                     None => {
-                        let c = input_to_cell(&input, sheet, at, &mut cx.wb)?;
-                        by_style.insert(style, c.clone());
-                        c
+                        let c = input_to_cell_impl(&input, sheet, at, &mut cx.wb, false)?;
+                        let bare = input.contains('[')
+                            && c.as_ref().and_then(|cell| cell.formula.as_ref()).and_then(|f| f.with_expr(has_bare_table_refs)).unwrap_or(false);
+                        by_style.insert(style, (c.clone(), bare));
+                        (c, bare)
                     }
                 };
                 let mut cell = base.unwrap_or_default();
                 if let Some(f) = &cell.formula
                     && let Some(e) = f.expr()
                 {
+                    let e = if bare_table_refs { bind_local_tables(e, &cx.wb, sheet, at) } else { e };
                     let shifted = gridcraft_formula::adjust::shift_relative(e, at.row as i64 - origin.row as i64, at.col as i64 - origin.col as i64);
                     cell.formula = Some(std::sync::Arc::new(f.rewritten(shifted)));
                 }

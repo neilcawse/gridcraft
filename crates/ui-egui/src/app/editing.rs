@@ -56,13 +56,10 @@ impl SheetApp {
             return;
         }
         let locale = self.ui.language.formula_locale();
-        let current = if sh.cell_pictures.contains_key(&at) {
-            String::new()
+        let current = if let Some(f) = sh.cell(at).filter(|_| !sh.cell_pictures.contains_key(&at)).and_then(|c| c.formula.as_ref()) {
+            formula_locale::display(&gridcraft_engine::display::formula_text(&d.wb, sh, at, f), locale, &d.wb, d.wb.active_sheet())
         } else {
-            match sh.cell(at) {
-                Some(c) if c.formula.is_some() => formula_locale::display(&c.input_text(), locale, &d.wb, d.wb.active_sheet()),
-                _ => gridcraft_engine::display::edit_text(&d.wb, sh, at),
-            }
+            gridcraft_engine::display::edit_text(&d.wb, sh, at)
         };
         let (text, replace) = match text {
             Some(t) => (t, true),

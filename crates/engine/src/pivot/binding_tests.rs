@@ -7,7 +7,7 @@ use std::io::Read;
 use std::sync::Arc;
 
 use gridcraft_core::{CellRef, RangeRef, Value};
-use gridcraft_model::{DefinedName, PivotField, PivotTable, PivotValue, Sheet, Table, TableColumn, TotalsFn, Workbook};
+use gridcraft_model::{Cell, DefinedName, Formula, PivotField, PivotTable, PivotValue, Sheet, Table, TableColumn, TotalsFn, Workbook};
 use serde_json::json;
 
 use crate::io::{FileKind, open_bytes, save_bytes_reported};
@@ -680,6 +680,172 @@ fn table_rename_follows_bound_pivots_and_does_not_capture_let_or_lambda_names() 
     let mut wb = (*s.doc().unwrap().wb).clone();
     assert_eq!(wb.sheets[REPORT].pivots[0].source, "Data!Renamed");
     assert_eq!(total(&mut wb), Ok(FROM_DATA));
+}
+
+#[test]
+fn table_rename_keeps_builtin_calls_that_share_a_lambda_name() {
+    let mut wb = book("rData", true);
+    Arc::make_mut(&mut wb.sheets[1]).tables.push(kv_table("Sales"));
+    wb.names.push(name("IsRef", None, "LAMBDA(x,FALSE)"));
+    // A native file's cell tree parses the call as the built-in ISREF.
+    let at = CellRef::parse("M1").unwrap();
+    let f: Formula = serde_json::from_str(r#"{"text":"ISREF(Sales[V])","array":null}"#).unwrap();
+    Arc::make_mut(&mut wb.sheets[REPORT]).set_cell(at, Cell::formula(f));
+    let mut s = rename_session(wb);
+    s.execute("formulas.calculateNow", json!({})).unwrap();
+    assert_eq!(s.doc().unwrap().wb.sheets[REPORT].value(at), Value::Bool(true));
+    s.execute("table.rename", json!({"sheet": "Data", "table": "Sales", "name": "Renamed"})).unwrap();
+    let sh = &s.doc().unwrap().wb.sheets[REPORT];
+    assert_eq!(sh.value(at), Value::Bool(true));
+    assert_eq!(sh.cell(at).unwrap().formula.as_ref().unwrap().text, "ISREF(Renamed[V])");
+}
+
+fn rename_session(wb: Workbook) -> crate::Session {
+    let mut s = crate::Session::new();
+    s.new_workbook();
+    *Arc::make_mut(&mut s.doc_mut().unwrap().wb) = wb;
+    s
+}
+
+fn check_table_rename(mut s: crate::Session, check: impl Fn(&Workbook, &str)) -> Workbook {
+    check(&s.doc().unwrap().wb, "Sales");
+    s.execute("table.rename", json!({"sheet": "Data", "table": "Sales", "name": "Renamed"})).unwrap();
+    check(&s.doc().unwrap().wb, "Renamed");
+    s.execute("edit.undo", json!({})).unwrap();
+    check(&s.doc().unwrap().wb, "Sales");
+    s.execute("edit.redo", json!({})).unwrap();
+    check(&s.doc().unwrap().wb, "Renamed");
+    (*s.doc().unwrap().wb).clone()
+}
+
+#[test]
+fn table_rename_follows_defined_names_without_changing_shadowed_names() {
+    let mut wb = book("rData", true);
+    Arc::make_mut(&mut wb.sheets[1]).tables.push(kv_table("Sales"));
+    wb.names.extend([
+        name("Sales", Some(REPORT), "42"),
+        name("Amounts", None, "Sales[V]"),
+        name("DataRows", Some(1), "ROWS(Sales)"),
+        name("LocalTotal", Some(REPORT), "Sales+SUM(Sales[V])"),
+        name("CallerDependent", None, "SUM(Sales)"),
+        name("LocalBinder", None, "LET(Sales,5,Sales+SUM(Sales[V]))"),
+    ]);
+    let mut s = rename_session(wb);
+    for (sheet, at, f) in [("Report", "M1", "=SUM(Amounts)+LocalTotal+LocalBinder"), ("Data", "M1", "=DataRows")] {
+        s.execute("cell.set", json!({"sheet": sheet, "cell": at, "input": f})).unwrap();
+    }
+    let check = |wb: &Workbook, table: &str| {
+        assert_eq!(wb.name("Amounts", REPORT).unwrap().formula, format!("{table}[V]"));
+        assert_eq!(wb.name("DataRows", 1).unwrap().formula, format!("ROWS({table})"));
+        assert_eq!(wb.name("LocalTotal", REPORT).unwrap().formula, format!("Sales+SUM({table}[V])"));
+        assert_eq!(wb.name("CallerDependent", REPORT).unwrap().formula, "SUM(Sales)");
+        assert_eq!(wb.name("LocalBinder", REPORT).unwrap().formula, format!("LET(Sales,5,Sales+SUM({table}[V]))"));
+        assert_eq!(wb.sheets[REPORT].value(CellRef::parse("M1").unwrap()), Value::Number(56.0));
+        assert_eq!(wb.sheets[1].value(CellRef::parse("M1").unwrap()), Value::Number(2.0));
+    };
+    let wb = check_table_rename(s, check);
+    check(&reopened(&wb), "Renamed");
+}
+
+#[test]
+fn table_rename_follows_names_scoped_to_retained_sheets() {
+    use gridcraft_model::{Preserved, PreservedName, PreservedPart, PreservedRel, PreservedSheet};
+
+    let mut wb = book("rData", true);
+    Arc::make_mut(&mut wb.sheets[1]).tables.push(kv_table("Sales"));
+    let attrs = r#" name="KeptAmounts" hidden="1""#;
+    let part = "xl/chartsheets/sheet1.xml";
+    let content = br#"<chartsheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"/></sheetViews></chartsheet>"#;
+    wb.preserved = Some(Arc::new(Preserved {
+        rels: vec![PreservedRel {
+            id: "rIdKept".into(),
+            rel_type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartsheet".into(),
+            target: part.into(),
+            external: false,
+        }],
+        parts: vec![PreservedPart {
+            name: part.into(),
+            content_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.chartsheet+xml".into(),
+            data: Arc::from(content.as_slice()),
+            rels: vec![],
+        }],
+        sheets: vec![PreservedSheet {
+            name: "KeptChart".into(),
+            rel_id: "rIdKept".into(),
+            before: 1,
+            sheet_id: 4,
+            names: vec![PreservedName { attrs: attrs.into(), formula: "Sales[V]".into() }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    }));
+    let check = |wb: &Workbook, table: &str| {
+        let kept = wb.preserved.as_ref().unwrap();
+        let name = &kept.sheets[0].names[0];
+        assert_eq!(name.formula, format!("{table}[V]"));
+        assert_eq!(name.attrs, attrs);
+        assert_eq!(kept.parts.iter().find(|p| p.name == part).unwrap().data.as_ref(), content);
+    };
+    let wb = check_table_rename(rename_session(wb), check);
+    check(&reopened(&wb), "Renamed");
+}
+
+#[test]
+fn table_rename_follows_table_column_formulas_but_not_totals_labels() {
+    let mut wb = book("rData", true);
+    let table = &mut kv_table("Sales");
+    table.columns[0].totals_label = Some("Sales[V]".into());
+    table.columns[1].formula = Some("ROW(Sales[@K])".into());
+    table.columns[1].totals = TotalsFn::Custom;
+    table.columns[1].totals_label = Some("SUM(Sales[V])".into());
+    Arc::make_mut(&mut wb.sheets[1]).tables.push(table.clone());
+    let check = |wb: &Workbook, name: &str| {
+        let columns = &wb.sheets[1].tables[0].columns;
+        assert_eq!(columns[0].totals_label.as_deref(), Some("Sales[V]"));
+        assert_eq!(columns[1].formula, Some(format!("ROW({name}[@K])")));
+        assert_eq!(columns[1].totals_label, Some(format!("SUM({name}[V])")));
+    };
+    let wb = check_table_rename(rename_session(wb), check);
+    check(&reopened(&wb), "Renamed");
+}
+
+#[test]
+fn table_rename_follows_unbound_pivot_table_sources() {
+    let mut wb = book("rData", false);
+    Arc::make_mut(&mut wb.sheets[1]).tables.push(kv_table("Sales"));
+    Arc::make_mut(&mut wb.sheets[REPORT]).pivots[0].source = "Sales".into();
+    let check = |wb: &Workbook, table: &str| {
+        assert_eq!(wb.sheets[REPORT].pivots[0].source, table);
+        assert_eq!(total(&mut wb.clone()), Ok(FROM_DATA));
+    };
+    let wb = check_table_rename(rename_session(wb), check);
+    check(&reopened(&wb), "Renamed");
+}
+
+#[test]
+fn table_rename_follows_a_pivot_rebound_to_the_table_that_took_its_place() {
+    let mut wb = book("rData", false);
+    Arc::make_mut(&mut wb.sheets[1]).tables.push(kv_table("Sales"));
+    let binding = wb.bind_pivot_source("Sales", REPORT);
+    let pt = &mut Arc::make_mut(&mut wb.sheets[REPORT]).pivots[0];
+    pt.source = "Sales".into();
+    pt.binding = binding;
+    // The bound table is gone; another of the same name took its place.
+    Arc::make_mut(&mut wb.sheets[1]).tables[0].uid = gridcraft_model::DefinitionUid::fresh();
+    let check = |wb: &Workbook, table: &str| {
+        let pt = &wb.sheets[REPORT].pivots[0];
+        assert_eq!(pt.source, table);
+        assert_eq!(total(&mut wb.clone()), Ok(FROM_DATA));
+        let found = wb.pivot_source(pt, REPORT).unwrap();
+        assert_eq!(found.rebound, Some(("table \"Sales\"".into(), format!("table \"{table}\""))));
+    };
+    let wb = check_table_rename(rename_session(wb), check);
+    let saved = save(&wb);
+    assert_eq!(saved.warnings.len(), 1, "{:?}", saved.warnings);
+    assert!(saved.warnings[0].contains("table \"Sales\" was deleted, and table \"Renamed\" took its place"), "{:?}", saved.warnings);
+    let mut reopened = saved.back;
+    assert_eq!(reopened.sheets[REPORT].pivots[0].source, "Renamed");
+    assert_eq!(total(&mut reopened), Ok(FROM_DATA));
 }
 
 #[test]

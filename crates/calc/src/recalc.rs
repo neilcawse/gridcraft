@@ -40,7 +40,7 @@ fn reads_linked_expr(wb: &Workbook, sheet: usize, expr: &Expr, seen: &mut Vec<(O
         Expr::Name(n) if n.starts_with('[') => linked = true,
         Expr::Name(n) => names.push(n.as_str()),
         // A defined name that holds a LAMBDA, called like a function.
-        Expr::Call(n, _) if gridcraft_functions::lookup(n).is_none() => names.push(n.as_str()),
+        Expr::Call(n, _) if !gridcraft_functions::is_known_function(n) => names.push(n.as_str()),
         _ => {}
     });
     linked || names.into_iter().any(|n| reads_linked_name(wb, sheet, n, seen))

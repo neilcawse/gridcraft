@@ -2,16 +2,12 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use gridcraft_core::{CellError, quote_sheet, split_sheet, valid_table_name};
 use gridcraft_formula::{Expr, StructRef, fold_name};
-use gridcraft_model::{
-    CfRule, CfValueKind, Formula, PivotSource, SlicerSource, TotalsFn, Workbook,
-    workbook::{next_table_name_with, reserved_name, rewrite_table_tokens},
-};
-
-type Position = (usize, usize);
+use gridcraft_model::table_refs::{self, TablePosition as Position, TableRefRewrite};
+use gridcraft_model::workbook::{next_table_name_with, reserved_name};
+use gridcraft_model::{PivotSource, PivotTable, Workbook};
 
 /// ECMA-376 Part 1 §18.5.1.2 makes a table's `displayName` unique amongst all other display
 /// names and defined names in the workbook, whatever their scope; GridCraft's own Insert Table
@@ -112,7 +108,7 @@ struct Rewrite<'a> {
     repaired_names: HashSet<String>,
 }
 
-impl Rewrite<'_> {
+impl TableRefRewrite for Rewrite<'_> {
     fn table(&self, name: &str) -> Option<Position> {
         if name.bytes().any(|b| b.is_ascii_uppercase()) { self.first.get(&name.to_ascii_lowercase()).copied() } else { self.first.get(name).copied() }
     }
@@ -125,15 +121,11 @@ impl Rewrite<'_> {
         (containing.next().is_none() && !table.header_range().is_some_and(|r| r.contains(cell))).then_some((sheet, ti))
     }
 
-    /// The table an unqualified token names: the owner table when it is spelled like the owner,
-    /// else the first table of that spelling.
-    fn resolve(&self, bare: &str, owner: Option<Position>) -> Option<Position> {
-        owner.filter(|&(si, ti)| self.original.sheets[si].tables[ti].name.eq_ignore_ascii_case(bare)).or_else(|| self.table(bare))
+    fn renamed(&self, at: Position) -> Option<&str> {
+        self.renamed.get(&at).map(String::as_str)
     }
 
-    /// Whether the token changes: it names a renamed table, or it names no table but is spelled
-    /// like a new name, which would capture it on reopen.
-    fn renames(&self, bare: &str, owner: Option<Position>) -> bool {
+    fn might_change(&self, bare: &str, owner: Option<Position>) -> bool {
         match self.resolve(bare, owner) {
             Some(at) => self.renamed.contains_key(&at),
             None => self.captures(bare),
@@ -178,165 +170,32 @@ impl Rewrite<'_> {
         })
     }
 
-    fn expression(&self, e: &mut Expr, sheet: usize, owner: Option<Position>) -> bool {
-        rewrite_table_tokens(e, &|n, structured, env| self.replacement(n, structured, sheet, owner, env))
+    fn pivot(&self, p: &PivotTable, si: usize) -> Option<(String, Option<&str>)> {
+        let (at, qualified) = match self.original.pivot_source(p, si).ok()?.source {
+            PivotSource::Table { sheet, table } => ((sheet, table), split_sheet(&p.source).0.is_some()),
+            PivotSource::Text(t) if !p.binding.unresolved(t) && !t.trim_start().starts_with('[') => {
+                (self.table(t.trim().trim_start_matches('=').trim())?, false)
+            }
+            _ => return None,
+        };
+        let new = self.renamed(at)?;
+        let source = if qualified { format!("{}!{new}", quote_sheet(&self.original.sheets[at.0].name)) } else { new.to_string() };
+        Some((source, Some(new)))
+    }
+}
+
+impl Rewrite<'_> {
+    /// The table an unqualified token names: the owner table when it is spelled like the owner,
+    /// else the first table of that spelling.
+    fn resolve(&self, bare: &str, owner: Option<Position>) -> Option<Position> {
+        owner.filter(|&(si, ti)| self.original.sheets[si].tables[ti].name.eq_ignore_ascii_case(bare)).or_else(|| self.table(bare))
     }
 
-    fn rewritten_text(&self, text: &str, sheet: usize, owner: Option<Position>) -> Option<String> {
-        let mut expr = gridcraft_formula::parse_name(text).ok()?;
-        self.expression(&mut expr, sheet, owner).then(|| {
-            let prefix = if text.trim_start().starts_with('=') { "=" } else { "" };
-            format!("{prefix}{}", gridcraft_formula::print(&expr))
-        })
-    }
-
-    fn text(&self, text: &mut String, sheet: usize, owner: Option<Position>) {
-        if let Some(new) = self.rewritten_text(text, sheet, owner) {
-            *text = new;
-        }
-    }
-
-    fn apply(self, wb: &mut Workbook) {
-        for n in &mut wb.names {
-            self.text(&mut n.formula, n.scope.unwrap_or(usize::MAX), None);
-        }
+    fn apply(&self, wb: &mut Workbook) {
+        table_refs::apply(self, wb, true);
         crate::passthrough::rewrite_kept_names(wb, |mut e| {
-            self.expression(&mut e, usize::MAX, None);
+            table_refs::expression(self, &mut e, usize::MAX, None);
             e
         });
-        for (si, sh) in wb.sheets.iter_mut().enumerate() {
-            let sheet = Arc::make_mut(sh);
-            let formulas: Vec<_> = sheet
-                .cells
-                .iter()
-                .filter_map(|(c, cell)| {
-                    let f = cell.formula.as_ref()?;
-                    let owner = self.cell_owner(si, c);
-                    f.with_expr(|e| {
-                        let mut uses_table = false;
-                        e.walk(&mut |e| {
-                            uses_table |= match e {
-                                Expr::Name(n) => match n.rsplit_once('!') {
-                                    Some((_, bare)) => self.renames(bare, None),
-                                    None => self.renames(n, owner),
-                                },
-                                Expr::Struct(s) => self.renames(&s.table, owner),
-                                _ => false,
-                            }
-                        });
-                        if !uses_table {
-                            return None;
-                        }
-                        let mut e = e.clone();
-                        self.expression(&mut e, si, owner).then(|| (c, Formula { array: f.array, ..f.rewritten(e) }))
-                    })?
-                })
-                .collect();
-            for (c, f) in formulas {
-                if let Some(cell) = sheet.cells.get_mut(c) {
-                    cell.formula = Some(Arc::new(f));
-                }
-            }
-            let text = |f: &mut String| self.text(f, si, None);
-            let threshold = |v: &mut CfValueKind| {
-                if let CfValueKind::Formula(f) = v {
-                    text(f);
-                }
-            };
-            for cf in &mut sheet.cond_formats {
-                match &mut cf.rule {
-                    CfRule::CellIs { a, b, .. } => {
-                        text(a);
-                        b.iter_mut().for_each(text);
-                    }
-                    CfRule::Expression { formula, .. } => text(formula),
-                    CfRule::ColorScale { stops } => stops.iter_mut().for_each(|(v, _)| threshold(v)),
-                    CfRule::DataBar { min, max, .. } => {
-                        threshold(min);
-                        threshold(max);
-                    }
-                    CfRule::IconSet { thresholds, .. } => thresholds.iter_mut().for_each(threshold),
-                    _ => {}
-                }
-            }
-            for dv in &mut sheet.validations {
-                text(&mut dv.f1);
-                dv.f2.iter_mut().for_each(text);
-            }
-            for ch in &mut sheet.charts {
-                for series in &mut ch.series {
-                    text(&mut series.values);
-                    series.categories.iter_mut().for_each(text);
-                    series.bubble_sizes.iter_mut().for_each(text);
-                    if let Some(n) = &mut series.name
-                        && let Ok(Expr::Struct(r)) = gridcraft_formula::parse(n)
-                        && !r.table.is_empty()
-                    {
-                        if self.table(&r.table).is_some() {
-                            text(n);
-                        } else if self.captures(&r.table) {
-                            // An unbound lookalike must not become a reference just because a
-                            // repaired table takes its spelling (or increase ChartEx's alias count).
-                            *n = format!("\"{}\"", n.replace('"', "\"\""));
-                        }
-                    }
-                }
-            }
-            for link in sheet.hyperlinks.values_mut().filter(|l| !l.external) {
-                let target = gridcraft_core::link_location(link.target.trim());
-                if target.starts_with('#') {
-                    // An error or literal hash location cannot be a table or defined name.
-                    continue;
-                }
-                if let Some(new) = self.rewritten_text(target, si, None) {
-                    link.target = new;
-                }
-            }
-            for sparkline in &mut sheet.sparklines {
-                text(&mut sparkline.source);
-            }
-            for control in &mut sheet.controls {
-                control.link.iter_mut().for_each(text);
-            }
-            for (ti, t) in sheet.tables.iter_mut().enumerate() {
-                for col in &mut t.columns {
-                    let local = |f: &mut String| self.text(f, si, Some((si, ti)));
-                    col.formula.iter_mut().for_each(local);
-                    if col.totals == TotalsFn::Custom {
-                        col.totals_label.iter_mut().for_each(local);
-                    }
-                }
-                if let Some(name) = self.renamed.get(&(si, ti)) {
-                    t.name.clone_from(name);
-                }
-            }
-            for slicer in &mut sheet.slicers {
-                if let SlicerSource::Table { table, .. } = &mut slicer.source
-                    && let Some(name) = self.table(table).and_then(|at| self.renamed.get(&at))
-                {
-                    table.clone_from(name);
-                }
-            }
-            for p in &mut sheet.pivots {
-                let Ok(found) = self.original.pivot_source(p, si) else { continue };
-                let (at, qualified) = match found.source {
-                    PivotSource::Table { sheet, table } => ((sheet, table), split_sheet(&p.source).0.is_some()),
-                    PivotSource::Text(t) if !p.binding.unresolved(t) && !t.trim_start().starts_with('[') => {
-                        let Some(at) = self.table(t.trim().trim_start_matches('=').trim()) else { continue };
-                        (at, false)
-                    }
-                    _ => continue,
-                };
-                let Some(new) = self.renamed.get(&at) else { continue };
-                let source = if qualified { format!("{}!{new}", quote_sheet(&self.original.sheets[at.0].name)) } else { new.clone() };
-                if let Some(binding) = &mut p.binding.0
-                    && binding.text == p.source
-                {
-                    binding.text.clone_from(&source);
-                    binding.was = format!("table \"{new}\"");
-                }
-                p.source = source;
-            }
-        }
     }
 }

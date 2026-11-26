@@ -362,7 +362,19 @@ pub(crate) fn dispatch(app: &mut SheetApp, ctx: &egui::Context, key: Key, physic
         Shortcut::FormulaAbove | Shortcut::ValueAbove => {
             let Some(above) = active.row.checked_sub(1).map(|r| CellRef::new(r, active.col)) else { return true };
             let text = if shortcut == Shortcut::FormulaAbove {
-                app.session.active().map(|d| gridcraft_engine::display::edit_text(&d.wb, sh, above)).unwrap_or_default()
+                // The formula is spelled for the cell it goes into: a table reference shown
+                // without its name above keeps the name when this cell is outside that table.
+                app.session
+                    .active()
+                    .map(|d| match sh.cell(above).and_then(|c| c.formula.as_ref()).filter(|_| !sh.cell_pictures.contains_key(&above)) {
+                        Some(f) => {
+                            let text = gridcraft_engine::display::formula_text(&d.wb, sh, active, f);
+                            crate::formula_locale::localize_for_entry(&text, app.ui.language.formula_locale(), &d.wb, d.wb.active_sheet())
+                                .unwrap_or(text)
+                        }
+                        None => gridcraft_engine::display::edit_text(&d.wb, sh, above),
+                    })
+                    .unwrap_or_default()
             } else {
                 app.session
                     .active()

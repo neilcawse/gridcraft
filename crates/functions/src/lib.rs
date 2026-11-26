@@ -266,21 +266,77 @@ fn registry() -> &'static (Vec<FnSpec>, HashMap<&'static str, usize>) {
     })
 }
 
+/// Names of functions the evaluator implements itself (merged into the function list for UI).
+pub const SPECIAL_FUNCTIONS: &[&str] = &[
+    "IF",
+    "IFS",
+    "IFERROR",
+    "IFNA",
+    "CHOOSE",
+    "SWITCH",
+    "ROW",
+    "COLUMN",
+    "ROWS",
+    "COLUMNS",
+    "AREAS",
+    "ISREF",
+    "ISFORMULA",
+    "FORMULATEXT",
+    "SHEET",
+    "SHEETS",
+    "OFFSET",
+    "INDIRECT",
+    "INDEX",
+    "CELL",
+    "TRIMRANGE",
+    "GETPIVOTDATA",
+    "SUBTOTAL",
+    "AGGREGATE",
+    "TEXT",
+    "LET",
+    "LAMBDA",
+    "ISOMITTED",
+    "MAP",
+    "REDUCE",
+    "SCAN",
+    "BYROW",
+    "BYCOL",
+    "MAKEARRAY",
+];
+
+/// Whether the worksheet library or the evaluator handles this function name.
+pub fn is_known_function(name: &str) -> bool {
+    canonical_function_name(name).is_some()
+}
+
+/// Canonical spelling of a worksheet or evaluator built-in, if it is known.
+pub fn canonical_function_name(name: &str) -> Option<&'static str> {
+    SPECIAL_FUNCTIONS.iter().copied().find(|special| special.eq_ignore_ascii_case(name)).or_else(|| lookup(name).map(|spec| spec.name))
+}
+
+/// No registered function name is longer (`registry_is_consistent` checks it), so an upper-cased
+/// name to look up fits a buffer this long.
+const MAX_NAME_LEN: usize = 32;
+
 /// Looks a function up by name (case-insensitive; `_xlfn.`- and `_xlws.`-free names). A
-/// `_xludf.` name is user-defined and never found.
+/// `_xludf.` name is user-defined and never found. Never allocates: the evaluator looks up every
+/// call of a defined LAMBDA name, every time it runs.
 pub fn lookup(name: &str) -> Option<&'static FnSpec> {
-    let mut n = name.trim().to_ascii_uppercase();
-    loop {
-        if let Some(r) = n.strip_prefix("_XLFN.") {
-            n = r.to_string();
-        } else if let Some(r) = n.strip_prefix("_XLWS.") {
-            n = r.to_string();
-        } else {
-            break;
-        }
+    let strip = |n: &'static str, s: &str| -> Option<usize> { s.get(..n.len()).filter(|p| p.eq_ignore_ascii_case(n)).map(|_| n.len()) };
+    let mut n = name.trim();
+    while let Some(len) = strip("_XLFN.", n).or_else(|| strip("_XLWS.", n)) {
+        n = &n[len..];
+    }
+    let mut buf = [0u8; MAX_NAME_LEN];
+    if n.bytes().any(|b| b.is_ascii_lowercase()) {
+        // A longer name is no function's.
+        let upper = buf.get_mut(..n.len())?;
+        upper.copy_from_slice(n.as_bytes());
+        upper.make_ascii_uppercase();
+        n = std::str::from_utf8(upper).ok()?;
     }
     let (v, map) = registry();
-    map.get(n.as_str()).and_then(|&i| v.get(i))
+    map.get(n).and_then(|&i| v.get(i))
 }
 
 /// Every registered function.
@@ -306,6 +362,7 @@ mod tests {
         for s in all() {
             assert!(seen.insert(s.name), "duplicate function {}", s.name);
             assert_eq!(s.name, s.name.to_ascii_uppercase(), "{} not upper-case", s.name);
+            assert!(s.name.len() <= MAX_NAME_LEN && lookup(&s.name.to_ascii_lowercase()).is_some_and(|f| f.name == s.name), "{} lookup", s.name);
             assert!(s.min_args <= s.max_args, "{} arity", s.name);
             assert!(!s.description.is_empty() && !s.signature.is_empty(), "{} docs", s.name);
         }
@@ -313,6 +370,8 @@ mod tests {
         assert!(all().len() >= 400);
         assert!(lookup("_xlfn._xlws.sort").is_some_and(|s| s.name == "SORT"));
         assert!(lookup("nosuchfn").is_none());
+        assert!(lookup(" _XlFn._xlws.Sort ").is_some_and(|s| s.name == "SORT"));
+        assert!(lookup(&"x".repeat(MAX_NAME_LEN + 1)).is_none() && lookup("_xludf.sum").is_none());
         for s in all() {
             assert!(lookup(&format!("_xlfn.{}", s.name.to_ascii_lowercase())).is_some_and(|x| x.name == s.name));
         }

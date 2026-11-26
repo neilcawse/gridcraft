@@ -6,6 +6,12 @@ use std::sync::Arc;
 
 impl<'h> Evaluator<'h> {
     pub(super) fn call(&mut self, name: &str, args: &[Expr]) -> Ev {
+        // The parser normally uppercases calls. An already-stored AST can carry old casing.
+        let name = if name.bytes().any(|b| b.is_ascii_lowercase()) {
+            gridcraft_functions::canonical_function_name(name).filter(|canonical| canonical.eq_ignore_ascii_case(name)).unwrap_or(name)
+        } else {
+            name
+        };
         match name {
             "IF" => self.if_call(args),
             "IFS" => {

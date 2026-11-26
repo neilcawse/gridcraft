@@ -928,7 +928,7 @@ fn evaluate(s: &mut Session, p: &Json) -> Result<Json> {
     let d = s.doc()?;
     let f = str_param(p, "formula").ok_or_else(|| bad("formulas.evaluate", "missing `formula`"))?;
     let at = cell_param(s, p, "cell")?.unwrap_or(d.selection.active);
-    let expr = crate::cmd::edit::parse_typed_formula(f.strip_prefix('=').unwrap_or(f))?;
+    let expr = crate::cmd::edit::parse_typed_formula(f.strip_prefix('=').unwrap_or(f), &d.wb, d.wb.active_sheet())?;
     crate::cmd::edit::check_arg_counts(&expr)?;
     let v = gridcraft_calc::recalc::evaluate_expr(&d.wb, d.wb.active_sheet(), at, &expr);
     Ok(crate::cmd::inspect::value_json(&v))
