@@ -534,6 +534,32 @@ Documented, not measured (Microsoft's form check box documentation, ECMA-376, [M
 - Collapse recovery needs the source transform tree to still describe the members; a member skipped on open (SmartArt, OLE) does not prevent it. When X34 holds every box in place, sort preserves collapse recovery only if the rows in the coincident span still occupy the same range. Reordering within the span is fine; if any row leaves it, recovery ends even when the row heights did not change. This also applies to subsequent sorts. When the original markers are no longer valid, sort retains only the coincident line pair and refreshes the transform snapshots: a later fit changes the collapsed extent by the change in distance between those lines, without reusing stale worksheet markers on export. Recovery ends when the resize changes the saved layout. This is a GridCraft choice; Excel for Mac is unmeasured.
 - Untouched groups still write their original worksheet anchor fields and group/member transforms, including grouped members' own flips, which were previously dropped. Line resizing still applies the existing placement invalidation and anchor-mode rules; hide/unhide and chart `userShapes` ownership are unchanged.
 
+## X47 — Direct formatting on protected sheets
+
+Batch 5 `protect-format-rows` (Excel for Mac 16.115.2) verified the unprotected controls on `P`:
+row 7 height 15 → 24 pt, row `7:7` fill white → yellow, and Locked off on `E7`. With only Format
+Rows enabled, row 5 height changed from 15 to 30 pt, but fill on `5:5` stayed white and attempts
+to set Locked on `5:5` or its blank cell `C5` were refused; both read back as unlocked. The
+probe's encoded rule had predicted the fill would succeed. GridCraft's direct setters already
+matched all four measured outcomes on the base: size and visibility use the relevant axis
+permission, and direct fill, font and cell style commands require Format Cells regardless of
+the range shape. The new tests pin that distinction and the two Locked refusals.
+
+The column rule is documentation-derived, not live-measured: [Microsoft's protection options for
+Mac](https://support.microsoft.com/en-us/excel/protect-a-worksheet-in-mac) distinguish column
+width/visibility and row height/visibility from cell formatting. Microsoft lists [Default
+Width](https://support.microsoft.com/en-us/excel/change-column-width-and-row-height#change-the-default-width-for-all-columns-on-a-worksheet-or-workbook)
+as a column-sizing command on the same Home › Cells › Format menu. `home.defaultWidth` used to
+bypass protection; it now requires Format Columns, like `home.columnWidth`.
+
+Batch 5 did not measure formatting locked versus unlocked cells with Format Cells enabled;
+direct changes to Locked or Formula Hidden still refuse with that permission enabled. Data
+outline commands, Clear Formats, Format Painter, and [X31](#x31--whole-row-autofill-carries-row-formatting)
+and [X32](#x32--paste-special-all-and-insert-copied-cells-carry-line-formatting) transfers are
+outside this direct-setter rule and unchanged. `protect-unlocked-destination` did not verify
+formula transfer to `E2:E3`; it does not establish how Excel pastes protection or formatting
+into unlocked cells.
+
 ## X14b–X38 integration (`wip/integration-x38`)
 
 **X15 lookup criteria and X20 external names.** For VLOOKUP and HLOOKUP over a readable local table or array:

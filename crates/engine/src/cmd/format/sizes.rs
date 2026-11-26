@@ -297,6 +297,7 @@ pub(super) fn autofit_rows(s: &mut Session, p: &Json) -> Result<Json> {
 pub(super) fn default_width(s: &mut Session, p: &Json) -> Result<Json> {
     let w = f64_param(p, "width").ok_or_else(|| bad("home.defaultWidth", "missing `width`"))?;
     let si = target_sheet(s, p)?;
+    crate::cmd::refuse_unless_allowed(s, si, "Formatting columns", |p| p.format_columns)?;
     edit(s, |cx| {
         let sheet = cx.sheet_mut(si)?;
         sheet.default_col_width = w.clamp(0.0, 1800.0) as f32;

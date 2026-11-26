@@ -9629,6 +9629,90 @@ fn open_replaces_an_untouched_blank_workbook_and_its_windows() {
     assert_eq!(s.windows()[0].doc_uid, s.doc().unwrap().uid);
 }
 
+// Batch 5, protect-format-rows: the blank C5 inherits the unlocked format of row 5.
+#[test]
+fn protected_line_format_rows_only_allows_geometry() -> crate::Result<()> {
+    use gridcraft_model::{Color, Fill};
+
+    let mut s = s();
+    let c5 = CellRef::new(4, 2);
+    let e7 = CellRef::new(6, 4);
+    s.execute("home.rowHeight", json!({"rows": "5:5", "points": 15}))?;
+    s.execute("home.lockCell", json!({"range": "5:5", "on": false}))?;
+
+    s.execute("home.rowHeight", json!({"rows": "7:7", "points": 24}))?;
+    s.execute("home.fillColor", json!({"range": "7:7", "color": "#FFFF00"}))?;
+    s.execute("home.lockCell", json!({"range": "E7", "on": false}))?;
+    let d = s.doc()?;
+    let sh = d.wb.active().ok_or(crate::EngineError::NoDocument)?;
+    assert_eq!(sh.row_height(4), 20.);
+    assert_eq!(sh.row_height(6), 32.);
+    let control = d.wb.styles.get(sh.style_id(e7));
+    assert_eq!(control.fill, Fill::solid(Color::Rgb(0xFFFF00)));
+    assert!(!control.protection.locked);
+    assert!(sh.cell(c5).is_none());
+    let before_c5 = sh.style_id(c5);
+    assert!(!d.wb.styles.get(before_c5).protection.locked);
+
+    s.execute("review.protectSheet", json!({"formatRows": true}))?;
+    s.execute("home.rowHeight", json!({"rows": "5:5", "points": 30}))?;
+    for (cmd, params) in [
+        ("home.fillColor", json!({"range": "5:5", "color": "#FFFF00"})),
+        ("home.lockCell", json!({"range": "5:5", "on": true})),
+        ("home.lockCell", json!({"range": "C5", "on": true})),
+    ] {
+        assert_line_edit_refused(&mut s, cmd, params, "protected sheet");
+    }
+    let sh = s.doc()?.wb.active().ok_or(crate::EngineError::NoDocument)?;
+    assert_eq!(sh.row_height(4), 40.);
+    assert_eq!(sh.style_id(c5), before_c5);
+    assert!(sh.cell(c5).is_none());
+
+    s.execute("home.hideRows", json!({"rows": "5:5"}))?;
+    assert_eq!(s.doc()?.wb.active().map(|sh| sh.row_height(4)), Some(0.));
+    s.execute("home.unhideRows", json!({"rows": "5:5"}))?;
+    assert_eq!(s.doc()?.wb.active().map(|sh| sh.row_height(4)), Some(40.));
+    Ok(())
+}
+
+// The column mapping comes from Microsoft's worksheet protection options, not the Batch 5 probe.
+#[test]
+fn protected_line_format_columns_only_allows_geometry() -> crate::Result<()> {
+    let mut s = s();
+    s.execute("review.protectSheet", json!({"formatColumns": true}))?;
+    s.execute("home.columnWidth", json!({"cols": "C:C", "width": 120}))?;
+    for (cmd, params) in [
+        ("home.fillColor", json!({"range": "C:C", "color": "#FFFF00"})),
+        ("home.bold", json!({"range": "C:C", "on": true})),
+        ("home.cellStyle", json!({"range": "C:C", "name": "Good"})),
+    ] {
+        assert_line_edit_refused(&mut s, cmd, params, "protected sheet");
+    }
+    let width = |s: &Session| -> crate::Result<Option<f32>> { Ok(s.doc()?.wb.active().map(|sh| sh.col_width(2))) };
+    assert_eq!(width(&s)?, Some(120.));
+    s.execute("home.hideColumns", json!({"cols": "C:C"}))?;
+    assert_eq!(width(&s)?, Some(0.));
+    s.execute("home.unhideColumns", json!({"cols": "C:C"}))?;
+    assert_eq!(width(&s)?, Some(120.));
+
+    s.execute("review.protectSheet", json!({"formatCells": true}))?;
+    assert_line_edit_refused(&mut s, "home.columnWidth", json!({"cols": "C:C", "width": 150}), "Formatting columns");
+    s.execute("home.fillColor", json!({"range": "C:C", "color": "#FFFF00"}))?;
+    Ok(())
+}
+
+#[test]
+fn protected_line_format_default_width_requires_format_columns() -> crate::Result<()> {
+    let mut s = s();
+    s.execute("review.protectSheet", json!({"formatCells": true}))?;
+    assert_line_edit_refused(&mut s, "home.defaultWidth", json!({"width": 150}), "Formatting columns");
+
+    s.execute("review.protectSheet", json!({"formatColumns": true}))?;
+    s.execute("home.defaultWidth", json!({"width": 100}))?;
+    assert_eq!(s.doc()?.wb.active().map(|sh| sh.default_col_width), Some(100.));
+    Ok(())
+}
+
 #[test]
 fn format_cells_permission_on_a_protected_sheet_cannot_unlock_cells() {
     // Formatting may be allowed on a protected sheet; the permission can't serve as a key to

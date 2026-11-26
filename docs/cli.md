@@ -85,6 +85,13 @@ gridcraft-cli run --in book.xlsx \
 
 Command ids and parameters: `gridcraft-cli commands`.
 
+On a protected sheet, direct formatting commands use `review.protectSheet` permissions by
+operation, not by the shape of the selection. `formatRows` permits height and hide/unhide;
+`formatColumns` permits width (including `home.defaultWidth`) and hide/unhide. Fill, font and
+cell style commands require `formatCells` even when the range is a whole row or column. Direct
+formatting cannot change the Locked or Formula Hidden flags while the sheet is protected. See
+[X47](parity/INTEGRATION_NOTES.md#x47--direct-formatting-on-protected-sheets) for evidence and scope.
+
 ## `check`
 
 ```sh
