@@ -224,7 +224,7 @@ impl DrawingKept<'_> {
                     ids.insert(old, drawing_rels.add_raw(&r.rel_type, &target, r.external));
                 }
             }
-            let (DrawingRef::Image(id) | DrawingRef::Shape(id) | DrawingRef::Chart(id) | DrawingRef::Group(id)) = link.object;
+            let (DrawingRef::Image(id) | DrawingRef::Shape(id) | DrawingRef::Chart(id) | DrawingRef::Slicer(id) | DrawingRef::Group(id)) = link.object;
             if let Some(xml) = remap(&link.xml, &ids) {
                 // Click before hover, as read (CT_NonVisualDrawingProps).
                 found.entry(id).or_default().push_str(&xml);
