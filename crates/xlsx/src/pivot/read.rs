@@ -56,9 +56,20 @@ impl FieldIn {
 struct CacheIn {
     id: u32,
     source: String,
+    external_source: bool,
     fields: Vec<FieldIn>,
     /// `x14:pivotCacheDefinition pivotCacheId`: how slicer caches name the cache.
     slicer_id: Option<u32>,
+}
+
+/// Source parts of a PivotTable read from an XLSX sheet, used to preserve raw pivot XML
+/// when the source is external or cannot be resolved locally.
+#[derive(Clone, Debug)]
+pub struct ReadPivotSource {
+    pub pivot_id: u32,
+    pub table_part: String,
+    pub cache_part: String,
+    pub external_source: bool,
 }
 
 /// Workbook-level pivot cache lookup, filled from `<pivotCaches>`; caches are parsed once.
@@ -207,12 +218,13 @@ fn read_cache(cx: &mut Ctx<'_>, part: &str, sheet_name: &str) -> Option<CacheIn>
         return None;
     }
     let ws = src.and_then(|s| s.child("worksheetSource"));
+    let external_source = ws.is_some_and(|w| w.attr("id").is_some());
+    if external_source {
+        cx.warn("a PivotTable's source is in another workbook; its source reference may not resolve");
+    }
     let source = match ws {
         Some(w) if w.attr("name").is_some_and(|n| !n.trim().is_empty()) => w.attr("name").unwrap_or("").trim().to_string(),
         Some(w) => {
-            if w.attr("id").is_some() {
-                cx.warn("a PivotTable's source is in another workbook; its source reference may not resolve");
-            }
             let r = w.attr("ref").map(|r| r.replace('$', "")).and_then(|r| RangeRef::parse(&r));
             let Some(r) = r else {
                 cx.warn("a PivotTable's source reference is missing or invalid; kept as plain cells");
@@ -265,11 +277,17 @@ fn read_cache(cx: &mut Ctx<'_>, part: &str, sheet_name: &str) -> Option<CacheIn>
     }
     let slicer_id =
         x.child("extLst").and_then(|l| l.kids("ext").find_map(|e| e.child("pivotCacheDefinition"))).and_then(|d| d.attr_u32("pivotCacheId"));
-    Some(CacheIn { id: 0, source, fields, slicer_id })
+    Some(CacheIn { id: 0, source, external_source, fields, slicer_id })
 }
 
 /// Reads the PivotTables related to a worksheet part.
-pub fn read_pivots(cx: &mut Ctx<'_>, caches: &mut CachesIn, sheet_part: &str, sheet_name: &str) -> Result<Vec<PivotTable>, IoError> {
+pub fn read_pivots(
+    cx: &mut Ctx<'_>,
+    caches: &mut CachesIn,
+    sheet_part: &str,
+    sheet_name: &str,
+    sources: &mut Vec<ReadPivotSource>,
+) -> Result<Vec<PivotTable>, IoError> {
     let rels = cx.pkg.rels(sheet_part)?;
     let mut out = Vec::new();
     for rel in rels.iter().filter(|r| r.kind == "pivotTable" && !r.external) {
@@ -307,6 +325,12 @@ pub fn read_pivots(cx: &mut Ctx<'_>, caches: &mut CachesIn, sheet_part: &str, sh
             if !pt.style.is_empty() {
                 pt.custom_style = PivotCustomStyle(caches.custom_style(cx, &pt.style));
             }
+            sources.push(ReadPivotSource {
+                pivot_id: pt.id,
+                table_part: rel.target.clone(),
+                cache_part: cache_part.clone(),
+                external_source: cache.external_source,
+            });
             caches.next_id = caches.next_id.saturating_add(1);
             out.push(pt);
         }

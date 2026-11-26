@@ -161,8 +161,10 @@ fn cache_compatible(a: &Cache, b: &Cache) -> bool {
 pub struct PivotWriter {
     /// (cache id, workbook-relative part name).
     caches: Vec<(u32, String)>,
-    /// The caches written, which the pending tables refer to.
-    built: Vec<Cache>,
+    /// The caches written from model sources as `(cache_id, cache)`, which pending tables refer to.
+    built: Vec<(u32, Cache)>,
+    /// Original normalized cache part path → assigned cache id for preserved raw pivot caches.
+    preserved_caches: HashMap<String, u32>,
     /// PivotTables (sheet, index) whose shared cache an earlier table wrote: (cache id, index in
     /// `built`, axis map).
     shared: HashMap<(usize, usize), (u32, usize, AxisMap)>,
@@ -191,12 +193,19 @@ impl PivotWriter {
     pub fn add_sheet(&mut self, wb: &Workbook, si: usize, out: &mut Out, rels: &mut Rels) {
         let Some(sheet) = wb.sheet(si) else { return };
         for idx in 0..sheet.pivots.len() {
+            let pt = &sheet.pivots[idx];
+            if has_external_preserved(sheet, pt) && self.write_preserved(sheet, pt, out, rels) {
+                continue;
+            }
             let (n, cache, axis_map) = match self.shared.remove(&(si, idx)) {
                 Some(x) => x,
-                None => {
-                    let Some(x) = self.write_cache(wb, si, idx, out) else { continue };
-                    x
-                }
+                None => match self.write_cache(wb, si, idx, out) {
+                    Some(x) => x,
+                    None => {
+                        self.write_preserved(sheet, pt, out, rels);
+                        continue;
+                    }
+                },
             };
             self.tables += 1;
             let t = self.tables;
@@ -206,6 +215,120 @@ impl PivotWriter {
             out.part(&format!("xl/pivotTables/_rels/pivotTable{t}.xml.rels"), None, tr.xml().into_bytes());
             self.pending.push(Pending { part: format!("xl/pivotTables/pivotTable{t}.xml"), sheet: si, idx, cache_id: n, cache, axis_map });
         }
+    }
+
+    /// Writes a PivotTable whose source is external or unresolvable from its preserved raw XML
+    /// parts, reusing an already-written preserved cache if another table shares it.
+    fn write_preserved(&mut self, sheet: &gridcraft_model::Sheet, pt: &PivotTable, out: &mut Out, rels: &mut Rels) -> bool {
+        let Some(p) = sheet.preserved.as_deref() else { return false };
+        let Some(meta) = find_passthrough_meta(p, pt) else { return false };
+        let table_key = crate::package::normalize(meta.table_part);
+        let cache_key = crate::package::normalize(meta.cache_part);
+        let Some(table_part) = p.parts.iter().find(|q| crate::package::normalize(&q.name) == table_key) else {
+            return false;
+        };
+        let Some(cache_part) = p.parts.iter().find(|q| crate::package::normalize(&q.name) == cache_key) else {
+            return false;
+        };
+        let n = if let Some(&existing) = self.preserved_caches.get(&cache_key) {
+            existing
+        } else {
+            let n = self.caches.len() as u32 + 1;
+            if !cache_part.rels.is_empty() {
+                let mut rxml = format!("{XML_DECL}<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">");
+                let mut wrote_any_rel = false;
+                let mut wrote_records = false;
+                let mut written_sub: HashMap<String, String> = HashMap::new();
+                for r in &cache_part.rels {
+                    let target = if r.external {
+                        Some(r.target.clone())
+                    } else {
+                        let sub_key = crate::package::normalize(&r.target);
+                        if let Some(existing) = written_sub.get(&sub_key) {
+                            Some(existing.clone())
+                        } else {
+                            p.parts.iter().find(|q| crate::package::normalize(&q.name) == sub_key).map(|sub| {
+                                let is_rec = r.rel_type.rsplit('/').next().is_some_and(|k| k.eq_ignore_ascii_case("pivotCacheRecords"));
+                                let written_target = if is_rec && !wrote_records {
+                                    wrote_records = true;
+                                    let rec_file = format!("pivotCacheRecords{n}.xml");
+                                    let rec_part = format!("xl/pivotCache/{rec_file}");
+                                    let ct = if sub.content_type.is_empty() { CT_PIVOT_CACHE_REC } else { &sub.content_type };
+                                    out.part(&rec_part, Some(ct), sub.data.to_vec());
+                                    rec_file
+                                } else {
+                                    let claimed = out.kept.claim(&sub.name);
+                                    let ct = if sub.content_type.is_empty() && is_rec { CT_PIVOT_CACHE_REC } else { &sub.content_type };
+                                    out.part(&claimed, Some(ct), sub.data.to_vec());
+                                    format!("/{claimed}")
+                                };
+                                written_sub.insert(sub_key, written_target.clone());
+                                written_target
+                            })
+                        }
+                    };
+                    if let Some(target) = target {
+                        let _ = write!(
+                            rxml,
+                            "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"{}/>",
+                            esc_attr(&r.id),
+                            esc_attr(&r.rel_type),
+                            esc_attr(&target),
+                            if r.external { " TargetMode=\"External\"" } else { "" }
+                        );
+                        wrote_any_rel = true;
+                    }
+                }
+                if wrote_any_rel {
+                    rxml.push_str("</Relationships>");
+                    out.part(&format!("xl/pivotCache/_rels/pivotCacheDefinition{n}.xml.rels"), None, rxml.into_bytes());
+                }
+            }
+            let ct = if cache_part.content_type.is_empty() { CT_PIVOT_CACHE_DEF } else { &cache_part.content_type };
+            out.part(&format!("xl/pivotCache/pivotCacheDefinition{n}.xml"), Some(ct), cache_part.data.to_vec());
+            self.caches.push((n, format!("pivotCache/pivotCacheDefinition{n}.xml")));
+            self.preserved_caches.insert(cache_key, n);
+            n
+        };
+        self.tables += 1;
+        let t = self.tables;
+        rels.add("pivotTable", &format!("../pivotTables/pivotTable{t}.xml"));
+        let cache_rel_target = format!("../pivotCache/pivotCacheDefinition{n}.xml");
+        let mut tr_xml = format!("{XML_DECL}<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">");
+        let mut has_cache_rel = false;
+        for r in &table_part.rels {
+            let is_cache = !r.external && r.rel_type.rsplit('/').next().is_some_and(|k| k.eq_ignore_ascii_case("pivotCacheDefinition"));
+            if is_cache {
+                let _ = write!(
+                    tr_xml,
+                    "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"/>",
+                    esc_attr(&r.id),
+                    esc_attr(&r.rel_type),
+                    esc_attr(&cache_rel_target)
+                );
+                has_cache_rel = true;
+            } else if r.external {
+                let _ = write!(
+                    tr_xml,
+                    "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\" TargetMode=\"External\"/>",
+                    esc_attr(&r.id),
+                    esc_attr(&r.rel_type),
+                    esc_attr(&r.target)
+                );
+            }
+        }
+        if !has_cache_rel {
+            let mut tr = Rels::default();
+            tr.add("pivotCacheDefinition", &cache_rel_target);
+            tr_xml = tr.xml();
+        } else {
+            tr_xml.push_str("</Relationships>");
+        }
+        out.part(&format!("xl/pivotTables/_rels/pivotTable{t}.xml.rels"), None, tr_xml.into_bytes());
+        let ct = if table_part.content_type.is_empty() { CT_PIVOT_TABLE } else { &table_part.content_type };
+        let patched_table = rewrite_preserved_pivot_table(&table_part.data, pt, n);
+        out.part(&format!("xl/pivotTables/pivotTable{t}.xml"), Some(ct), patched_table);
+        true
     }
 
     /// Writes the cache of PivotTable `idx` on sheet `si` (shared with the PivotTables its
@@ -220,8 +343,8 @@ impl PivotWriter {
         let (mut cache, maps) = build_cache(wb, &tables, &slicer_fields)?;
         if cache.slicer_fields.is_empty()
             && members.len() == 1
-            && let Some(b) = self.built.iter().position(|existing| existing.slicer_fields.is_empty() && cache_compatible(existing, &cache))
-            && let Some(&(n, _)) = self.caches.get(b)
+            && let Some((b, &(n, _))) =
+                self.built.iter().enumerate().find(|(_, (_, existing))| existing.slicer_fields.is_empty() && cache_compatible(existing, &cache))
         {
             return Some((n, b, maps.into_iter().next()?));
         }
@@ -253,7 +376,7 @@ impl PivotWriter {
         out.part(&cache_part, Some(CT_PIVOT_CACHE_DEF), cache_xml(&cache, rec_rid.as_deref(), wb.date_system).into_bytes());
         self.caches.push((n, format!("pivotCache/pivotCacheDefinition{n}.xml")));
         let b = self.built.len();
-        self.built.push(cache);
+        self.built.push((n, cache));
         let mut mine = None;
         for ((key, _), map) in members.iter().zip(maps) {
             if *key == (si, idx) {
@@ -305,7 +428,7 @@ impl PivotWriter {
     pub fn finish(self, wb: &Workbook, out: &mut Out, fmt_id: &dyn Fn(&str) -> Option<u32>) {
         for p in &self.pending {
             let Some(pt) = wb.sheet(p.sheet).and_then(|s| s.pivots.get(p.idx)) else { continue };
-            let Some(cache) = self.built.get(p.cache) else { continue };
+            let Some((_, cache)) = self.built.get(p.cache) else { continue };
             let xml = table_xml(pt, p.idx, p.cache_id, cache, &p.axis_map, fmt_id);
             out.part(&p.part, Some(CT_PIVOT_TABLE), xml.into_bytes());
         }
@@ -313,7 +436,7 @@ impl PivotWriter {
 }
 
 /// Resolves a pivot source to (sheet, range including the header row, worksheetSource XML).
-fn resolve_source(wb: &Workbook, text: &str, default_sheet: usize, depth: u32) -> Option<(usize, RangeRef, String)> {
+pub(crate) fn resolve_source(wb: &Workbook, text: &str, default_sheet: usize, depth: u32) -> Option<(usize, RangeRef, String)> {
     let t = text.trim().trim_start_matches('=').trim();
     if t.is_empty() || depth > 4 {
         return None;
@@ -357,6 +480,74 @@ fn resolve_source(wb: &Workbook, text: &str, default_sheet: usize, depth: u32) -
         return Some((si, r, xml));
     }
     None
+}
+
+struct PassthroughPivotMeta<'a> {
+    pivot_id: u32,
+    table_part: &'a str,
+    cache_part: &'a str,
+    external_source: bool,
+    orig_source: &'a str,
+}
+
+fn parse_passthrough_meta(xml: &str) -> Option<PassthroughPivotMeta<'_>> {
+    let mut it = xml.splitn(5, '\t');
+    let pivot_id = it.next()?.parse::<u32>().ok()?;
+    let table_part = it.next()?;
+    let cache_part = it.next()?;
+    let external_source = it.next()? == "1";
+    let orig_source = it.next()?;
+    Some(PassthroughPivotMeta { pivot_id, table_part, cache_part, external_source, orig_source })
+}
+
+fn find_passthrough_meta<'a>(p: &'a gridcraft_model::Preserved, pt: &PivotTable) -> Option<PassthroughPivotMeta<'a>> {
+    p.elements
+        .iter()
+        .filter(|e| e.slot == crate::passthrough::SLOT_PIVOT_PASSTHROUGH)
+        .filter_map(|e| parse_passthrough_meta(&e.xml))
+        .find(|m| m.pivot_id == pt.id && m.orig_source == pt.source)
+}
+
+fn has_external_preserved(sheet: &gridcraft_model::Sheet, pt: &PivotTable) -> bool {
+    sheet.preserved.as_deref().and_then(|p| find_passthrough_meta(p, pt)).is_some_and(|m| m.external_source)
+}
+
+/// Rewrites a preserved `<pivotTableDefinition>` XML part via `craft_xml` so its `cacheId`,
+/// `name`, and `<location ref="..."/>` stay in sync with the workbook model (e.g. after row
+/// insertions, moves, or renames).
+fn rewrite_preserved_pivot_table(data: &[u8], pt: &PivotTable, new_id: u32) -> Vec<u8> {
+    let Ok(mut root) = craft_xml::parse(data) else {
+        return data.to_vec();
+    };
+    if !root.is(craft_xml::Local("pivotTableDefinition")) {
+        return data.to_vec();
+    }
+    root.set_attr("cacheId", new_id);
+    if !pt.name.is_empty() {
+        root.set_attr("name", &pt.name);
+    }
+    if let Some(loc_el) = root.child_mut(craft_xml::Local("location")) {
+        let orig_loc = loc_el.attr("ref").and_then(|r| RangeRef::parse(&r.replace('$', "")));
+        let new_loc = match (pt.last_range, orig_loc) {
+            (Some(lr), Some(orig)) if lr.end.row < pt.anchor.row || lr.end.col < pt.anchor.col => {
+                let dr = orig.end.row.saturating_sub(orig.start.row);
+                let dc = orig.end.col.saturating_sub(orig.start.col);
+                RangeRef::new(pt.anchor, CellRef::new(pt.anchor.row.saturating_add(dr), pt.anchor.col.saturating_add(dc)))
+            }
+            (Some(lr), _) => RangeRef::new(pt.anchor, CellRef::new(lr.end.row.max(pt.anchor.row), lr.end.col.max(pt.anchor.col))),
+            (None, Some(orig)) => {
+                let dr = orig.end.row.saturating_sub(orig.start.row);
+                let dc = orig.end.col.saturating_sub(orig.start.col);
+                RangeRef::new(pt.anchor, CellRef::new(pt.anchor.row.saturating_add(dr), pt.anchor.col.saturating_add(dc)))
+            }
+            (None, None) => RangeRef::new(pt.anchor, pt.anchor),
+        };
+        loc_el.set_attr("ref", new_loc.a1());
+    }
+    let mut out = String::with_capacity(data.len() + 32);
+    out.push_str(XML_DECL);
+    root.write_xml(&mut out);
+    out.into_bytes()
 }
 
 fn range_source_xml(sheet: &str, r: RangeRef) -> String {

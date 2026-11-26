@@ -110,6 +110,9 @@ pub struct Sheet {
     /// Default column width and row height in pixels at 96 dpi (a file stores row heights in points).
     pub default_col_width: f32,
     pub default_row_height: f32,
+    /// Whether `sheetFormatPr customHeight="1"` was set in the source XLSX file. Not in JSON.
+    #[serde(skip)]
+    pub default_row_height_custom: bool,
     pub merges: Vec<RangeRef>,
     /// Frozen rows and columns (top/left).
     pub freeze: Option<(u32, u32)>,
@@ -202,6 +205,7 @@ impl Sheet {
             rows: BTreeMap::new(),
             default_col_width: DEFAULT_COL_WIDTH,
             default_row_height: DEFAULT_ROW_HEIGHT,
+            default_row_height_custom: false,
             merges: vec![],
             freeze: None,
             tab_color: None,

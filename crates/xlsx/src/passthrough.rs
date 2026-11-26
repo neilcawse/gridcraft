@@ -59,6 +59,8 @@ pub(crate) use write::{fingerprint_image, fingerprint_shape};
 pub(crate) const SLOT_DRAWING_SVG_BLIP: &str = "drawingSvgBlip";
 /// Slot for a chart's preserved `chartUserShapes` drawing part.
 pub(crate) const SLOT_CHART_USER_SHAPES: &str = "chartUserShapes";
+/// Slot for a PivotTable whose source is external or unresolvable, kept as raw XML parts.
+pub(crate) const SLOT_PIVOT_PASSTHROUGH: &str = "pivotPassthrough";
 /// Relationship URI of a chart's user shapes drawing part.
 pub(crate) const REL_CHART_USER_SHAPES: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartUserShapes";
 /// Extension URI for `<asvg:svgBlip>` inside `<a:blip><a:extLst>`.

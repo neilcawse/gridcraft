@@ -68,7 +68,8 @@ pub struct Preserved {
     pub package_rels: Vec<PreservedRel>,
     /// Relationships of the owning workbook or sheet part to kept parts.
     pub rels: Vec<PreservedRel>,
-    /// Every kept part reachable from `package_rels` and `rels`.
+    /// Every kept part reachable from `package_rels`, `rels`, or slot-specific passthrough
+    /// entries in `elements` (such as preserved PivotTables, SVG blips, and chart user shapes).
     pub parts: Vec<PreservedPart>,
     /// Owner XML elements that refer to kept parts.
     pub elements: Vec<PreservedXml>,

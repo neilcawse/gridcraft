@@ -29,9 +29,9 @@ use crate::xml::{El, esc_attr};
 mod read;
 mod write;
 
-pub use read::{CachesIn, NonSourceField, read_pivots};
+pub use read::{CachesIn, NonSourceField, ReadPivotSource, read_pivots};
 pub use write::{PivotSlicerInfo, PivotWriter};
-pub(crate) use write::{can_share, slicer_field_ok};
+pub(crate) use write::{can_share, resolve_source, slicer_field_ok};
 pub const CT_PIVOT_TABLE: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.pivotTable+xml";
 pub const CT_PIVOT_CACHE_DEF: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml";
 pub const CT_PIVOT_CACHE_REC: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheRecords+xml";

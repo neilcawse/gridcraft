@@ -37,7 +37,7 @@ impl KeptOut {
 
     /// A part name for a kept part: its original name when that can't collide with anything
     /// written, otherwise a fresh one in the same folder.
-    pub(super) fn claim(&mut self, original: &str) -> String {
+    pub(crate) fn claim(&mut self, original: &str) -> String {
         let lower = original.to_ascii_lowercase();
         let own = OWN_DIRS.iter().any(|d| lower.starts_with(d));
         if own && self.used.insert(lower) {
@@ -541,7 +541,8 @@ fn active_user_shapes<'a>(sheet: &Sheet, p: &'a Preserved) -> Vec<UserShapesMeta
 /// Sheet-level kept parts (excluding drawing SVG companions and chart `userShapes` graphs, which
 /// are written alongside their owning drawing/chart parts).
 pub(super) fn sheet_owned_parts(p: &Preserved) -> Vec<PreservedPart> {
-    let has_companions = p.elements.iter().any(|e| e.slot == SLOT_DRAWING_SVG_BLIP || e.slot == SLOT_CHART_USER_SHAPES);
+    let has_companions =
+        p.elements.iter().any(|e| e.slot == SLOT_DRAWING_SVG_BLIP || e.slot == SLOT_CHART_USER_SHAPES || e.slot == SLOT_PIVOT_PASSTHROUGH);
     if !has_companions {
         return p.parts.clone();
     }
