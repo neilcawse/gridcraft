@@ -30,13 +30,11 @@ pub(super) fn insert_table(s: &mut Session, p: &Json) -> Result<Json> {
         let sh = d.wb.sheet(sheet);
         sh.is_some_and(|sh| (r.start.col..=r.end.col).all(|c| sh.value(CellRef::new(r.start.row, c)).is_text()) && r.height() > 1)
     });
-    let name = str_param(p, "name")
-        .map(str::to_string)
-        .unwrap_or_else(|| (1..).map(|n| format!("Table{n}")).find(|n| d.wb.table(n).is_none()).unwrap_or_else(|| "Table".into()));
+    let name = str_param(p, "name").map_or_else(|| d.wb.next_table_name(), str::to_string);
     if !gridcraft_core::valid_table_name(&name) {
         return Err(EngineError::Other("The name that you entered is not valid.".into()));
     }
-    if d.wb.table(&name).is_some() || d.wb.names.iter().any(|n| n.name.eq_ignore_ascii_case(&name)) {
+    if d.wb.table_name_taken(&name, None) {
         return Err(EngineError::Other("The name entered already exists. Enter a unique name.".into()));
     }
     // Without a header row, the data moves down a row to make room for one: never a table with it.
@@ -280,8 +278,7 @@ pub(super) fn table_rename(s: &mut Session, p: &Json) -> Result<Json> {
     if !gridcraft_core::valid_table_name(&name) {
         return Err(EngineError::Other("The name that you entered is not valid.".into()));
     }
-    let wb = &s.doc()?.wb;
-    if wb.table(&name).is_some_and(|x| x != (si, ti)) || wb.names.iter().any(|n| n.name.eq_ignore_ascii_case(&name)) {
+    if s.doc()?.wb.table_name_taken(&name, Some((si, ti))) {
         return Err(EngineError::Other("The name entered already exists. Enter a unique name.".into()));
     }
     edit(s, |cx| {

@@ -6,7 +6,10 @@ use std::sync::Arc;
 
 use gridcraft_core::{CellError, quote_sheet, split_sheet, valid_table_name};
 use gridcraft_formula::{Expr, StructRef, fold_name};
-use gridcraft_model::{CfRule, CfValueKind, Formula, PivotSource, SlicerSource, TotalsFn, Workbook, workbook::rewrite_table_tokens};
+use gridcraft_model::{
+    CfRule, CfValueKind, Formula, PivotSource, SlicerSource, TotalsFn, Workbook,
+    workbook::{next_table_name_with, reserved_name, rewrite_table_tokens},
+};
 
 type Position = (usize, usize);
 
@@ -27,11 +30,11 @@ pub(crate) fn repair(wb: &mut Cow<'_, Workbook>, extra_names: impl IntoIterator<
         used.insert(fold_name("_xlnm.Print_Titles"));
     }
     let kept = wb.preserved.iter().flat_map(|p| &p.sheets).flat_map(|s| &s.names);
-    used.extend(kept.filter_map(|n| crate::xml::parse(format!("<n{}/>", n.attrs).as_bytes()).ok()?.attr("name").map(fold_name)));
+    used.extend(kept.map(|n| fold_name(&n.name)));
     let mut pending = Vec::new();
     for (si, sheet) in wb.sheets.iter().enumerate() {
         for (ti, t) in sheet.tables.iter().enumerate() {
-            if !valid_table_name(&t.name) || !used.insert(fold_name(&t.name)) {
+            if reserved_name(&t.name) || !valid_table_name(&t.name) || !used.insert(fold_name(&t.name)) {
                 pending.push(((si, ti), t.name.as_str()));
             }
         }
@@ -40,6 +43,7 @@ pub(crate) fn repair(wb: &mut Cow<'_, Workbook>, extra_names: impl IntoIterator<
         return;
     }
     let mut next = HashMap::new();
+    let mut next_number = 1;
     let mut renamed = HashMap::new();
     for (at, old) in pending {
         let base: String = old
@@ -52,20 +56,27 @@ pub(crate) fn repair(wb: &mut Cow<'_, Workbook>, extra_names: impl IntoIterator<
                 },
             )
             .collect();
-        let base = if valid_table_name(&base) { base } else { format!("Table_{base}") };
-        let suffix = next.entry(fold_name(&base)).or_insert(1usize);
-        loop {
-            let tail = if *suffix == 1 { String::new() } else { format!("_{suffix}") };
-            *suffix += 1;
-            let mut name: String = base.chars().take(255 - tail.len()).collect();
-            name.push_str(&tail);
-            if valid_table_name(&name) && used.insert(fold_name(&name)) {
-                // Names as the user typed them: `{:?}` would escape a table's leading `\`.
-                warnings.push(format!("Table \"{old}\" on sheet \"{}\" was renamed to \"{name}\".", wb.sheets[at.0].name));
-                renamed.insert(at, name);
-                break;
+        // Sanitizing an invalid name can also produce a reserved prefix. Suffixes can't remove it.
+        let name = if reserved_name(&base) {
+            let name = next_table_name_with(&mut next_number, |name| used.contains(name));
+            used.insert(name.to_ascii_lowercase());
+            name
+        } else {
+            let base = if valid_table_name(&base) { base } else { format!("Table_{base}") };
+            let suffix = next.entry(fold_name(&base)).or_insert(1usize);
+            loop {
+                let tail = if *suffix == 1 { String::new() } else { format!("_{suffix}") };
+                *suffix += 1;
+                let mut name: String = base.chars().take(255 - tail.len()).collect();
+                name.push_str(&tail);
+                if valid_table_name(&name) && used.insert(fold_name(&name)) {
+                    break name;
+                }
             }
-        }
+        };
+        // Names as the user typed them: `{:?}` would escape a table's leading `\`.
+        warnings.push(format!("Table \"{old}\" on sheet \"{}\" was renamed to \"{name}\".", wb.sheets[at.0].name));
+        renamed.insert(at, name);
     }
     // The native table lookup is ASCII-insensitive. Allocation above uses the stronger
     // Excel-style fold, but it must not change what an existing token originally meant.

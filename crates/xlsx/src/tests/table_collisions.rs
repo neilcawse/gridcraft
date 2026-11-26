@@ -91,6 +91,52 @@ fn xml(bytes: &[u8], path: &str) -> Result<String, Box<dyn std::error::Error>> {
     Ok(text)
 }
 
+#[test]
+fn imported_tables_with_reserved_prefixes_get_free_numbered_names() -> Result<(), Box<dyn std::error::Error>> {
+    // Generate our own package, then replace table names to exercise repair on import, not export.
+    let mut wb = Workbook::new();
+    wb.names.push(DefinedName {
+        name: "TABLE1".into(),
+        formula: "1".into(),
+        scope: None,
+        hidden: false,
+        comment: String::new(),
+        uid: Default::default(),
+    });
+    let sh = Arc::make_mut(&mut wb.sheets[0]);
+    for (i, name) in ["ChartRows", "PrintRows", "SanitizedRows", "OtherRows", "table2"].into_iter().enumerate() {
+        sh.tables.push(table(name, 2 * i as u32));
+    }
+    let saved = write_xlsx(&wb)?;
+    let mut package = zip::ZipArchive::new(Cursor::new(saved))?;
+    let mut parts = Vec::new();
+    for i in 0..package.len() {
+        let mut part = package.by_index(i)?;
+        let path = part.name().to_owned();
+        let mut data = Vec::new();
+        part.read_to_end(&mut data)?;
+        if let Some((original, injected)) = match path.as_str() {
+            "xl/tables/table1.xml" => Some(("ChartRows", "_XLCHART.v1.0")),
+            "xl/tables/table2.xml" => Some(("PrintRows", "_xlnm.Other")),
+            "xl/tables/table3.xml" => Some(("SanitizedRows", "?xlchart.Data")),
+            "xl/tables/table4.xml" => Some(("OtherRows", "?xlnm.")),
+            _ => None,
+        } {
+            data = String::from_utf8(data)?.replace(original, injected).into_bytes();
+        }
+        parts.push((path, data));
+    }
+    let imported = make_zip(&parts.iter().map(|(path, data)| (path.as_str(), data.as_slice())).collect::<Vec<_>>());
+    let (back, report) = read_xlsx(&imported)?;
+    let names: Vec<_> = back.sheets[0].tables.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(names, ["Table3", "Table4", "Table5", "Table6", "table2"]);
+    for (ti, name) in names.iter().enumerate() {
+        assert!(!back.table_name_taken(name, Some((0, ti))), "{name}");
+    }
+    assert_eq!(report.warnings.iter().filter(|w| w.starts_with("Table ") && w.contains("was renamed")).count(), 4);
+    Ok(())
+}
+
 fn table(name: &str, col: u32) -> Table {
     Table {
         id: col + 1,
@@ -238,7 +284,7 @@ fn direct_model_repairs_formula_objects_without_rewriting_literals() -> Result<(
     let extended = &back.sheets[0].charts[1].series[0];
     assert_eq!(extended.name.as_deref(), Some("Data_Tbl_2[Label]"));
     assert_eq!(extended.categories.as_deref(), Some("Data_Tbl_2[Value]"));
-    assert_eq!(extended.values, "_xlchart.v1.0_2[Value]");
+    assert_eq!(extended.values, "Table1[Value]");
     assert_eq!(back.sheets[0].charts[1].series[1].name.as_deref(), Some("\"Data?Tbl[Label]\""));
     assert_eq!(back.sheets[0].sparklines[0].source, "Data_Tbl_2[Value]");
     assert_eq!(back.sheets[0].controls[0].link.as_deref(), Some("Data_Tbl_2[@Value]"));
@@ -303,7 +349,7 @@ fn allocator_preserves_valid_spellings_and_bounds_generated_names() {
     let mut borrowed = Cow::Borrowed(&wb);
     crate::table_names::repair(&mut borrowed, ["_XLCHART.V1.0".into()], &mut Vec::new());
     let tables = &borrowed.sheets[0].tables;
-    assert_eq!(tables[3].name, "_xlchart.v1.0_2");
+    assert_eq!(tables[3].name, "Table1");
     assert_eq!(tables[4].name, "KeepMe");
     assert_eq!(tables[5].name, "keepme_2");
     assert_eq!(tables[6].name, long);
@@ -323,7 +369,7 @@ fn a_name_scoped_to_a_kept_sheet_follows_the_repaired_table() -> Result<(), Box<
             kind: PreservedSheetKind::Module,
             before: 1,
             sheet_id: 2,
-            names: vec![PreservedName { attrs: r#" name="LocalRef" hidden="1""#.into(), formula: "Source?Rows[Value]".into() }],
+            names: vec![PreservedName { name: "LocalRef".into(), attrs: r#" hidden="1""#.into(), formula: "Source?Rows[Value]".into() }],
             ..Default::default()
         }],
         ..Default::default()
@@ -443,7 +489,7 @@ fn a_literal_series_title_spelling_a_structured_reference_stays_literal() -> Res
     assert!(captured_extended.contains("<cx:tx><cx:txData><cx:v>Sale__2[Value]</cx:v></cx:txData></cx:tx>"), "{captured_extended}");
     assert_eq!(back.sheets[0].charts.iter().filter(|ch| ch.series[0].name.as_deref() == Some("\"Sales[2024]\"")).count(), 2);
     assert_eq!(back.sheets[0].charts.iter().filter(|ch| ch.series[0].name.as_deref() == Some("\"Sale__2[Value]\"")).count(), 2);
-    assert!(back.table("_xlchart.v1.2").is_some());
+    assert_eq!(back.table("Table1"), Some((0, 2)));
     let workbook = xml(&saved, "xl/workbook.xml")?;
     assert_eq!(workbook.matches("<definedName name=\"_xlchart.v1.").count(), 2);
     Ok(())
@@ -483,7 +529,7 @@ fn sheet_scoped_names_reserve_table_names() -> Result<(), Box<dyn std::error::Er
             kind: PreservedSheetKind::Module,
             before: 2,
             sheet_id: 3,
-            names: vec![PreservedName { attrs: r#" name="LOCAL&#82;EF" comment="A &amp; B""#.into(), formula: "Sheet1!$H$2".into() }],
+            names: vec![PreservedName { name: "LOCALREF".into(), attrs: r#" comment="A &amp; B""#.into(), formula: "Sheet1!$H$2".into() }],
             ..Default::default()
         }],
         ..Default::default()
@@ -526,12 +572,12 @@ fn modeled_print_names_reserve_table_names_on_save() -> Result<(), Box<dyn std::
     assert_eq!(
         report.warnings,
         [
-            r#"Table "_xlnm.Print_Area" on sheet "Sheet1" was renamed to "_xlnm.Print_Area_2"."#,
-            r#"Table "_xlnm.Print_Titles" on sheet "Sheet1" was renamed to "_xlnm.Print_Titles_2"."#,
+            r#"Table "_xlnm.Print_Area" on sheet "Sheet1" was renamed to "Table1"."#,
+            r#"Table "_xlnm.Print_Titles" on sheet "Sheet1" was renamed to "Table2"."#,
         ]
     );
-    assert_eq!(back.table("_xlnm.Print_Area_2"), Some((0, 0)));
-    assert_eq!(back.table("_xlnm.Print_Titles_2"), Some((0, 1)));
+    assert_eq!(back.table("Table1"), Some((0, 0)));
+    assert_eq!(back.table("Table2"), Some((0, 1)));
     assert_eq!(back.sheets[0].print.print_area, RangeRef::parse("A1:C4"));
     assert_eq!(back.sheets[0].print.title_rows, Some((0, 0)));
     Ok(())

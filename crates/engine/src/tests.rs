@@ -8037,6 +8037,7 @@ mod objects;
 mod python_cells;
 mod python_commands;
 mod python_files;
+mod table_name_scopes;
 
 #[test]
 fn text_to_columns_keeps_a_mid_field_quote() {

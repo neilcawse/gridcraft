@@ -71,9 +71,9 @@ fn kept_sheet_entries<'a>(wb_xml: &'a xml::El, wb_rels: &[PreservedRel], file_to
     out
 }
 
-/// The attributes of `CT_DefinedName` (ECMA-376 Part 1, §18.2.5) other than `localSheetId`.
+/// The attributes of `CT_DefinedName` (ECMA-376 Part 1, §18.2.5) other than `name` and
+/// `localSheetId`.
 const NAME_ATTRS: &[&str] = &[
-    "name",
     "comment",
     "customMenu",
     "description",
@@ -89,19 +89,21 @@ const NAME_ATTRS: &[&str] = &[
     "workbookParameter",
 ];
 
-/// The defined names of the workbook scoped to the sheet at `file_index`.
+/// The defined names of the workbook scoped to the sheet at `file_index`. One without its
+/// required `name` is dropped, as the workbook's own names are.
 fn sheet_names(wb_xml: &xml::El, file_index: usize) -> Vec<PreservedName> {
     let names = wb_xml.child("definedNames").into_iter().flat_map(|d| d.kids("definedName"));
     names
         .filter(|d| d.attr_u32("localSheetId").and_then(|i| usize::try_from(i).ok()) == Some(file_index))
-        .map(|d| {
+        .filter_map(|d| {
+            let name = d.attr("name")?.to_string();
             let mut attrs = String::new();
             for k in NAME_ATTRS {
                 if let Some(v) = d.attr(k) {
                     let _ = write!(attrs, " {k}=\"{}\"", esc_attr(v));
                 }
             }
-            PreservedName { attrs, formula: d.text.clone() }
+            Some(PreservedName { name, attrs, formula: d.text.clone() })
         })
         .collect()
 }

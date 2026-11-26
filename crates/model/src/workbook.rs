@@ -751,6 +751,29 @@ impl Workbook {
         }
         None
     }
+    /// Whether a table can't take `name` because the one namespace tables share with defined names
+    /// (ECMA-376 Part 1 §18.5.1.2) already holds it: another table than `except` (the table being
+    /// renamed), a defined name of any scope, including the names of kept chart, dialog and macro
+    /// sheets, an imported slicer cache's name (written as a workbook name, `#N/A`, when the file
+    /// had no marker for it), or a name the file format reserves ([`reserved_name`]). Names are
+    /// the same regardless of case in any script ([`gridcraft_formula::same_name`]), as the XLSX
+    /// save's repair of colliding table names compares them. Allocates nothing: it runs on what
+    /// the user types.
+    pub fn table_name_taken(&self, name: &str, except: Option<(usize, usize)>) -> bool {
+        let same = |other: &str| gridcraft_formula::same_name(other, name);
+        let tables = self.sheets.iter().enumerate().flat_map(|(si, s)| s.tables.iter().enumerate().map(move |(ti, t)| ((si, ti), t)));
+        let mut kept_names = self.preserved.iter().flat_map(|p| &p.sheets).flat_map(|s| &s.names);
+        reserved_name(name)
+            || tables.filter(|(at, _)| Some(*at) != except).any(|(_, t)| same(&t.name))
+            || self.names.iter().any(|n| same(&n.name))
+            || kept_names.any(|n| same(&n.name))
+            || self.sheets.iter().flat_map(|s| &s.slicers).any(|sl| !sl.imported_cache.name.is_empty() && same(&sl.imported_cache.name))
+    }
+    /// The name Insert Table gives a new table: the first of `Table1`, `Table2`… that
+    /// [`Self::table_name_taken`] leaves free.
+    pub fn next_table_name(&self) -> String {
+        next_table_name_with(&mut 1, |name| self.table_name_taken(name, None))
+    }
     /// Renames the `ti`th table of the `si`th sheet to `name` (Table Design > Table Name).
     /// Bound PivotTables, slicers and cell references to the table follow the rename.
     pub fn rename_table(&mut self, si: usize, ti: usize, name: &str) {
@@ -907,6 +930,31 @@ impl Workbook {
         out.sort_unstable();
         out
     }
+}
+
+/// Allocates the first free `Table<n>` at or after `next`, advancing the cursor so batch
+/// repair need not search occupied numbers again. `taken` receives the lowercase spelling.
+pub fn next_table_name_with(next: &mut u64, mut taken: impl FnMut(&str) -> bool) -> String {
+    use std::fmt::Write;
+
+    let mut name = String::from("table");
+    loop {
+        name.truncate("table".len());
+        let _ = write!(name, "{next}");
+        *next += 1;
+        if !taken(&name) {
+            name[..1].make_ascii_uppercase();
+            return name;
+        }
+    }
+}
+
+/// Whether the file format keeps `name` for itself, in any case: `_xlnm.` starts SpreadsheetML's
+/// built-in names (ECMA-376 Part 1 §18.2.5: "End users shall not use this string for custom
+/// names"), and `_xlchart.` the hidden names an Excel 2016 chart (histogram, waterfall…) reads its
+/// data through, which the XLSX writer makes on save and the reader takes back as the charts'.
+pub fn reserved_name(name: &str) -> bool {
+    ["_xlnm.", "_xlchart."].iter().any(|p| name.get(..p.len()).is_some_and(|head| head.eq_ignore_ascii_case(p)))
 }
 
 /// Calls of the names in `lambdas` spelled as the names are.
