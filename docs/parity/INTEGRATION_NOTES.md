@@ -208,7 +208,9 @@ In the normal grid view, a small viewport may need to scroll beyond the legacy p
 cap to show a selected endpoint near the last worksheet row or column. The view now allows the
 offset needed to show that endpoint while it remains selected, without changing the shared
 used-range scrollbar bounds. This also fixes the pre-existing snapback after Ctrl+arrow to a
-physical sheet edge.
+physical sheet edge. On base `c40a8d51`, a 600×420 keyboard test reached `XFD1048576` with
+Ctrl+Down and Ctrl+Right but failed the visibility assertion after three more frames. The
+regression also checks Ctrl+End and Ctrl+Shift+End with formatting-only bounds.
 
 **Residual differences** (paste payload, documented in `docs/gaps.md` §25). After GridCraft's own
 whole-row/column Copy or Cut the destination keeps its outline level and has no collapsed summary
