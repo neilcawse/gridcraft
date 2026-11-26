@@ -280,7 +280,7 @@ fn ctrl_prop(c: &FormControl) -> String {
             if let Some(l) = &c.link {
                 let _ = write!(s, " fmlaLink=\"{}\"", esc_attr(l));
             }
-            if c.check_lock_text.unwrap_or(true) {
+            if c.check_lock_text.or(c.check_vml_lock_text).unwrap_or(true) {
                 s.push_str(" lockText=\"1\"");
             }
             if let Some(flat) = c.no_three_d {
@@ -379,6 +379,7 @@ fn vml_shape(sheet: &Sheet, c: &FormControl, id: u64, z: usize) -> String {
             if c.checked != CheckState::Unchecked {
                 let _ = write!(data, "<x:Checked>{}</x:Checked>", c.checked.number());
             }
+            push_vml_flag(&mut data, "LockText", c.check_vml_lock_text);
             push_vml_flag(&mut data, "NoThreeD", c.no_three_d);
         }
     }
@@ -399,14 +400,20 @@ fn vml_shape(sheet: &Sheet, c: &FormControl, id: u64, z: usize) -> String {
     } else {
         let _ = write!(shape, " id=\"_x0000_s{id}\"");
     }
+    let aspect = match (c.kind, c.check_vml_lock_aspect) {
+        (ControlKind::Check, Some(true)) => " aspectratio=\"t\"",
+        (ControlKind::Check, Some(false)) => " aspectratio=\"f\"",
+        _ => "",
+    };
     let _ = write!(
         shape,
-        " type=\"#_x0000_t201\" style=\"position:absolute;margin-left:{:.2}pt;margin-top:{:.2}pt;width:{:.2}pt;height:{:.2}pt;z-index:{}\"{} o:insetmode=\"auto\"><o:lock v:ext=\"edit\" rotation=\"t\"/>{text}{data}</v:shape>",
+        " type=\"#_x0000_t201\" style=\"position:absolute;margin-left:{:.2}pt;margin-top:{:.2}pt;width:{:.2}pt;height:{:.2}pt;z-index:{}{}\"{} o:insetmode=\"auto\"><o:lock v:ext=\"edit\" rotation=\"t\"{aspect}/>{text}{data}</v:shape>",
         pt(x),
         pt(y),
         pt(c.anchor.width.max(0.0) as f64),
         pt(c.anchor.height.max(0.0) as f64),
         z + 1,
+        if c.kind == ControlKind::Check && c.check_vml_wrap_tight { ";mso-wrap-style:tight" } else { "" },
         if c.kind == ControlKind::Button { " o:button=\"t\"" } else { " stroked=\"f\" filled=\"f\"" },
     );
     shape
@@ -492,6 +499,9 @@ struct Props {
     checked: Option<CheckState>,
     markup: Option<CaptionMarkup>,
     check_lock_text: Option<bool>,
+    check_vml_lock_text: Option<bool>,
+    check_vml_wrap_tight: bool,
+    check_vml_lock_aspect: Option<bool>,
     check_ctrl_prop_opaque: bool,
     /// Payload that the drop-down or check box model cannot faithfully rewrite.
     opaque: bool,
@@ -574,6 +584,9 @@ fn props_from_ctrl_prop(e: &El) -> Props {
         checked: e.attr("checked").and_then(check_state_of),
         markup: None,
         check_lock_text: Some(e.attr_bool("lockText").unwrap_or(false)),
+        check_vml_lock_text: None,
+        check_vml_wrap_tight: false,
+        check_vml_lock_aspect: None,
         check_ctrl_prop_opaque: matches!(kind, Some(ControlKind::Check) | None)
             && (check_ctrl_prop_payload(e) || e.attr("objectType").is_some_and(|_| kind.is_none())),
         opaque: match kind {
@@ -628,6 +641,10 @@ fn props_from_vml(shape: &El) -> Option<Props> {
         },
         checked: data.child("Checked").and_then(|c| vml_check_state_of(&c.text)),
         markup,
+        check_vml_lock_text: if kind == ControlKind::Check { data.child("LockText").and_then(vml_drop_bool) } else { None },
+        check_vml_wrap_tight: kind == ControlKind::Check
+            && shape.attr("style").is_some_and(|s| s.split(';').filter_map(vml_style_entry).any(|p| p == ("mso-wrap-style", "tight"))),
+        check_vml_lock_aspect: if kind == ControlKind::Check { shape.child("lock").and_then(|e| e.attr_bool("aspectratio")) } else { None },
         opaque,
         ..Props::default()
     })
@@ -639,30 +656,35 @@ fn props_from_vml(shape: &El) -> Option<Props> {
 /// shading, is kept by leaving the check box to pass-through.
 fn check_vml_payload(shape: &El, data: &El) -> bool {
     shape.children.len() > 5
-        || data.children.len() > 12
+        || data.children.len() > 13
         || has_repeated_children(shape)
         || has_repeated_children(data)
         || shape.attrs.iter().any(|(k, v)| match k.as_str() {
             "id" | "spid" => false,
-            "style" => v.split(';').map(str::trim).filter(|s| !s.is_empty()).any(|s| match s.split_once(':').map(|(k, v)| (k.trim(), v.trim())) {
+            "style" => v.split(';').map(str::trim).filter(|s| !s.is_empty()).any(|s| match vml_style_entry(s) {
                 Some(("position", "absolute")) => false,
                 Some(("margin-left" | "margin-top" | "width" | "height", v)) => {
-                    !v.strip_suffix("pt").unwrap_or(v).parse::<f64>().is_ok_and(f64::is_finite)
+                    !v.strip_suffix("pt").or_else(|| v.strip_suffix("in")).unwrap_or(v).parse::<f64>().is_ok_and(f64::is_finite)
                 }
                 Some(("z-index", v)) => v.parse::<i64>().is_err(),
+                Some(("mso-wrap-style", "tight")) => false,
                 _ => true,
             }),
             "insetmode" => v != "auto",
             "stroked" | "filled" => v != "f",
             "type" => v != "#_x0000_t201",
             "strokecolor" => !matches!(v.as_str(), "black [0]" | "black [64]" | "windowText [64]" | "windowText"),
-            "fillcolor" => !matches!(v.as_str(), "window [65]" | "windowText [64]"),
+            "strokeweight" => shape.attr("stroked") != Some("f") || v != "3e-5mm",
+            "fillcolor" => !matches!(v.as_str(), "window [65]" | "windowText [64]") && !(shape.attr("filled") == Some("f") && v == "white [9]"),
             _ => true,
         })
         || shape.children.iter().any(|c| match c.name.as_str() {
             "ClientData" | "textbox" => false,
             _ if !c.children.is_empty() || !c.text.trim().is_empty() => true,
-            "lock" => c.attrs.iter().any(|(k, v)| !matches!((k.as_str(), v.as_str()), ("ext", "edit") | ("rotation" | "text", "t"))),
+            "lock" => c
+                .attrs
+                .iter()
+                .any(|(k, v)| !matches!((k.as_str(), v.as_str()), ("ext", "edit") | ("rotation" | "text", "t") | ("aspectratio", "t" | "f"))),
             "fill" => c.attrs.iter().any(|(k, v)| !matches!((k.as_str(), v.as_str()), ("color2", "window [65]") | ("detectmouseclick", "t"))),
             "path" => c.attrs.iter().any(|(k, v)| !matches!((k.as_str(), v.as_str()), ("shadowok" | "strokeok" | "fillok", "t"))),
             _ => true,
@@ -677,10 +699,14 @@ fn check_vml_payload(shape: &El, data: &El) -> bool {
                     "AutoFill" | "AutoLine" => !c.text.trim().eq_ignore_ascii_case("false"),
                     "TextVAlign" => !c.text.trim().eq_ignore_ascii_case("center"),
                     "Checked" => vml_check_state_of(&c.text).is_none(),
-                    "NoThreeD" | "MoveWithCells" | "SizeWithCells" | "Locked" | "PrintObject" => vml_drop_bool(c).is_none(),
+                    "NoThreeD" | "MoveWithCells" | "SizeWithCells" | "Locked" | "PrintObject" | "LockText" => vml_drop_bool(c).is_none(),
                     _ => true,
                 }
         })
+}
+
+fn vml_style_entry(s: &str) -> Option<(&str, &str)> {
+    s.split_once(':').map(|(k, v)| (k.trim(), v.trim()))
 }
 
 fn has_repeated_children(e: &El) -> bool {
@@ -838,6 +864,9 @@ fn build(p: Props, kind: ControlKind, anchor: Anchor, name: Option<&str>, id: u3
         c.checked = p.checked.unwrap_or_default();
         c.no_three_d = p.display.no_three_d.or(p.vml_display.no_three_d);
         c.check_lock_text = p.check_lock_text;
+        c.check_vml_lock_text = p.check_vml_lock_text;
+        c.check_vml_wrap_tight = p.check_vml_wrap_tight;
+        c.check_vml_lock_aspect = p.check_vml_lock_aspect;
         c.kept_macro = p.macro_;
         c.caption_markup = p.markup;
     }
@@ -991,6 +1020,9 @@ pub fn read(cx: &mut Ctx<'_>, controls: Option<&El>, vml_rid: Option<&str>, rels
                             f.checked = f.checked.or(v.checked);
                             f.vml_display = v.vml_display;
                             f.markup = v.markup;
+                            f.check_vml_lock_text = v.check_vml_lock_text;
+                            f.check_vml_wrap_tight = v.check_vml_wrap_tight;
+                            f.check_vml_lock_aspect = v.check_vml_lock_aspect;
                             f.opaque |= f.kind != v.kind;
                         }
                         _ => {}

@@ -1033,6 +1033,15 @@ pub struct FormControl {
     /// The x14 caption lock; `None` uses the new-control default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub check_lock_text: Option<bool>,
+    /// The legacy VML caption lock, when the file explicitly gives one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_vml_lock_text: Option<bool>,
+    /// The legacy shape explicitly requests tight wrapping.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub check_vml_wrap_tight: bool,
+    /// The legacy shape's aspect-ratio lock, when explicitly specified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_vml_lock_aspect: Option<bool>,
     /// The macro a check box's file assigns it, as written (`[0]!Toggled`): kept for saving,
     /// never run.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1069,6 +1078,9 @@ impl Default for FormControl {
             checked: CheckState::Unchecked,
             no_three_d: None,
             check_lock_text: None,
+            check_vml_lock_text: None,
+            check_vml_wrap_tight: false,
+            check_vml_lock_aspect: None,
             kept_macro: None,
             caption_markup: None,
         }

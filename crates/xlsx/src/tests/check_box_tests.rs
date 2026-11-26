@@ -224,6 +224,82 @@ fn x14_default_caption_lock_is_not_changed_on_save() {
 }
 
 #[test]
+fn vml_caption_lock_survives_with_or_without_x14() {
+    let target = "xl/drawings/vmlDrawing1.vml";
+    for x14 in [false, true] {
+        let original = legacy_check_boxes(x14);
+        let vml = text(&mut Package::open(&original).unwrap(), target).replacen(
+            "<x:Checked>1</x:Checked>",
+            "<x:Checked>1</x:Checked><x:LockText>False</x:LockText>",
+            1,
+        );
+        let (wb, _) = read_xlsx(&replace_part(&original, target, &vml)).unwrap();
+        assert_eq!(check_boxes(&wb), expected());
+        let out = write_xlsx(&wb).unwrap();
+        assert_eq!(written_vml(&out).matches("<x:LockText>False</x:LockText>").count(), 1);
+        let mut pkg = Package::open(&out).unwrap();
+        let rels = pkg.rels("xl/worksheets/sheet1.xml").unwrap();
+        let checked = rels
+            .iter()
+            .filter(|r| r.kind == "ctrlProp")
+            .filter_map(|r| pkg.read_xml(&r.target).unwrap())
+            .find(|p| p.attr("checked") == Some("Checked"))
+            .unwrap();
+        assert_eq!(checked.attr_bool("lockText").unwrap_or(false), x14);
+    }
+}
+
+#[test]
+fn supported_shape_style_and_aspect_lock_survive_vml_export() {
+    for x14 in [false, true] {
+        let original = legacy_check_boxes(x14);
+        let target = "xl/drawings/vmlDrawing1.vml";
+        let vml = text(&mut Package::open(&original).unwrap(), target);
+        for (old, new, markup) in [
+            ("z-index:1", "z-index:1;mso-wrap-style:tight", ";mso-wrap-style:tight"),
+            ("rotation=\"t\"", "rotation=\"t\" aspectratio=\"t\"", " aspectratio=\"t\""),
+            ("rotation=\"t\"", "rotation=\"t\" aspectratio=\"f\"", " aspectratio=\"f\""),
+        ] {
+            let source = vml.replacen(old, new, 1);
+            assert!(source.contains(new));
+            let (wb, _) = read_xlsx(&replace_part(&original, target, &source)).unwrap();
+            assert_eq!(check_boxes(&wb), expected(), "x14={x14}: {new}");
+            let out = write_xlsx(&wb).unwrap();
+            assert_eq!(written_vml(&out).matches(markup).count(), 1);
+            let (back, _) = read_xlsx(&out).unwrap();
+            assert_eq!(check_boxes(&back), expected(), "x14={x14}: {new}");
+        }
+    }
+}
+
+#[test]
+fn vml_inches_do_not_override_the_cell_anchor() {
+    let original = legacy_check_boxes(false);
+    let target = "xl/drawings/vmlDrawing1.vml";
+    let vml = text(&mut Package::open(&original).unwrap(), target).replacen("margin-left:120pt", "margin-left:5in", 1);
+    assert!(vml.contains("margin-left:5in"));
+    let (wb, _) = read_xlsx(&replace_part(&original, target, &vml)).unwrap();
+    let (ordinary, _) = read_xlsx(&original).unwrap();
+    assert_eq!(check_boxes(&wb), expected());
+    assert_eq!(wb.sheet(0).unwrap().controls[0].anchor, ordinary.sheet(0).unwrap().controls[0].anchor);
+}
+
+#[test]
+fn inactive_shape_paint_does_not_make_a_checkbox_opaque() {
+    let original = legacy_check_boxes(false);
+    let target = "xl/drawings/vmlDrawing1.vml";
+    let vml = text(&mut Package::open(&original).unwrap(), target);
+    for (old, paint) in [("fillcolor=\"window [65]\"", "fillcolor=\"white [9]\""), ("<v:shape id=", "<v:shape strokeweight=\"3e-5mm\" id=")] {
+        let vml = vml.replacen(old, paint, 1);
+        assert!(vml.contains(paint));
+        let (wb, _) = read_xlsx(&replace_part(&original, target, &vml)).unwrap();
+        assert_eq!(check_boxes(&wb), expected(), "{paint}");
+        let (back, _) = read_xlsx(&write_xlsx(&wb).unwrap()).unwrap();
+        assert_eq!(check_boxes(&back), expected(), "{paint}");
+    }
+}
+
+#[test]
 fn worksheet_anchor_settings_outside_the_model_remain_in_the_sheet() {
     let base = legacy_check_boxes(true);
     let target = "xl/worksheets/sheet1.xml";
