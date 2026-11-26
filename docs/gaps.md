@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-11-13 · **Change:** minor (§5: Arabic PDF output preserves cell direction, joined glyphs and RTL sheet geometry; earlier: §17: equations; earlier: §13: Solver Sensitivity report; earlier: §4: chart resizing is no longer a gap; earlier: §13: Analysis ToolPak has all 19 tools; earlier: §4: chart data tables implemented with XLSX round-trip and print/PDF; earlier: §13: Solver Options; earlier: §13: Solver Load/Save Model and Reset All) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-11-25 · **Change:** minor (§17: grouped drawing placement during sort; earlier: §5: Arabic PDF output preserves cell direction, joined glyphs and RTL sheet geometry; earlier: §17: equations; earlier: §13: Solver Sensitivity report; earlier: §4: chart resizing is no longer a gap; earlier: §13: Analysis ToolPak has all 19 tools; earlier: §4: chart data tables implemented with XLSX round-trip and print/PDF; earlier: §13: Solver Options; earlier: §13: Solver Load/Save Model and Reset All) · **Target:** Microsoft Excel (Microsoft 365)
 
 Every known shortfall against Excel, one entry each, ranked by user impact (what blocks someone
 using GridCraft for real work first). This is the work list: pick from the top, check the open
@@ -162,6 +162,9 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
   conversion; cloud storage requested (#86). **Estimate:** 35–55 h (co-authoring scope needs the owner).
 
 ### 17. Insert objects (F)
+- Grouped shapes stay in place during the sort permutation, including groups that straddle the block;
+  ungrouped drawings retain their existing sort behavior. Excel confirmed group bounds and placement,
+  but individual member positions were unmeasured. See [X34](parity/INTEGRATION_NOTES.md#x34--grouped-shapes-stay-in-place-during-sort).
 - Ink strokes now survive XLSX save/reopen as editable polylines. Inserted icons still lose their
   identity/artwork on save (#551); native Office InkML import is not implemented.
 - SmartArt, signature line, objects, 3-D models, screenshot; 8 shape kinds vs ~170;
@@ -202,6 +205,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-25 | minor | §17: X34 keeps grouped shapes in place during the sort permutation, replacing X28's member-by-member movement. |
 | 2026-11-02 | minor | §17: equations (Insert › Equation, LaTeX source, gallery, editor) |
 | 2026-11-02 | minor | §13: Solver Sensitivity report: shadow prices, reduced costs and allowable ranges for Simplex LP; Lagrange multipliers and reduced gradients for GRG Nonlinear |
 | 2026-11-02 | minor | §4: charts, like every floating object, move and resize from eight handles (#190), so resizing is no longer listed as missing; the evidence is one paragraph again, without the stale "PRs #158, #161 open" |

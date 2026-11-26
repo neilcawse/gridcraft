@@ -287,6 +287,130 @@ fn a_sort_keeps_valid_named_markers_for_the_row_fit() {
     assert_rect(chart_rect(&s), before, "the end marker stays 50 px into row 4");
 }
 
+/// Synthetic version of the Batch 4 grouped-shape probe: one group straddles A5:D10
+/// (members starting in B1 and B6), and the other lies fully inside it (B8 and B9).
+fn group_sort_session() -> Session {
+    let mut s = s();
+    s.execute(
+        "range.setValues",
+        json!({"range": "A5", "values": [[6, 16, 26, 36], [5, 15, 25, 35], [4, 14, 24, 34], [3, 13, 23, 33], [2, 12, 22, 32], [1, 11, 21, 31]]}),
+    )
+    .unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    let (row, width) = (sh.row_height(0), sh.col_left(4) - sh.col_left(1));
+    for (cells, rows) in [(["B1", "B6"], 2.0), (["B8", "B9"], 1.0)] {
+        let mut members = Vec::new();
+        for at in cells {
+            let shape = s
+                .execute("insert.shape", json!({"kind": "rectangle", "at": at, "width": width, "height": rows * row, "mode": "moveAndSize"}))
+                .unwrap();
+            members.push(DrawingRef::Shape(shape["shape"].as_u64().unwrap() as u32));
+        }
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let id = wb.next_object_id();
+        let sh = wb.sheet_mut(0).unwrap();
+        let first = sh.drawing_rect(members[0]).unwrap();
+        let last = sh.drawing_rect(members[1]).unwrap();
+        let rect = ObjectRect { h: last.y + last.h - first.y, ..first };
+        sh.groups.push(gridcraft_model::DrawingGroup {
+            id,
+            name: format!("Group {id}"),
+            anchor: sh.rect_anchor(rect, AnchorMode::MoveAndSize),
+            child_offset: (0, 0),
+            child_extent: ((rect.w * EMU_PER_PX) as i64, (rect.h * EMU_PER_PX) as i64),
+            flip: (false, false),
+            rotation: 0,
+            member_rotations: Vec::new(),
+            members,
+            file: None,
+        });
+    }
+    let bytes = crate::io::save_bytes(&s.doc().unwrap().wb, "groups.xlsx").unwrap();
+    s.execute("file.open", json!({"name": "groups.xlsx", "base64": crate::io::base64_encode(&bytes)})).unwrap();
+    s
+}
+
+fn sort_group_rows(s: &mut Session) {
+    s.execute("data.sort", json!({"range": "A5:D10", "header": false, "keys": [{"column": "A"}]})).unwrap();
+}
+
+fn assert_group_sort_rows(sh: &gridcraft_model::Sheet, sorted: bool) {
+    for row in 4..10 {
+        let key = if sorted { row - 3 } else { 10 - row };
+        for col in 0..4 {
+            assert_eq!(sh.value(CellRef::new(row, col)), Value::Number(f64::from(key + 10 * col)));
+        }
+    }
+}
+
+fn assert_group_boxes(sh: &gridcraft_model::Sheet, before: &gridcraft_model::Sheet, index: usize) {
+    assert_eq!(sh.groups.len(), 2);
+    let (group, old) = (&sh.groups[index], &before.groups[index]);
+    assert_eq!(group.name, old.name);
+    assert_eq!(group.anchor.mode, AnchorMode::MoveAndSize);
+    assert_rect(sh.anchor_rect(&group.anchor), before.anchor_rect(&old.anchor), "stored group box");
+    assert_rect(sh.drawing_rect(DrawingRef::Group(group.id)).unwrap(), before.drawing_rect(DrawingRef::Group(old.id)).unwrap(), "group box");
+    assert_eq!(group.members.len(), old.members.len());
+    for (&member, &old_member) in group.members.iter().zip(&old.members) {
+        assert_rect(sh.drawing_rect(member).unwrap(), before.drawing_rect(old_member).unwrap(), "group member");
+    }
+}
+
+#[test]
+fn a_sort_keeps_group_boxes_and_members_in_place_through_undo_redo() {
+    let mut s = group_sort_session();
+    let before = s.doc().unwrap().wb.sheets[0].clone();
+    assert_group_sort_rows(&before, false);
+    sort_group_rows(&mut s);
+    for (command, sorted) in [(None, true), (Some("edit.undo"), false), (Some("edit.redo"), true)] {
+        if let Some(command) = command {
+            s.execute(command, json!({})).unwrap();
+        }
+        let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+        assert_group_sort_rows(sh, sorted);
+        for index in 0..2 {
+            assert_group_boxes(sh, &before, index);
+        }
+    }
+}
+
+#[test]
+fn a_sort_keeps_group_boxes_and_members_in_place_through_xlsx_save() {
+    let mut s = group_sort_session();
+    let before = s.doc().unwrap().wb.sheets[0].clone();
+    sort_group_rows(&mut s);
+    let bytes = crate::io::save_bytes(&s.doc().unwrap().wb, "groups.xlsx").unwrap();
+    let (reopened, _) = crate::io::open_bytes("groups.xlsx", &bytes).unwrap();
+    let sh = reopened.sheet(0).unwrap();
+    assert_group_sort_rows(sh, true);
+    for index in (0..2).rev() {
+        assert_group_boxes(sh, &before, index);
+        let (new_ref, old_ref) = (DrawingRef::Group(sh.groups[index].id), DrawingRef::Group(before.groups[index].id));
+        assert_eq!(sh.drawing_files[&new_ref].placement, before.drawing_files[&old_ref].placement);
+    }
+}
+
+#[test]
+fn a_sort_keeps_groups_in_place_before_the_separate_row_fit() {
+    let mut s = group_sort_session();
+    s.execute("home.rowHeight", json!({"rows": "5:5", "points": 30})).unwrap();
+    {
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let large = wb.styles.derive(StyleId::DEFAULT, |st| st.font.size = 36.0);
+        wb.sheet_mut(0).unwrap().set_style(CellRef::new(6, 0), large);
+    }
+    let before = s.doc().unwrap().wb.sheets[0].clone();
+    let group_box = |sh: &gridcraft_model::Sheet, index: usize| sh.drawing_rect(DrawingRef::Group(sh.groups[index].id)).unwrap();
+    sort_group_rows(&mut s);
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert_eq!(sh.row_height(9), before.row_height(4), "row 5's height goes to row 10");
+    let grown = f64::from(sh.row_height(7) - before.row_height(6));
+    assert!(grown > 20.0, "the unfitted 36 pt cell sorts into row 8 and fits");
+    let (straddle, inside) = (group_box(&before, 0), group_box(&before, 1));
+    assert_rect(group_box(sh, 0), ObjectRect { h: straddle.h + grown, ..straddle }, "row 8 fits inside the straddling group");
+    assert_rect(group_box(sh, 1), ObjectRect { y: inside.y + grown, ..inside }, "row 8 fits above the inside group");
+}
+
 /// The row fit after a deletion re-measures the chart against the remapped rows.
 #[test]
 fn a_row_fit_after_a_deletion_sizes_the_shifted_chart() {

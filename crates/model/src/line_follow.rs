@@ -160,6 +160,11 @@ impl Sheet {
             || self.cols != other.cols
     }
 
+    /// The groups and every object they contain, named as in [`Sheet::object_refs`].
+    pub fn grouped_objects(&self) -> HashSet<ObjRef> {
+        self.groups.iter().flat_map(|g| std::iter::once(DrawingRef::Group(g.id)).chain(g.members.iter().copied())).map(drawing_obj).collect()
+    }
+
     /// Floating objects outside any group, then each one's anchor.
     fn floating(&self) -> Vec<(Floating, Anchor)> {
         let grouped: HashSet<DrawingRef> = self.groups.iter().flat_map(|g| g.members.iter().copied()).collect();
