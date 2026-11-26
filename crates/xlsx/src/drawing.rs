@@ -403,8 +403,10 @@ fn read_object_inner(
             let name = obj.path(&["nvGrpSpPr", "cNvPr"]).and_then(|c| c.attr("name")).unwrap_or("").to_string();
             let effective = ChildTransform::from_rect(child_box, 0, (false, false));
             let (child_offset, child_extent) = (effective.off, effective.ext);
-            if group_quarter_turn(rotation).is_none() {
-                cx.warn("a rotated group was laid out without its rotation");
+            match group_quarter_turn(rotation) {
+                None => cx.warn("a rotated group was laid out without its rotation"),
+                Some(0) => {}
+                Some(_) => cx.warn("a rotated group was laid out turned, but its pictures and shapes aren't drawn rotated"),
             }
             if member_rotations.iter().any(|&(_, r)| rotates(r)) {
                 cx.warn("a rotated picture or shape in a group is drawn without its rotation");
@@ -1134,14 +1136,14 @@ impl DrawingOut<'_> {
                 _ => None,
             };
             let nested_source = child.and_then(|ng| if source.is_some() { ng.file.as_ref() } else { self.source(ng) });
-            let file_member = g.file.as_ref().and_then(|f| f.members.iter().find(|f| f.reference == *m));
-            let flip = file_member.and_then(|f| f.transform).map_or((false, false), |t| t.flip);
             let member = source.and_then(|f| f.members[i].transform).unwrap_or_else(|| {
                 let r = nested_source.map_or(r, |f| sheet.anchor_rect(&f.anchor));
                 let local = space.unproject(r);
                 if let Some(child) = child {
                     ChildTransform::from_rect(group_unturned_box(local, child.rotation), child.rotation, child.flip)
                 } else {
+                    let file_member = g.file.as_ref().and_then(|f| f.members.iter().find(|f| f.reference == *m));
+                    let flip = file_member.and_then(|f| f.transform).map_or((false, false), |t| t.flip);
                     ChildTransform::from_leaf_box(local, rot, flip)
                 }
             });

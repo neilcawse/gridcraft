@@ -47,6 +47,9 @@ pub fn group_quarter_turn(rotation: i64) -> Option<usize> {
     (rot % 5_400_000 == 0).then_some((rot / 5_400_000) as usize)
 }
 
+/// A box swapped about its centre for an exact 90° or 270° group turn, else unchanged. It is
+/// its own inverse: it takes an outermost group's anchor to the box its members fill, and a
+/// nested group's placed (turned) box back to its frame.
 pub fn group_unturned_box(r: ObjectRect, rotation: i64) -> ObjectRect {
     swap_about_center(r, group_quarter_turn(rotation).is_some_and(|q| q % 2 == 1))
 }
@@ -142,4 +145,61 @@ pub fn group_child_box(frame: ObjectRect, off: (i64, i64), ch_ext: (i64, i64), e
         }
     };
     ObjectRect { x: off.0 as f64, y: off.1 as f64, w: extent(ch_ext.0, ext.0, frame.w), h: extent(ch_ext.1, ext.1, frame.h) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_exact_quarter_turns_turn_a_group_whatever_the_stored_angle() {
+        for (rot, turn) in [
+            (0, Some(0)),
+            (5_400_000, Some(1)),
+            (-16_200_000, Some(1)),
+            (27_000_000, Some(1)),
+            (-10_800_000, Some(2)),
+            (16_200_000, Some(3)),
+            (-5_400_000, Some(3)),
+            (21_600_000, Some(0)),
+            (-21_600_000, Some(0)),
+            (5_399_999, None),
+            (5_400_001, None),
+            (-5_400_001, None),
+            (2_700_000, None),
+            (i64::MIN, None),
+        ] {
+            assert_eq!(group_quarter_turn(rot), turn, "rot {rot}");
+        }
+    }
+
+    #[test]
+    fn nested_flipped_quarter_turns_invert_on_both_axes() {
+        // Outer: flipped vertically and turned -90° (that is 270°), child box 100x100 on a
+        // 120x80 frame. Inner: flipped horizontally and turned 90°, child box 100x100 on 20x30.
+        let outer = GroupProjection::new(
+            ObjectRect { x: 40.0, y: 30.0, w: 120.0, h: 80.0 },
+            ObjectRect { x: 100.0, y: 200.0, w: 100.0, h: 100.0 },
+            ((false, true), -5_400_000),
+            1.0 / 9525.0,
+        );
+        let inner = GroupProjection::new(
+            ObjectRect { x: 110.0, y: 220.0, w: 20.0, h: 30.0 },
+            ObjectRect { x: 30.0, y: 40.0, w: 100.0, h: 100.0 },
+            ((true, false), 5_400_000),
+            1.0,
+        );
+        let map = outer.compose(inner);
+        let leaf = ObjectRect { x: 40.0, y: 60.0, w: 20.0, h: 30.0 };
+        let placed = map.project(leaf);
+        // Inner: centre offset (-30, -15) scales to (-6, -4.5), flips to (6, -4.5) and turns to
+        // (4.5, 6) about (120, 235); the 4x9 box turns to 9x4. Outer: offset (-25.5, -9) scales
+        // to (-30.6, -7.2), flips to (-30.6, 7.2) and turns to (7.2, 30.6) about (100, 70); the
+        // 10.8x3.2 box turns to 3.2x10.8.
+        let expected = ObjectRect { x: 105.6, y: 95.2, w: 3.2, h: 10.8 };
+        let back = map.unproject(placed);
+        for (a, b) in [(placed, expected), (back, leaf)] {
+            assert!([a.x - b.x, a.y - b.y, a.w - b.w, a.h - b.h].iter().all(|d| d.abs() < 1e-9), "{a:?} vs {b:?}");
+        }
+    }
 }

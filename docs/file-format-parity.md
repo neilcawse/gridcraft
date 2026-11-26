@@ -113,9 +113,13 @@ object or a grouped member changes.
 If an imported group's collapsed axis grows during open-time row fit or a later line resize,
 GridCraft recovers its member boxes from the original DrawingML child coordinates. Group flips
 and exact 90°, 180° and 270° turns compose through nested groups and affect member boxes even
-when the group never collapsed. Other group angles retain the unturned layout and warn on import.
-These are DrawingML layout rules, not measurements of Excel for Mac; rendering the transformed
-content itself is outside this change. Untouched worksheet anchor and transform fields still round trip.
+when the group never collapsed. The outermost group's worksheet anchor is taken as its unturned
+frame, so after a 90° or 270° turn its members fill that box swapped about its centre, and a
+member past the sheet's top or left edge is moved back onto the sheet. The turned content is
+still drawn unturned and is reported on import. Other group angles retain the unturned layout
+and warn on import. These are DrawingML layout rules, not measurements of Excel for Mac. A
+group opened and saved untouched writes its worksheet anchor and the group and member transforms
+as read, now including grouped members' own flips.
 
 Imported objects keep their source stacking order and nonvisual IDs and names; a name is kept
 even when its ID is the placeholder `0`, which is renumbered. Bring Forward and Send Backward
@@ -224,7 +228,7 @@ refresh. Counted under features (Get & Transform, ~10% ready), not here.
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-11-25 | minor | XLSX: collapsed imported groups recover member geometry after line sizing; nested group flips and exact quarter turns affect member boxes, superseding the earlier rotated-group layout limit |
+| 2026-11-25 | minor | XLSX: collapsed imported groups recover member geometry after line sizing; nested group flips and exact 90°, 180° and 270° group turns affect member boxes (other angles keep the unturned layout and warning; content is still drawn unturned). Spec-derived, unmeasured in Excel for Mac |
 | 2026-11-25 | minor | XLSX drawings are placed over the rows the open's automatic fit settles on (both profiles), not over the saved heights; untouched objects still save their original markers. Row and column resizes after opening move and size objects by their anchor mode (`ST_EditAs`), groups included; hiding a line leaves them as they were |
 | 2026-11-13 | minor | PDF of a right-to-left sheet keeps explicit Left and Right alignment on the side the grid shows them |
 | 2026-11-12 | minor | `.xls` files open with their data validation (drop-down lists, input messages, error alerts and the rules), read by craft-xls and mapped as the `.xlsx` reader maps the same rules. A rule Excel would refuse, or one past 65,536 in a workbook, is skipped with a warning (#3634, from #3636) |

@@ -212,13 +212,13 @@ impl Sheet {
     fn carry_group(&mut self, id: u32, old: &Sheet, from: &Anchor, to: Anchor) {
         let (from_rect, to_rect) = (old.anchor_rect(from), self.anchor_rect(&to));
         let mut recovered = HashMap::new();
-        if ((from_rect.w == 0.0 && to_rect.w > 0.0) || (from_rect.h == 0.0 && to_rect.h > 0.0))
-            && let Some(g) = self.drawing_group(id)
-            && self.source_group(g).is_some()
-        {
-            self.project_group_members(g, to_rect, None, 0, &mut recovered);
+        let mut rotation = 0;
+        if let Some(g) = self.drawing_group(id) {
+            rotation = g.rotation;
+            if ((from_rect.w == 0.0 && to_rect.w > 0.0) || (from_rect.h == 0.0 && to_rect.h > 0.0)) && self.source_layout_group(g) {
+                self.project_group_members(g, to_rect, None, 0, &mut recovered);
+            }
         }
-        let rotation = self.drawing_group(id).map_or(0, |g| g.rotation);
         let old_box = group_unturned_box(from_rect, rotation);
         let new_box = group_unturned_box(to_rect, rotation);
         let same = |a: ObjectRect, b: ObjectRect| [a.x - b.x, a.y - b.y, a.w - b.w, a.h - b.h].iter().all(|d| d.abs() <= PX_PER_EMU / 2.0);

@@ -357,8 +357,6 @@ fn open_places_a_group_over_the_rows_it_fits() {
 // Synthetic DrawingML, packaged with a generated workbook rather than a captured file.
 fn group_projection_book(height: f32, attrs: &str, member_attrs: &str, nested: bool, custom: bool) -> Vec<u8> {
     use gridcraft_model::{Anchor, Color, DrawingGroup, DrawingRef, LineInfo, Shape, ShapeKind, StyleId};
-    use std::io::{Cursor, Read, Write};
-    use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
 
     let mut wb = Workbook::new();
     let large = wb.styles.derive(StyleId::DEFAULT, |style| style.font.size = 36.0);
@@ -423,7 +421,15 @@ fn group_projection_book(height: f32, attrs: &str, member_attrs: &str, nested: b
 <xdr:grpSpPr><a:xfrm {attrs}><a:off x="610000" y="190500"/><a:ext cx="1200000" cy="760000"/><a:chOff x="100" y="200"/><a:chExt cx="100" cy="100"/></a:xfrm></xdr:grpSpPr>{first}{second}</xdr:grpSp>
 <xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#
     );
-    let mut src = ZipArchive::new(Cursor::new(generated)).unwrap();
+    with_drawing_xml(generated, &drawing)
+}
+
+/// `xlsx` with its first drawing part replaced by `drawing`.
+fn with_drawing_xml(xlsx: Vec<u8>, drawing: &str) -> Vec<u8> {
+    use std::io::{Cursor, Read, Write};
+    use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
+
+    let mut src = ZipArchive::new(Cursor::new(xlsx)).unwrap();
     let mut dst = ZipWriter::new(Cursor::new(Vec::new()));
     for entry in 0..src.len() {
         let mut part = src.by_index(entry).unwrap();
@@ -461,6 +467,16 @@ fn collapsed_group_recovers_member_boxes_on_open() {
 }
 
 #[test]
+fn collapsed_group_with_a_skipped_member_recovers_the_rest_on_open() {
+    let bytes = group_projection_book(0.0, "", "", false, false);
+    let ole = r#"<xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="5" name="Object"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm><a:off x="120" y="240"/><a:ext cx="10" cy="10"/></xdr:xfrm><a:graphic><a:graphicData uri="urn:example:embedded"/></a:graphic></xdr:graphicFrame>"#;
+    let drawing = drawing_xml(&bytes).replacen("</xdr:grpSp>", &format!("{ole}</xdr:grpSp>"), 1);
+    let (wb, warnings) = open_bytes("group.xlsx", &with_drawing_xml(bytes, &drawing)).unwrap();
+    assert!(warnings.iter().any(|w| w.contains("embedded object")), "{warnings:?}");
+    assert_group_projection(&wb, [[0.10, 0.20, 0.20, 0.30], [0.60, 0.70, 0.15, 0.10]]);
+}
+
+#[test]
 fn collapsed_group_projects_flips_and_quarter_turns_on_open() {
     for (group, member, first, second) in [
         (r#"flipH="1""#, r#"flipV="1""#, [0.70, 0.20, 0.20, 0.30], [0.25, 0.70, 0.15, 0.10]),
@@ -484,11 +500,15 @@ fn collapsed_group_composes_nested_member_transforms_on_open() {
 
 #[test]
 fn noncollapsed_group_keeps_base_geometry_on_open() {
-    let (wb, _) = open_bytes("group.xlsx", &group_projection_book(20.0, "", "", false, false)).unwrap();
+    let (wb, warnings) = open_bytes("group.xlsx", &group_projection_book(20.0, "", "", false, false)).unwrap();
     assert_group_projection(&wb, [[0.10, 0.20, 0.20, 0.30], [0.60, 0.70, 0.15, 0.10]]);
+    assert!(!warnings.iter().any(|w| w.contains("group")), "{warnings:?}");
 
-    let (wb, _) = open_bytes("group.xlsx", &group_projection_book(20.0, r#"rot="5400000""#, "", false, false)).unwrap();
+    let (wb, warnings) = open_bytes("group.xlsx", &group_projection_book(20.0, r#"rot="5400000""#, "", false, false)).unwrap();
     assert_group_projection(&wb, [[0.50, 0.10, 0.30, 0.20], [0.20, 0.60, 0.10, 0.15]]);
+    // The boxes turn, but the content inside them is still drawn unturned.
+    assert!(warnings.iter().any(|w| w.contains("aren't drawn rotated")), "{warnings:?}");
+    assert!(!warnings.iter().any(|w| w.contains("without its rotation")), "{warnings:?}");
 }
 
 fn drawing_xml(bytes: &[u8]) -> String {

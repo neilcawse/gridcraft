@@ -935,8 +935,10 @@ fn a_flipped_group_mirrors_its_members_and_keeps_its_transform() {
     assert!(near_box(shape_box(s, "A"), (252.0, 198.0, 40.0, 50.0)), "{:?}", shape_box(s, "A"));
     assert!(near_box(shape_box(s, "B"), (172.0, 0.0, 20.0, 60.0)), "{:?}", shape_box(s, "B"));
     assert!(near_box(shape_box(s, "C"), (92.0, 118.0, 50.0, 30.0)), "{:?}", shape_box(s, "C"));
-    // Only the unmirrored content is reported; the quarter turn already affects layout.
-    assert_eq!(rep.warnings.iter().filter(|w| w.contains("group")).count(), 1, "{:?}", rep.warnings);
+    // The quarter turn affects layout, but the unturned and unmirrored content is reported.
+    let content = ["aren't drawn rotated", "aren't drawn mirrored"];
+    assert!(content.iter().all(|c| rep.warnings.iter().any(|w| w.contains(c))), "{:?}", rep.warnings);
+    assert!(!rep.warnings.iter().any(|w| w.contains("without its rotation")), "{:?}", rep.warnings);
     let outer = s.groups.iter().find(|g| g.name == "Flipped").unwrap();
     assert_eq!((outer.flip, outer.rotation), ((true, false), 5400000));
 

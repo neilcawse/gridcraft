@@ -67,7 +67,9 @@ pub struct DrawingGroup {
     /// The group's box on the sheet when it was laid out (opened, or last moved or sized as a
     /// whole). With `child_offset`/`child_extent` it fixes the group's child coordinate space;
     /// its current box is [`Sheet::drawing_rect`] of the group, the box around its members. A
-    /// rotated group is saved with this box, as it turns about the box's centre.
+    /// rotated group is saved with this box, as it turns about the box's centre. An outermost
+    /// group turned exactly 90° or 270° holds its members in this box swapped about its centre;
+    /// a nested group's box is already that turned box, as its parent places it.
     pub anchor: Anchor,
     /// The child box (`a:chOff`/`a:chExt`, EMUs) that `anchor`'s box maps onto.
     pub child_offset: (i64, i64),
@@ -185,14 +187,21 @@ impl Sheet {
 
     /// The file transform is reusable only if all dependent objects are unchanged.
     pub fn source_group<'a>(&self, g: &'a DrawingGroup) -> Option<&'a GroupFile> {
-        self.source_group_at_depth(g, 0)
+        self.source_group_at_depth(g, 0, true)
     }
 
-    fn source_group_at_depth<'a>(&self, g: &'a DrawingGroup, depth: usize) -> Option<&'a GroupFile> {
+    /// Whether the file transforms still lay the group out: nothing in it moved or was edited.
+    /// Unlike [`Sheet::source_group`] this allows members skipped on open or read without a
+    /// transform, which can't be written back from the file but still place the rest.
+    pub(crate) fn source_layout_group(&self, g: &DrawingGroup) -> bool {
+        self.source_group_at_depth(g, 0, false).is_some()
+    }
+
+    fn source_group_at_depth<'a>(&self, g: &'a DrawingGroup, depth: usize, complete: bool) -> Option<&'a GroupFile> {
         let f = g.file.as_ref()?;
         if depth >= MAX_GROUP_DEPTH
             || f.edited
-            || !f.complete
+            || (complete && !f.complete)
             || f.anchor != g.anchor
             || f.model_child_offset != g.child_offset
             || f.model_child_extent != g.child_extent
@@ -210,7 +219,7 @@ impl Sheet {
                 m.reference == r
                     && self.raw_drawing_anchor(r) == Some(m.anchor)
                     && match r {
-                        DrawingRef::Group(id) => self.drawing_group(id).and_then(|g| self.source_group_at_depth(g, depth + 1)).is_some(),
+                        DrawingRef::Group(id) => self.drawing_group(id).and_then(|g| self.source_group_at_depth(g, depth + 1, complete)).is_some(),
                         _ => true,
                     }
             })
