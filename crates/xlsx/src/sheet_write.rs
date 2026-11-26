@@ -675,10 +675,13 @@ struct SharedRun {
 
 /// Valid `(min_dr, max_dr, min_dc, max_dc)` relative-shift bounds for `e` such that no
 /// `Expr::Ref` shifts outside `0..MAX_ROWS` × `0..MAX_COLS` (producing `#REF!`), or `None` when
-/// `e` contains constructs Excel rejects or mis-rewrites inside `<f t="shared">` (structured table
-/// references, spill `#` references, or trim-range references).
+/// `e` contains constructs Excel rejects or mis-rewrites inside `<f t="shared">` (per `[MS-XLSB]`
+/// §2.5.98.98 `SharedParsedFormula`: cross-sheet/3D/linked references `PtgRef3d`/`PtgArea3d`,
+/// deleted `#REF!` literals, array constants, reference operators `:` / `,` / intersection,
+/// sheet-qualified/external names `PtgNameX`, `RTD` (`0x017B`), `LAMBDA`/invocations, structured
+/// table references, spill `#` references, or trim-range references).
 fn shared_run_bounds(e: &gridcraft_formula::Expr) -> Option<(i64, i64, i64, i64)> {
-    use gridcraft_formula::{Expr, RefKind, UnOp};
+    use gridcraft_formula::{BinOp, Expr, RefKind, SheetSel, UnOp};
     let mut min_dr = i64::MIN;
     let mut max_dr = i64::MAX;
     let mut min_dc = i64::MIN;
@@ -697,27 +700,41 @@ fn shared_run_bounds(e: &gridcraft_formula::Expr) -> Option<(i64, i64, i64, i64)
         }
     };
     e.walk(&mut |x| match x {
-        Expr::Struct(_) | Expr::Unary(UnOp::Spill | UnOp::Trim(_), _) => supported = false,
-        Expr::Ref(r) => match r.kind {
-            RefKind::Cell(a) => {
-                clamp_row(a.row, a.row_abs, &mut min_dr, &mut max_dr);
-                clamp_col(a.col, a.col_abs, &mut min_dc, &mut max_dc);
+        Expr::Struct(_)
+        | Expr::Unary(UnOp::Spill | UnOp::Trim(_), _)
+        | Expr::LinkedRefError(_)
+        | Expr::Error(CellError::Ref)
+        | Expr::Array(_)
+        | Expr::Binary(BinOp::Range | BinOp::Union | BinOp::Intersect, _, _)
+        | Expr::Invoke(_, _) => supported = false,
+        Expr::Name(n) if n.contains('!') => supported = false,
+        Expr::Call(name, _) if name.eq_ignore_ascii_case("LAMBDA") || name.eq_ignore_ascii_case("RTD") => supported = false,
+        Expr::Ref(r) => {
+            if !matches!(r.sheet, SheetSel::Current) {
+                supported = false;
+                return;
             }
-            RefKind::Range(a, b) => {
-                clamp_row(a.row, a.row_abs, &mut min_dr, &mut max_dr);
-                clamp_col(a.col, a.col_abs, &mut min_dc, &mut max_dc);
-                clamp_row(b.row, b.row_abs, &mut min_dr, &mut max_dr);
-                clamp_col(b.col, b.col_abs, &mut min_dc, &mut max_dc);
+            match r.kind {
+                RefKind::Cell(a) => {
+                    clamp_row(a.row, a.row_abs, &mut min_dr, &mut max_dr);
+                    clamp_col(a.col, a.col_abs, &mut min_dc, &mut max_dc);
+                }
+                RefKind::Range(a, b) => {
+                    clamp_row(a.row, a.row_abs, &mut min_dr, &mut max_dr);
+                    clamp_col(a.col, a.col_abs, &mut min_dc, &mut max_dc);
+                    clamp_row(b.row, b.row_abs, &mut min_dr, &mut max_dr);
+                    clamp_col(b.col, b.col_abs, &mut min_dc, &mut max_dc);
+                }
+                RefKind::Rows(r0, a0, r1, a1) => {
+                    clamp_row(r0, a0, &mut min_dr, &mut max_dr);
+                    clamp_row(r1, a1, &mut min_dr, &mut max_dr);
+                }
+                RefKind::Cols(c0, a0, c1, a1) => {
+                    clamp_col(c0, a0, &mut min_dc, &mut max_dc);
+                    clamp_col(c1, a1, &mut min_dc, &mut max_dc);
+                }
             }
-            RefKind::Rows(r0, a0, r1, a1) => {
-                clamp_row(r0, a0, &mut min_dr, &mut max_dr);
-                clamp_row(r1, a1, &mut min_dr, &mut max_dr);
-            }
-            RefKind::Cols(c0, a0, c1, a1) => {
-                clamp_col(c0, a0, &mut min_dc, &mut max_dc);
-                clamp_col(c1, a1, &mut min_dc, &mut max_dc);
-            }
-        },
+        }
         _ => {}
     });
     supported.then_some((min_dr, max_dr, min_dc, max_dc))

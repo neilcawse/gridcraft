@@ -2604,3 +2604,68 @@ fn shared_formula_export_assigns_monotonic_deterministic_si_and_skips_struct_spi
     assert_eq!(sh.cell(at("B131")).unwrap().formula.as_ref().unwrap().text(), "A131*3");
     assert_eq!(sh.cell(at("B201")).unwrap().formula.as_ref().unwrap().text(), "A201*3");
 }
+
+#[test]
+fn shared_formula_export_skips_cross_sheet_and_disallowed_shared_ptgs() {
+    let mut wb = Workbook::new();
+    wb.sheets.push(std::sync::Arc::new(Sheet::new("Lookup")));
+    let base_local = std::sync::Arc::new(gridcraft_formula::parse("IF(A1>0,A1*2,0)").unwrap());
+    let base_xsheet = std::sync::Arc::new(gridcraft_formula::parse("IF(A1=Lookup!$B$1,A1,0)").unwrap());
+    let base_3d = std::sync::Arc::new(gridcraft_formula::parse("SUM(Sheet1:Lookup!A1)").unwrap());
+    let base_array = std::sync::Arc::new(gridcraft_formula::parse("SUM(A1*{1,2})").unwrap());
+    let base_union = std::sync::Arc::new(gridcraft_formula::parse("SUM((A1,A2))").unwrap());
+    let base_ref_err = std::sync::Arc::new(gridcraft_formula::parse("IFERROR(#REF!+A1,0)").unwrap());
+    let base_ext_name = std::sync::Arc::new(gridcraft_formula::parse("A1*Lookup!Rate").unwrap());
+    let base_rtd = std::sync::Arc::new(gridcraft_formula::parse(r#"RTD("prog","",A1)"#).unwrap());
+    let base_linked_ref_err = std::sync::Arc::new(gridcraft_formula::parse("[1]Lookup!#REF!+A1").unwrap());
+    let base_intersect = std::sync::Arc::new(gridcraft_formula::parse("SUM(A1:B2 B1:C2)").unwrap());
+    let base_range_op = std::sync::Arc::new(gridcraft_formula::parse("SUM(A1:INDEX(A:A,3))").unwrap());
+    let base_lambda_invoke = std::sync::Arc::new(gridcraft_formula::parse("LAMBDA(x,x+1)(A1)").unwrap());
+    {
+        let sh = wb.sheet_mut(0).unwrap();
+        for r in 0..70u32 {
+            let dr = r as i32;
+            sh.cells.set(CellRef::new(r, 1), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_local), dr, 0)));
+            sh.cells.set(CellRef::new(r, 2), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_xsheet), dr, 0)));
+            sh.cells.set(CellRef::new(r, 3), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_3d), dr, 0)));
+            sh.cells.set(CellRef::new(r, 4), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_array), dr, 0)));
+            sh.cells.set(CellRef::new(r, 5), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_union), dr, 0)));
+            sh.cells.set(CellRef::new(r, 6), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_ref_err), dr, 0)));
+            sh.cells.set(CellRef::new(r, 7), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_ext_name), dr, 0)));
+            sh.cells.set(CellRef::new(r, 8), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_rtd), dr, 0)));
+            sh.cells.set(CellRef::new(r, 9), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_linked_ref_err), dr, 0)));
+            sh.cells.set(CellRef::new(r, 10), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_intersect), dr, 0)));
+            sh.cells.set(CellRef::new(r, 11), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_range_op), dr, 0)));
+            sh.cells.set(CellRef::new(r, 12), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_lambda_invoke), dr, 0)));
+        }
+    }
+
+    let saved = write_xlsx(&wb).unwrap();
+    let (xml, _) = sheet1_xml(&saved);
+    // Same-sheet column B remains a shared run.
+    assert!(xml.contains(r#"t="shared" ref="B1:B70" si="0""#), "{xml}");
+    assert!(xml.contains(r#"<f t="shared" si="0"/>"#), "{xml}");
+    // Cross-sheet, 3D, array-constant, reference-operator, #REF!, sheet-qualified name, RTD,
+    // linked ref error, intersect, dynamic range, and LAMBDA/invoke runs must never be emitted as
+    // `<f t="shared">` (Excel rejects them per [MS-XLSB] §2.5.98.98 SharedParsedFormula).
+    for col in ["C1:C70", "D1:D70", "E1:E70", "F1:F70", "G1:G70", "H1:H70", "I1:I70", "J1:J70", "K1:K70", "L1:L70", "M1:M70"] {
+        assert!(!xml.contains(col), "unexpected shared ref {col} in {xml}");
+    }
+    assert!(!xml.contains(r#"si="1""#), "only column B should be shared: {xml}");
+
+    let (reopened, _) = read_xlsx(&saved).unwrap();
+    let sh = reopened.sheet(0).unwrap();
+    assert_eq!(sh.cell(at("B70")).unwrap().formula.as_ref().unwrap().text(), "IF(A70>0,A70*2,0)");
+    assert_eq!(sh.cell(at("C1")).unwrap().formula.as_ref().unwrap().text(), "IF(A1=Lookup!$B$1,A1,0)");
+    assert_eq!(sh.cell(at("C70")).unwrap().formula.as_ref().unwrap().text(), "IF(A70=Lookup!$B$1,A70,0)");
+    assert_eq!(sh.cell(at("D70")).unwrap().formula.as_ref().unwrap().text(), "SUM(Sheet1:Lookup!A70)");
+    assert_eq!(sh.cell(at("E70")).unwrap().formula.as_ref().unwrap().text(), "SUM(A70*{1,2})");
+    assert_eq!(sh.cell(at("F70")).unwrap().formula.as_ref().unwrap().text(), "SUM((A70,A71))");
+    assert_eq!(sh.cell(at("G70")).unwrap().formula.as_ref().unwrap().text(), "IFERROR(#REF!+A70,0)");
+    assert_eq!(sh.cell(at("H70")).unwrap().formula.as_ref().unwrap().text(), "A70*Lookup!Rate");
+    assert_eq!(sh.cell(at("I70")).unwrap().formula.as_ref().unwrap().text(), r#"RTD("prog","",A70)"#);
+    assert_eq!(sh.cell(at("J70")).unwrap().formula.as_ref().unwrap().text(), "[1]Lookup!#REF!+A70");
+    assert_eq!(sh.cell(at("K70")).unwrap().formula.as_ref().unwrap().text(), "SUM(A70:B71 B70:C71)");
+    assert_eq!(sh.cell(at("L70")).unwrap().formula.as_ref().unwrap().text(), "SUM(A70:INDEX(A:A,3))");
+    assert_eq!(sh.cell(at("M70")).unwrap().formula.as_ref().unwrap().text(), "LAMBDA(x,x+1)(A70)");
+}
