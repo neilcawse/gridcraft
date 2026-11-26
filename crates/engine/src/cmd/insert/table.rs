@@ -166,6 +166,7 @@ pub(super) fn table_flag(s: &mut Session, p: &Json, which: &str) -> Result<Json>
                     if v && t.range.end.row.saturating_add(1) >= MAX_ROWS {
                         return Err(EngineError::Other("There's no room below the table for the total row.".into()));
                     }
+                    let full_proxy = sh.autofilter.as_ref().is_some_and(|af| af.range == t.range && t.matches_autofilter(af.range));
                     t.totals_row = v;
                     if v {
                         t.range.end.row += 1;
@@ -187,6 +188,10 @@ pub(super) fn table_flag(s: &mut Session, p: &Json, which: &str) -> Result<Json>
                         }
                     }
                     write_totals(sh, ti);
+                    // A full-table proxy keeps covering the whole table, without changing its data scope.
+                    if full_proxy && let Some(af) = &mut sh.autofilter {
+                        af.range = sh.tables[ti].range;
+                    }
                     cx.structural = true;
                 }
             }
@@ -196,8 +201,9 @@ pub(super) fn table_flag(s: &mut Session, p: &Json, which: &str) -> Result<Json>
             "lastCol" => t.last_col = on.unwrap_or(!t.last_col),
             "header" => {
                 t.filter_button = on.unwrap_or(!t.filter_button);
-                if !t.filter_button {
-                    t.filter.clear();
+                if !t.filter_button && crate::cmd::data::clear_table_filter(sh, ti) {
+                    crate::cmd::data::apply_filters(&mut cx.wb, si, Some(ti), false);
+                    cx.structural = true;
                 }
             }
             _ => {}

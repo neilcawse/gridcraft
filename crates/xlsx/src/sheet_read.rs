@@ -318,7 +318,7 @@ fn apply_craft_sheet_part(
     let mut fit_to_page = false;
     let mut cf_kept_cells = 0u64;
     cx.cf_ext_ids.clear();
-    read_sheet_slicer_defs(cx, rels)?;
+    crate::slicer::read_sheet_parts(cx, rels, name)?;
     for cf in &sp.features.conditional_formats {
         read_cf(cx, &from_craft_el(&cf.to_el()), sheet, &mut cf_kept_cells);
     }
@@ -366,11 +366,7 @@ fn apply_craft_sheet_part(
             }
             "protectedRanges" => read_protected_ranges(&from_craft_el(child), sheet),
             "autoFilter" => sheet.autofilter = read_autofilter(cx, &from_craft_el(child)),
-            "extLst" => {
-                let e = from_craft_el(child);
-                read_ext(cx, &e, sheet, &mut cf_kept_cells);
-                crate::slicer::read_sheet_ext(cx, &e, rels, name);
-            }
+            "extLst" => read_ext(cx, &from_craft_el(child), sheet, &mut cf_kept_cells),
             _ => {}
         }
     }
@@ -407,7 +403,18 @@ fn apply_craft_sheet_part(
 fn read_sheet_notes_and_tables(cx: &mut Ctx<'_>, sp: &CraftSheetPart, rels: &[Rel], sheet: &mut Sheet) -> Result<(), IoError> {
     let tables = cx.pkg.craft_mut().tables(sp).map_err(craft_error)?;
     for (_, t) in tables {
-        let mut model = parts::from_craft_table(cx, &t);
+        let (mut model, filter_range) = parts::from_craft_table(cx, &t);
+        // The row flag has no provenance. Repair only an active, exact full-table ref;
+        // a correctly bounded filter cannot explain a hidden totals row.
+        if model.totals_row && model.autofilter_range().is_some() {
+            let stale_native = filter_range == Some(model.range) && !model.filter.is_empty();
+            let stale_sheet = sheet.autofilter.as_ref().is_some_and(|af| af.range == model.range && !af.criteria.is_empty());
+            if (stale_native || stale_sheet)
+                && let Some(row) = sheet.rows.get_mut(&model.range.end.row)
+            {
+                row.hidden = false;
+            }
+        }
         model.id = cx.next_object_id();
         record_file_table(cx, &t, model.id);
         sheet.tables.push(model);
@@ -1101,25 +1108,6 @@ fn read_ext(cx: &mut Ctx<'_>, e: &El, sheet: &mut Sheet, cf_kept_cells: &mut u64
     }
 }
 
-/// Reads worksheet-level `slicer` parts and stores their `(cache, caption, columnCount)` definitions on `cx`.
-fn read_sheet_slicer_defs(cx: &mut Ctx<'_>, rels: &[crate::package::Rel]) -> Result<(), IoError> {
-    cx.sheet_slicer_defs.clear();
-    cx.sheet_slicer_frames.clear();
-    for rel in rels.iter().filter(|r| r.kind.eq_ignore_ascii_case("slicer")) {
-        if let Some(x) = cx.optional_xml(&rel.target)? {
-            for s in x.kids("slicer") {
-                if let Some(sname) = s.attr("name").filter(|n| !n.is_empty()) {
-                    let cache = s.attr("cache").unwrap_or("").to_string();
-                    let caption = xml::decode_xstring(s.attr("caption").unwrap_or(""));
-                    let cols = s.attr_u32("columnCount").unwrap_or(1).max(1);
-                    cx.sheet_slicer_defs.insert(sname.to_string(), (cache, caption, cols));
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Records file-to-model table and column identity for `x15:tableSlicerCache` resolution.
 fn record_file_table(cx: &mut Ctx<'_>, t: &craft_xlsx::Table, model_id: u32) {
     let Some(id) = t.id.filter(|&id| id != 0) else { return };
@@ -1206,10 +1194,6 @@ mod tests {
             pivot_parts: vec![],
             slicers: Default::default(),
             file_tables: Default::default(),
-            slicer_caches: Default::default(),
-            sheet_slicer_defs: Default::default(),
-            sheet_slicer_frames: Default::default(),
-            pending_slicers: Default::default(),
         }
     }
 

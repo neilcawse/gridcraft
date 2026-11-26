@@ -367,7 +367,7 @@ fn write_package(
     check_sheet_names(wb)?;
     let table_names = crate::sheet_write::table_names(wb);
     let mut warnings = vec![];
-    let mut slicers = crate::slicer::SlicerWriter::new(wb, &table_names);
+    let mut slicers = crate::slicer::SlicerWriter::new(wb, &table_names, &mut warnings);
     let defined_names = defined_names_to_write(wb, &mut warnings);
     let mut catalog = pivot_catalog(wb, &table_names, &defined_names, &slicers);
     while let Some(projection) = &catalog {

@@ -1,41 +1,58 @@
-//! PivotTable slicers (the Excel 2010 `x14` extension, [MS-XLSX] §2.3): a drawing frame
-//! (`sle:slicer`, in a markup-compatibility block with a fallback shape) places the slicer, a
-//! slicer part (`xl/slicers/slicerN.xml`, listed by the sheet's `x14:slicerList`) holds its
-//! caption and layout, and a slicer cache (`xl/slicerCaches/slicerCacheN.xml`, listed by the
-//! workbook's `x14:slicerCaches`) names the PivotTables, the field and the selected items.
+//! Slicers ([MS-XLSX] §2.3): a drawing frame (`sle:slicer`, in a markup-compatibility block with a
+//! fallback shape) places the slicer, a slicer part (`xl/slicers/slicerN.xml`) holds its caption
+//! and layout, and a slicer cache (`xl/slicerCaches/slicerCacheN.xml`) names what it filters.
+//!
+//! - A PivotTable slicer (Excel 2010, `x14`) is listed by the sheet's and workbook's `x14` lists; its
+//!   cache names the PivotTables, the field and the selected items.
+//! - A table slicer (Excel 2013, `x15`) is listed by the `x15` lists; its cache names the table and
+//!   column by file id (`x15:tableSlicerCache`, [MS-XLSX] 2.6.97) and holds no items: the selection
+//!   is the table's AutoFilter on the column.
 //!
 //! Reading: frames and slicer parts are collected while sheets are read, then [`resolve`] joins
-//! them with the slicer caches once the PivotTables exist. The selection lives in the model as the
-//! PivotTables' filters on the field (read from their hidden items); a cache's `s` flags only fill
-//! in a PivotTable that has no filter on the field. Table and OLAP slicers, and slicers on a
-//! coarser date level that has its own cache field, are skipped with a warning.
+//! them with the slicer caches once the PivotTables exist. A PivotTable slicer's selection lives in
+//! the model as the PivotTables' filters on the field (read from their hidden items); a cache's `s`
+//! flags only fill in a PivotTable that has no filter on the field. Table slicers are bound by
+//! [`attach_tables`] once table names are repaired. OLAP slicers, and slicers on a coarser date
+//! level that has its own cache field, are skipped with a warning.
 //!
 //! Writing: [`SlicerWriter`] plans the slicers before the sheets are written, so the PivotTable
-//! writer can give their fields shared items and their caches an id; the sheets write the frames
-//! and slicer parts and [`SlicerWriter::finish`] the caches.
+//! writer can give their fields shared items and their caches an id. Both kinds share one set of
+//! slicer and cache names. The sheets write the frames and slicer parts, and record the ids their
+//! tables are written with; [`SlicerWriter::finish`] writes the caches. A table slicer whose table
+//! or column is not written is dropped with a warning.
 
 use std::fmt::Write as _;
 
 use gridcraft_model::{
-    Anchor, PivotDateGroup, PivotFilter, PivotSort, PivotTable, Sheet, Slicer, SlicerCrossFilter, SlicerPivot, SlicerSource, Workbook,
+    Anchor, PivotDateGroup, PivotFilter, PivotSort, PivotTable, Sheet, Slicer, SlicerCacheOrigin, SlicerCrossFilter, SlicerPivot, SlicerSource,
+    TableSlicerItems, Workbook,
 };
 
 use crate::package::Rel;
 use crate::read::Ctx;
 use crate::tables::EMU_PER_PX;
 use crate::write::{Out, Rels, XML_DECL};
-use crate::xml::{El, esc_attr};
+use crate::xml::{El, decode_xstring, encode_xstring, esc_attr};
 
 pub const CT_SLICER: &str = "application/vnd.ms-excel.slicer+xml";
 pub const CT_SLICER_CACHE: &str = "application/vnd.ms-excel.slicerCache+xml";
 const REL_SLICER: &str = "http://schemas.microsoft.com/office/2007/relationships/slicer";
 const REL_SLICER_CACHE: &str = "http://schemas.microsoft.com/office/2007/relationships/slicerCache";
 const NS_X14: &str = "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main";
+const NS_X15: &str = "http://schemas.microsoft.com/office/spreadsheetml/2010/11/main";
 const NS_MC: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
 /// `a:graphicData` uri (and `sle` namespace) of a slicer frame.
 pub const FRAME_URI: &str = "http://schemas.microsoft.com/office/drawing/2010/slicer";
+/// The namespace a table slicer frame's markup-compatibility choice requires.
+const NS_SLE15: &str = "http://schemas.microsoft.com/office/drawing/2012/slicer";
 const EXT_SHEET_SLICERS: &str = "{A8765BA9-456A-4dab-B4F3-ACF838C121DE}";
 const EXT_WB_SLICER_CACHES: &str = "{BBE1A952-AA13-448e-AADC-164F8A28A991}";
+/// The sheet's `x14:slicerList` extension for table slicer parts.
+const EXT_SHEET_TABLE_SLICERS: &str = "{3A4CF648-6AED-40f4-86FF-DC5316D8AED3}";
+/// The workbook's `x15` list of table slicer caches.
+const EXT_WB_TABLE_SLICER_CACHES: &str = "{46BE6895-7355-4a93-B00E-2C351335B9C9}";
+/// The slicer cache's extension holding `x15:tableSlicerCache`.
+const EXT_TABLE_SLICER_CACHE: &str = "{2F2917AC-EB37-4324-AD4E-5DD8C200BD13}";
 /// Excel's default button height (EMU), written when the model has none.
 const DEFAULT_ROW_HEIGHT: u32 = 241_300;
 /// Most items read from one slicer cache.
@@ -52,6 +69,8 @@ pub struct SlicersIn {
     frames: Vec<(String, String, Anchor)>,
     /// (sheet name, slicer) of the slicers the sheets list.
     parts: Vec<(String, PartIn)>,
+    /// Table slicers joined with their caches, to bind once table names are repaired.
+    tables: Vec<TableIn>,
 }
 
 /// One `<slicer>` of a slicer part.
@@ -64,6 +83,18 @@ struct PartIn {
     row_height: Option<f32>,
 }
 
+/// A table slicer read with its frame and cache.
+struct TableIn {
+    /// Model sheet index of the slicer.
+    sheet: usize,
+    part: PartIn,
+    anchor: Anchor,
+    table: TableCache,
+    /// The cache's `sourceName`: the column's header.
+    source: String,
+    origin: SlicerCacheOrigin,
+}
+
 /// A slicer cache definition.
 struct CacheDef {
     name: String,
@@ -72,6 +103,9 @@ struct CacheDef {
     pivots: Vec<(u32, String)>,
     /// `None`: not a PivotTable (tabular) cache.
     tabular: Option<Tabular>,
+    /// `x15:tableSlicerCache`, when the cache names a table.
+    table: Option<TableCache>,
+    olap: bool,
 }
 
 struct Tabular {
@@ -81,6 +115,30 @@ struct Tabular {
     show_missing: bool,
     /// (shared item index, selected).
     items: Vec<(u32, bool)>,
+}
+
+/// `x15:tableSlicerCache`: the file ids of the table and its column, and the item options.
+#[derive(Clone, Copy)]
+struct TableCache {
+    table_id: Option<u32>,
+    column_id: Option<u32>,
+    items: TableSlicerItems,
+}
+
+impl CacheDef {
+    /// Whether the cache filters a table: it says so, or it names no PivotTable and has no
+    /// PivotTable or OLAP data (the column is then found by `sourceName`).
+    fn is_table(&self) -> bool {
+        self.table.is_some() || (self.pivots.is_empty() && self.tabular.is_none() && !self.olap)
+    }
+}
+
+fn cross_filter(v: Option<&str>) -> SlicerCrossFilter {
+    match v {
+        Some("none") => SlicerCrossFilter::None,
+        Some("showItemsWithNoData") => SlicerCrossFilter::ShowItemsWithNoData,
+        _ => SlicerCrossFilter::ShowItemsWithDataAtTop,
+    }
 }
 
 /// Records a drawing frame's slicer; returns false when `gd` is not a slicer frame.
@@ -95,29 +153,33 @@ pub fn read_frame(cx: &mut Ctx<'_>, sheet: &str, gd: &El, anchor: Anchor) -> boo
     true
 }
 
-/// Reads the slicer parts a worksheet's `extLst` lists (`x14:slicerList`).
-pub fn read_sheet_ext(cx: &mut Ctx<'_>, ext_lst: &El, rels: &[Rel], sheet: &str) {
-    for list in ext_lst.kids("ext").flat_map(|e| e.kids("slicerList")) {
-        for sl in list.kids("slicer") {
-            let Some(rel) = sl.attr("id").and_then(|id| rels.iter().find(|r| r.id == id && !r.external)) else { continue };
-            let target = rel.target.clone();
-            let Ok(Some(x)) = cx.optional_xml(&target) else { continue };
-            for s in x.kids("slicer") {
-                if cx.slicers.parts.len() >= MAX_SLICERS {
-                    return;
-                }
-                let part = PartIn {
-                    name: s.attr("name").unwrap_or("").to_string(),
-                    cache: s.attr("cache").unwrap_or("").to_string(),
-                    caption: s.attr("caption").unwrap_or("").to_string(),
-                    columns: s.attr_u32("columnCount").unwrap_or(1).clamp(1, 20_000),
-                    style: s.attr("style").unwrap_or("").to_string(),
-                    row_height: s.attr_u32("rowHeight").filter(|h| *h > 0).map(|h| (h as f64 / EMU_PER_PX) as f32),
-                };
-                cx.slicers.parts.push((sheet.to_string(), part));
+/// Reads a worksheet's slicer parts: those its relationships name (which its `x14` and `x15`
+/// `slicerList`s list). A part that can't be read is skipped (its frame then warns); only a part
+/// over the size limit fails the read.
+pub fn read_sheet_parts(cx: &mut Ctx<'_>, rels: &[Rel], sheet: &str) -> Result<(), crate::IoError> {
+    for rel in rels.iter().filter(|r| !r.external && r.kind.eq_ignore_ascii_case("slicer")) {
+        let target = rel.target.clone();
+        let x = match cx.optional_xml(&target) {
+            Ok(Some(x)) => x,
+            Err(crate::IoError::TooLarge(m)) => return Err(crate::IoError::TooLarge(m)),
+            Ok(None) | Err(_) => continue,
+        };
+        for s in x.kids("slicer") {
+            if cx.slicers.parts.len() >= MAX_SLICERS {
+                return Ok(());
             }
+            let part = PartIn {
+                name: s.attr("name").unwrap_or("").to_string(),
+                cache: s.attr("cache").unwrap_or("").to_string(),
+                caption: decode_xstring(s.attr("caption").unwrap_or("")),
+                columns: s.attr_u32("columnCount").unwrap_or(1).clamp(1, 20_000),
+                style: s.attr("style").unwrap_or("").to_string(),
+                row_height: s.attr_u32("rowHeight").filter(|h| *h > 0).map(|h| (h as f64 / EMU_PER_PX) as f32),
+            };
+            cx.slicers.parts.push((sheet.to_string(), part));
         }
     }
+    Ok(())
 }
 
 fn read_cache_def(x: &El) -> Option<CacheDef> {
@@ -131,26 +193,45 @@ fn read_cache_def(x: &El) -> Option<CacheDef> {
     let tabular = x.path(&["data", "tabular"]).map(|t| Tabular {
         cache_id: t.attr_u32("pivotCacheId"),
         sort: if t.attr("sortOrder") == Some("descending") { PivotSort::Desc } else { PivotSort::Asc },
-        cross: match t.attr("crossFilter") {
-            Some("none") => SlicerCrossFilter::None,
-            Some("showItemsWithNoData") => SlicerCrossFilter::ShowItemsWithNoData,
-            _ => SlicerCrossFilter::ShowItemsWithDataAtTop,
-        },
+        cross: cross_filter(t.attr("crossFilter")),
         show_missing: t.flag("showMissing", true),
         items: t
             .child("items")
             .map(|i| i.kids("i").filter_map(|e| Some((e.attr_u32("x")?, e.flag("s", false)))).take(MAX_ITEMS).collect())
             .unwrap_or_default(),
     });
-    Some(CacheDef { name: x.attr("name").unwrap_or("").to_string(), source: x.attr("sourceName").unwrap_or("").to_string(), pivots, tabular })
+    let table = x.child("extLst").and_then(|l| l.kids("ext").find_map(|e| e.child("tableSlicerCache"))).map(|t| TableCache {
+        // Zero is never a recorded table id. Do not treat malformed ids as absent.
+        table_id: t.attr("tableId").map(|id| id.trim().parse().unwrap_or(0)),
+        column_id: t.attr_u32("column"),
+        items: TableSlicerItems {
+            descending: t.attr("sortOrder") == Some("descending"),
+            custom_list_sort: t.flag("customListSort", true),
+            cross_filter: cross_filter(t.attr("crossFilter")),
+        },
+    });
+    Some(CacheDef {
+        name: x.attr("name").unwrap_or("").to_string(),
+        source: x.attr("sourceName").unwrap_or("").to_string(),
+        pivots,
+        tabular,
+        table,
+        olap: x.path(&["data", "olap"]).is_some(),
+    })
+}
+
+/// The imported cache's name and its workbook marker (a workbook-scoped `#N/A` name of the same
+/// spelling), if any.
+fn origin(wb: &Workbook, def: &CacheDef) -> SlicerCacheOrigin {
+    let marker = wb.names.iter().find(|n| n.scope.is_none() && n.name.eq_ignore_ascii_case(&def.name)).filter(|n| is_cache_marker(n));
+    SlicerCacheOrigin { name: def.name.clone(), marker: marker.map(|n| n.uid), table_items: def.table.map(|t| t.items) }
 }
 
 /// Joins the collected frames and slicer parts with the workbook's slicer caches and adds the
-/// PivotTable slicers to their sheets. `sheet_els` are the workbook's `<sheet>` elements and
-/// `file_to_model` maps each to a model sheet.
+/// PivotTable slicers to their sheets; table slicers wait for [`attach_tables`]. `sheet_els` are
+/// the workbook's `<sheet>` elements and `file_to_model` maps each to a model sheet.
 pub fn resolve(
     cx: &mut Ctx<'_>,
-    wb_xml: &El,
     wb_rels: &[Rel],
     sheet_els: &[&El],
     file_to_model: &[Option<usize>],
@@ -161,10 +242,10 @@ pub fn resolve(
     if found.frames.is_empty() && found.parts.is_empty() {
         return;
     }
+    // The caches the workbook's relationships name (which its `x14` and `x15` `slicerCaches`
+    // list).
     let mut defs: Vec<CacheDef> = Vec::new();
-    let lists = wb_xml.child("extLst").map(|l| l.kids("ext").flat_map(|e| e.kids("slicerCaches")).collect::<Vec<_>>()).unwrap_or_default();
-    for c in lists.iter().flat_map(|l| l.kids("slicerCache")) {
-        let Some(rel) = c.attr("id").and_then(|id| wb_rels.iter().find(|r| r.id == id && !r.external)) else { continue };
+    for rel in wb_rels.iter().filter(|r| !r.external && r.kind.eq_ignore_ascii_case("slicerCache")) {
         let target = rel.target.clone();
         if let Ok(Some(x)) = cx.optional_xml(&target)
             && let Some(d) = read_cache_def(&x)
@@ -179,6 +260,7 @@ pub fn resolve(
         file_to_model.get(i).copied().flatten()
     };
     let mut used = vec![false; found.frames.len()];
+    let mut tables = Vec::new();
     for (sheet_name, part) in found.parts {
         let Some(si) = wb.sheet_index(&sheet_name) else { continue };
         // The part's frame is accounted for even when the slicer is skipped below with its own
@@ -191,8 +273,23 @@ pub fn resolve(
             cx.warn(format!("slicer \"{}\" has no slicer cache and was skipped", part.name));
             continue;
         };
+        if def.is_table() {
+            let Some(&(_, _, anchor)) = fi.and_then(|i| found.frames.get(i)) else {
+                cx.warn(format!("slicer \"{}\" has no drawing frame and was skipped", part.name));
+                continue;
+            };
+            let table = def.table.unwrap_or(TableCache {
+                table_id: None,
+                column_id: None,
+                items: TableSlicerItems { descending: false, custom_list_sort: true, cross_filter: SlicerCrossFilter::ShowItemsWithDataAtTop },
+            });
+            if tables.len() < MAX_SLICERS {
+                tables.push(TableIn { sheet: si, part, anchor, table, source: decode_xstring(&def.source), origin: origin(wb, def) });
+            }
+            continue;
+        }
         let Some(tab) = &def.tabular else {
-            cx.warn(format!("slicer \"{}\" filters a table or an external data source, which is not supported; skipped", part.name));
+            cx.warn(format!("slicer \"{}\" filters an external data source, which is not supported; skipped", part.name));
             continue;
         };
         // The model's slicer filters a source column; a cache field that isn't one (a coarser date
@@ -265,7 +362,6 @@ pub fn resolve(
             })
             .collect();
         let id = cx.next_object_id();
-        let marker = wb.names.iter().find(|n| n.scope.is_none() && n.name.eq_ignore_ascii_case(&def.name)).filter(|n| is_cache_marker(n));
         let slicer = Slicer {
             id,
             source: SlicerSource::Pivot {
@@ -281,7 +377,7 @@ pub fn resolve(
             name: part.name,
             style: part.style,
             row_height: part.row_height,
-            imported_cache: gridcraft_model::SlicerCacheOrigin { name: def.name.clone(), marker: marker.map(|n| n.uid) },
+            imported_cache: origin(wb, def),
         };
         if let Some(sh) = wb.sheet_mut(si) {
             sh.slicers.push(slicer);
@@ -289,9 +385,85 @@ pub fn resolve(
     }
     for ((_, name, _), u) in found.frames.iter().zip(used) {
         if !u {
-            cx.warn(format!("slicer \"{name}\" was skipped (only PivotTable slicers are supported)"));
+            cx.warn(format!("slicer \"{name}\" has no slicer part and was skipped"));
         }
     }
+    cx.slicers.tables = tables;
+}
+
+/// Binds the table slicers [`resolve`] found to their tables, once the tables have their repaired
+/// names. A present table id limits recovery to that table; only an absent id permits a unique
+/// workbook-wide header match.
+pub fn attach_tables(cx: &mut Ctx<'_>, wb: &mut Workbook) {
+    for t in std::mem::take(&mut cx.slicers.tables) {
+        let tables = || wb.sheets.iter().flat_map(|sh| &sh.tables);
+        let resolved = match t.table.table_id {
+            Some(id) => cx.file_tables.get(&id).and_then(|(model_id, columns)| {
+                let table = tables().find(|x| x.id == *model_id)?;
+                let ci = t
+                    .table
+                    .column_id
+                    .and_then(|id| columns.get(&id))
+                    .filter(|h| !h.is_empty())
+                    .and_then(|h| table.column_index(h))
+                    .or_else(|| if t.source.is_empty() { None } else { table.column_index(&t.source) })?;
+                Some((table.name.as_str(), table.columns[ci].name.as_str()))
+            }),
+            None if !t.source.is_empty() => {
+                let mut matches = tables().filter_map(|table| {
+                    let ci = table.column_index(&t.source)?;
+                    Some((table.name.as_str(), table.columns[ci].name.as_str()))
+                });
+                matches.next().filter(|_| matches.next().is_none())
+            }
+            None => None,
+        };
+        let Some((table, column)) = resolved.filter(|(table, column)| !table.is_empty() && !column.is_empty()) else {
+            cx.warn(format!("slicer \"{}\": its table column could not be found; skipped", t.part.name));
+            continue;
+        };
+        let selected = saved_table_column_selection(wb, t.sheet, table, column);
+        let (table, column) = (table.to_owned(), column.to_owned());
+        let id = cx.next_object_id();
+        let caption = if t.part.caption.is_empty() { column.clone() } else { t.part.caption };
+        let slicer = Slicer {
+            id,
+            source: SlicerSource::Table { table, column, selected },
+            caption,
+            anchor: t.anchor,
+            columns: t.part.columns,
+            name: t.part.name,
+            style: t.part.style,
+            row_height: t.part.row_height,
+            imported_cache: t.origin,
+        };
+        if let Some(sh) = wb.sheet_mut(t.sheet) {
+            sh.slicers.push(slicer);
+        }
+    }
+}
+
+/// A table slicer's selected values: the table column's saved AutoFilter values.
+fn saved_table_column_selection(wb: &Workbook, slicer_sheet: usize, table: &str, column: &str) -> Option<Vec<String>> {
+    let (target_sheet, t) = wb
+        .sheets
+        .get(slicer_sheet)
+        .and_then(|sh| sh.tables.iter().find(|t| t.name.eq_ignore_ascii_case(table)).map(|t| (sh.as_ref(), t)))
+        .or_else(|| wb.sheets.iter().find_map(|sh| sh.tables.iter().find(|t| t.name.eq_ignore_ascii_case(table)).map(|t| (sh.as_ref(), t))))?;
+    let ci = t.column_index(column)? as u32;
+    if let Some((_, gridcraft_model::FilterCriterion::Values { values, .. })) = t.filter.iter().find(|(col, _)| *col == ci) {
+        return Some(values.clone());
+    }
+    let af = target_sheet.autofilter.as_ref()?;
+    let abs_col = t.range.start.col + ci;
+    if abs_col < af.range.start.col || abs_col > af.range.end.col {
+        return None;
+    }
+    let off = abs_col - af.range.start.col;
+    af.criteria.iter().find_map(|(col, crit)| match crit {
+        gridcraft_model::FilterCriterion::Values { values, .. } if *col == off => Some(values.clone()),
+        _ => None,
+    })
 }
 
 // ---------------------------------------------------------------- writing
@@ -307,9 +479,23 @@ struct Planned {
     cache: String,
     /// The imported marker is written with the other defined names, without losing its metadata.
     has_marker: bool,
+    /// The PivotTable field, or the table column.
     field: String,
-    /// The connected PivotTables written (sheet, index), which share one pivot cache.
+    /// The connected PivotTables written (sheet, index), which share one pivot cache. Empty for a
+    /// table slicer.
     pivots: Vec<(usize, usize)>,
+    /// A table slicer's table and column.
+    table: Option<TableTarget>,
+}
+
+/// The table a table slicer filters.
+struct TableTarget {
+    /// (sheet, index) of the table.
+    at: (usize, usize),
+    /// Index of the column in the table.
+    column: usize,
+    /// The table's `id`, the column's `id` and its written name, once the table is written.
+    written: Option<(u32, u32, String)>,
 }
 
 /// A slicer on the sheet being written: its index in the sheet's slicers, name and cache name.
@@ -319,7 +505,7 @@ pub struct SheetSlicer {
     pub cache: String,
 }
 
-/// The PivotTable slicers of a workbook being written.
+/// The slicers of a workbook being written.
 #[derive(Default)]
 pub struct SlicerWriter {
     planned: Vec<Planned>,
@@ -329,31 +515,55 @@ pub struct SlicerWriter {
 }
 
 impl SlicerWriter {
-    /// Plans the PivotTable slicers whose PivotTables can be written. A slicer's PivotTables must
-    /// share a pivot cache; where they can't (different sources or date grouping), the slicer
-    /// keeps only its first PivotTable.
-    pub fn new(wb: &Workbook, table_names: &[Vec<Option<String>>]) -> SlicerWriter {
+    /// Plans the slicers that can be written. A PivotTable slicer's PivotTables must share a pivot
+    /// cache; where they can't (different sources or date grouping), the slicer keeps only its
+    /// first PivotTable. A table slicer needs its table (found by its repaired name) to be written
+    /// with the column; otherwise it is dropped with a warning in `warnings`.
+    pub fn new(wb: &Workbook, table_names: &[Vec<Option<String>>], warnings: &mut Vec<String>) -> SlicerWriter {
         let mut planned: Vec<Planned> = Vec::new();
         let mut names: Vec<String> = Vec::new();
         for (si, sheet) in wb.sheets.iter().enumerate() {
             for (i, sl) in sheet.slicers.iter().enumerate() {
-                let SlicerSource::Pivot { pivots, field, .. } = &sl.source else { continue };
-                let mut targets: Vec<(usize, usize)> = Vec::new();
-                for p in pivots {
-                    let Some(psi) = wb.sheet_index(&p.sheet) else { continue };
-                    let Some(sh) = wb.sheet(psi) else { continue };
-                    let Some(pi) = sh.pivots.iter().position(|t| t.name.eq_ignore_ascii_case(&p.name)) else { continue };
-                    let ok = sh.pivots.get(pi).is_some_and(|pt| crate::pivot::slicer_field_ok(wb, wb, pt, psi, field));
-                    if ok && !targets.contains(&(psi, pi)) {
-                        targets.push((psi, pi));
+                let base = [sl.name.trim(), sl.caption.trim(), sl.field().trim()].into_iter().find(|n| !n.is_empty()).unwrap_or("Slicer");
+                let (field, pivots, table) = match &sl.source {
+                    SlicerSource::Pivot { pivots, field, .. } => {
+                        let mut targets: Vec<(usize, usize)> = Vec::new();
+                        for p in pivots {
+                            let Some(psi) = wb.sheet_index(&p.sheet) else { continue };
+                            let Some(sh) = wb.sheet(psi) else { continue };
+                            let Some(pi) = sh.pivots.iter().position(|t| t.name.eq_ignore_ascii_case(&p.name)) else { continue };
+                            let ok = sh.pivots.get(pi).is_some_and(|pt| crate::pivot::slicer_field_ok(wb, wb, pt, psi, field));
+                            if ok && !targets.contains(&(psi, pi)) {
+                                targets.push((psi, pi));
+                            }
+                        }
+                        if targets.is_empty() {
+                            continue;
+                        }
+                        (field.clone(), targets, None)
                     }
-                }
-                if targets.is_empty() {
-                    continue;
-                }
-                let base = [sl.name.trim(), sl.caption.trim(), field.trim()].into_iter().find(|n| !n.is_empty()).unwrap_or("Slicer");
+                    SlicerSource::Table { table, column, .. } => {
+                        // The table's sheet first, as the slicer's tiles find it.
+                        let at = sheet.tables.iter().position(|t| t.name.eq_ignore_ascii_case(table)).map(|ti| (si, ti)).or_else(|| wb.table(table));
+                        let written = at.filter(|&(tsi, ti)| table_names.get(tsi).and_then(|n| n.get(ti)).is_some_and(Option::is_some));
+                        let Some((tsi, ti)) = written else {
+                            warnings.push(format!("slicer \"{base}\" was dropped because its table \"{table}\" is not in the saved workbook"));
+                            continue;
+                        };
+                        let t = &wb.sheets[tsi].tables[ti];
+                        if t.data_range().is_none() {
+                            warnings.push(format!("slicer \"{base}\" was dropped because table \"{table}\" has no data rows"));
+                            continue;
+                        }
+                        let Some(ci) = t.column_index(column).filter(|&ci| ci < t.range.width() as usize) else {
+                            warnings.push(format!("slicer \"{base}\" was dropped because table \"{table}\" has no column \"{column}\""));
+                            continue;
+                        };
+                        (t.columns[ci].name.clone(), vec![], Some(TableTarget { at: (tsi, ti), column: ci, written: None }))
+                    }
+                };
                 let name = unique(base, " ", &mut names);
-                planned.push(Planned { sheet: si, slicer: i, name, cache: String::new(), has_marker: false, field: field.clone(), pivots: targets });
+                planned.push(Planned { sheet: si, slicer: i, name, cache: String::new(), has_marker: false, field, pivots, table });
             }
         }
         if planned.is_empty() {
@@ -376,7 +586,7 @@ impl SlicerWriter {
         // Give imported caches first claim to their original names. An occupied name can be
         // reused only by the cache that imported that exact workbook marker.
         for p in &mut planned {
-            let gridcraft_model::SlicerCacheOrigin { name, marker } = &wb.sheets[p.sheet].slicers[p.slicer].imported_cache;
+            let SlicerCacheOrigin { name, marker, .. } = &wb.sheets[p.sheet].slicers[p.slicer].imported_cache;
             if name.is_empty() {
                 continue;
             }
@@ -408,14 +618,15 @@ impl SlicerWriter {
         SlicerWriter { planned, groups: vec![], parts: 0 }
     }
 
-    /// Remove targets that cannot be rebuilt against the catalog as serialized. Return whether
-    /// any marker names disappeared, so the caller can reproject the catalog before grouping.
+    /// Remove PivotTable targets that cannot be rebuilt against the catalog as serialized. Return
+    /// whether any marker names disappeared, so the caller can reproject the catalog before
+    /// grouping.
     pub fn prune_targets(&mut self, wb: &Workbook, catalog: &Workbook) -> bool {
         let count = self.planned.len();
         for p in &mut self.planned {
             p.pivots.retain(|&(si, pi)| crate::pivot::slicer_field_ok(wb, catalog, &wb.sheets[si].pivots[pi], si, &p.field));
         }
-        self.planned.retain(|p| !p.pivots.is_empty());
+        self.planned.retain(|p| p.table.is_some() || !p.pivots.is_empty());
         self.planned.len() != count
     }
 
@@ -457,6 +668,16 @@ impl SlicerWriter {
             .collect()
     }
 
+    /// Records the ids table `at` (sheet, index) is written with: the table's `table_id`, and its
+    /// columns' written `names` and `column_id`s, which the table slicer caches name.
+    pub fn table_written(&mut self, at: (usize, usize), table_id: u32, names: &[String], column_id: impl Fn(usize) -> u32) {
+        for t in self.planned.iter_mut().filter_map(|p| p.table.as_mut()).filter(|t| t.at == at) {
+            if let Some(name) = names.get(t.column) {
+                t.written = Some((table_id, column_id(t.column), name.clone()));
+            }
+        }
+    }
+
     /// Names whose markers are not already written by the workbook's defined names.
     pub fn new_marker_names(&self) -> impl Iterator<Item = &str> {
         self.planned.iter().filter(|p| !p.has_marker).map(|p| p.cache.as_str())
@@ -467,12 +688,30 @@ impl SlicerWriter {
         self.new_marker_names().map(|name| format!("<definedName name=\"{}\">#N/A</definedName>", esc_attr(name))).collect()
     }
 
-    /// Writes a sheet's slicer part and relationship; returns the sheet's `x14:slicerList`
-    /// extension (empty when the sheet has none).
+    /// Writes a sheet's slicer parts and relationships: one for its PivotTable slicers and one for
+    /// its table slicers, as Excel does. Returns the sheet's `extLst` entries listing them (empty
+    /// when the sheet has none).
     pub fn sheet_part(sheet: &Sheet, list: &[SheetSlicer], out: &mut Out, rels: &mut Rels) -> String {
-        if list.is_empty() {
-            return String::new();
+        let is_table = |p: &&SheetSlicer| sheet.slicers.get(p.slicer).is_some_and(|sl| matches!(sl.source, SlicerSource::Table { .. }));
+        let (tables, pivots): (Vec<&SheetSlicer>, Vec<&SheetSlicer>) = list.iter().partition(is_table);
+        let mut ext = String::new();
+        if let Some(rid) = Self::slicer_part(sheet, &pivots, out, rels) {
+            let _ = write!(
+                ext,
+                "<ext uri=\"{EXT_SHEET_SLICERS}\" xmlns:x14=\"{NS_X14}\"><x14:slicerList><x14:slicer r:id=\"{rid}\"/></x14:slicerList></ext>"
+            );
         }
+        if let Some(rid) = Self::slicer_part(sheet, &tables, out, rels) {
+            let _ = write!(
+                ext,
+                "<ext uri=\"{EXT_SHEET_TABLE_SLICERS}\" xmlns:x15=\"{NS_X15}\"><x14:slicerList xmlns:x14=\"{NS_X14}\"><x14:slicer r:id=\"{rid}\"/></x14:slicerList></ext>"
+            );
+        }
+        ext
+    }
+
+    /// Writes one slicer part holding `list`; returns its relationship id (`None` when empty).
+    fn slicer_part(sheet: &Sheet, list: &[&SheetSlicer], out: &mut Out, rels: &mut Rels) -> Option<String> {
         let mut x = format!("{XML_DECL}<slicers xmlns=\"{NS_X14}\" xmlns:mc=\"{NS_MC}\" mc:Ignorable=\"x\" xmlns:x=\"{}\">", crate::write::NS_MAIN);
         let mut any = false;
         for p in list {
@@ -480,7 +719,7 @@ impl SlicerWriter {
             any = true;
             let _ = write!(x, "<slicer name=\"{}\" cache=\"{}\"", esc_attr(&p.name), esc_attr(&p.cache));
             if !sl.caption.is_empty() {
-                let _ = write!(x, " caption=\"{}\"", esc_attr(&sl.caption));
+                let _ = write!(x, " caption=\"{}\"", esc_attr(&encode_xstring(&sl.caption)));
             }
             if sl.columns > 1 {
                 let _ = write!(x, " columnCount=\"{}\"", sl.columns.min(20_000));
@@ -492,97 +731,149 @@ impl SlicerWriter {
             let _ = write!(x, " rowHeight=\"{}\"/>", h.unwrap_or(DEFAULT_ROW_HEIGHT));
         }
         if !any {
-            return String::new();
+            return None;
         }
         x.push_str("</slicers>");
         out.slicers.parts += 1;
         let n = out.slicers.parts;
         out.part(&format!("xl/slicers/slicer{n}.xml"), Some(CT_SLICER), x.into_bytes());
-        let rid = rels.add_uri(REL_SLICER, &format!("../slicers/slicer{n}.xml"));
-        format!("<ext uri=\"{EXT_SHEET_SLICERS}\" xmlns:x14=\"{NS_X14}\"><x14:slicerList><x14:slicer r:id=\"{rid}\"/></x14:slicerList></ext>")
+        Some(rels.add_uri(REL_SLICER, &format!("../slicers/slicer{n}.xml")))
     }
 
-    /// Writes the slicer caches; returns the workbook `extLst`'s `ext` listing them (empty when
+    /// Writes the slicer caches; returns the workbook `extLst`'s entries listing them (empty when
     /// there are none). `sheet_ids` is the `sheetId` written for each model sheet, which a cache's
     /// `tabId` names.
     pub fn finish(self, wb: &Workbook, sheet_ids: &[usize], pivots: &crate::pivot::PivotWriter, out: &mut Out, wb_rels: &mut Rels) -> String {
         let mut list = String::new();
+        let mut table_list = String::new();
         for (k, p) in self.planned.iter().enumerate() {
-            // The connected PivotTables that were written, with their (shared) cache's data.
-            let written: Vec<((usize, usize), &PivotTable, &crate::pivot::PivotSlicerInfo)> =
-                p.pivots.iter().filter_map(|&(psi, pi)| Some(((psi, pi), wb.sheet(psi)?.pivots.get(pi)?, pivots.slicer_info(psi, pi)?))).collect();
-            let Some(&(_, pt, info)) = written.first() else { continue };
             let Some(sl) = wb.sheet(p.sheet).and_then(|s| s.slicers.get(p.slicer)) else { continue };
-            let SlicerSource::Pivot { sort, cross_filter, show_missing, .. } = &sl.source else { continue };
-            let field = info.fields.iter().find(|f| f.name.eq_ignore_ascii_case(&p.field));
-            let labels: &[String] = field.map(|f| f.labels.as_slice()).unwrap_or(&[]);
-            // The selection at the base cache field's level (the items written below).
-            let level = pt.field_group(&p.field);
-            let sel = pt
-                .filters
-                .iter()
-                .find(|f| f.source_col.eq_ignore_ascii_case(&p.field) && pt.filter_group(f) == level)
-                .and_then(|f| f.selected.as_deref());
-            let mut on: Vec<bool> = labels.iter().map(|l| sel.is_none_or(|s| s.iter().any(|x| x.eq_ignore_ascii_case(l)))).collect();
-            if !on.contains(&true) {
-                on.iter_mut().for_each(|o| *o = true);
-            }
-            // Date groups are in date order already; other items sort by value.
-            let mut order: Vec<usize> = (0..labels.len()).collect();
-            match (sort, field.is_some_and(|f| f.grouped)) {
-                (PivotSort::Asc, false) => order.sort_by(|a, b| cmp_label(&labels[*a], &labels[*b])),
-                (PivotSort::Desc, false) => order.sort_by(|a, b| cmp_label(&labels[*b], &labels[*a])),
-                (PivotSort::Desc, true) => order.reverse(),
-                (PivotSort::Asc | PivotSort::None, true) | (PivotSort::None, false) => {}
-            }
-            let mut x = format!(
-                "{XML_DECL}<slicerCacheDefinition xmlns=\"{NS_X14}\" xmlns:mc=\"{NS_MC}\" mc:Ignorable=\"x\" xmlns:x=\"{}\" name=\"{}\" sourceName=\"{}\"><pivotTables>",
-                crate::write::NS_MAIN,
-                esc_attr(&p.cache),
-                esc_attr(&p.field),
-            );
-            for &((psi, pi), t, i) in &written {
-                if i.cache_id != info.cache_id {
-                    continue;
+            let x = match (&p.table, &sl.source) {
+                (Some(t), _) => {
+                    // Its table's sheet records the ids; a table that wasn't written has no cache.
+                    let Some((table_id, column_id, source)) = &t.written else { continue };
+                    table_cache_xml(&p.cache, source, *table_id, *column_id, sl.imported_cache.table_items)
                 }
-                let Some(tab) = sheet_ids.get(psi) else { continue };
-                let pname = if t.name.trim().is_empty() { format!("PivotTable{}", pi + 1) } else { t.name.clone() };
-                let _ = write!(x, "<pivotTable tabId=\"{tab}\" name=\"{}\"/>", esc_attr(&pname));
-            }
-            let _ = write!(x, "</pivotTables><data><tabular pivotCacheId=\"{}\"", info.cache_id);
-            if *sort == PivotSort::Desc {
-                x.push_str(" sortOrder=\"descending\"");
-            }
-            if !show_missing {
-                x.push_str(" showMissing=\"0\"");
-            }
-            match cross_filter {
-                SlicerCrossFilter::None => x.push_str(" crossFilter=\"none\""),
-                SlicerCrossFilter::ShowItemsWithNoData => x.push_str(" crossFilter=\"showItemsWithNoData\""),
-                SlicerCrossFilter::ShowItemsWithDataAtTop => {}
-            }
-            let _ = write!(x, "><items count=\"{}\">", order.len());
-            for i in order {
-                let _ = write!(x, "<i x=\"{i}\"{}/>", if on[i] { " s=\"1\"" } else { "" });
-            }
-            x.push_str("</items></tabular></data></slicerCacheDefinition>");
+                (None, SlicerSource::Pivot { sort, cross_filter, show_missing, .. }) => {
+                    let Some(x) = pivot_cache_xml(wb, p, sheet_ids, pivots, (*sort, *cross_filter, *show_missing)) else { continue };
+                    x
+                }
+                (None, SlicerSource::Table { .. }) => continue,
+            };
             let part = format!("slicerCaches/slicerCache{}.xml", k + 1);
             out.part(&format!("xl/{part}"), Some(CT_SLICER_CACHE), x.into_bytes());
             let rid = wb_rels.add_uri(REL_SLICER_CACHE, &part);
-            let _ = write!(list, "<x14:slicerCache r:id=\"{rid}\"/>");
+            let _ = write!(if p.table.is_some() { &mut table_list } else { &mut list }, "<x14:slicerCache r:id=\"{rid}\"/>");
         }
-        if list.is_empty() {
-            return String::new();
+        let mut ext = String::new();
+        if !list.is_empty() {
+            let _ = write!(ext, "<ext uri=\"{EXT_WB_SLICER_CACHES}\" xmlns:x14=\"{NS_X14}\"><x14:slicerCaches>{list}</x14:slicerCaches></ext>");
         }
-        format!("<ext uri=\"{EXT_WB_SLICER_CACHES}\" xmlns:x14=\"{NS_X14}\"><x14:slicerCaches>{list}</x14:slicerCaches></ext>")
+        if !table_list.is_empty() {
+            let _ = write!(
+                ext,
+                "<ext uri=\"{EXT_WB_TABLE_SLICER_CACHES}\" xmlns:x15=\"{NS_X15}\"><x15:slicerCaches xmlns:x14=\"{NS_X14}\">{table_list}</x15:slicerCaches></ext>"
+            );
+        }
+        ext
     }
 }
 
-/// The PivotTables (sheet, index) that must share a pivot cache: each slicer's, merged where
-/// slicers have a PivotTable in common.
+/// A table slicer cache: the cache's name, the column's written header (`sourceName`) and the
+/// table and column ids it was written with, with the item options kept from the file.
+fn table_cache_xml(cache: &str, source: &str, table_id: u32, column_id: u32, items: Option<TableSlicerItems>) -> String {
+    let mut x = format!(
+        "{XML_DECL}<slicerCacheDefinition xmlns=\"{NS_X14}\" xmlns:mc=\"{NS_MC}\" mc:Ignorable=\"x\" xmlns:x=\"{}\" name=\"{}\" sourceName=\"{}\"><extLst><x:ext uri=\"{EXT_TABLE_SLICER_CACHE}\" xmlns:x15=\"{NS_X15}\"><x15:tableSlicerCache tableId=\"{table_id}\" column=\"{column_id}\"",
+        crate::write::NS_MAIN,
+        esc_attr(cache),
+        esc_attr(&encode_xstring(source)),
+    );
+    if let Some(items) = items {
+        if items.descending {
+            x.push_str(" sortOrder=\"descending\"");
+        }
+        if !items.custom_list_sort {
+            x.push_str(" customListSort=\"0\"");
+        }
+        match items.cross_filter {
+            SlicerCrossFilter::None => x.push_str(" crossFilter=\"none\""),
+            SlicerCrossFilter::ShowItemsWithNoData => x.push_str(" crossFilter=\"showItemsWithNoData\""),
+            SlicerCrossFilter::ShowItemsWithDataAtTop => {}
+        }
+    }
+    x.push_str("/></x:ext></extLst></slicerCacheDefinition>");
+    x
+}
+
+/// A PivotTable slicer cache, or `None` when none of its PivotTables was written.
+fn pivot_cache_xml(
+    wb: &Workbook,
+    p: &Planned,
+    sheet_ids: &[usize],
+    pivots: &crate::pivot::PivotWriter,
+    (sort, cross_filter, show_missing): (PivotSort, SlicerCrossFilter, bool),
+) -> Option<String> {
+    // The connected PivotTables that were written, with their (shared) cache's data.
+    let written: Vec<((usize, usize), &PivotTable, &crate::pivot::PivotSlicerInfo)> =
+        p.pivots.iter().filter_map(|&(psi, pi)| Some(((psi, pi), wb.sheet(psi)?.pivots.get(pi)?, pivots.slicer_info(psi, pi)?))).collect();
+    let &(_, pt, info) = written.first()?;
+    let field = info.fields.iter().find(|f| f.name.eq_ignore_ascii_case(&p.field));
+    let labels: &[String] = field.map(|f| f.labels.as_slice()).unwrap_or(&[]);
+    // The selection at the base cache field's level (the items written below).
+    let level = pt.field_group(&p.field);
+    let sel =
+        pt.filters.iter().find(|f| f.source_col.eq_ignore_ascii_case(&p.field) && pt.filter_group(f) == level).and_then(|f| f.selected.as_deref());
+    let mut on: Vec<bool> = labels.iter().map(|l| sel.is_none_or(|s| s.iter().any(|x| x.eq_ignore_ascii_case(l)))).collect();
+    if !on.contains(&true) {
+        on.iter_mut().for_each(|o| *o = true);
+    }
+    // Date groups are in date order already; other items sort by value.
+    let mut order: Vec<usize> = (0..labels.len()).collect();
+    match (sort, field.is_some_and(|f| f.grouped)) {
+        (PivotSort::Asc, false) => order.sort_by(|a, b| cmp_label(&labels[*a], &labels[*b])),
+        (PivotSort::Desc, false) => order.sort_by(|a, b| cmp_label(&labels[*b], &labels[*a])),
+        (PivotSort::Desc, true) => order.reverse(),
+        (PivotSort::Asc | PivotSort::None, true) | (PivotSort::None, false) => {}
+    }
+    let mut x = format!(
+        "{XML_DECL}<slicerCacheDefinition xmlns=\"{NS_X14}\" xmlns:mc=\"{NS_MC}\" mc:Ignorable=\"x\" xmlns:x=\"{}\" name=\"{}\" sourceName=\"{}\"><pivotTables>",
+        crate::write::NS_MAIN,
+        esc_attr(&p.cache),
+        esc_attr(&p.field),
+    );
+    for &((psi, pi), t, i) in &written {
+        if i.cache_id != info.cache_id {
+            continue;
+        }
+        let Some(tab) = sheet_ids.get(psi) else { continue };
+        let pname = if t.name.trim().is_empty() { format!("PivotTable{}", pi + 1) } else { t.name.clone() };
+        let _ = write!(x, "<pivotTable tabId=\"{tab}\" name=\"{}\"/>", esc_attr(&pname));
+    }
+    let _ = write!(x, "</pivotTables><data><tabular pivotCacheId=\"{}\"", info.cache_id);
+    if sort == PivotSort::Desc {
+        x.push_str(" sortOrder=\"descending\"");
+    }
+    if !show_missing {
+        x.push_str(" showMissing=\"0\"");
+    }
+    match cross_filter {
+        SlicerCrossFilter::None => x.push_str(" crossFilter=\"none\""),
+        SlicerCrossFilter::ShowItemsWithNoData => x.push_str(" crossFilter=\"showItemsWithNoData\""),
+        SlicerCrossFilter::ShowItemsWithDataAtTop => {}
+    }
+    let _ = write!(x, "><items count=\"{}\">", order.len());
+    for i in order {
+        let _ = write!(x, "<i x=\"{i}\"{}/>", if on[i] { " s=\"1\"" } else { "" });
+    }
+    x.push_str("</items></tabular></data></slicerCacheDefinition>");
+    Some(x)
+}
+
+/// The PivotTables (sheet, index) that must share a pivot cache: each PivotTable slicer's, merged
+/// where slicers have a PivotTable in common.
 fn merge_groups(planned: &[Planned]) -> Vec<Vec<(usize, usize)>> {
     let mut groups: Vec<Vec<(usize, usize)>> = Vec::new();
-    for p in planned {
+    for p in planned.iter().filter(|p| !p.pivots.is_empty()) {
         let mut g = p.pivots.clone();
         let (overlap, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut groups).into_iter().partition(|o| o.iter().any(|x| g.contains(x)));
         groups = rest;
@@ -646,10 +937,19 @@ fn builtin_style(style: &str) -> Option<&str> {
     ok.then_some(base)
 }
 
-/// The drawing XML of a slicer frame, with a fallback shape for readers without slicers.
-pub fn frame_xml(id: usize, name: &str, xfrm: &str, a_xfrm: &str) -> String {
+/// The drawing XML of a slicer frame, with a fallback shape for readers without slicers. A table
+/// slicer's choice requires Excel 2013's `sle15` namespace, a PivotTable slicer's Excel 2010's `a14`.
+pub fn frame_xml(id: usize, name: &str, table: bool, xfrm: &str, a_xfrm: &str) -> String {
+    let (choice, message) = if table {
+        (format!("xmlns:sle15=\"{NS_SLE15}\" Requires=\"sle15\""), "This is a table slicer. Table slicers need Excel 2013 or later.")
+    } else {
+        (
+            "xmlns:a14=\"http://schemas.microsoft.com/office/drawing/2010/main\" Requires=\"a14\"".to_string(),
+            "This is a PivotTable slicer. Slicers need Excel 2010 or later.",
+        )
+    };
     format!(
-        "<mc:AlternateContent xmlns:mc=\"{NS_MC}\"><mc:Choice xmlns:a14=\"http://schemas.microsoft.com/office/drawing/2010/main\" Requires=\"a14\"><xdr:graphicFrame macro=\"\"><xdr:nvGraphicFramePr><xdr:cNvPr id=\"{id}\" name=\"{n}\"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>{xfrm}<a:graphic><a:graphicData uri=\"{FRAME_URI}\"><sle:slicer xmlns:sle=\"{FRAME_URI}\" name=\"{n}\"/></a:graphicData></a:graphic></xdr:graphicFrame></mc:Choice><mc:Fallback><xdr:sp macro=\"\" textlink=\"\"><xdr:nvSpPr><xdr:cNvPr id=\"0\" name=\"\"/><xdr:cNvSpPr><a:spLocks noTextEdit=\"1\"/></xdr:cNvSpPr></xdr:nvSpPr><xdr:spPr>{a_xfrm}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr><xdr:txBody><a:bodyPr vertOverflow=\"clip\" horzOverflow=\"clip\"/><a:lstStyle/><a:p><a:r><a:rPr lang=\"en-US\" sz=\"1100\"/><a:t>This is a PivotTable slicer. Slicers need Excel 2010 or later.</a:t></a:r></a:p></xdr:txBody></xdr:sp></mc:Fallback></mc:AlternateContent>",
+        "<mc:AlternateContent xmlns:mc=\"{NS_MC}\"><mc:Choice {choice}><xdr:graphicFrame macro=\"\"><xdr:nvGraphicFramePr><xdr:cNvPr id=\"{id}\" name=\"{n}\"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>{xfrm}<a:graphic><a:graphicData uri=\"{FRAME_URI}\"><sle:slicer xmlns:sle=\"{FRAME_URI}\" name=\"{n}\"/></a:graphicData></a:graphic></xdr:graphicFrame></mc:Choice><mc:Fallback><xdr:sp macro=\"\" textlink=\"\"><xdr:nvSpPr><xdr:cNvPr id=\"0\" name=\"\"/><xdr:cNvSpPr><a:spLocks noTextEdit=\"1\"/></xdr:cNvSpPr></xdr:nvSpPr><xdr:spPr>{a_xfrm}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr><xdr:txBody><a:bodyPr vertOverflow=\"clip\" horzOverflow=\"clip\"/><a:lstStyle/><a:p><a:r><a:rPr lang=\"en-US\" sz=\"1100\"/><a:t>{message}</a:t></a:r></a:p></xdr:txBody></xdr:sp></mc:Fallback></mc:AlternateContent>",
         n = esc_attr(name)
     )
 }
@@ -691,7 +991,7 @@ mod tests {
             });
         }
         wb.sheets[0] = std::sync::Arc::new(data);
-        let mut writer = SlicerWriter::new(&wb, &[vec![]]);
+        let mut writer = SlicerWriter::new(&wb, &[vec![]], &mut vec![]);
         assert_eq!(writer.new_marker_names().collect::<Vec<_>>(), ["Slicer_K", "Slicer_K2"]);
         // Exercise the writer's catalog boundary: the first target's explicit range would import
         // as a table binding rather than the range used by native refresh in the model.
@@ -728,9 +1028,9 @@ mod tests {
             uid: Default::default(),
         };
         wb.sheet_mut(0).unwrap().slicers[1].imported_cache =
-            gridcraft_model::SlicerCacheOrigin { name: marker.name.clone(), marker: Some(marker.uid) };
+            gridcraft_model::SlicerCacheOrigin { name: marker.name.clone(), marker: Some(marker.uid), table_items: None };
         wb.names.push(marker);
-        let mut writer = SlicerWriter::new(&wb, &[vec![]]);
+        let mut writer = SlicerWriter::new(&wb, &[vec![]], &mut vec![]);
         assert_eq!(writer.planned[1].cache, "Slicer_K2");
         assert!(writer.planned[1].has_marker);
         assert!(writer.prune_targets(&wb, &catalog));

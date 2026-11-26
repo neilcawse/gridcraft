@@ -53,7 +53,7 @@ pub struct Ctx<'a> {
     pub drawing_kept: crate::drawing::DrawingKeptIn,
     /// The current sheet's PivotTables whose parts are kept, for pass-through.
     pub pivot_parts: Vec<crate::pivot::PivotPartsIn>,
-    /// PivotTable slicer pieces collected from sheets, joined once sheets are read.
+    /// Slicer pieces collected from sheets, joined once sheets are read.
     pub slicers: crate::slicer::SlicersIn,
     /// Cells of the worksheet being read whose formulas lack dynamic-array metadata (legacy
     /// formulas, evaluated with implicit intersection), collected per sheet.
@@ -68,14 +68,6 @@ pub struct Ctx<'a> {
     pub python: crate::python_part::ScriptsIn,
     /// Table file id → (model table id, column file id → header), for resolving slicers.
     pub file_tables: HashMap<u32, (u32, HashMap<u32, String>)>,
-    /// Slicer cache name → (table file id, column file id, sourceName).
-    pub slicer_caches: HashMap<String, (Option<u32>, Option<u32>, String)>,
-    /// Current sheet's slicer definitions: slicer name → (cache name, caption, column count).
-    pub sheet_slicer_defs: HashMap<String, (String, String, u32)>,
-    /// Current sheet's drawing slicer frames: (slicer name, anchor).
-    pub sheet_slicer_frames: Vec<(String, gridcraft_model::Anchor)>,
-    /// Slicers to attach after all sheets and tables are read: (sheet index, cache name, caption, anchor, columns).
-    pub pending_slicers: Vec<(usize, String, String, gridcraft_model::Anchor, u32)>,
     /// Cell elements read so far, across every sheet (capped by `sheet_read::MAX_CELLS`).
     pub cells: u64,
 }
@@ -436,10 +428,6 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
         known_function,
         python: Default::default(),
         file_tables: Default::default(),
-        slicer_caches: Default::default(),
-        sheet_slicer_defs: Default::default(),
-        sheet_slicer_frames: Default::default(),
-        pending_slicers: Default::default(),
         cells: 0,
     };
     let root_rels = cx.pkg.rels("")?;
@@ -472,7 +460,6 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
             }
         }
     }
-    read_slicer_caches(&mut cx, &wb_rels)?;
 
     read_workbook_properties(&mut cx, &mut wb, &wb_xml);
     let view_el = selected_workbook_view(&wb_xml);
@@ -558,7 +545,6 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
             _ => Visibility::Visible,
         };
         file_to_model.push(Some(wb.sheets.len()));
-        collect_sheet_slicers(&mut cx, wb.sheets.len());
         wb.sheets.push(Arc::new(sheet));
     }
     // Only kept macro sheets have a cell table whose shared string indexes are resolved later.
@@ -574,7 +560,7 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
     wb.external_books = Arc::new(crate::external::read(&mut cx, &wb_xml, &wb_rels)?);
 
     let chart_names = read_defined_names(&mut wb, &wb_xml, &file_to_model);
-    crate::slicer::resolve(&mut cx, &wb_xml, &wb_rels, &sheet_els, &file_to_model, &pivot_caches, &mut wb);
+    crate::slicer::resolve(&mut cx, &wb_rels, &sheet_els, &file_to_model, &pivot_caches, &mut wb);
 
     if !chart_names.is_empty() {
         let resolve = |f: &mut String| {
@@ -639,7 +625,7 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
     let mut owned = std::borrow::Cow::Owned(wb);
     crate::table_names::repair(&mut owned, names, &mut cx.report.warnings);
     wb = owned.into_owned();
-    attach_pending_slicers(&mut cx, &mut wb);
+    crate::slicer::attach_tables(&mut cx, &mut wb);
     cx.release_shared_strings_unless_needed(false);
     if let Some(w) = cx.python.warning() {
         cx.warn(w);
@@ -688,109 +674,4 @@ pub fn parse_print_titles(text: &str) -> (TitleSpan, TitleSpan) {
         }
     }
     (rows, cols)
-}
-
-/// Reads workbook-level `slicerCache` parts and records their table/column mappings on `cx`.
-fn read_slicer_caches(cx: &mut Ctx<'_>, wb_rels: &[crate::package::Rel]) -> Result<(), IoError> {
-    for r in wb_rels.iter().filter(|r| r.kind.eq_ignore_ascii_case("slicerCache")).cloned().collect::<Vec<_>>() {
-        if let Some(x) = cx.optional_xml(&r.target)?
-            && let Some(name) = x.attr("name").filter(|s| !s.is_empty())
-        {
-            let tsc = x.child("extLst").and_then(|el| el.kids("ext").find_map(|e| e.child("tableSlicerCache")));
-            let is_pivot_cache =
-                x.child("pivotTables").is_some() || x.child("data").is_some_and(|d| d.child("tabular").is_some() || d.child("olap").is_some());
-            if tsc.is_none() && is_pivot_cache {
-                continue;
-            }
-            let source_name = xml::decode_xstring(x.attr("sourceName").unwrap_or(""));
-            let table_id = tsc.and_then(|t| t.attr_u32("tableId"));
-            let col_id = tsc.and_then(|t| t.attr_u32("column"));
-            cx.slicer_caches.insert(name.to_string(), (table_id, col_id, source_name));
-        }
-    }
-    Ok(())
-}
-
-/// Matches drawing slicer graphicFrames on `sheet_idx` to worksheet slicer definitions and queues them for attachment.
-fn collect_sheet_slicers(cx: &mut Ctx<'_>, sheet_idx: usize) {
-    let frames = std::mem::take(&mut cx.sheet_slicer_frames);
-    let single_frame = frames.len() == 1;
-    for (sname, anchor) in frames {
-        let def = cx
-            .sheet_slicer_defs
-            .get(&sname)
-            .cloned()
-            .or_else(|| (single_frame && cx.sheet_slicer_defs.len() == 1).then(|| cx.sheet_slicer_defs.values().next().cloned()).flatten());
-        if let Some((cache_name, caption, columns)) = def {
-            cx.pending_slicers.push((sheet_idx, cache_name, caption, anchor, columns));
-        }
-    }
-}
-
-/// Resolves queued slicers against loaded tables and attaches them to their target sheets.
-fn attach_pending_slicers(cx: &mut Ctx<'_>, wb: &mut Workbook) {
-    for (sheet_idx, cache_name, caption, anchor, columns) in std::mem::take(&mut cx.pending_slicers) {
-        let Some((table_id, col_id, source_name)) = cx.slicer_caches.get(&cache_name).cloned() else { continue };
-        let resolved = table_id
-            .and_then(|tid| cx.file_tables.get(&tid))
-            .and_then(|(id, cols)| {
-                let t = wb.sheets.iter().flat_map(|sh| &sh.tables).find(|t| t.id == *id)?;
-                let col = col_id.and_then(|cid| cols.get(&cid).cloned()).filter(|s| !s.is_empty()).unwrap_or_else(|| source_name.clone());
-                Some((t.name.clone(), col))
-            })
-            .or_else(|| {
-                (!source_name.is_empty()).then(|| {
-                    wb.sheets
-                        .iter()
-                        .flat_map(|s| &s.tables)
-                        .find_map(|t| t.columns.iter().find(|c| c.name.eq_ignore_ascii_case(&source_name)).map(|c| (t.name.clone(), c.name.clone())))
-                })?
-            });
-        if let Some((table, column)) = resolved
-            && !table.is_empty()
-            && !column.is_empty()
-            && let Some(sh) = wb.sheets.get(sheet_idx)
-        {
-            let selected = saved_table_column_selection(wb, sheet_idx, &table, &column);
-            let _ = sh;
-            if let Some(sh) = wb.sheets.get_mut(sheet_idx) {
-                let id = cx.next_object_id();
-                let caption = if caption.is_empty() { column.clone() } else { caption };
-                Arc::make_mut(sh).slicers.push(gridcraft_model::Slicer {
-                    id,
-                    source: gridcraft_model::SlicerSource::Table { table, column, selected },
-                    caption,
-                    anchor,
-                    columns,
-                    name: String::new(),
-                    style: String::new(),
-                    row_height: None,
-                    imported_cache: Default::default(),
-                });
-            }
-        }
-    }
-}
-
-/// Restores a table slicer's selected values from the resolved table column's saved AutoFilter.
-fn saved_table_column_selection(wb: &Workbook, slicer_sheet: usize, table: &str, column: &str) -> Option<Vec<String>> {
-    let (target_sheet, t) = wb
-        .sheets
-        .get(slicer_sheet)
-        .and_then(|sh| sh.tables.iter().find(|t| t.name.eq_ignore_ascii_case(table)).map(|t| (sh.as_ref(), t)))
-        .or_else(|| wb.sheets.iter().find_map(|sh| sh.tables.iter().find(|t| t.name.eq_ignore_ascii_case(table)).map(|t| (sh.as_ref(), t))))?;
-    let ci = t.column_index(column)? as u32;
-    if let Some((_, gridcraft_model::FilterCriterion::Values { values, .. })) = t.filter.iter().find(|(col, _)| *col == ci) {
-        return Some(values.clone());
-    }
-    let af = target_sheet.autofilter.as_ref()?;
-    let abs_col = t.range.start.col + ci;
-    if abs_col < af.range.start.col || abs_col > af.range.end.col {
-        return None;
-    }
-    let off = abs_col - af.range.start.col;
-    af.criteria.iter().find_map(|(col, crit)| match crit {
-        gridcraft_model::FilterCriterion::Values { values, .. } if *col == off => Some(values.clone()),
-        _ => None,
-    })
 }

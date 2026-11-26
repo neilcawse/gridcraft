@@ -5,7 +5,7 @@ use super::{
 
 /// `rels` maps relationship ids to relationships (the first of duplicate ids). `budget` counts the
 /// cells and bytes this sheet's hyperlinks have copied so far, across `<hyperlinks>` blocks.
-pub(super) fn from_craft_table(cx: &mut Ctx<'_>, t: &craft_xlsx::Table) -> Table {
+pub(super) fn from_craft_table(cx: &mut Ctx<'_>, t: &craft_xlsx::Table) -> (Table, Option<RangeRef>) {
     let columns = t
         .columns
         .iter()
@@ -44,8 +44,13 @@ pub(super) fn from_craft_table(cx: &mut Ctx<'_>, t: &craft_xlsx::Table) -> Table
         .collect();
     let xml_table = t.table_type.as_deref() == Some("xml");
     let si = t.style.as_ref();
-    let filter = t.auto_filter.as_ref().and_then(|af| read_autofilter(cx, &super::from_craft_el(af))).map(|af| af.criteria).unwrap_or_default();
-    Table {
+    let (range, filter) = t
+        .auto_filter
+        .as_ref()
+        .and_then(|af| read_autofilter(cx, &super::from_craft_el(af)))
+        .map(|af| (Some(af.range), af.criteria))
+        .unwrap_or_default();
+    let table = Table {
         id: t.id.unwrap_or(0),
         name: t.display_name.as_deref().or(t.name.as_deref()).unwrap_or("Table").to_string(),
         range: super::to_range_ref(t.range),
@@ -62,7 +67,8 @@ pub(super) fn from_craft_table(cx: &mut Ctx<'_>, t: &craft_xlsx::Table) -> Table
         table_type: xml_table.then(|| "xml".to_string()),
         connection_id: t.connection_id.filter(|_| xml_table),
         uid: Default::default(),
-    }
+    };
+    (table, range)
 }
 
 pub(super) fn apply_craft_comments(comments: &craft_xlsx::Comments, sheet: &mut Sheet) {

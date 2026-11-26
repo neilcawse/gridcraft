@@ -468,24 +468,11 @@ fn read_object(
                 } else {
                     cx.warn(format!("chart {target} is missing from the package and was skipped ({part}, object {n})"));
                 }
-            } else if crate::slicer::read_frame(cx, &sheet.name, gd, anchor) {
-                let sname = gd
-                    .child("slicer")
-                    .and_then(|s| s.attr("name"))
-                    .or_else(|| obj.path(&["nvGraphicFramePr", "cNvPr"]).and_then(|c| c.attr("name")))
-                    .unwrap_or("")
-                    .to_string();
-                cx.sheet_slicer_frames.push((sname, anchor));
+            } else if crate::slicer::read_frame(cx, &sheet.name, gd, anchor) || uri.contains("slicer") || gd.child("slicer").is_some() {
+                // A slicer frame is joined with its slicer part and cache once every sheet is read
+                // (`slicer::resolve`); other slicer-like frames (timelines) have no model.
             } else if uri.contains("chartex") || uri.contains("chartEx") {
                 cx.warn(format!("a histogram, waterfall, treemap… chart without its chart part was skipped ({part}, object {n})"));
-            } else if uri.contains("slicer") || gd.child("slicer").is_some() {
-                let sname = gd
-                    .child("slicer")
-                    .and_then(|s| s.attr("name"))
-                    .or_else(|| obj.path(&["nvGraphicFramePr", "cNvPr"]).and_then(|c| c.attr("name")))
-                    .unwrap_or("")
-                    .to_string();
-                cx.sheet_slicer_frames.push((sname, anchor));
             } else {
                 cx.warn(format!("an embedded object (SmartArt, OLE…) was skipped ({part}, object {n})"));
             }
@@ -1025,7 +1012,7 @@ pub enum Obj<'a> {
     Image(&'a Image, String),
     Chart(&'a gridcraft_model::Chart, String),
     Shape(&'a Shape),
-    /// A PivotTable slicer and its (unique) name.
+    /// A slicer and its (unique) name.
     Slicer(&'a gridcraft_model::Slicer, String),
 }
 
@@ -1383,8 +1370,9 @@ fn write_obj(s: &mut String, theme: &Theme, o: &Obj<'_>, id: usize, off: (i64, i
                 xfrm("a:xfrm", off, ext, rot)
             );
         }
-        Obj::Slicer(_, name) => {
-            s.push_str(&crate::slicer::frame_xml(id, name, &xfrm("xdr:xfrm", off, ext, rot), &xfrm("a:xfrm", off, ext, rot)));
+        Obj::Slicer(sl, name) => {
+            let table = matches!(sl.source, gridcraft_model::SlicerSource::Table { .. });
+            s.push_str(&crate::slicer::frame_xml(id, name, table, &xfrm("xdr:xfrm", off, ext, rot), &xfrm("a:xfrm", off, ext, rot)));
         }
         Obj::Chart(_, rid) => {
             let _ = write!(

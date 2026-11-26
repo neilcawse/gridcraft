@@ -14,21 +14,11 @@ pub(super) fn filter_menu(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_
     // Tables get an autofilter on demand.
     let table_range = filter_table_range(sh, col, row);
     if sh.autofilter.is_none()
-        && let Some(r) = table_range
+        && let Some(range) = table_range
+        && let Some(d) = app.session.active_mut()
+        && let Some(s) = Arc::make_mut(&mut d.wb).sheet_mut(si)
     {
-        let _ = app.session.run("data.filter", json!({"range": r.a1()}));
-        let _ = app.session.run("data.filter", json!({"range": r.a1()}));
-        if let Some(sh2) = app.session.active().and_then(|d| d.wb.active()).map(|s| s.autofilter.is_some())
-            && !sh2
-        {
-            let d = app.session.active_mut();
-            if let Some(d) = d {
-                let wbm = Arc::make_mut(&mut d.wb);
-                if let Some(s) = wbm.sheet_mut(si) {
-                    s.autofilter = Some(gridcraft_engine::model::AutoFilter { range: r, criteria: vec![] });
-                }
-            }
-        }
+        s.autofilter = Some(gridcraft_engine::model::AutoFilter { range, criteria: vec![] });
     }
     let wb = app.session.active().map(|d| d.wb.clone()).unwrap_or(wb);
     let values = gridcraft_engine::cmd::data::filter_values(&wb, si, col);

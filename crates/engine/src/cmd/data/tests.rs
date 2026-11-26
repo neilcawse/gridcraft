@@ -97,6 +97,121 @@ fn filter_by_inside_a_table_installs_the_autofilter_and_keeps_the_button() {
 }
 
 #[test]
+fn table_autofilter_reapplies_to_data_but_not_totals() {
+    let mut s = Session::new();
+    s.new_workbook();
+    s.execute("range.setValues", json!({"range": "A1", "values": [["Region", "Amount"], ["East", 10], ["West", 20]]})).unwrap();
+    s.execute("insert.table", json!({"range": "A1:B3", "name": "Sales", "header": true})).unwrap();
+    s.execute("table.totalRow", json!({"table": "Sales", "on": true})).unwrap();
+    let bytes = crate::io::save_bytes(&s.doc().unwrap().wb, "sales.xlsx").unwrap();
+    let (mut wb, _) = crate::io::open_bytes("sales.xlsx", &bytes).unwrap();
+    wb.sheet_mut(0).unwrap().tables[0].filter = vec![(0, FilterCriterion::Values { values: vec!["East".into()], blanks: false })];
+    s.add_document(crate::DocState::new(wb, None, "Sales".into(), crate::Trust::FromFile));
+    s.execute("data.reapply", json!({})).unwrap();
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    assert_eq!((0..4).filter(|&r| sh.is_row_hidden(r)).collect::<Vec<_>>(), [2]);
+    assert_eq!(sh.filter_row_spans(), [(1, 2)]);
+}
+
+#[test]
+fn worksheet_filter_over_table_omits_totals_from_samples_and_dropdown() {
+    let mut s = Session::new();
+    s.new_workbook();
+    s.execute("range.setValues", json!({"range": "A1", "values": [["Region", "Amount"], ["East", 10], ["West", 20]]})).unwrap();
+    s.execute("data.filter", json!({"range": "A1:B4"})).unwrap();
+    s.execute("insert.table", json!({"range": "A1:B3", "name": "Sales", "header": true})).unwrap();
+    s.execute("table.totalRow", json!({"table": "Sales", "on": true})).unwrap();
+    let wb = &s.doc().unwrap().wb;
+    assert_eq!(filter_values(wb, 0, 1), [("10".into(), true), ("20".into(), true)]);
+    s.execute("data.filterBy", json!({"column": "B", "top": {"count": 1}})).unwrap();
+    let wb = &s.doc().unwrap().wb;
+    let sh = wb.active().unwrap();
+    assert!(sh.is_row_filtered(1));
+    assert!(!sh.is_row_hidden(2));
+    assert!(!sh.is_row_hidden(3));
+    let bytes = crate::io::save_bytes(wb, "sales.xlsx").unwrap();
+    let (wb, _) = crate::io::open_bytes("sales.xlsx", &bytes).unwrap();
+    s.add_document(crate::DocState::new(wb, None, "Sales".into(), crate::Trust::FromFile));
+    s.execute("data.reapply", json!({})).unwrap();
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    assert!(sh.is_row_filtered(1));
+    assert!(!sh.is_row_hidden(2));
+    assert!(!sh.is_row_hidden(3));
+    s.execute("data.clearFilter", json!({})).unwrap();
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    assert!((0..4).all(|row| !sh.is_row_hidden(row)));
+    assert!(sh.tables[0].filter.is_empty());
+}
+
+#[test]
+fn totals_toggle_keeps_a_full_table_worksheet_filter_on_the_table() {
+    let mut s = Session::new();
+    s.new_workbook();
+    s.execute("range.setValues", json!({"range": "A1", "values": [["Region", "Amount"], ["East", 10], ["West", 20], ["East", 30]]})).unwrap();
+    s.execute("insert.table", json!({"range": "A1:B4", "name": "Sales", "header": true})).unwrap();
+    s.execute("table.totalRow", json!({"table": "Sales", "on": true})).unwrap();
+    // The table dropdown installs a worksheet filter over the whole table.
+    s.execute("selection.set", json!({"range": "E1"})).unwrap();
+    s.execute("data.filter", json!({"range": "A1:B5"})).unwrap();
+    s.execute("data.filterBy", json!({"column": "A", "values": ["East"]})).unwrap();
+    let assert_proxy = |s: &Session, totals: bool| {
+        let sh = s.doc().unwrap().wb.active().unwrap();
+        let table = &sh.tables[0];
+        assert_eq!(table.totals_row, totals);
+        assert_eq!(table.range.a1(), if totals { "A1:B5" } else { "A1:B4" });
+        assert_eq!(sh.autofilter.as_ref().unwrap().range, table.range);
+        assert_eq!((0..6).filter(|&r| sh.is_row_hidden(r)).collect::<Vec<_>>(), [2]);
+        assert_eq!(filter_values(&s.doc().unwrap().wb, 0, 0), [("East".into(), true), ("West".into(), false)]);
+    };
+    assert_proxy(&s, true);
+
+    s.execute("table.totalRow", json!({"table": "Sales", "on": false})).unwrap();
+    assert_proxy(&s, false);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_proxy(&s, true);
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_proxy(&s, false);
+    s.execute("data.reapply", json!({})).unwrap();
+    assert_proxy(&s, false);
+    let bytes = crate::io::save_bytes(&s.doc().unwrap().wb, "sales.xlsx").unwrap();
+    let (back, _) = crate::io::open_bytes("sales.xlsx", &bytes).unwrap();
+    assert!(back.sheets[0].is_row_filtered(2), "the criterion survives the save");
+
+    s.execute("table.totalRow", json!({"table": "Sales", "on": true})).unwrap();
+    assert_proxy(&s, true);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_proxy(&s, false);
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_proxy(&s, true);
+    s.execute("data.reapply", json!({})).unwrap();
+    assert_proxy(&s, true);
+}
+
+#[test]
+fn totals_toggle_leaves_worksheet_filter_over_headerless_table_unchanged() {
+    let mut s = Session::new();
+    s.new_workbook();
+    s.execute("range.setValues", json!({"range": "A1", "values": [["East"], ["West"], ["East"]]})).unwrap();
+    s.execute("insert.table", json!({"range": "A1:A3", "name": "Sales", "header": true})).unwrap();
+    // Imported tables can have no header; an exact-range worksheet filter is not their proxy.
+    Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap().tables[0].header_row = false;
+    s.execute("selection.set", json!({"range": "E1"})).unwrap();
+    s.execute("data.filter", json!({"range": "A1:A3"})).unwrap();
+    s.execute("data.filterBy", json!({"column": "A", "values": ["East"]})).unwrap();
+    let assert_filter = |s: &Session, hidden_rows: &[u32]| {
+        let sh = s.doc().unwrap().wb.active().unwrap();
+        assert_eq!(sh.autofilter.as_ref().unwrap().range.a1(), "A1:A3");
+        assert_eq!((0..5).filter(|&r| sh.is_row_hidden(r)).collect::<Vec<_>>(), hidden_rows);
+    };
+    assert_filter(&s, &[1]);
+    s.execute("table.totalRow", json!({"table": "Sales", "on": true})).unwrap();
+    s.execute("data.reapply", json!({})).unwrap();
+    assert_filter(&s, &[1]);
+    s.execute("table.totalRow", json!({"table": "Sales", "on": false})).unwrap();
+    assert_filter(&s, &[1]);
+}
+
+#[test]
 fn autofilter_range_grows_when_a_value_is_entered_in_the_row_below() {
     let mut s = Session::new();
     s.new_workbook();
@@ -212,7 +327,7 @@ fn table_dropdown_setup_outside_the_table_keeps_manually_hidden_rows() {
     s.execute("home.hideRows", json!({"rows": "3:3"})).unwrap();
     s.execute("home.hideRows", json!({"rows": "10:10"})).unwrap();
     s.execute("selection.set", json!({"range": "E1"})).unwrap();
-    // The table filter dropdown installs an AutoFilter on demand by toggling `data.filter` twice.
+    // Toggling an empty worksheet proxy must not reveal manually hidden data rows.
     s.execute("data.filter", json!({"range": "A1:A4"})).unwrap();
     s.execute("data.filter", json!({"range": "A1:A4"})).unwrap();
     let sh = s.doc().unwrap().wb.active().unwrap();

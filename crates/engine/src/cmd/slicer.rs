@@ -1,14 +1,12 @@
 //! Slicers: on-sheet widgets that filter a table column or a PivotTable field by clicking value
 //! tiles.
 //!
-//! A slicer is a thin front-end over the existing filter machinery. A table slicer's selection is
-//! written as a [`FilterCriterion::Values`] into the sheet's [`AutoFilter`] (over the table's
-//! range) and [`super::data::apply_filter`] hides the rows. A PivotTable slicer's selection is each
-//! connected PivotTable's [`PivotFilter`] on the field, and the PivotTables are refreshed. Creating
-//! a slicer (`insert.slicer` / `table.insertSlicer`) selects everything, i.e. applies no filter.
+//! A table slicer writes a [`FilterCriterion::Values`] to its table's AutoFilter. A PivotTable
+//! slicer sets each connected PivotTable's [`PivotFilter`] and refreshes the PivotTables.
+//! Creating a slicer (`insert.slicer` / `table.insertSlicer`) selects everything.
 
 use gridcraft_core::CellRef;
-use gridcraft_model::{Anchor, AnchorMode, AutoFilter, FilterCriterion, Slicer, SlicerPivot, SlicerSource, Workbook};
+use gridcraft_model::{Anchor, AnchorMode, FilterCriterion, Slicer, SlicerPivot, SlicerSource, Workbook};
 
 use crate::pivot::{self as pv, SlicerTile};
 use serde_json::{Value as Json, json};
@@ -142,31 +140,65 @@ fn next_selection(current: Option<Vec<String>>, all: &[String], value: &str, mul
     }
 }
 
-/// Re-applies slicer `id`'s selected filter values to its target table's sheet autofilter.
-fn reapply_slicer(wb: &mut Workbook, sheet: usize, id: u32) {
-    let info = wb.sheet(sheet).and_then(|sh| {
-        let sl = sh.slicers.iter().find(|s| s.id == id)?;
-        let SlicerSource::Table { table, column, selected } = &sl.source else { return None };
-        let (target_sheet, t) = sh
-            .tables
+/// Remove slicers whose backing table or column was deleted. Do this before syncing headers:
+/// a surviving column could otherwise be assigned the deleted column's name during that sync.
+pub(crate) fn remove_orphaned_table_slicers(before: &Workbook, wb: &mut Workbook) {
+    let has_column = |book: &Workbook, sheet: Option<usize>, table: &str, column: &str| {
+        sheet
+            .and_then(|i| book.sheets[i].tables.iter().find(|t| t.name.eq_ignore_ascii_case(table)))
+            .or_else(|| book.table(table).map(|(si, ti)| &book.sheets[si].tables[ti]))
+            .is_some_and(|t| t.column_index(column).is_some())
+    };
+    for si in 0..wb.sheets.len() {
+        let sh = &wb.sheets[si];
+        let removed: Vec<_> = sh
+            .slicers
             .iter()
-            .find(|t| t.name.eq_ignore_ascii_case(table))
-            .map(|t| (sheet, t))
-            .or_else(|| wb.table(table).and_then(|(si, ti)| Some((si, wb.sheet(si)?.tables.get(ti)?))))?;
-        let ci = t.column_index(column)?;
-        Some((target_sheet, t.range, t.range.start.col + ci as u32, selected.clone()))
-    });
-    let Some((target_sheet, table_range, abs_col, selected)) = info else { return };
-    {
-        let Some(sh) = wb.sheet_mut(target_sheet) else { return };
-        let af = sh.autofilter.get_or_insert_with(|| AutoFilter { range: table_range, criteria: vec![] });
-        let off = abs_col.saturating_sub(af.range.start.col);
-        af.criteria.retain(|(o, _)| *o != off);
-        if let Some(values) = selected {
-            af.criteria.push((off, FilterCriterion::Values { values, blanks: false }));
+            .enumerate()
+            .filter_map(|(i, sl)| {
+                let SlicerSource::Table { table, column, .. } = &sl.source else { return None };
+                // Preserve slicers that were already unbound; their fallback commands still work.
+                (!has_column(wb, Some(si), table, column) && has_column(before, before.sheet_index(&sh.name), table, column)).then_some(i)
+            })
+            .collect();
+        if !removed.is_empty()
+            && let Some(sh) = wb.sheet_mut(si)
+        {
+            let mut removed = removed.into_iter().peekable();
+            let mut i = 0;
+            sh.slicers.retain(|_| {
+                let keep = removed.next_if_eq(&i).is_none();
+                i += 1;
+                keep
+            });
         }
     }
-    super::data::apply_filter(wb, target_sheet);
+}
+
+fn table_filter_target(wb: &Workbook, sheet: usize, table: &str, column: &str) -> Option<(usize, usize, u32)> {
+    let (si, ti) =
+        wb.sheet(sheet)?.tables.iter().position(|t| t.name.eq_ignore_ascii_case(table)).map(|ti| (sheet, ti)).or_else(|| wb.table(table))?;
+    let col = wb.sheet(si)?.tables[ti].column_index(column)?;
+    Some((si, ti, col as u32))
+}
+
+fn set_table_filter(wb: &mut Workbook, sheet: usize, table: usize, column: u32, selected: Option<Vec<String>>) {
+    let Some(sh) = wb.sheet_mut(sheet) else { return };
+    sh.adopt_table_autofilter(table);
+    let t = &mut sh.tables[table];
+    t.filter.retain(|(off, _)| *off != column);
+    if let Some(values) = selected {
+        t.filter.push((column, FilterCriterion::Values { values, blanks: false }));
+    }
+    super::data::apply_filters(wb, sheet, Some(table), false);
+}
+
+fn reapply_slicer(wb: &mut Workbook, sheet: usize, id: u32) {
+    let Some(slicer) = wb.sheet(sheet).and_then(|sh| sh.slicers.iter().find(|s| s.id == id)) else { return };
+    let SlicerSource::Table { table, column, selected } = &slicer.source else { return };
+    if let Some((si, ti, col)) = table_filter_target(wb, sheet, table, column) {
+        set_table_filter(wb, si, ti, col, selected.clone());
+    }
 }
 
 /// Inserts a slicer for a table column on the active sheet or the named table's sheet.
@@ -301,30 +333,17 @@ fn slicer_select_all(s: &mut Session, p: &Json) -> Result<Json> {
 fn slicer_delete(s: &mut Session, p: &Json) -> Result<Json> {
     let (idx, id) = find_slicer(s, p)?;
     let sheet = s.doc()?.wb.active_sheet();
-    // Absolute column of a table slicer, so its filter criterion can be removed too.
+    // Resolve the table column before deleting the slicer binding.
     let target = s.doc().ok().and_then(|d| {
         let sh = d.wb.active()?;
         let SlicerSource::Table { table, column, .. } = &sh.slicers.get(idx)?.source else { return None };
-        let (target_sheet, t) = sh
-            .tables
-            .iter()
-            .find(|t| t.name.eq_ignore_ascii_case(table))
-            .map(|t| (sheet, t))
-            .or_else(|| d.wb.table(table).and_then(|(si, ti)| Some((si, d.wb.sheet(si)?.tables.get(ti)?))))?;
-        let ci = t.column_index(column)?;
-        Some((target_sheet, t.range.start.col + ci as u32))
+        table_filter_target(&d.wb, sheet, table, column)
     });
     edit(s, |cx| {
         let sh = cx.sheet_mut(sheet)?;
         sh.slicers.retain(|x| x.id != id);
-        if let Some((target_sheet, abs)) = target {
-            if let Some(af) = cx.sheet_mut(target_sheet)?.autofilter.as_mut() {
-                let off = abs.saturating_sub(af.range.start.col);
-                af.criteria.retain(|(o, _)| *o != off);
-            }
-            super::data::apply_filter(&mut cx.wb, target_sheet);
-        } else {
-            super::data::apply_filter(&mut cx.wb, sheet);
+        if let Some((si, ti, col)) = target {
+            set_table_filter(&mut cx.wb, si, ti, col, None);
         }
         cx.structural = true;
         Ok(Json::Null)
@@ -354,6 +373,54 @@ pub(crate) fn drop_pivot(wb: &mut Workbook, sheet: &str, name: &str) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn assert_slicer_rows(totals: bool, sheet_filter: bool) {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute(
+            "range.setValues",
+            json!({"range": "A1", "values": [["Region", "Amount"], ["East", 10], ["West", 20], ["East", 30], ["West", 40]]}),
+        )
+        .unwrap();
+        if sheet_filter {
+            // The old worksheet-filter proxy can include the totals row already.
+            s.execute("data.filter", json!({"range": "A1:B6"})).unwrap();
+        }
+        s.execute("insert.table", json!({"range": "A1:B5", "name": "Sales", "header": true})).unwrap();
+        if totals {
+            s.execute("table.totalRow", json!({"table": "Sales", "on": true})).unwrap();
+        }
+        let id = s.execute("insert.slicer", json!({"table": "Sales", "column": "Region"})).unwrap()["slicer"].clone();
+        let assert_rows = |sh: &gridcraft_model::Sheet, expected: &[u32]| {
+            assert_eq!((0..6).filter(|&r| sh.is_row_hidden(r)).collect::<Vec<_>>(), expected);
+            assert_eq!((0..6).filter(|&r| sh.is_row_filtered(r)).collect::<Vec<_>>(), expected);
+        };
+        s.execute("slicer.toggle", json!({"slicer": id, "value": "East"})).unwrap();
+        assert_rows(&s.doc().unwrap().wb.sheets[0], &[2, 4]);
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_rows(&s.doc().unwrap().wb.sheets[0], &[]);
+        s.execute("edit.redo", json!({})).unwrap();
+        assert_rows(&s.doc().unwrap().wb.sheets[0], &[2, 4]);
+
+        let bytes = crate::io::save_bytes(&s.doc().unwrap().wb, "sales.xlsx").unwrap();
+        let (back, _) = crate::io::open_bytes("sales.xlsx", &bytes).unwrap();
+        assert_rows(&back.sheets[0], &[2, 4]);
+    }
+
+    #[test]
+    fn slicer_leaves_totals_visible_through_undo_redo_and_reopen() {
+        assert_slicer_rows(true, false);
+    }
+
+    #[test]
+    fn slicer_leaves_totals_visible_with_existing_worksheet_filter() {
+        assert_slicer_rows(true, true);
+    }
+
+    #[test]
+    fn slicer_filters_all_data_rows_without_totals() {
+        assert_slicer_rows(false, false);
+    }
 
     #[test]
     /// Verifies same-sheet and cross-sheet slicer filtering/clearing/deletion as well as missing-table fallbacks.
@@ -427,5 +494,86 @@ mod tests {
         s.execute("slicer.selectAll", json!({"slicer": orphan_id})).unwrap();
         s.execute("slicer.delete", json!({"slicer": orphan_id})).unwrap();
         assert!(s.doc().unwrap().wb.sheets[1].slicers.is_empty());
+    }
+
+    fn table_slicer_session() -> Session {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("range.setValues", json!({"range": "A1:B3", "values": [["Region", "Quarter"], ["East", "Q1"], ["West", "Q2"]]})).unwrap();
+        s.execute("insert.table", json!({"range": "A1:B3", "name": "Sales"})).unwrap();
+        s.execute("insert.slicer", json!({"table": "Sales", "column": "Region"})).unwrap();
+        s.execute("insert.slicer", json!({"table": "Sales", "column": "Quarter"})).unwrap();
+        s.execute("home.insertSheet", json!({"name": "Dashboard"})).unwrap();
+        edit(&mut s, |cx| {
+            let slicers = std::mem::take(&mut cx.sheet_mut(0)?.slicers);
+            cx.sheet_mut(1)?.slicers = slicers;
+            Ok(())
+        })
+        .unwrap();
+        s
+    }
+
+    fn assert_slicer_cascade(command: &str, args: Json, remaining: &[&str]) {
+        let mut s = table_slicer_session();
+        let sources = |s: &Session| -> Vec<Slicer> {
+            let wb = &s.doc().unwrap().wb;
+            wb.sheet(wb.sheet_index("Dashboard").unwrap()).unwrap().slicers.clone()
+        };
+        let before = sources(&s);
+        s.execute(command, args).unwrap();
+        let after = sources(&s);
+        let columns: Vec<_> = after
+            .iter()
+            .filter_map(|s| match &s.source {
+                SlicerSource::Table { column, .. } => Some(column.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(columns, remaining, "{command}");
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(sources(&s), before, "undo {command}");
+        s.execute("edit.redo", json!({})).unwrap();
+        assert_eq!(sources(&s), after, "redo {command}");
+    }
+
+    #[test]
+    fn table_slicer_cascade_on_convert() {
+        assert_slicer_cascade("table.convertToRange", json!({"table": "Sales", "sheet": "Sheet1"}), &[]);
+    }
+
+    #[test]
+    fn table_slicer_cascade_on_sheet_delete() {
+        assert_slicer_cascade("home.deleteSheet", json!({"sheet": "Sheet1"}), &[]);
+    }
+
+    #[test]
+    fn table_slicer_cascade_on_row_delete() {
+        assert_slicer_cascade("home.deleteRows", json!({"rows": "1:3", "sheet": "Sheet1"}), &[]);
+    }
+
+    #[test]
+    fn table_slicer_cascade_on_column_delete() {
+        assert_slicer_cascade("home.deleteColumns", json!({"cols": "A:A", "sheet": "Sheet1"}), &["Quarter"]);
+    }
+
+    #[test]
+    fn table_slicer_cascade_on_cell_delete() {
+        assert_slicer_cascade("home.deleteCells", json!({"range": "A1:A3", "shift": "left", "sheet": "Sheet1"}), &["Quarter"]);
+    }
+
+    #[test]
+    fn table_slicer_cascade_prevents_capture_by_later_rename() {
+        let mut s = table_slicer_session();
+        s.execute("table.convertToRange", json!({"table": "Sales", "sheet": "Sheet1"})).unwrap();
+        s.execute("insert.table", json!({"range": "A1:B3", "name": "Replacement", "sheet": "Sheet1"})).unwrap();
+        s.execute("table.rename", json!({"table": "Replacement", "name": "Sales", "sheet": "Sheet1"})).unwrap();
+        assert!(s.doc().unwrap().wb.sheet(1).unwrap().slicers.is_empty());
+    }
+
+    #[test]
+    fn table_slicer_cascade_preserves_slicer_on_header_rename() {
+        let mut s = table_slicer_session();
+        s.execute("range.setValues", json!({"sheet": "Sheet1", "range": "A1", "values": [["Area"]]})).unwrap();
+        assert!(matches!(&s.doc().unwrap().wb.sheets[1].slicers[0].source, SlicerSource::Table { column, .. } if column == "Area"));
     }
 }

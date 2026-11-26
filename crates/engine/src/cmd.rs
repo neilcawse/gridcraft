@@ -389,8 +389,12 @@ pub struct Ctx<'a> {
 
 pub(crate) fn edit<R>(s: &mut Session, f: impl FnOnce(&mut Ctx) -> Result<R>) -> Result<R> {
     let d = s.doc_mut()?;
+    let before = d.wb.clone();
     commit(d, |cx| {
         let r = f(cx)?;
+        if cx.structural {
+            slicer::remove_orphaned_table_slicers(&before, &mut cx.wb);
+        }
         crate::tables::sync_headers(cx);
         Ok(r)
     })

@@ -117,6 +117,17 @@ impl Table {
         }
         Some(RangeRef::new(CellRef::new(r0, self.range.start.col), CellRef::new(r1, self.range.end.col)))
     }
+    /// Header and data rows of a table AutoFilter, excluding the totals row.
+    pub fn autofilter_range(&self) -> Option<RangeRef> {
+        let end_row = self.range.end.row.checked_sub(u32::from(self.totals_row))?;
+        (self.header_row && end_row >= self.range.start.row).then(|| RangeRef::new(self.range.start, CellRef::new(end_row, self.range.end.col)))
+    }
+
+    /// Older GridCraft versions used a worksheet AutoFilter over the whole table as a proxy.
+    pub fn matches_autofilter(&self, range: RangeRef) -> bool {
+        self.autofilter_range().is_some_and(|canonical| range == canonical || range == self.range)
+    }
+
     pub fn header_range(&self) -> Option<RangeRef> {
         self.header_row.then(|| RangeRef::new(self.range.start, CellRef::new(self.range.start.row, self.range.end.col)))
     }
@@ -1188,7 +1199,8 @@ pub struct Slicer {
     /// Button height in pixels; `None` uses the default.
     #[serde(default)]
     pub row_height: Option<f32>,
-    /// XLSX cache provenance used only to preserve the cache's name on save.
+    /// XLSX cache provenance used only to preserve the cache's name (and a table slicer's item
+    /// options) on save.
     #[serde(skip)]
     pub imported_cache: SlicerCacheOrigin,
 }
@@ -1199,6 +1211,18 @@ pub struct Slicer {
 pub struct SlicerCacheOrigin {
     pub name: String,
     pub marker: Option<crate::DefinitionUid>,
+    /// A table slicer cache's item options as read; `None` writes the format's defaults.
+    pub table_items: Option<TableSlicerItems>,
+}
+
+/// How a table slicer's cache orders and marks its items (`x15:tableSlicerCache` `sortOrder`,
+/// `customListSort` and `crossFilter`, [MS-XLSX] 2.6.97). GridCraft lists a table slicer's tiles in
+/// first-seen order and doesn't edit these: they are kept from the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TableSlicerItems {
+    pub descending: bool,
+    pub custom_list_sort: bool,
+    pub cross_filter: SlicerCrossFilter,
 }
 
 impl PartialEq for SlicerCacheOrigin {

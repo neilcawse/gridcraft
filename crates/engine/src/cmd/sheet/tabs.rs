@@ -50,9 +50,11 @@ pub(super) fn delete_sheet(s: &mut Session, p: &Json) -> Result<Json> {
     }
     let name = d.wb.sheet(i).map(|s| s.name.clone()).unwrap_or_default();
     let order: Vec<String> = d.wb.sheets.iter().map(|s| s.name.clone()).collect();
+    let before = Arc::clone(&d.wb);
     let d = s.doc_mut()?;
     edit_doc(d, |cx| {
         cx.wb.sheets.remove(i);
+        super::super::slicer::remove_orphaned_table_slicers(&before, &mut cx.wb);
         let new_order: Vec<String> = cx.wb.sheets.iter().map(|s| s.name.clone()).collect();
         for si in 0..cx.wb.sheets.len() {
             let keys: Vec<(CellRef, Arc<gridcraft_model::Formula>)> =

@@ -117,9 +117,9 @@ pub(super) fn table_xml(t: &Table, cols: &[String], name: &str, id: u32, bound: 
         let _ = write!(s, " connectionId=\"{c}\"");
     }
     s.push('>');
-    if t.header_row && t.filter_button {
-        let end_row = if t.totals_row { t.range.end.row.saturating_sub(1).max(t.range.start.row) } else { t.range.end.row };
-        let r = RangeRef::new(t.range.start, CellRef::new(end_row, t.range.end.col));
+    if t.filter_button
+        && let Some(r) = t.autofilter_range()
+    {
         s.push_str(&autofilter_xml(r, &t.filter, out));
     }
     let _ = write!(s, "<tableColumns count=\"{}\">", cols.len());
