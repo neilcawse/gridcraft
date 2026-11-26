@@ -36,6 +36,7 @@ mod shared_media;
 mod sheet_data_pin;
 mod sheet_names;
 mod smooth_roundtrip;
+mod table_collisions;
 mod trendline_roundtrip;
 mod xls_dv_tests;
 mod xls_style_tests;
@@ -96,7 +97,16 @@ fn transition_evaluation_survives_xlsx_round_trip() {
 
 #[test]
 /// Verifies that a cross-sheet `.xlsx` table slicer (`x15:tableSlicerCache`) imports cleanly without skipped-object warnings.
-fn cross_sheet_table_slicer_imports_without_skipped_object_warning() {
+fn cross_sheet_table_slicer_imports_without_skipped_object_warning() -> Result<(), crate::IoError> {
+    verify_cross_sheet_table_slicer(false)
+}
+
+#[test]
+fn table_slicer_file_id_selects_the_second_duplicate_table() -> Result<(), crate::IoError> {
+    verify_cross_sheet_table_slicer(true)
+}
+
+fn verify_cross_sheet_table_slicer(duplicate: bool) -> Result<(), crate::IoError> {
     let wb_xml = r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Dashboard" sheetId="1" r:id="rId1"/><sheet name="Tracker" sheetId="2" r:id="rId2"/></sheets></workbook>"#;
     let wb_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.microsoft.com/office/2007/relationships/slicerCache" Target="slicerCaches/slicerCache1.xml"/></Relationships>"#;
     let sheet1 = r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData/><drawing r:id="rId1"/></worksheet>"#;
@@ -107,6 +117,12 @@ fn cross_sheet_table_slicer_imports_without_skipped_object_warning() {
     let sheet2 = r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Date for Slicer</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>2026-Q1</t></is></c></row><row r="3" hidden="1"><c r="A3" t="inlineStr"><is><t>2026-Q2</t></is></c></row></sheetData><tableParts count="1"><tablePart r:id="rId1"/></tableParts></worksheet>"#;
     let sheet2_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table3.xml"/></Relationships>"#;
     let table3 = r#"<?xml version="1.0"?><table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="3" name="Table_3" displayName="Table_3" ref="A1:A3"><autoFilter ref="A1:A3"><filterColumn colId="0"><filters><filter val="2026-Q1"/></filters></filterColumn></autoFilter><tableColumns count="1"><tableColumn id="36" name="Date for Slicer"/></tableColumns></table>"#;
+    let first = table3.replace("id=\"3\"", "id=\"2\"").replace("A1:A3", "C1:C3").replace("2026-Q1", "Other");
+    let second = table3.replace("Table_3", "TABLE_3");
+    let duplicate_sheet =
+        sheet2.replace("count=\"1\"><tablePart r:id=\"rId1\"/>", "count=\"2\"><tablePart r:id=\"rId2\"/><tablePart r:id=\"rId1\"/>");
+    let duplicate_rels = sheet2_rels.replace("</Relationships>", r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table2.xml"/></Relationships>"#);
+    let table_parts = if duplicate { [duplicate_sheet.as_str(), duplicate_rels.as_str(), second.as_str()] } else { [sheet2, sheet2_rels, table3] };
     let zip = make_zip(&[
         ("[Content_Types].xml", CT.as_bytes()),
         ("_rels/.rels", ROOT_RELS.as_bytes()),
@@ -117,10 +133,20 @@ fn cross_sheet_table_slicer_imports_without_skipped_object_warning() {
         ("xl/drawings/drawing1.xml", drawing1.as_bytes()),
         ("xl/slicers/slicer1.xml", slicer1.as_bytes()),
         ("xl/slicerCaches/slicerCache1.xml", slicer_cache1.as_bytes()),
-        ("xl/worksheets/sheet2.xml", sheet2.as_bytes()),
-        ("xl/worksheets/_rels/sheet2.xml.rels", sheet2_rels.as_bytes()),
-        ("xl/tables/table3.xml", table3.as_bytes()),
+        ("xl/worksheets/sheet2.xml", table_parts[0].as_bytes()),
+        ("xl/worksheets/_rels/sheet2.xml.rels", table_parts[1].as_bytes()),
+        ("xl/tables/table3.xml", table_parts[2].as_bytes()),
+        ("xl/tables/table2.xml", first.as_bytes()),
     ]);
+    if duplicate {
+        let (workbook, _) = crate::read_xlsx(&zip)?;
+        assert_eq!(workbook.table("Table_3"), Some((1, 0)));
+        assert_eq!(workbook.table("TABLE_3_2"), Some((1, 1)));
+        let source = workbook.sheets[0].slicers.first().map(|s| &s.source);
+        assert!(matches!(source, Some(gridcraft_model::SlicerSource::Table { table, column, selected })
+            if table == "TABLE_3_2" && column == "Date for Slicer" && selected.as_deref() == Some(&["2026-Q1".to_string()])));
+        return Ok(());
+    }
     let (wb, report) = crate::read_xlsx(&zip).unwrap();
     assert!(!report.warnings.iter().any(|w| w.contains("skipped")), "expected no skipped warnings, got: {:?}", report.warnings);
     assert_eq!(wb.sheets[0].slicers.len(), 1);
@@ -189,4 +215,5 @@ fn cross_sheet_table_slicer_imports_without_skipped_object_warning() {
         let (wb_neg, _) = crate::read_xlsx(&zip_neg).unwrap();
         assert!(wb_neg.sheets[0].slicers.is_empty(), "mismatched or unresolvable slicer must not attach");
     }
+    Ok(())
 }

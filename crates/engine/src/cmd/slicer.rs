@@ -218,6 +218,7 @@ fn insert_slicer(s: &mut Session, p: &Json) -> Result<Json> {
         name: String::new(),
         style: String::new(),
         row_height: None,
+        imported_cache: Default::default(),
     };
     edit(s, |cx| {
         cx.sheet_mut(sheet)?.slicers.push(slicer);
@@ -393,6 +394,7 @@ mod tests {
                 name: String::new(),
                 style: String::new(),
                 row_height: None,
+                imported_cache: Default::default(),
             });
             Ok(Json::Null)
         })
@@ -417,6 +419,7 @@ mod tests {
                 name: String::new(),
                 style: String::new(),
                 row_height: None,
+                imported_cache: Default::default(),
             });
             Ok(Json::Null)
         })

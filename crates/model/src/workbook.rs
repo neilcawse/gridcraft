@@ -1,7 +1,7 @@
 //! Workbooks.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use gridcraft_core::{CellRef, DateSystem, RangeRef, Value};
 use gridcraft_formula::Expr;
@@ -10,6 +10,122 @@ use serde::{Deserialize, Serialize};
 use crate::cell::Formula;
 use crate::sheet::Sheet;
 use crate::style::{StyleTable, Theme};
+
+struct TableRename<'a> {
+    wb: &'a Workbook,
+    old: &'a str,
+    new: &'a str,
+}
+
+impl TableRename<'_> {
+    fn replacement(&self, n: &str, sheet: usize, env: &[String]) -> Option<Expr> {
+        if n.starts_with('[') {
+            return None;
+        }
+        let (scope, bare, qualifier) = match n.rsplit_once('!') {
+            Some((s, b)) => (self.wb.sheet_index(s)?, b, Some(s)),
+            None => (sheet, n, None),
+        };
+        if !bare.eq_ignore_ascii_case(self.old) || self.wb.name(bare, scope).is_some() {
+            return None;
+        }
+        let renamed = qualifier.map_or_else(|| self.new.into(), |s| format!("{s}!{}", self.new));
+        Some(if env.iter().any(|local| gridcraft_formula::same_name(local, &renamed)) || self.wb.name(self.new, scope).is_some() {
+            Expr::Struct(gridcraft_formula::StructRef { table: self.new.into(), specifiers: vec![], col_start: None, col_end: None })
+        } else {
+            Expr::Name(renamed)
+        })
+    }
+}
+
+/// Rewrites table tokens and free names, leaving LET/LAMBDA binders, bound names and text alone.
+/// The callback receives a name, whether it is the table token of a structured reference, and
+/// the lexical binders currently in scope. For a table token it returns the new name, or any
+/// other expression to take the whole structured reference's place.
+pub fn rewrite_table_tokens(e: &mut Expr, replacement: &impl Fn(&str, bool, &[String]) -> Option<Expr>) -> bool {
+    fn args(xs: &mut [Expr], env: &mut Vec<String>, replacement: &impl Fn(&str, bool, &[String]) -> Option<Expr>) -> bool {
+        xs.iter_mut().fold(false, |changed, e| visit(e, env, replacement) | changed)
+    }
+    fn visit(mut e: &mut Expr, env: &mut Vec<String>, replacement: &impl Fn(&str, bool, &[String]) -> Option<Expr>) -> bool {
+        let mut changed = false;
+        while let Expr::Binary(_, a, b) = e {
+            changed |= visit(b, env, replacement);
+            e = a;
+        }
+        changed
+            | match e {
+                Expr::Struct(st) if !st.table.is_empty() => match replacement(&st.table, true, env) {
+                    Some(Expr::Name(n)) => {
+                        st.table = n;
+                        true
+                    }
+                    Some(other) => {
+                        *e = other;
+                        true
+                    }
+                    None => false,
+                },
+                Expr::Name(n) if !env.iter().any(|local| gridcraft_formula::same_name(local, n)) => match replacement(n, false, env) {
+                    Some(new) => {
+                        *e = new;
+                        true
+                    }
+                    None => false,
+                },
+                Expr::Call(name, args) if name == "LET" && args.len() >= 3 && args.len() % 2 != 0 => {
+                    let Some((body, pairs)) = args.split_last_mut() else { return changed };
+                    let before = env.len();
+                    let mut rewritten = false;
+                    for [binder, value] in pairs.as_chunks_mut::<2>().0 {
+                        let Expr::Name(n) = binder else {
+                            env.truncate(before);
+                            return changed | rewritten;
+                        };
+                        rewritten |= visit(value, env, replacement);
+                        env.push(n.clone());
+                    }
+                    rewritten |= visit(body, env, replacement);
+                    env.truncate(before);
+                    rewritten
+                }
+                Expr::Call(name, args) if name == "LAMBDA" => {
+                    let Some((body, params)) = args.split_last_mut() else { return changed };
+                    let before = env.len();
+                    for param in params {
+                        let Expr::Name(n) = param else {
+                            env.truncate(before);
+                            return changed;
+                        };
+                        env.push(n.trim_start_matches('[').trim_end_matches(']').into());
+                    }
+                    let rewritten = visit(body, env, replacement);
+                    env.truncate(before);
+                    rewritten
+                }
+                Expr::Call(name, _) if name == "LET" => false,
+                Expr::Call(_, xs) => args(xs, env, replacement),
+                Expr::Invoke(c, xs) => visit(c, env, replacement) | args(xs, env, replacement),
+                Expr::Array(rows) => rows.iter_mut().fold(false, |changed, row| args(row, env, replacement) | changed),
+                Expr::Unary(_, inner) | Expr::Paren(inner) => visit(inner, env, replacement),
+                _ => false,
+            }
+    }
+    visit(e, &mut Vec::new(), replacement)
+}
+
+impl TableRename<'_> {
+    fn might_use_table(&self, e: &Expr) -> bool {
+        let mut found = false;
+        e.walk(&mut |e| {
+            found |= match e {
+                Expr::Name(n) => n.rsplit('!').next().is_some_and(|n| n.eq_ignore_ascii_case(self.old)),
+                Expr::Struct(r) => r.table.eq_ignore_ascii_case(self.old),
+                _ => false,
+            };
+        });
+        found
+    }
+}
 
 /// Most equation source, in bytes, one [`Workbook::refresh_equations`] lays out: about 2,500
 /// typical equations, or a few seconds of the slowest 4 KB sources.
@@ -142,6 +258,42 @@ pub struct DefinedName {
     pub formula: String,
     pub comment: String,
     pub hidden: bool,
+    /// The name's identity while the app runs ([`DefinitionUid`]). Not in JSON or the file.
+    #[serde(skip)]
+    pub uid: DefinitionUid,
+}
+
+/// The identity of a defined name or table while the app runs, so that what was bound to it (a
+/// PivotTable's source) can tell it from another one with the same text. Editing the definition
+/// keeps it; a definition deleted and made again gets a new one (they are never reused), and
+/// undo brings the old one back with the definition. Never saved. It is not content: any two
+/// compare equal, so comparing names compares what they hold; compare identities with
+/// [`DefinitionUid::get`].
+#[derive(Clone, Copy, Debug)]
+pub struct DefinitionUid(u64);
+
+/// The next [`DefinitionUid`]; 0 is never given out.
+static NEXT_DEFINITION_UID: AtomicU64 = AtomicU64::new(1);
+
+impl DefinitionUid {
+    pub fn fresh() -> DefinitionUid {
+        DefinitionUid(NEXT_DEFINITION_UID.fetch_add(1, Ordering::Relaxed))
+    }
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for DefinitionUid {
+    fn default() -> DefinitionUid {
+        DefinitionUid::fresh()
+    }
+}
+
+impl PartialEq for DefinitionUid {
+    fn eq(&self, _: &DefinitionUid) -> bool {
+        true
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -538,6 +690,11 @@ impl Workbook {
             .find(|n| n.scope == Some(sheet) && n.name.eq_ignore_ascii_case(name))
             .or_else(|| self.names.iter().find(|n| n.scope.is_none() && n.name.eq_ignore_ascii_case(name)))
     }
+    /// Finds the defined name of exactly scope `scope` (`None`: workbook scope), as `Data!rData`
+    /// names the one of sheet `Data` only.
+    pub fn name_in_scope(&self, name: &str, scope: Option<usize>) -> Option<&DefinedName> {
+        self.names.iter().find(|n| n.scope == scope && n.name.eq_ignore_ascii_case(name))
+    }
     /// Spells calls of LAMBDA names the way the names are defined (`Double(4)`, where the
     /// parser gives `DOUBLE(4)`: it upper-cases function names, as built-in ones are shown).
     pub fn name_call_case(&self, e: Expr) -> Expr {
@@ -594,6 +751,52 @@ impl Workbook {
         }
         None
     }
+    /// Renames the `ti`th table of the `si`th sheet to `name` (Table Design > Table Name).
+    /// Bound PivotTables and cell references to the table follow the rename.
+    pub fn rename_table(&mut self, si: usize, ti: usize, name: &str) {
+        let Some(t) = self.sheets.get(si).and_then(|s| s.tables.get(ti)) else { return };
+        let (old, uid) = (t.name.clone(), t.uid);
+        let found_by_name = self.table(&old) == Some((si, ti));
+        Arc::make_mut(&mut self.sheets[si]).tables[ti].name = name.to_string();
+        self.follow_renamed_definition(uid);
+        if !found_by_name {
+            return;
+        }
+        for i in 0..self.sheets.len() {
+            let rename = TableRename { wb: self, old: &old, new: name };
+            let rewritten: Vec<(CellRef, Formula)> = self.sheets[i]
+                .cells
+                .iter()
+                .filter_map(|(c, cell)| {
+                    let f = cell.formula.as_ref()?;
+                    f.with_expr(|e| {
+                        if !rename.might_use_table(e) {
+                            return None;
+                        }
+                        let mut ne = e.clone();
+                        rewrite_table_tokens(&mut ne, &|n, structured, env| {
+                            if structured {
+                                n.eq_ignore_ascii_case(rename.old).then(|| Expr::Name(rename.new.into()))
+                            } else {
+                                rename.replacement(n, i, env)
+                            }
+                        })
+                        .then(|| (c, Formula { array: f.array, ..f.rewritten(ne) }))
+                    })?
+                })
+                .collect();
+            if rewritten.is_empty() {
+                continue;
+            }
+            let sheet = Arc::make_mut(&mut self.sheets[i]);
+            for (c, f) in rewritten {
+                if let Some(cell) = sheet.cells.get_mut(c) {
+                    cell.formula = Some(Arc::new(f));
+                }
+            }
+        }
+    }
+
     /// Rebuilds the cached layout of every equation whose source changed (or was never laid
     /// out, as after loading a file). One call lays out at most [`MAX_EQUATION_LAYOUT_BYTES`] of
     /// source: one equation can take a tenth of a second to lay out, so a file with thousands of
@@ -650,6 +853,22 @@ impl Workbook {
                         }))
                     }))
                     .chain(s.controls.iter().map(|o| o.id))
+                    // And the objects kept hyperlinks belong to: a link read from the file stays
+                    // with its object (deleted, undo brings both back), never a new one.
+                    .chain(s.preserved.iter().flat_map(|p| p.object_links.iter().flat_map(|l| l.links.iter())).map(|l| {
+                        let (crate::DrawingRef::Chart(id)
+                        | crate::DrawingRef::Image(id)
+                        | crate::DrawingRef::Shape(id)
+                        | crate::DrawingRef::Group(id)) = l.object;
+                        id
+                    }))
+                    // Chart annotation snapshots, like links, refer to the original objects.
+                    .chain(
+                        s.preserved
+                            .iter()
+                            .flat_map(|p| p.chart_shapes.iter())
+                            .flat_map(|cs| std::iter::once(cs.chart).chain(cs.shapes.iter().map(|o| o.id)).chain(cs.images.iter().map(|o| o.id))),
+                    )
             })
             .collect();
         used.sort_unstable();
@@ -697,6 +916,47 @@ fn spell_calls(e: Expr, lambdas: &[String]) -> Expr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Renaming a table rewrites a legacy array formula's text and keeps its array range.
+    #[test]
+    fn rename_table_keeps_the_array_range_of_a_formula_it_rewrites() {
+        let mut wb = Workbook::new();
+        let range = |a: &str| RangeRef::parse(a).unwrap_or_else(|| RangeRef::new(CellRef::new(0, 0), CellRef::new(0, 0)));
+        let at = CellRef::new(0, 2);
+        if let Some(sh) = wb.sheet_mut(0) {
+            let col = |n: &str| crate::TableColumn {
+                name: n.into(),
+                totals: crate::TotalsFn::None,
+                totals_label: None,
+                formula: None,
+                unique_name: None,
+                xml: None,
+            };
+            sh.tables.push(crate::Table {
+                id: 1,
+                name: "Items".into(),
+                range: range("A1:A3"),
+                header_row: true,
+                totals_row: false,
+                columns: vec![col("V")],
+                style: String::new(),
+                banded_rows: false,
+                banded_cols: false,
+                first_col: false,
+                last_col: false,
+                filter_button: true,
+                filter: vec![],
+                table_type: None,
+                connection_id: None,
+                uid: Default::default(),
+            });
+            sh.set_cell(at, crate::Cell::formula(Formula { array: Some(range("C1:D1")), ..Formula::new("TRANSPOSE(Items[V])") }));
+        }
+        wb.rename_table(0, 0, "Renamed");
+        let f = wb.sheet(0).and_then(|sh| sh.cell(at)).and_then(|c| c.formula.clone());
+        assert_eq!(f.as_deref().map(|f| f.text.as_str()), Some("TRANSPOSE(Renamed[V])"));
+        assert_eq!(f.and_then(|f| f.array), Some(range("C1:D1")));
+    }
 
     #[test]
     fn phonetics_are_additive_in_json() -> Result<(), Box<dyn std::error::Error>> {

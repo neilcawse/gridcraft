@@ -353,6 +353,7 @@ fn sample() -> Workbook {
         ],
         table_type: None,
         connection_id: None,
+        uid: Default::default(),
     });
     let png = b"\x89PNG\r\n\x1a\n0000IHDRfake".to_vec();
     s.images.push(Image {
@@ -501,14 +502,29 @@ fn sample() -> Workbook {
         },
     );
     wb.sheets.push(Arc::new(s3));
-    wb.names.push(DefinedName { name: "Rate".into(), scope: None, formula: "0.07".into(), comment: "c".into(), hidden: false });
-    wb.names.push(DefinedName { name: "Local".into(), scope: Some(1), formula: "Hidden!$A$1".into(), comment: String::new(), hidden: true });
+    wb.names.push(DefinedName {
+        name: "Rate".into(),
+        scope: None,
+        formula: "0.07".into(),
+        comment: "c".into(),
+        hidden: false,
+        uid: Default::default(),
+    });
+    wb.names.push(DefinedName {
+        name: "Local".into(),
+        scope: Some(1),
+        formula: "Hidden!$A$1".into(),
+        comment: String::new(),
+        hidden: true,
+        uid: Default::default(),
+    });
     wb.names.push(DefinedName {
         name: "Pick".into(),
         scope: None,
         formula: "XLOOKUP(1,Hidden!A:A,Hidden!A:A)".into(),
         comment: String::new(),
         hidden: false,
+        uid: Default::default(),
     });
     wb.cell_styles.push(("Good".into(), red));
     wb
@@ -885,6 +901,7 @@ fn writing_repairs_invalid_models() {
         filter: vec![],
         table_type: None,
         connection_id: None,
+        uid: Default::default(),
     });
     s.cells.set(at("B2"), Cell { value: Value::Number(1.0), formula: None, style: StyleId(9999), py: None });
     let (back, _) = read_xlsx(&write_xlsx(&wb).unwrap()).unwrap();
@@ -893,7 +910,7 @@ fn writing_repairs_invalid_models() {
     let names: Vec<&str> = s.tables[0].columns.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, ["X", "x2", "Column3"]);
     assert_eq!(s.value(at("A1")), Value::text("X"));
-    assert_eq!(s.tables[0].name, "Table1");
+    assert_eq!(s.tables[0].name, "_bad_name");
     assert_eq!(s.cell(at("B2")).unwrap().style, StyleId::DEFAULT);
 }
 
@@ -1573,6 +1590,7 @@ fn table_newline_column_and_backslash_name_survive() {
         filter: vec![],
         table_type: None,
         connection_id: None,
+        uid: Default::default(),
     });
     s.cells.set(at("D1"), Cell::formula(Formula::new("COUNTA(\\_Prime.1[Name])")));
     let (back, _) = read_xlsx(&write_xlsx(&wb).unwrap()).unwrap();
@@ -1582,6 +1600,71 @@ fn table_newline_column_and_backslash_name_survive() {
     assert_eq!(s.value(at("A1")), Value::text("Handle\nBars"));
     assert_eq!(s.cell(at("D1")).and_then(|c| c.formula.as_ref()).map(|f| f.text.as_str()), Some("COUNTA(\\_Prime.1[Name])"));
     assert!(gridcraft_formula::parse("COUNTA(\\_Prime.1[Name])").is_ok(), "backslash table name parses as a structured reference");
+}
+
+/// Direct-model export repairs collisions without changing the source workbook.
+#[test]
+fn table_save_repairs_the_workbook_namespace() {
+    let mut wb = Workbook::new();
+    wb.names.push(DefinedName {
+        name: "Sales".into(),
+        scope: None,
+        formula: "Sheet1!$H$1".into(),
+        comment: String::new(),
+        hidden: false,
+        uid: Default::default(),
+    });
+    wb.sheets.push(Arc::new(Sheet::new("Two")));
+    let col = |n: &str| TableColumn { name: n.into(), totals: TotalsFn::None, totals_label: None, formula: None, unique_name: None, xml: None };
+    let table = |name: &str, r: &str| Table {
+        id: 1,
+        name: name.into(),
+        range: rr(r),
+        header_row: true,
+        totals_row: false,
+        columns: vec![col("V")],
+        style: String::new(),
+        banded_rows: true,
+        banded_cols: false,
+        first_col: false,
+        last_col: false,
+        filter_button: true,
+        filter: vec![],
+        table_type: None,
+        connection_id: None,
+        uid: Default::default(),
+    };
+    let s = wb.sheet_mut(0).unwrap();
+    for (c, v) in [("A1", "V"), ("C1", "V"), ("E1", "V")] {
+        s.set_value(at(c), Value::text(v));
+    }
+    for (c, n) in [("A2", 1.0), ("C2", 2.0), ("E2", 4.0)] {
+        s.set_value(at(c), Value::Number(n));
+    }
+    s.tables.push(table("sales", "A1:A2"));
+    s.tables.push(table("a b", "C1:C2"));
+    s.tables.push(table("Kept", "E1:E2"));
+    s.cells.set(at("G1"), Cell::formula(Formula::new("SUM(sales[V])+SUM(Kept[V])")));
+    let t = wb.sheet_mut(1).unwrap();
+    t.set_value(at("A1"), Value::text("V"));
+    t.set_value(at("A2"), Value::Number(8.0));
+    t.tables.push(table("SALES", "A1:A2"));
+    let (bytes, report) = crate::write_xlsx_named_with(&wb, crate::XlsxKind::Workbook, "book.xlsx", crate::FunctionInfo::default()).unwrap();
+    let (back, _) = read_xlsx(&bytes).unwrap();
+    let names = |si: usize| back.sheet(si).unwrap().tables.iter().map(|t| t.name.clone()).collect::<Vec<_>>();
+    assert_eq!(names(0), ["sales_2", "a_b", "Kept"]);
+    assert_eq!(names(1), ["SALES_3"]);
+    let g1 = back.sheet(0).unwrap().cell(at("G1")).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone());
+    assert_eq!(g1.as_deref(), Some("SUM(sales_2[V])+SUM(Kept[V])"));
+    assert_eq!(
+        report.warnings,
+        [
+            r#"Table "sales" on sheet "Sheet1" was renamed to "sales_2"."#,
+            r#"Table "a b" on sheet "Sheet1" was renamed to "a_b"."#,
+            r#"Table "SALES" on sheet "Two" was renamed to "SALES_3"."#,
+        ]
+    );
+    assert_eq!(wb.sheet(0).unwrap().tables[0].name, "sales", "the workbook saved is left as it is");
 }
 
 /// #4296: a table whose Total Row is turned off keeps each column's calculation in the file, as
@@ -1618,6 +1701,7 @@ fn hidden_total_row_keeps_its_calculations() {
         filter: vec![],
         table_type: None,
         connection_id: None,
+        uid: Default::default(),
     });
     let bytes = write_xlsx(&wb).unwrap();
     let mut xml = String::new();
@@ -1686,6 +1770,7 @@ fn header_and_totals_table_without_data_row_survives() {
         filter: vec![],
         table_type: None,
         connection_id: None,
+        uid: Default::default(),
     });
     let (back, report) = read_xlsx(&write_xlsx(&wb).unwrap()).unwrap();
     assert!(report.warnings.is_empty(), "{:?}", report.warnings);
@@ -1962,6 +2047,7 @@ fn a_table_filter_criteria_survive_a_round_trip() {
         filter: vec![],
         table_type: None,
         connection_id: None,
+        uid: Default::default(),
     });
     // The dropdown of a table's header cell installs the sheet AutoFilter over the table's
     // range, and `data.filterBy` stores its criteria there.
@@ -2007,6 +2093,7 @@ fn a_partial_sheet_filter_is_not_folded_into_a_table() {
         filter: vec![],
         table_type: None,
         connection_id: None,
+        uid: Default::default(),
     });
     s.autofilter =
         Some(AutoFilter { range: rr("B1:B3"), criteria: vec![(0, FilterCriterion::Values { values: vec!["East".into()], blanks: false })] });

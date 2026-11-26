@@ -88,9 +88,10 @@ pub(super) fn part_rels_xml(rels: &[PreservedRel], names: &NameMap) -> String {
     s
 }
 
-pub(super) fn write_parts(out: &mut Out, parts: &[PreservedPart]) -> NameMap {
+pub(super) fn write_parts<'a>(out: &mut Out, parts: impl IntoIterator<Item = &'a PreservedPart, IntoIter: Clone>) -> NameMap {
+    let parts = parts.into_iter();
     let mut names = NameMap::new();
-    for p in parts {
+    for p in parts.clone() {
         names.entry(normalize(&p.name)).or_insert_with(|| out.kept.claim(&p.name));
     }
     let mut written = HashSet::new();
@@ -195,14 +196,14 @@ impl WorkbookKept {
 
 /// The part names reachable from `root` through kept parts' relationships (normalized).
 fn reachable(p: &Preserved, root: &PreservedRel) -> HashSet<String> {
-    reachable_in(&p.parts, root)
+    reachable_in(&p.parts, std::iter::once(root))
 }
 
-/// The names of the parts of `parts` reachable from `root` (normalized, `root`'s target included).
-pub(super) fn reachable_in(parts: &[PreservedPart], root: &PreservedRel) -> HashSet<String> {
+/// The part names reachable from the roots through kept parts' relationships (normalized).
+pub(super) fn reachable_in<'a>(parts: &[PreservedPart], roots: impl Iterator<Item = &'a PreservedRel>) -> HashSet<String> {
     let by_name: HashMap<String, &PreservedPart> = parts.iter().map(|q| (normalize(&q.name), q)).collect();
     let mut seen = HashSet::new();
-    let mut queue = VecDeque::from([normalize(&root.target)]);
+    let mut queue: VecDeque<_> = roots.map(|r| normalize(&r.target)).collect();
     while let Some(n) = queue.pop_front() {
         if !seen.insert(n.clone()) {
             continue;

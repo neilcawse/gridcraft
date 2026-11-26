@@ -61,6 +61,7 @@ pub(super) fn from_craft_table(cx: &mut Ctx<'_>, t: &craft_xlsx::Table) -> Table
         filter,
         table_type: xml_table.then(|| "xml".to_string()),
         connection_id: t.connection_id.filter(|_| xml_table),
+        uid: Default::default(),
     }
 }
 

@@ -408,8 +408,8 @@ fn read_sheet_notes_and_tables(cx: &mut Ctx<'_>, sp: &CraftSheetPart, rels: &[Re
     let tables = cx.pkg.craft_mut().tables(sp).map_err(craft_error)?;
     for (_, t) in tables {
         let mut model = parts::from_craft_table(cx, &t);
-        record_file_table(cx, &t, &model);
         model.id = cx.next_object_id();
+        record_file_table(cx, &t, model.id);
         sheet.tables.push(model);
     }
     if let Some(comments) = cx.pkg.craft_mut().comments(sp).map_err(craft_error)? {
@@ -611,25 +611,52 @@ struct RawHyperlink<'a> {
     tooltip: Option<&'a str>,
 }
 
+/// Canonical XLSX location and model target for an internal link. Quote literal hash sheet
+/// names so the leading hash cannot be mistaken for another marker when reading or following.
+/// Otherwise preserve an opaque doubled-marker target unless its location is an error token.
+pub(crate) fn internal_link_location(target: &str) -> String {
+    let location = gridcraft_core::link_location(target);
+    if let Some((sheet, body)) = gridcraft_core::addr::hash_sheet_location(location) {
+        format!("{}!{body}", gridcraft_core::quote_sheet(sheet))
+    } else if location.starts_with('#') && CellError::parse(location).is_none() {
+        target.to_owned()
+    } else {
+        location.to_owned()
+    }
+}
+
+/// Model target of a link read from `location` alone. The text is [`internal_link_location`],
+/// with a `#` marker when scheme or network-path text would otherwise be opened externally or
+/// refused by navigation (`http://a.example` → `#http://a.example`).
+fn internal_model_target(location: &str) -> String {
+    let target = internal_link_location(location);
+    let bare = target.trim();
+    if !bare.starts_with('#') && (gridcraft_core::is_network_link(bare) || gridcraft_core::link_scheme(bare).is_some()) {
+        format!("#{target}")
+    } else {
+        target
+    }
+}
+
 fn push_hyperlink(cx: &mut Ctx<'_>, name: &str, h: RawHyperlink<'_>, rels: &HashMap<&str, &Rel>, sheet: &mut Sheet, budget: &mut LinkBudget) -> bool {
     let rel_target = h.rel_id.and_then(|id| rels.get(id)).map(|r| r.target.as_str()).unwrap_or("");
-    let location = h.location.filter(|l| !l.is_empty());
-    if rel_target.len().saturating_add(location.map_or(0, str::len)) > MAX_HYPERLINK_TARGET {
+    if rel_target.len().saturating_add(h.location.map_or(0, str::len)) > MAX_HYPERLINK_TARGET {
         cx.warn(format!("sheet \"{name}\": hyperlinks longer than {MAX_HYPERLINK_TARGET} characters were dropped"));
         return true;
     }
-    let mut target = rel_target.to_string();
-    let external = !target.is_empty();
-    if let Some(loc) = location {
-        if target.is_empty() {
-            target = loc.trim_start_matches('#').to_string();
-        } else {
-            target = format!("{target}#{loc}");
+    // The structure decides the kind: a relationship is outside the workbook, a `location` alone
+    // is a place in it, whatever either text looks like.
+    let external = !rel_target.is_empty();
+    let target = if external {
+        match h.location.filter(|loc| !loc.is_empty()) {
+            Some(loc) => format!("{rel_target}#{loc}"),
+            None => rel_target.to_owned(),
         }
-    }
-    if target.is_empty() {
+    } else if let Some(loc) = h.location {
+        internal_model_target(loc)
+    } else {
         return true;
-    }
+    };
     let tooltip = h.tooltip.map(|t| truncate_chars(t, MAX_TOOLTIP_CHARS));
     let link_bytes = (target.len() + tooltip.as_ref().map_or(0, String::len)) as u64;
     let link = Hyperlink { target, tooltip, external };
@@ -1093,14 +1120,12 @@ fn read_sheet_slicer_defs(cx: &mut Ctx<'_>, rels: &[crate::package::Rel]) -> Res
     Ok(())
 }
 
-/// Records a table's numeric `id`, name, and `tableColumn` id-to-name map on `cx` for `x15:tableSlicerCache` resolution.
-fn record_file_table(cx: &mut Ctx<'_>, t: &craft_xlsx::Table, model: &gridcraft_model::Table) {
-    if model.id == 0 {
-        return;
-    }
+/// Records file-to-model table and column identity for `x15:tableSlicerCache` resolution.
+fn record_file_table(cx: &mut Ctx<'_>, t: &craft_xlsx::Table, model_id: u32) {
+    let Some(id) = t.id.filter(|&id| id != 0) else { return };
     let col_map: HashMap<u32, String> =
         t.columns.iter().filter_map(|c| Some((c.id?, xml::decode_xstring(c.name.as_deref().unwrap_or(""))))).collect();
-    cx.file_tables.insert(model.id, (model.name.clone(), col_map));
+    cx.file_tables.insert(id, (model_id, col_map));
 }
 
 #[cfg(test)]
@@ -1177,6 +1202,8 @@ mod tests {
             legacy_formulas: vec![],
             pivot_charts: vec![],
             chart_budget: crate::chart::ChartReadBudget::new(),
+            drawing_kept: Default::default(),
+            pivot_parts: vec![],
             slicers: Default::default(),
             file_tables: Default::default(),
             slicer_caches: Default::default(),

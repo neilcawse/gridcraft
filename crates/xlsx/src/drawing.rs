@@ -25,6 +25,81 @@ use crate::xml::{El, esc, esc_attr};
 
 mod ink;
 
+/// What the drawings of the sheet being read hold that the model doesn't, noted for pass-through
+/// (`passthrough::KeptReader::sheet` keeps the parts behind it).
+#[derive(Default)]
+pub struct DrawingKeptIn {
+    pub chart_shapes: Vec<ChartShapesIn>,
+    pub links: Vec<ObjectLinkIn>,
+}
+
+/// A chart's shapes part, read into shapes and pictures of the sheet.
+pub struct ChartShapesIn {
+    /// The chart's model id.
+    pub chart: u32,
+    pub chart_part: String,
+    /// The id of the chart part's relationship to the shapes part.
+    pub rel_id: String,
+    /// The model ids of the shapes and pictures read from the part.
+    pub shapes: Vec<u32>,
+    pub images: Vec<u32>,
+}
+
+/// A hyperlink element (`a:hlinkClick` or `a:hlinkHover`) of a picture or shape read from a
+/// drawing.
+pub struct ObjectLinkIn {
+    /// The object in the model.
+    pub object: DrawingRef,
+    pub drawing_part: String,
+    /// The element, namespaces declared.
+    pub xml: String,
+    /// The relationship ids it names (its `r:id`, and its sound's `r:embed`).
+    pub rel_ids: Vec<String>,
+}
+
+/// The attributes of a hyperlink (CT_Hyperlink, ECMA-376 Part 1 §21.1.2.3.5) other than `r:id`.
+const LINK_ATTRS: [&str; 7] = ["invalidUrl", "action", "tgtFrame", "tooltip", "history", "highlightClick", "endSnd"];
+
+/// The hyperlink elements of a picture's or shape's `cNvPr` (`a:hlinkClick`, `a:hlinkHover`),
+/// each as XML with its namespaces declared and the relationship ids it names. Each goes on its
+/// own: one that names no relationship (an empty `r:id`) is left out, not the others.
+fn object_links(object: &El) -> Vec<(String, Vec<String>)> {
+    let mut out = Vec::new();
+    let Some(nv) = object.children.iter().find(|e| matches!(e.name.as_str(), "nvPicPr" | "nvSpPr" | "nvCxnSpPr")) else { return out };
+    let Some(c_nv_pr) = nv.child("cNvPr") else { return out };
+    for link in c_nv_pr.children.iter().filter(|e| matches!(e.name.as_str(), "hlinkClick" | "hlinkHover")) {
+        let Some(id) = link.attr("id").filter(|id| !id.trim().is_empty()) else { continue };
+        let mut xml = String::new();
+        let mut ids = vec![id.to_string()];
+        let _ = write!(xml, "<a:{} xmlns:a=\"{NS_A}\" xmlns:r=\"{NS_R}\" r:id=\"{}\"", link.name, esc_attr(id));
+        for k in LINK_ATTRS {
+            if let Some(v) = link.attr(k) {
+                let _ = write!(xml, " {k}=\"{}\"", esc_attr(v));
+            }
+        }
+        // The sound played on click, an embedded part of its own.
+        match link.child("snd").and_then(|s| Some((s.attr("embed").filter(|e| !e.is_empty())?, s.attr("name").unwrap_or("")))) {
+            Some((embed, name)) => {
+                ids.push(embed.to_string());
+                let _ = write!(xml, "><a:snd r:embed=\"{}\" name=\"{}\"/></a:{}>", esc_attr(embed), esc_attr(name), link.name);
+            }
+            None => xml.push_str("/>"),
+        }
+        out.push((xml, ids));
+    }
+    out
+}
+
+const NS_A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+const NS_R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+/// Notes the hyperlinks of the picture or shape `obj` of drawing `part`, read as `object`.
+fn note_link(cx: &mut Ctx<'_>, part: &str, obj: &El, object: DrawingRef) {
+    for (xml, rel_ids) in object_links(obj) {
+        cx.drawing_kept.links.push(ObjectLinkIn { object, drawing_part: part.to_string(), xml, rel_ids });
+    }
+}
+
 // ---------------------------------------------------------------- reading
 
 fn emu_px(v: Option<i64>) -> f32 {
@@ -353,6 +428,7 @@ fn read_object(
             let alt = obj.path(&["nvPicPr", "cNvPr"]).and_then(|c| c.attr("descr")).unwrap_or("").to_string();
             let id = cx.next_object_id();
             sheet.images.push(Image { id, anchor, data: data.into(), mime: mime_for(&target).to_string(), alt });
+            note_link(cx, part, obj, DrawingRef::Image(id));
             Ok(Some(DrawingRef::Image(id)))
         }
         "graphicFrame" => {
@@ -384,7 +460,7 @@ fn read_object(
                                 cx.pivot_charts.push((id, caches));
                             }
                             sheet.charts.push(ch);
-                            read_user_shapes(cx, &target, &cx_xml, anchor, sheet)?;
+                            read_user_shapes(cx, (id, &target), &cx_xml, anchor, sheet)?;
                             return Ok(Some(DrawingRef::Chart(id)));
                         }
                         None => cx.warn(format!("chart {target} has no supported plot and was skipped")),
@@ -419,6 +495,7 @@ fn read_object(
             let Some(s) = read_shape(obj, anchor, depth > 0) else { return Ok(None) };
             let id = cx.next_object_id();
             sheet.shapes.push(Shape { id, ..s });
+            note_link(cx, part, obj, DrawingRef::Shape(id));
             Ok(Some(DrawingRef::Shape(id)))
         }
         "grpSp" => {
@@ -554,7 +631,13 @@ fn optional_annotation_xml(cx: &mut Ctx<'_>, part: &str) -> Result<Option<El>, I
         }
     }
 }
-fn read_user_shapes(cx: &mut Ctx<'_>, chart_part: &str, chart_xml: &El, chart_anchor: Anchor, sheet: &mut Sheet) -> Result<(), IoError> {
+fn read_user_shapes(
+    cx: &mut Ctx<'_>,
+    (chart, chart_part): (u32, &str),
+    chart_xml: &El,
+    chart_anchor: Anchor,
+    sheet: &mut Sheet,
+) -> Result<(), IoError> {
     let Some(rid) = chart_xml.child("userShapes").and_then(|u| u.attr("id")) else { return Ok(()) };
     let Some(chart_rels) = optional_annotation_rels(cx, chart_part)? else { return Ok(()) };
     let Some(rel) = chart_rels.iter().find(|r| r.id == rid && !r.external) else { return Ok(()) };
@@ -565,6 +648,7 @@ fn read_user_shapes(cx: &mut Ctx<'_>, chart_part: &str, chart_xml: &El, chart_an
     let chart_y = sheet.row_top(chart_anchor.cell.row) + chart_anchor.dy as f64;
     let chart_w = chart_anchor.width.max(0.0) as f64;
     let chart_h = chart_anchor.height.max(0.0) as f64;
+    let mut kept = ChartShapesIn { chart, chart_part: chart_part.to_string(), rel_id: rid.to_string(), shapes: vec![], images: vec![] };
     for a in &us_xml.children {
         let frac = |parent: &str, child: &str, def: f64| {
             a.path(&[parent, child]).and_then(|e| e.text.trim().parse::<f64>().ok()).filter(|v| v.is_finite()).unwrap_or(def).clamp(0.0, 1.0)
@@ -607,17 +691,20 @@ fn read_user_shapes(cx: &mut Ctx<'_>, chart_part: &str, chart_xml: &El, chart_an
                     let alt = obj.path(&["nvPicPr", "cNvPr"]).and_then(|c| c.attr("descr")).unwrap_or("").to_string();
                     let id = cx.next_object_id();
                     sheet.images.push(Image { id, anchor: sub_anchor, data: data.into(), mime: mime_for(&target).to_string(), alt });
+                    kept.images.push(id);
                 }
                 "sp" | "cxnSp" => {
                     if let Some(s) = read_shape(obj, sub_anchor, false) {
                         let id = cx.next_object_id();
                         sheet.shapes.push(Shape { id, ..s });
+                        kept.shapes.push(id);
                     }
                 }
                 _ => {}
             }
         }
     }
+    cx.drawing_kept.chart_shapes.push(kept);
     Ok(())
 }
 
@@ -1016,6 +1103,8 @@ struct DrawingOut<'a> {
     sheet: &'a Sheet,
     theme: &'a Theme,
     objs: &'a [Obj<'a>],
+    /// The kept hyperlink elements of pictures and shapes, by object id.
+    links: &'a HashMap<u32, String>,
     /// Where each object is in `objs` (the first, should ids repeat).
     index: HashMap<DrawingRef, usize>,
     /// The direct parent of each member, built once for the drawing write.
@@ -1175,7 +1264,9 @@ impl DrawingOut<'_> {
                         *d = true;
                     }
                     let oid = self.take_id();
+                    let start = self.s.len();
                     write_obj(&mut self.s, self.theme, o, oid, moff, mext, rot);
+                    link_into(&mut self.s, start, o, self.links);
                 }
             }
         }
@@ -1185,8 +1276,9 @@ impl DrawingOut<'_> {
 
 /// The drawing part for a sheet's objects (relationship ids already assigned). A grouped object
 /// goes out with its outermost group: one anchor holding the `grpSp`, written where the group's
-/// first object comes in `objs`.
-pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>]) -> String {
+/// first object comes in `objs`. `links` holds the hyperlink elements of pictures and shapes
+/// (relationship ids assigned), by object id.
+pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>], links: &HashMap<u32, String>) -> String {
     let mut index = HashMap::new();
     for (i, o) in objs.iter().enumerate() {
         if let Some(r) = o.drawing_ref() {
@@ -1206,6 +1298,7 @@ pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>]) -> String {
         sheet,
         theme,
         objs,
+        links,
         index,
         member_parent,
         done: vec![false; objs.len()],
@@ -1239,12 +1332,31 @@ pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>]) -> String {
             Obj::Shape(sh) => (f64::from(sh.rotation.rem_euclid(360.0)) * 60000.0).round() as i64,
             _ => 0,
         };
+        let start = out.s.len();
         write_obj(&mut out.s, theme, o, id, (0, 0), (emu(a.width.max(0.0) as f64), emu(a.height.max(0.0) as f64)), rot);
+        link_into(&mut out.s, start, o, links);
         out.s.push_str("<xdr:clientData/>");
         out.s.push_str(close);
     }
     out.s.push_str("</xdr:wsDr>");
     out.s
+}
+
+/// Puts the kept hyperlink of picture or shape `o` (from `links`) into the `cNvPr` that
+/// [`write_obj`] wrote from `start` on, as its first children (CT_NonVisualDrawingProps).
+fn link_into(s: &mut String, start: usize, o: &Obj<'_>, links: &HashMap<u32, String>) {
+    let id = match o {
+        Obj::Image(i, _) => i.id,
+        Obj::Shape(sh) => sh.id,
+        _ => return,
+    };
+    let Some(xml) = links.get(&id) else { return };
+    let Some(at) = s.get(start..).and_then(|w| w.find("<xdr:cNvPr ")).map(|i| start + i) else { return };
+    // Attribute values have `>` escaped: the first one closes the tag.
+    let Some(close) = s.get(at..).and_then(|w| w.find('>')).map(|i| at + i) else { return };
+    if close > 0 && s.get(close - 1..close) == Some("/") {
+        s.replace_range(close - 1..=close, &format!(">{xml}</xdr:cNvPr>"));
+    }
 }
 
 /// One object's element, with `cNvPr` id `id` and its transform at `off`/`ext` (EMUs), rotated

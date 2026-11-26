@@ -31,20 +31,16 @@ impl SheetApp {
         // The opened workbook's window shows them, however it was opened (a script may have run
         // `file.open` on the session directly).
         self.follow_active_window();
-        let Some(list) = r.get("warnings").and_then(Json::as_array) else {
-            self.notice = None;
-            return;
-        };
-        let msgs: Vec<&str> = list.iter().filter_map(Json::as_str).collect();
+        let msgs = file_warnings(r);
         if msgs.is_empty() {
             // A clean open clears any notice left over from the previous document.
             self.notice = None;
             return;
         }
-        let vba: Vec<&str> = msgs.iter().copied().filter(|m| m.to_lowercase().contains("macro") || m.contains("VBA")).collect();
-        if !vba.is_empty() {
+        let mut vba = msgs.iter().copied().filter(|m| m.starts_with("macros (VBA project)"));
+        if let Some(first) = vba.next() {
             // The reader says "dropped" when the VBA project was missing or unreadable; never promise to keep it then.
-            let dropped = vba.iter().any(|m| m.contains("dropped"));
+            let dropped = first.contains("dropped") || vba.any(|m| m.contains("dropped"));
             let text = if dropped {
                 "This workbook's VBA macros could not be loaded and were dropped, so they will not be in the saved file. Keep the original file."
             } else {
@@ -52,13 +48,47 @@ impl SheetApp {
             };
             self.notice = Some(Notice { text: text.into(), kind: NoticeKind::Warning, action: Some(("What this means".into(), "macros".into())) });
         } else {
-            let text = if msgs.len() == 1 {
-                msgs[0].to_string()
-            } else {
-                format!("{} items in this file were handled differently. First: {}", msgs.len(), msgs[0])
-            };
-            self.notice = Some(Notice { text, kind: NoticeKind::Info, action: None });
+            self.notice = file_warning_notice(&msgs);
         }
+    }
+
+    /// Unlike a clean open, a clean save leaves any existing info-bar notice alone. Called once the
+    /// file is written or handed over by a save the user asked for, which always shows its warnings.
+    pub(crate) fn show_save_warnings(&mut self, r: &Json) {
+        let msgs = file_warnings(r);
+        self.note_save_warnings(&msgs);
+        if let Some(notice) = file_warning_notice(&msgs) {
+            self.notice = Some(notice);
+        }
+    }
+
+    /// AutoSave's warnings show only when they differ from those last shown for the workbook at
+    /// its path, so a dismissed notice stays dismissed while they don't change.
+    fn show_changed_save_warnings(&mut self, r: &Json) {
+        let msgs = file_warnings(r);
+        if self.note_save_warnings(&msgs)
+            && let Some(notice) = file_warning_notice(&msgs)
+        {
+            self.notice = Some(notice);
+        }
+    }
+
+    /// Records the active workbook's save warnings as shown; whether they differ from the last
+    /// ones recorded for it at its current path. Closed workbooks' records go (a `uid` is never
+    /// reused, so a reopened file starts afresh).
+    fn note_save_warnings(&mut self, msgs: &[&str]) -> bool {
+        let Some(doc) = self.session.active() else { return true };
+        let (uid, path) = (doc.uid, doc.path.as_deref());
+        let open = self.session.documents();
+        self.save_warnings_shown.retain(|uid, _| open.iter().any(|d| d.uid == *uid));
+        let unchanged = self
+            .save_warnings_shown
+            .get(&uid)
+            .is_some_and(|(shown_path, shown)| shown_path.as_deref() == path && shown.iter().map(String::as_str).eq(msgs.iter().copied()));
+        if !unchanged {
+            self.save_warnings_shown.insert(uid, (path.map(str::to_owned), msgs.iter().map(|m| (*m).to_owned()).collect()));
+        }
+        !unchanged
     }
 
     /// The open windows in order, for the Switch Windows lists.
@@ -112,7 +142,9 @@ impl SheetApp {
         if autosave_due {
             self.grid.last_autosave = now;
             self.store_view_state();
-            let _ = self.session.run("file.save", json!({}));
+            if let Ok(result) = self.session.run("file.save", json!({})) {
+                self.show_changed_save_warnings(&result);
+            }
         } else if self.ui.autosave && dirty_xlsx {
             // Keep checking even when no input arrives while the window is hidden.
             ctx.request_repaint_after(std::time::Duration::from_secs(2));
@@ -124,4 +156,15 @@ impl SheetApp {
     pub fn toggle_autosave(&mut self) {
         self.ui.autosave = !self.ui.autosave;
     }
+}
+
+fn file_warnings(r: &Json) -> Vec<&str> {
+    r.get("warnings").and_then(Json::as_array).into_iter().flatten().filter_map(Json::as_str).collect()
+}
+
+fn file_warning_notice(msgs: &[&str]) -> Option<Notice> {
+    let first = msgs.first()?;
+    let text =
+        if msgs.len() == 1 { (*first).to_string() } else { format!("{} items in this file were handled differently. First: {first}", msgs.len()) };
+    Some(Notice { text, kind: NoticeKind::Info, action: None })
 }

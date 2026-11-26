@@ -780,14 +780,14 @@ pub fn export_as(app: &mut SheetApp, fmt: &str) -> bool {
             }
         };
     }
-    app.store_view_state();
-    match app.session.run("file.saveBytes", json!({"format": fmt})) {
+    match app.run("file.saveBytes", json!({"format": fmt})) {
         Ok(r) => {
             let bytes = r.get("base64").and_then(Json::as_str).and_then(gridcraft_engine::io::base64_decode);
             let name = r.get("name").and_then(Json::as_str).map_or_else(|| format!("{stem}.{fmt}"), str::to_string);
             match (bytes, &app.services.download) {
                 (Some(b), Some(dl)) => {
                     dl(&name, &b);
+                    app.show_save_warnings(&r);
                     true
                 }
                 _ => false,

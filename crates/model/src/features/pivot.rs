@@ -1,6 +1,8 @@
 use gridcraft_core::Value;
 
 use super::{CellRef, RangeRef};
+use crate::sheet::SheetUid;
+use crate::workbook::DefinitionUid;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------- pivot tables
@@ -234,6 +236,85 @@ pub struct PivotTable {
     /// the same source keep separate caches on save.
     #[serde(default, skip_serializing_if = "PivotCacheId::is_none")]
     pub cache_id: PivotCacheId,
+    /// What the source stood for when the file was read: the exact defined name or table it
+    /// resolved to ([`crate::Workbook::pivot_source`]). Not in JSON or the file.
+    #[serde(skip)]
+    pub binding: SourceBinding,
+    /// XLSX import provenance, independent of subsequent source edits.
+    #[serde(skip)]
+    pub had_x14_cache_id: X14CacheId,
+}
+
+/// The definition an imported PivotTable's source was bound to, if any (a range, a source in
+/// another workbook or one already missing in the file has none, nor does a source typed in the
+/// app). Compares equal for any two values, like [`PivotCacheId`]: it is where the source text
+/// led, not part of the PivotTable.
+#[derive(Clone, Debug, Default)]
+pub struct SourceBinding(pub Option<Binding>, pub Option<String>);
+
+impl SourceBinding {
+    /// True if this unchanged source was an unresolved local name in the input file.
+    pub fn unresolved(&self, source: &str) -> bool {
+        self.1.as_deref() == Some(source)
+    }
+}
+
+impl PartialEq for SourceBinding {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+/// Whether the input cache carried an x14 ID. This does not describe the report itself.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct X14CacheId(pub bool);
+
+impl PartialEq for X14CacheId {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+/// A PivotTable source bound to one definition.
+#[derive(Clone, Debug)]
+pub struct Binding {
+    /// The source text (`PivotTable::source`) the binding was made for. A source changed since
+    /// is not bound; a sheet rename rewrites both.
+    pub text: String,
+    pub kind: BindingKind,
+    /// The identity of the defined name or table.
+    pub def: DefinitionUid,
+    /// How the definition is described in a save warning once it is gone (`sheet "Data"'s name
+    /// "rData"`).
+    pub was: String,
+    /// Source text and supported attributes as imported. Kept parts retain the original bytes;
+    /// rebuilt local sources serialize only these attributes.
+    pub read_as: Option<(String, WorksheetSourceAttrs)>,
+}
+
+/// Unqualified attributes of an imported local, named worksheet source.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorksheetSourceAttrs {
+    pub name: String,
+    pub sheet: Option<String>,
+    pub reference: Option<String>,
+}
+
+/// What kind of definition a source is bound to, which decides what may replace it once it is
+/// gone: only a definition of the same kind and scope.
+#[derive(Clone, Copy, Debug)]
+pub enum BindingKind {
+    /// A bare name (`worksheetSource name`), looked up as a formula would from the PivotTable's
+    /// sheet.
+    Name,
+    /// A bare table name.
+    Table,
+    /// `name` with `sheet`: the name of that sheet.
+    SheetName(SheetUid),
+    /// `name` with `sheet`: a workbook name whose reference is on that sheet.
+    WorkbookName(SheetUid),
+    /// `name` with `sheet`: a table on that sheet.
+    SheetTable(SheetUid),
 }
 
 /// Imported pivot-cache group id. Compares equal for any two values in [`PartialEq`] so that
@@ -503,6 +584,8 @@ impl Default for PivotTable {
             values_on_rows: false,
             values_position: None,
             cache_id: PivotCacheId::default(),
+            binding: SourceBinding::default(),
+            had_x14_cache_id: X14CacheId::default(),
         }
     }
 }

@@ -265,6 +265,7 @@ pub fn resolve(
             })
             .collect();
         let id = cx.next_object_id();
+        let marker = wb.names.iter().find(|n| n.scope.is_none() && n.name.eq_ignore_ascii_case(&def.name)).filter(|n| is_cache_marker(n));
         let slicer = Slicer {
             id,
             source: SlicerSource::Pivot {
@@ -280,6 +281,7 @@ pub fn resolve(
             name: part.name,
             style: part.style,
             row_height: part.row_height,
+            imported_cache: gridcraft_model::SlicerCacheOrigin { name: def.name.clone(), marker: marker.map(|n| n.uid) },
         };
         if let Some(sh) = wb.sheet_mut(si) {
             sh.slicers.push(slicer);
@@ -303,6 +305,8 @@ struct Planned {
     name: String,
     /// Unique slicer cache name (also a workbook defined name).
     cache: String,
+    /// The imported marker is written with the other defined names, without losing its metadata.
+    has_marker: bool,
     field: String,
     /// The connected PivotTables written (sheet, index), which share one pivot cache.
     pivots: Vec<(usize, usize)>,
@@ -328,10 +332,9 @@ impl SlicerWriter {
     /// Plans the PivotTable slicers whose PivotTables can be written. A slicer's PivotTables must
     /// share a pivot cache; where they can't (different sources or date grouping), the slicer
     /// keeps only its first PivotTable.
-    pub fn new(wb: &Workbook) -> SlicerWriter {
+    pub fn new(wb: &Workbook, table_names: &[Vec<Option<String>>]) -> SlicerWriter {
         let mut planned: Vec<Planned> = Vec::new();
         let mut names: Vec<String> = Vec::new();
-        let mut caches: Vec<String> = Vec::new();
         for (si, sheet) in wb.sheets.iter().enumerate() {
             for (i, sl) in sheet.slicers.iter().enumerate() {
                 let SlicerSource::Pivot { pivots, field, .. } = &sl.source else { continue };
@@ -340,7 +343,7 @@ impl SlicerWriter {
                     let Some(psi) = wb.sheet_index(&p.sheet) else { continue };
                     let Some(sh) = wb.sheet(psi) else { continue };
                     let Some(pi) = sh.pivots.iter().position(|t| t.name.eq_ignore_ascii_case(&p.name)) else { continue };
-                    let ok = sh.pivots.get(pi).is_some_and(|pt| crate::pivot::slicer_field_ok(wb, pt, psi, field));
+                    let ok = sh.pivots.get(pi).is_some_and(|pt| crate::pivot::slicer_field_ok(wb, wb, pt, psi, field));
                     if ok && !targets.contains(&(psi, pi)) {
                         targets.push((psi, pi));
                     }
@@ -350,15 +353,78 @@ impl SlicerWriter {
                 }
                 let base = [sl.name.trim(), sl.caption.trim(), field.trim()].into_iter().find(|n| !n.is_empty()).unwrap_or("Slicer");
                 let name = unique(base, " ", &mut names);
-                let clean: String = field.chars().map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' }).collect();
-                let cache = unique(&format!("Slicer_{clean}"), "", &mut caches);
-                planned.push(Planned { sheet: si, slicer: i, name, cache, field: field.clone(), pivots: targets });
+                planned.push(Planned { sheet: si, slicer: i, name, cache: String::new(), has_marker: false, field: field.clone(), pivots: targets });
             }
         }
-        let mut groups = merge_groups(&planned);
+        if planned.is_empty() {
+            return Self::default();
+        }
+        // A workbook-scoped marker owns its name unless another workbook-scoped name or a table
+        // shares it. Sheet-scoped names are separate definitions: they stop a cache from taking
+        // a free name, but not from keeping its own marker.
+        let mut reserved = std::collections::HashMap::new();
+        for n in wb.names.iter().filter(|n| n.scope.is_none()) {
+            let marker = is_cache_marker(n).then(|| n.uid.get());
+            reserved.entry(n.name.to_ascii_lowercase()).and_modify(|uid| *uid = None).or_insert(marker);
+        }
+        for n in wb.names.iter().filter(|n| n.scope.is_some()) {
+            reserved.entry(n.name.to_ascii_lowercase()).or_insert(None);
+        }
+        for name in wb.sheets.iter().flat_map(|s| s.tables.iter().map(|t| &t.name)).chain(table_names.iter().flatten().flatten()) {
+            reserved.insert(name.to_ascii_lowercase(), None);
+        }
+        // Give imported caches first claim to their original names. An occupied name can be
+        // reused only by the cache that imported that exact workbook marker.
+        for p in &mut planned {
+            let gridcraft_model::SlicerCacheOrigin { name, marker } = &wb.sheets[p.sheet].slicers[p.slicer].imported_cache;
+            if name.is_empty() {
+                continue;
+            }
+            let key = name.to_ascii_lowercase();
+            if !gridcraft_core::valid_defined_name(name) || crate::read::is_special_defined_name(&key) {
+                continue;
+            }
+            if let Some(uid) = reserved.get(&key) {
+                if !uid.is_some_and(|uid| marker.is_some_and(|marker| marker.get() == uid)) {
+                    continue;
+                }
+                p.has_marker = true;
+            }
+            p.cache.clone_from(name);
+            reserved.insert(key, None);
+        }
+        for p in planned.iter_mut().filter(|p| p.cache.is_empty()) {
+            let clean: String = p.field.chars().map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' }).collect();
+            let base = format!("Slicer_{clean}");
+            let mut name = base.clone();
+            let mut suffix = 2;
+            while reserved.contains_key(&name.to_ascii_lowercase()) {
+                name = format!("{base}{suffix}");
+                suffix += 1;
+            }
+            reserved.insert(name.to_ascii_lowercase(), None);
+            p.cache = name;
+        }
+        SlicerWriter { planned, groups: vec![], parts: 0 }
+    }
+
+    /// Remove targets that cannot be rebuilt against the catalog as serialized. Return whether
+    /// any marker names disappeared, so the caller can reproject the catalog before grouping.
+    pub fn prune_targets(&mut self, wb: &Workbook, catalog: &Workbook) -> bool {
+        let count = self.planned.len();
+        for p in &mut self.planned {
+            p.pivots.retain(|&(si, pi)| crate::pivot::slicer_field_ok(wb, catalog, &wb.sheets[si].pivots[pi], si, &p.field));
+        }
+        self.planned.retain(|p| !p.pivots.is_empty());
+        self.planned.len() != count
+    }
+
+    pub fn finish_plan(&mut self, wb: &Workbook, catalog: &Workbook) {
+        let planned = &mut self.planned;
+        let mut groups = merge_groups(planned);
         let mut split = false;
         for g in groups.iter().filter(|g| g.len() > 1) {
-            if !crate::pivot::can_share(wb, g, &group_fields(&planned, g)) {
+            if !crate::pivot::can_share(wb, catalog, g, &group_fields(planned, g)) {
                 for p in planned.iter_mut().filter(|p| p.pivots.iter().any(|x| g.contains(x))) {
                     p.pivots.truncate(1);
                 }
@@ -366,9 +432,9 @@ impl SlicerWriter {
             }
         }
         if split {
-            groups = merge_groups(&planned);
+            groups = merge_groups(planned);
         }
-        SlicerWriter { planned, groups, parts: 0 }
+        self.groups = groups;
     }
 
     /// The PivotTables written with the same pivot cache as PivotTable `pi` on sheet `si`
@@ -391,14 +457,14 @@ impl SlicerWriter {
             .collect()
     }
 
-    /// Whether `name` is a slicer cache name (written as a defined name by the writer).
-    pub fn is_cache_name(&self, name: &str) -> bool {
-        self.planned.iter().any(|p| p.cache.eq_ignore_ascii_case(name))
+    /// Names whose markers are not already written by the workbook's defined names.
+    pub fn new_marker_names(&self) -> impl Iterator<Item = &str> {
+        self.planned.iter().filter(|p| !p.has_marker).map(|p| p.cache.as_str())
     }
 
     /// `<definedName>` elements Excel keeps for slicer caches.
     pub fn defined_names(&self) -> String {
-        self.planned.iter().map(|p| format!("<definedName name=\"{}\">#N/A</definedName>", esc_attr(&p.cache))).collect()
+        self.new_marker_names().map(|name| format!("<definedName name=\"{}\">#N/A</definedName>", esc_attr(name))).collect()
     }
 
     /// Writes a sheet's slicer part and relationship; returns the sheet's `x14:slicerList`
@@ -553,6 +619,11 @@ fn unique(base: &str, sep: &str, taken: &mut Vec<String>) -> String {
     n
 }
 
+/// Whether `n` has the form Excel gives a slicer cache's defined name: workbook scope, `#N/A`.
+fn is_cache_marker(n: &gridcraft_model::DefinedName) -> bool {
+    n.scope.is_none() && n.formula.trim().trim_start_matches('=').trim().eq_ignore_ascii_case("#N/A")
+}
+
 /// Ascending item order: numbers (dates are serials) by value, before text by case-insensitive
 /// text.
 fn cmp_label(a: &str, b: &str) -> std::cmp::Ordering {
@@ -581,4 +652,88 @@ pub fn frame_xml(id: usize, name: &str, xfrm: &str, a_xfrm: &str) -> String {
         "<mc:AlternateContent xmlns:mc=\"{NS_MC}\"><mc:Choice xmlns:a14=\"http://schemas.microsoft.com/office/drawing/2010/main\" Requires=\"a14\"><xdr:graphicFrame macro=\"\"><xdr:nvGraphicFramePr><xdr:cNvPr id=\"{id}\" name=\"{n}\"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>{xfrm}<a:graphic><a:graphicData uri=\"{FRAME_URI}\"><sle:slicer xmlns:sle=\"{FRAME_URI}\" name=\"{n}\"/></a:graphicData></a:graphic></xdr:graphicFrame></mc:Choice><mc:Fallback><xdr:sp macro=\"\" textlink=\"\"><xdr:nvSpPr><xdr:cNvPr id=\"0\" name=\"\"/><xdr:cNvSpPr><a:spLocks noTextEdit=\"1\"/></xdr:cNvSpPr></xdr:nvSpPr><xdr:spPr>{a_xfrm}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr><xdr:txBody><a:bodyPr vertOverflow=\"clip\" horzOverflow=\"clip\"/><a:lstStyle/><a:p><a:r><a:rPr lang=\"en-US\" sz=\"1100\"/><a:t>This is a PivotTable slicer. Slicers need Excel 2010 or later.</a:t></a:r></a:p></xdr:txBody></xdr:sp></mc:Fallback></mc:AlternateContent>",
         n = esc_attr(name)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gridcraft_core::{CellRef, RangeRef, Value};
+    use gridcraft_model::Table;
+
+    #[test]
+    fn pruning_keeps_a_later_serializable_target_and_removes_empty_markers() {
+        let mut wb = Workbook::new();
+        let mut data = Sheet::new("Data");
+        for row in [0, 3] {
+            data.set_value(CellRef::new(row, 0), Value::text("K"));
+            data.set_value(CellRef::new(row + 1, 0), Value::text("value"));
+        }
+        for (id, name, source) in [(1, "First", "Data!$A$1:$A$2"), (2, "Second", "Data!$A$4:$A$5")] {
+            data.pivots.push(PivotTable { id, name: name.into(), source: source.into(), ..Default::default() });
+        }
+        for (id, name, targets) in [(3, "Both", &["First", "Second"][..]), (4, "OnlyFirst", &["First"][..])] {
+            data.slicers.push(Slicer {
+                id,
+                name: name.into(),
+                caption: name.into(),
+                anchor: Anchor { cell: CellRef::new(0, 9), dx: 0.0, dy: 0.0, width: 180.0, height: 240.0, mode: Default::default() },
+                columns: 1,
+                style: String::new(),
+                row_height: None,
+                imported_cache: Default::default(),
+                source: SlicerSource::Pivot {
+                    pivots: targets.iter().map(|n| SlicerPivot { sheet: "Data".into(), name: (*n).into() }).collect(),
+                    field: "K".into(),
+                    sort: PivotSort::Asc,
+                    cross_filter: SlicerCrossFilter::ShowItemsWithDataAtTop,
+                    show_missing: true,
+                },
+            });
+        }
+        wb.sheets[0] = std::sync::Arc::new(data);
+        let mut writer = SlicerWriter::new(&wb, &[vec![]]);
+        assert_eq!(writer.new_marker_names().collect::<Vec<_>>(), ["Slicer_K", "Slicer_K2"]);
+        // Exercise the writer's catalog boundary: the first target's explicit range would import
+        // as a table binding rather than the range used by native refresh in the model.
+        let mut catalog = wb.clone();
+        catalog.sheet_mut(0).unwrap().tables.push(Table {
+            name: "Data!$A$1:$A$2".into(),
+            range: RangeRef::parse("A4:A5").unwrap(),
+            id: 1,
+            uid: Default::default(),
+            header_row: true,
+            totals_row: false,
+            columns: vec![],
+            style: String::new(),
+            banded_rows: false,
+            banded_cols: false,
+            first_col: false,
+            last_col: false,
+            filter_button: false,
+            filter: vec![],
+            table_type: None,
+            connection_id: None,
+        });
+        assert!(writer.prune_targets(&wb, &catalog));
+        writer.finish_plan(&wb, &catalog);
+        assert_eq!(writer.new_marker_names().collect::<Vec<_>>(), ["Slicer_K"]);
+        assert_eq!(writer.planned[0].pivots, [(0, 1)]);
+
+        let marker = gridcraft_model::DefinedName {
+            name: "Slicer_K2".into(),
+            scope: None,
+            formula: "#N/A".into(),
+            hidden: true,
+            comment: "Imported marker".into(),
+            uid: Default::default(),
+        };
+        wb.sheet_mut(0).unwrap().slicers[1].imported_cache =
+            gridcraft_model::SlicerCacheOrigin { name: marker.name.clone(), marker: Some(marker.uid) };
+        wb.names.push(marker);
+        let mut writer = SlicerWriter::new(&wb, &[vec![]]);
+        assert_eq!(writer.planned[1].cache, "Slicer_K2");
+        assert!(writer.planned[1].has_marker);
+        assert!(writer.prune_targets(&wb, &catalog));
+        assert_eq!(writer.new_marker_names().collect::<Vec<_>>(), ["Slicer_K"]);
+    }
 }

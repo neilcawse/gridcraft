@@ -1,6 +1,6 @@
 //! Writing worksheet parts and the parts they own (tables, comments, drawings, charts).
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use craft_xlsx::{
@@ -34,7 +34,7 @@ mod parts;
 mod rules;
 
 pub(crate) use parts::password_attrs;
-use parts::{autofilter_xml, comments_xml, protected_ranges_xml, table_columns, table_name, table_xml, thread_ids, threaded_xml, vml_xml};
+use parts::{autofilter_xml, comments_xml, protected_ranges_xml, table_columns, table_xml, thread_ids, threaded_xml, vml_xml};
 use rules::{cf_rule_xml, solid_bar_x14, validation_xml, x14_cf_rule_xml};
 
 fn sqref(ranges: &[RangeRef]) -> String {
@@ -85,7 +85,15 @@ fn push_fragment_kids(root: &mut craft_xml::El, xml: &str) {
     }
 }
 
-pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> (String, Rels) {
+/// Projects the repaired names of tables that are emitted.
+pub(crate) fn table_names(wb: &Workbook) -> Vec<Vec<Option<String>>> {
+    wb.sheets
+        .iter()
+        .map(|sheet| sheet.tables.iter().map(|t| (t.range.height() > u32::from(t.totals_row)).then(|| t.name.clone())).collect())
+        .collect()
+}
+
+pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, table_names: &[Option<String>], out: &mut Out) -> (String, Rels) {
     let mut rels = Rels::default();
     let Some(sheet) = wb.sheet(si) else { return (String::new(), rels) };
     let nstyles = wb.styles.len() as u32;
@@ -111,12 +119,8 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> (
         _ => sheet.tables.clone(),
     };
     let mut overrides: BTreeMap<CellRef, String> = BTreeMap::new();
-    let tables: Vec<(&Table, Vec<String>)> = folded
-        .iter()
-        .filter(|t| t.range.height() > t.header_row as u32 + t.totals_row as u32 || (t.header_row && t.range.height() > t.totals_row as u32))
-        .map(|t| (t, table_columns(t)))
-        .collect();
-    for (t, cols) in &tables {
+    let tables: Vec<_> = folded.iter().zip(table_names).filter_map(|(t, name)| Some((t, table_columns(t), name.as_deref()?))).collect();
+    for (t, cols, _) in &tables {
         if t.header_row {
             for (i, name) in cols.iter().enumerate() {
                 overrides.insert(CellRef::new(t.range.start.row, t.range.start.col + i as u32), name.clone());
@@ -205,19 +209,17 @@ pub fn write_sheet(wb: &Workbook, si: usize, selected: bool, out: &mut Out) -> (
     push_fragment_kids(&mut part.root, &kept.custom_sheet_views());
     push_fragment_kids(&mut part.root, &kept.custom_properties());
     build_sheet_printing(sheet, &mut part.features.print, &kept);
-    part.features.drawing = write_sheet_drawing_rel(wb, si, sheet, &mut rels, out);
+    part.features.drawing = write_sheet_drawing_rel(wb, si, sheet, &kept, &mut rels, out);
     let (legacy_rid, notes_frag) = write_sheet_notes_frag(sheet, si, &kept, &mut rels, out);
     part.features.legacy_drawing = legacy_rid;
 
     if !tables.is_empty() {
-        let mut used_names: HashSet<String> = HashSet::new();
-        for (t, cols) in &tables {
+        for (t, cols, name) in &tables {
             out.tables += 1;
             out.table_id += 1;
             let n = out.tables;
-            let name = table_name(&t.name, &mut used_names, out.table_id);
             let bound = kept.table_binding(t.id, cols);
-            let xml = table_xml(t, cols, &name, out.table_id, bound.as_ref(), out);
+            let xml = table_xml(t, cols, name, out.table_id, bound.as_ref(), out);
             let path = format!("xl/tables/table{n}.xml");
             out.part(&path, Some(CT_TABLE), xml.into_bytes());
             if let Some(b) = &bound {
@@ -390,8 +392,11 @@ fn write_sheet_extensions(s: &mut String, sheet: &Sheet, x14_cf: &str, slicers: 
                 SparklineKind::Column => " type=\"column\"",
                 SparklineKind::WinLoss => " type=\"stacked\"",
             };
-            let src =
-                if sp.source.contains('!') { sp.source.clone() } else { format!("{}!{}", gridcraft_formula::quote_sheet(&sheet.name), sp.source) };
+            let src = if sp.source.contains('!') || crate::chart::is_structured_ref(&sp.source) {
+                std::borrow::Cow::Borrowed(sp.source.as_str())
+            } else {
+                std::borrow::Cow::Owned(format!("{}!{}", gridcraft_formula::quote_sheet(&sheet.name), sp.source))
+            };
             let color = if sp.color == Color::Auto { "rgb=\"FF376092\"".to_string() } else { color_attrs(&sp.color) };
             let _ = write!(
                 s,
@@ -456,19 +461,28 @@ fn write_sheet_notes_frag(
     (legacy_rid, kept.elements(&controls))
 }
 
-fn write_sheet_drawing_rel(wb: &Workbook, si: usize, sheet: &Sheet, rels: &mut Rels, out: &mut Out) -> Option<String> {
+fn write_sheet_drawing_rel(
+    wb: &Workbook,
+    si: usize,
+    sheet: &Sheet,
+    kept: &crate::passthrough::SheetKept<'_>,
+    rels: &mut Rels,
+    out: &mut Out,
+) -> Option<String> {
+    use gridcraft_model::{DrawingRef, Image, Shape};
     let slicers = out.slicers.on_sheet(si);
-    if sheet.images.is_empty() && sheet.charts.is_empty() && sheet.shapes.is_empty() && slicers.is_empty() {
+    let drawn = kept.drawing(sheet, out);
+    // The shapes and pictures drawn on a chart go back in its shapes part, not in the drawing.
+    let images: Vec<&Image> = sheet.images.iter().filter(|i| !i.data.is_empty() && !drawn.in_chart(DrawingRef::Image(i.id))).collect();
+    let shapes: Vec<&Shape> = sheet.shapes.iter().filter(|s| !drawn.in_chart(DrawingRef::Shape(s.id))).collect();
+    if images.is_empty() && sheet.charts.is_empty() && shapes.is_empty() && slicers.is_empty() {
         return None;
     }
     out.drawings += 1;
     let dn = out.drawings;
     let mut drels = Rels::default();
     let mut objs: Vec<Obj<'_>> = vec![];
-    for img in &sheet.images {
-        if img.data.is_empty() {
-            continue;
-        }
+    for img in images {
         let ext = image_ext(&img.mime, &img.data);
         out.default_type(ext, image_content_type(ext));
         let file = out.image_part(ext, &img.data);
@@ -489,13 +503,22 @@ fn write_sheet_drawing_rel(wb: &Workbook, si: usize, sheet: &Sheet, rels: &mut R
             out.part(&format!("xl/charts/_rels/chartEx{n}.xml.rels"), None, crels.xml().into_bytes());
             drels.add_uri(crate::chartex::REL_CHARTEX, &format!("../charts/chartEx{n}.xml"))
         } else {
-            let name = format!("xl/charts/chart{}.xml", out.charts);
-            out.part(&name, Some(CT_CHART), crate::chart::write_chart(wb, si, ch, &out.book_name).into_bytes());
-            drels.add("chart", &format!("../charts/chart{}.xml", out.charts))
+            let n = out.charts;
+            let mut xml = crate::chart::write_chart(wb, si, ch, &out.book_name);
+            let mut crels = Rels::default();
+            if let Some(user_shapes) = drawn.chart_shapes(ch.id, &mut crels, out)
+                && let Some(end) = xml.rfind("</c:chartSpace>")
+            {
+                // CT_ChartSpace: `userShapes` is the last child but for `extLst`.
+                xml.insert_str(end, &user_shapes);
+                out.part(&format!("xl/charts/_rels/chart{n}.xml.rels"), None, crels.xml().into_bytes());
+            }
+            out.part(&format!("xl/charts/chart{n}.xml"), Some(CT_CHART), xml.into_bytes());
+            drels.add("chart", &format!("../charts/chart{n}.xml"))
         };
         objs.push(Obj::Chart(ch, rid));
     }
-    for sh in &sheet.shapes {
+    for sh in shapes {
         objs.push(Obj::Shape(sh));
     }
     for p in &slicers {
@@ -503,7 +526,13 @@ fn write_sheet_drawing_rel(wb: &Workbook, si: usize, sheet: &Sheet, rels: &mut R
             objs.push(Obj::Slicer(sl, p.name.clone()));
         }
     }
-    out.part(&format!("xl/drawings/drawing{dn}.xml"), Some(CT_DRAWING), crate::drawing::write_drawing(sheet, &wb.theme, &objs).into_bytes());
+    let objects = objs.iter().filter_map(|o| match o {
+        Obj::Image(i, _) => Some(DrawingRef::Image(i.id)),
+        Obj::Shape(s) => Some(DrawingRef::Shape(s.id)),
+        _ => None,
+    });
+    let links = drawn.links(wb, (si, sheet), objects, &mut drels, out);
+    out.part(&format!("xl/drawings/drawing{dn}.xml"), Some(CT_DRAWING), crate::drawing::write_drawing(sheet, &wb.theme, &objs, &links).into_bytes());
     if !drels.is_empty() {
         out.part(&format!("xl/drawings/_rels/drawing{dn}.xml.rels"), None, drels.xml().into_bytes());
     }
@@ -648,15 +677,11 @@ fn build_sheet_rules(sheet: &Sheet, features: &mut CraftFeatures, rels: &mut Rel
     }
     for (c, h) in &sheet.hyperlinks {
         let t = h.target.trim();
-        if t.is_empty() {
+        if h.external && t.is_empty() {
             continue;
         }
-        let external = h.external
-            || t.contains("://")
-            || t.to_ascii_lowercase().starts_with("mailto:")
-            || t.starts_with("\\\\")
-            || t.to_ascii_lowercase().starts_with("file:");
-        let (rel_id, location, display, url) = if external {
+        // The model's flag alone picks a relationship or a `location`; the text never does.
+        let (rel_id, location, display, url) = if h.external {
             let (u, loc) = match t.split_once('#') {
                 Some((u, l)) if !u.is_empty() => (u, Some(l.to_string())),
                 _ => (t, None),
@@ -664,7 +689,7 @@ fn build_sheet_rules(sheet: &Sheet, features: &mut CraftFeatures, rels: &mut Rel
             let id = rels.add_external("hyperlink", u);
             (Some(id), loc, None, Some(u.to_string()))
         } else {
-            let loc = t.trim_start_matches('#').to_string();
+            let loc = crate::sheet_read::internal_link_location(t);
             (None, Some(loc.clone()), Some(loc), None)
         };
         features.hyperlinks.push(CraftHyperlink {

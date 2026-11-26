@@ -6,6 +6,7 @@ use super::{
     PivotField, PivotFilter, PivotFunc, PivotLayout, PivotShowAs, PivotSort, PivotTable, PivotValue, RangeRef, Rels, VALUES_FIELD, Value, Workbook,
     XML_DECL, datetime_from_serial, esc_attr, func_caption, func_name, group_by_name, group_caption, iso, key, label, mdy, same,
 };
+use gridcraft_model::{FoundSource, PivotSource, SavedSource};
 
 #[derive(Clone, Default)]
 struct Stats {
@@ -136,6 +137,7 @@ pub struct SlicerField {
 /// from `(source_sheet, source_range, fields)`, so neither needs to be compared here.
 fn cache_compatible(a: &Cache, b: &Cache) -> bool {
     a.cache_id == b.cache_id
+        && a.slicer_id.is_some() == b.slicer_id.is_some()
         && a.source_sheet == b.source_sheet
         && a.source_range == b.source_range
         && a.source_xml == b.source_xml
@@ -172,6 +174,11 @@ pub struct PivotWriter {
     /// for each PivotTable written with such a cache.
     infos: Vec<PivotSlicerInfo>,
     slicer_info: HashMap<(usize, usize), usize>,
+    /// Caches of kept PivotTables written as the file had them: (cache id, part name), and (the
+    /// source file's cache definition (normalized name), the source written into it, `None` for
+    /// the file's) → its index there.
+    kept: Vec<(u32, String)>,
+    kept_by_source: HashMap<(String, Option<String>), usize>,
 }
 
 struct Pending {
@@ -186,18 +193,84 @@ struct Pending {
 
 impl PivotWriter {
     /// Writes the caches of a sheet's PivotTables and adds the sheet's relationships to its
-    /// PivotTable parts. Pivots whose source can't be resolved are not written. The PivotTables a
-    /// slicer connects get one cache, written with the first of them.
-    pub fn add_sheet(&mut self, wb: &Workbook, si: usize, out: &mut Out, rels: &mut Rels) {
+    /// PivotTable parts. A PivotTable is written from what its source stands for
+    /// ([`Workbook::pivot_source`]), and its source so that reading the file binds it to that
+    /// again ([`bound_source`]): one whose bound definition is gone with nothing of the same kind
+    /// in its place is not written, nor one that can't be written so that it reads back; one
+    /// whose definition was replaced is rebuilt from the replacement; the save says so. A
+    /// PivotTable that is as it was read, still bound to the same definition, and whose parts
+    /// were kept goes back as the file had it (unless slicers filter it), its source written
+    /// anew only when the file's would no longer read back to it. Pivots whose source can't be
+    /// resolved are not written. The PivotTables a slicer connects get one cache, written with
+    /// the first of them.
+    pub fn add_sheet(&mut self, wb: &Workbook, catalog: &Workbook, si: usize, out: &mut Out, rels: &mut Rels) {
         let Some(sheet) = wb.sheet(si) else { return };
-        for idx in 0..sheet.pivots.len() {
+        for (idx, pt) in sheet.pivots.iter().enumerate() {
+            let not_saved =
+                |out: &mut Out, why: &str| out.warn(format!("PivotTable \"{}\" on sheet \"{}\" was not saved: {why}.", pt.name, sheet.name));
+            let found = match wb.pivot_source(pt, si) {
+                Ok(found) => found,
+                Err(why) => {
+                    not_saved(out, &why);
+                    continue;
+                }
+            };
+            let bound = bound_source(wb, catalog, pt, si, &found);
+            if let BoundSource::Hidden(why) = bound {
+                if let Some((was, now)) = &found.rebound {
+                    not_saved(out, &format!("{was} was deleted, and {now}, which took its place, is not a range it can be built from: {why}"));
+                } else {
+                    not_saved(out, &format!("its source \"{}\" {why}", pt.source));
+                }
+                continue;
+            }
+            // Said once the PivotTable is written.
+            let written = |out: &mut Out| {
+                if let Some((was, now)) = &found.rebound {
+                    out.warn(format!(
+                        "PivotTable \"{}\" on sheet \"{}\" was rebuilt from a different source: {was} was deleted, and {now} took its place.",
+                        pt.name, sheet.name
+                    ));
+                }
+                if let BoundSource::Range { si: at, r, fallback: true } = &bound
+                    && let Some(on) = wb.sheet(*at)
+                {
+                    out.warn(format!(
+                        "PivotTable \"{}\" on sheet \"{}\": its source \"{}\" was saved as the range {}!{}, because the saved definitions would change its binding.",
+                        pt.name,
+                        sheet.name,
+                        pt.source,
+                        gridcraft_core::quote_sheet(&on.name),
+                        r.a1()
+                    ));
+                }
+            };
+            if found.rebound.is_none()
+                && out.slicers.cache_group(si, idx).is_none()
+                && let Some(pp) = crate::passthrough::kept_pivot(sheet, pt)
+                && self.add_kept(pp, pt, wb, si, &bound, out, rels)
+            {
+                written(out);
+                continue;
+            }
             let (n, cache, axis_map) = match self.shared.remove(&(si, idx)) {
                 Some(x) => x,
                 None => {
-                    let Some(x) = self.write_cache(wb, si, idx, out) else { continue };
+                    let Some(x) = self.write_cache(wb, catalog, si, idx, out) else {
+                        match &found.rebound {
+                            Some((was, now)) => {
+                                not_saved(out, &format!("{was} was deleted, and {now}, which took its place, is not a range it can be built from"))
+                            }
+                            // A source in another workbook names it (`[Book.xlsx]Sheet!…`): it
+                            // isn't taken for a sheet or name of this one.
+                            None => not_saved(out, &format!("its source \"{}\" can't be found in the workbook", pt.source)),
+                        }
+                        continue;
+                    };
                     x
                 }
             };
+            written(out);
             self.tables += 1;
             let t = self.tables;
             rels.add("pivotTable", &format!("../pivotTables/pivotTable{t}.xml"));
@@ -208,16 +281,71 @@ impl PivotWriter {
         }
     }
 
+    /// The id the next cache written gets.
+    fn next_cache_id(&self) -> u32 {
+        u32::try_from(self.caches.len() + self.kept.len()).unwrap_or(u32::MAX - 1) + 1
+    }
+
+    /// Writes a kept PivotTable `pp` (`pt` as it is now) as the file had it, and adds the sheet's
+    /// relationship to it. Its cache's source is written as `bound` says when the file's would no
+    /// longer read back to what it stands for. A cache written already is shared only while the
+    /// source written for this PivotTable is the very same: a PivotTable whose kept cache needs
+    /// another source gets a copy of it with that source and its own cache id. False, with a
+    /// warning, when it can't be kept (nothing is written).
+    #[allow(clippy::too_many_arguments)]
+    fn add_kept(
+        &mut self,
+        pp: &gridcraft_model::PreservedPivot,
+        pt: &PivotTable,
+        wb: &Workbook,
+        si: usize,
+        bound: &BoundSource,
+        out: &mut Out,
+        rels: &mut Rels,
+    ) -> bool {
+        let source = match bound {
+            BoundSource::Text | BoundSource::Hidden(_) => None,
+            // The source as read: the kept cache holds the attributes it was read from.
+            BoundSource::Name { original: true, .. } if pt.source.trim() == pp.table.source.trim() => None,
+            b => source_attrs(wb, b),
+        };
+        let key = (pp.cache.clone(), source.clone());
+        let written = self.kept_by_source.get(&key).and_then(|&i| self.kept.get(i)).cloned();
+        let n = written.as_ref().map_or_else(|| self.next_cache_id(), |(n, _)| *n);
+        let mut kept = match crate::passthrough::kept_pivot_out(pp, n, written.is_none(), source.as_deref(), out) {
+            Ok(k) => k,
+            Err(why) => {
+                let sheet = wb.sheet(si).map_or("", |s| s.name.as_str());
+                out.warn(format!("PivotTable \"{}\" on sheet \"{sheet}\" can't be saved as the file had it: {why}.", pp.table.name));
+                return false;
+            }
+        };
+        let cache_part = match written {
+            Some((_, part)) => part,
+            None => {
+                let Some(part) = crate::passthrough::write_pivot_cache(pp, &mut kept, out) else { return false };
+                self.kept_by_source.insert(key, self.kept.len());
+                self.kept.push((n, part.clone()));
+                part
+            }
+        };
+        self.tables += 1;
+        let t = self.tables;
+        rels.add("pivotTable", &format!("../pivotTables/pivotTable{t}.xml"));
+        crate::passthrough::write_pivot_table(pp, &format!("xl/pivotTables/pivotTable{t}.xml"), kept, &cache_part, out);
+        true
+    }
+
     /// Writes the cache of PivotTable `idx` on sheet `si` (shared with the PivotTables its
     /// slicers connect, which are recorded in `shared`); returns (cache id, index in `built`,
     /// the table's axis map).
-    fn write_cache(&mut self, wb: &Workbook, si: usize, idx: usize, out: &mut Out) -> Option<(u32, usize, AxisMap)> {
+    fn write_cache(&mut self, wb: &Workbook, catalog: &Workbook, si: usize, idx: usize, out: &mut Out) -> Option<(u32, usize, AxisMap)> {
         let group = out.slicers.cache_group(si, idx).unwrap_or_else(|| vec![(si, idx)]);
         let members: Vec<((usize, usize), &PivotTable)> =
             group.iter().filter_map(|&(gs, gp)| Some(((gs, gp), wb.sheet(gs)?.pivots.get(gp)?))).collect();
         let slicer_fields = out.slicers.fields_for(si, idx);
         let tables: Vec<(&PivotTable, usize)> = members.iter().map(|((gs, _), pt)| (*pt, *gs)).collect();
-        let (mut cache, maps) = build_cache(wb, &tables, &slicer_fields)?;
+        let (mut cache, maps) = build_cache(wb, catalog, &tables, &slicer_fields)?;
         if cache.slicer_fields.is_empty()
             && members.len() == 1
             && let Some(b) = self.built.iter().position(|existing| existing.slicer_fields.is_empty() && cache_compatible(existing, &cache))
@@ -225,9 +353,11 @@ impl PivotWriter {
         {
             return Some((n, b, maps.into_iter().next()?));
         }
-        let n = self.caches.len() as u32 + 1;
-        if !cache.slicer_fields.is_empty() {
+        let n = self.next_cache_id();
+        if cache.slicer_id.is_some() || !cache.slicer_fields.is_empty() {
             cache.slicer_id = Some(n);
+        }
+        if !cache.slicer_fields.is_empty() {
             let fields = cache
                 .slicer_fields
                 .iter()
@@ -273,11 +403,14 @@ impl PivotWriter {
     /// Adds the workbook relationships to the caches; returns the `<pivotCaches>` element (empty
     /// when there are none).
     pub fn workbook_xml(&self, wb_rels: &mut Rels) -> String {
-        if self.caches.is_empty() {
+        if self.caches.is_empty() && self.kept.is_empty() {
             return String::new();
         }
+        let mut caches: Vec<(u32, String)> =
+            self.caches.iter().cloned().chain(self.kept.iter().map(|(id, part)| (*id, format!("/{part}")))).collect();
+        caches.sort_by_key(|(id, _)| *id);
         let mut s = String::from("<pivotCaches>");
-        for (id, target) in &self.caches {
+        for (id, target) in &caches {
             let rid = wb_rels.add("pivotCacheDefinition", target);
             let _ = write!(s, "<pivotCache cacheId=\"{id}\" r:id=\"{rid}\"/>");
         }
@@ -312,28 +445,220 @@ impl PivotWriter {
     }
 }
 
-/// Resolves a pivot source to (sheet, range including the header row, worksheetSource XML).
-fn resolve_source(wb: &Workbook, text: &str, default_sheet: usize, depth: u32) -> Option<(usize, RangeRef, String)> {
+/// How a save writes a PivotTable's source ([`bound_source`]).
+#[derive(Clone, Debug, PartialEq)]
+enum BoundSource {
+    /// Not bound: from its text.
+    Text,
+    /// `worksheetSource name` (with `sheet`), which reads back to the definition. `original`: the
+    /// source text as it is; `read_attrs`: supported attributes from that same input source.
+    Name {
+        name: String,
+        sheet: Option<String>,
+        original: bool,
+        read_attrs: Option<gridcraft_model::WorksheetSourceAttrs>,
+        data: Option<(usize, RangeRef)>,
+    },
+    /// The definition's range, `r` on the `si`th sheet: no name form reads back to it (another
+    /// definition of the same name hides it).
+    Range { si: usize, r: RangeRef, fallback: bool },
+    /// No representation preserves the source.
+    Hidden(&'static str),
+}
+
+/// Checks the source against the emitted catalog, while resolving the intended data in `wb`.
+fn bound_source(wb: &Workbook, catalog: &Workbook, pt: &PivotTable, host: usize, found: &FoundSource<'_>) -> BoundSource {
+    const CONFLICT: BoundSource = BoundSource::Hidden("cannot be represented by the saved definitions or as an equivalent range");
+    let range = |si, r, fallback| {
+        let Some(sheet) = catalog.sheet(si) else { return CONFLICT };
+        let text = format!("{}!{}", gridcraft_core::quote_sheet(&sheet.name), crate::write::abs_range(&r));
+        if catalog.bind_pivot_source(&text, host).0.is_none() && resolve_source(catalog, wb, &text, host, 0) == Some((si, r)) {
+            BoundSource::Range { si, r, fallback }
+        } else {
+            CONFLICT
+        }
+    };
+    let def = match found.source {
+        PivotSource::Name { name, .. } => name.uid,
+        PivotSource::Table { sheet, table } => wb.sheets[sheet].tables[table].uid,
+        PivotSource::Text(text) => {
+            if pt.binding.unresolved(text) {
+                return if catalog.bind_pivot_source(text, host).0.is_some()
+                    || wb.bind_pivot_source(text, host).0.is_some()
+                    || resolve_source(wb, wb, text, host, 0).is_some()
+                    || resolve_source(catalog, wb, text, host, 0).is_some()
+                {
+                    BoundSource::Hidden("was unresolved on import but would acquire a definition")
+                } else {
+                    BoundSource::Text
+                };
+            }
+            // App-created sources use native text semantics, not the import binder.
+            let Some((si, r)) = resolve_source(wb, wb, text, host, 0) else { return BoundSource::Text };
+            let t = text.trim().trim_start_matches('=').trim();
+            if wb.name(t, host).is_some_and(|n| n.scope.is_some()) && wb.table(t).is_none() {
+                return range(si, r, false);
+            }
+            let binding = wb.bind_pivot_source(t, host);
+            if binding.0.is_some() {
+                let probe = PivotTable { source: t.into(), binding, ..Default::default() };
+                if let Ok(named) = wb.pivot_source(&probe, host)
+                    && bound_range(wb, wb, &named) == Some((si, r))
+                {
+                    let chosen = bound_source(wb, catalog, pt, host, &named);
+                    if matches!(chosen, BoundSource::Name { .. }) {
+                        return chosen;
+                    }
+                }
+            }
+            return range(si, r, false);
+        }
+    };
+    let data = bound_range(wb, wb, found);
+    // Binding identity alone is insufficient: the emitted name formula may find a different
+    // dependency (a sanitized table, an omitted name, or a generated slicer cache name).
+    let same_data = |b: &gridcraft_model::Binding| {
+        let probe = PivotTable { source: b.text.clone(), binding: gridcraft_model::SourceBinding(Some(b.clone()), None), ..Default::default() };
+        let Ok(projected) = catalog.pivot_source(&probe, host) else { return false };
+        bound_range(catalog, wb, &projected) == data
+            && (data.is_some()
+                || match (&found.source, &projected.source) {
+                    (PivotSource::Name { name: a, from: x }, PivotSource::Name { name: b, from: y }) => {
+                        same_name_dependencies(wb, catalog, (a, *x), (b, *y), 0, &mut std::collections::HashSet::new())
+                    }
+                    _ => false,
+                })
+    };
+    match catalog.saved_source(&pt.source, host, def, data.map(|(si, _)| si), same_data) {
+        SavedSource::Name { name, sheet, original } => {
+            let read_as = pt.binding.0.as_ref().and_then(|b| b.read_as.as_ref());
+            let read_attrs = read_as.filter(|(text, _)| original && *text == pt.source).map(|(_, attrs)| attrs.clone());
+            BoundSource::Name { name, sheet, original, read_attrs, data }
+        }
+        SavedSource::Range => data.map_or(CONFLICT, |(si, r)| range(si, r, true)),
+    }
+}
+
+/// A kept cache can reference formulas that native refresh cannot evaluate (for example,
+/// OFFSET). Preserve them only if their name and table dependencies survive the projection.
+fn same_name_dependencies(
+    wb: &Workbook,
+    catalog: &Workbook,
+    original: (&gridcraft_model::DefinedName, usize),
+    projected: (&gridcraft_model::DefinedName, usize),
+    depth: usize,
+    seen: &mut std::collections::HashSet<(u64, usize)>,
+) -> bool {
+    use gridcraft_formula::Expr;
+
+    let ((a, x), (b, y)) = (original, projected);
+    if a.uid.get() != b.uid.get() || x != y || a.formula.trim_start_matches('=') != b.formula.trim_start_matches('=') {
+        return false;
+    }
+    let key = (a.uid.get(), x);
+    if !seen.insert(key) {
+        return true;
+    }
+    if depth == 32 {
+        return false;
+    }
+    let Ok(expr) = gridcraft_formula::parse(&a.formula) else { return false };
+    fn lookup<'a>(book: &'a Workbook, text: &str, host: usize) -> Option<&'a gridcraft_model::DefinedName> {
+        let (sheet, bare) = gridcraft_core::split_sheet(text);
+        match sheet {
+            Some(s) => book.sheet_index(&s).and_then(|i| book.name(bare, i)),
+            None => book.name(bare, host),
+        }
+    }
+    let table =
+        |book: &Workbook, text: &str| book.table(text).map(|(s, t)| (s, book.sheets[s].tables[t].uid.get(), table_range(&book.sheets[s].tables[t])));
+    let mut unchanged = true;
+    expr.walk(&mut |expr| {
+        if !unchanged {
+            return;
+        }
+        let text = match expr {
+            Expr::Name(text) | Expr::Call(text, _) => text,
+            Expr::Struct(r) => {
+                unchanged = table(wb, &r.table) == table(catalog, &r.table);
+                return;
+            }
+            _ => return,
+        };
+        unchanged = table(wb, text) == table(catalog, text)
+            && match (lookup(wb, text, x), lookup(catalog, text, y)) {
+                (Some(a), Some(b)) => same_name_dependencies(wb, catalog, (a, a.scope.unwrap_or(x)), (b, b.scope.unwrap_or(y)), depth + 1, seen),
+                (None, None) => true,
+                _ => false,
+            };
+    });
+    unchanged
+}
+
+/// The sheet and range (header row included) of the definition a bound source stands for.
+fn bound_range(wb: &Workbook, cells: &Workbook, found: &FoundSource<'_>) -> Option<(usize, RangeRef)> {
+    match found.source {
+        PivotSource::Text(_) => None,
+        PivotSource::Table { sheet, table } => Some((sheet, table_range(wb.sheet(sheet)?.tables.get(table)?)?)),
+        PivotSource::Name { name, from } => resolve_source(wb, cells, &name.formula, from, 1),
+    }
+}
+
+/// The attributes of the `worksheetSource` a bound source is written as; `None` for one written
+/// from its text, or that can't be written.
+fn source_attrs(wb: &Workbook, bound: &BoundSource) -> Option<String> {
+    match bound {
+        BoundSource::Name { read_attrs: Some(attrs), .. } => {
+            let mut xml = format!("name=\"{}\"", esc_attr(&attrs.name));
+            if let Some(sheet) = &attrs.sheet {
+                let _ = write!(xml, " sheet=\"{}\"", esc_attr(sheet));
+            }
+            if let Some(reference) = &attrs.reference {
+                let _ = write!(xml, " ref=\"{}\"", esc_attr(reference));
+            }
+            Some(xml)
+        }
+        BoundSource::Name { name, sheet: Some(sheet), .. } => Some(format!("name=\"{}\" sheet=\"{}\"", esc_attr(name), esc_attr(sheet))),
+        BoundSource::Name { name, sheet: None, .. } => Some(format!("name=\"{}\"", esc_attr(name))),
+        BoundSource::Range { si, r, .. } => Some(range_source_attrs(&wb.sheet(*si)?.name, *r)),
+        BoundSource::Text | BoundSource::Hidden(_) => None,
+    }
+}
+
+/// Resolves the source of `pt`, a PivotTable on the `host`th sheet, to (sheet, range including
+/// the header row, worksheetSource XML): the definition it stands for
+/// ([`Workbook::pivot_source`]), written as [`bound_source`] says, or its text when it is bound
+/// to none.
+fn resolve_pivot(wb: &Workbook, catalog: &Workbook, pt: &PivotTable, host: usize) -> Option<(usize, RangeRef, String)> {
+    let found = wb.pivot_source(pt, host).ok()?;
+    let bound = bound_source(wb, catalog, pt, host, &found);
+    let (si, r) = match &bound {
+        BoundSource::Range { si, r, .. } => (*si, *r),
+        BoundSource::Name { data, .. } => (*data)?,
+        BoundSource::Text | BoundSource::Hidden(_) => return None,
+    };
+    let attrs = source_attrs(wb, &bound)?;
+    Some((si, r, format!("<worksheetSource {attrs}/>")))
+}
+
+/// The source range of table `tb` (header row included, totals row not); `None` for a table
+/// without a header row.
+fn table_range(tb: &gridcraft_model::Table) -> Option<RangeRef> {
+    if !tb.header_row {
+        return None;
+    }
+    let end_row = tb.range.end.row.saturating_sub(tb.totals_row as u32).max(tb.range.start.row);
+    Some(RangeRef::new(tb.range.start, CellRef::new(end_row, tb.range.end.col)))
+}
+
+/// Resolves source text using native refresh's lookup rules, without formatting XML.
+fn resolve_source(wb: &Workbook, cells: &Workbook, text: &str, default_sheet: usize, depth: u32) -> Option<(usize, RangeRef)> {
     let t = text.trim().trim_start_matches('=').trim();
     if t.is_empty() || depth > 4 {
         return None;
     }
-    if let Some((si, ti)) = wb.table(t)
-        && let Some(sh) = wb.sheet(si)
-        && let Some(tb) = sh.tables.get(ti)
-    {
-        if !tb.header_row {
-            return None;
-        }
-        let end_row = tb.range.end.row.saturating_sub(tb.totals_row as u32).max(tb.range.start.row);
-        let r = RangeRef::new(tb.range.start, CellRef::new(end_row, tb.range.end.col));
-        // Table names are sanitized when written; refer by range when this one would change.
-        let valid = !tb.name.is_empty()
-            && tb.name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.')
-            && tb.name.starts_with(|c: char| c.is_alphabetic() || c == '_')
-            && CellRef::parse(&tb.name).is_none();
-        let xml = if valid { format!("<worksheetSource name=\"{}\"/>", esc_attr(&tb.name)) } else { range_source_xml(&sh.name, r) };
-        return Some((si, r, xml));
+    if let Some((si, ti)) = wb.table(t) {
+        return Some((si, table_range(wb.sheet(si)?.tables.get(ti)?)?));
     }
     let (sheet, body) = gridcraft_core::split_sheet(t);
     if let Some(r) = RangeRef::parse(body) {
@@ -341,27 +666,26 @@ fn resolve_source(wb: &Workbook, text: &str, default_sheet: usize, depth: u32) -
             Some(n) => wb.sheet_index(n)?,
             None => default_sheet,
         };
-        let sh = wb.sheet(si)?;
-        let r = if r.is_full_cols() || r.is_full_rows() { r.intersection(&sh.used_range()?)? } else { r };
-        return Some((si, r, range_source_xml(&sh.name, r)));
+        let r = if r.is_full_cols() || r.is_full_rows() { r.intersection(&cells.sheet(si)?.used_range()?)? } else { r };
+        return Some((si, r));
     }
-    if sheet.is_none()
-        && let Some(n) = wb.name(t, default_sheet)
-    {
-        let (si, r, _) = resolve_source(wb, &n.formula.clone(), default_sheet, depth + 1)?;
-        let xml = if n.scope.is_none() {
-            format!("<worksheetSource name=\"{}\"/>", esc_attr(&n.name))
-        } else {
-            wb.sheet(si).map(|s| range_source_xml(&s.name, r))?
-        };
-        return Some((si, r, xml));
+    match sheet {
+        // `Data!rData`: the name of sheet `Data` only (`worksheetSource name sheet`), never a
+        // same-named one of the workbook or of the PivotTable's sheet.
+        Some(s) => {
+            let scope = wb.sheet_index(&s)?;
+            let n = wb.name_in_scope(body, Some(scope))?;
+            resolve_source(wb, cells, &n.formula, scope, depth + 1)
+        }
+        None => {
+            let n = wb.name(t, default_sheet)?;
+            resolve_source(wb, cells, &n.formula, default_sheet, depth + 1)
+        }
     }
-    None
 }
 
-fn range_source_xml(sheet: &str, r: RangeRef) -> String {
-    let name: String = sheet.chars().take(31).collect();
-    format!("<worksheetSource ref=\"{}\" sheet=\"{}\"/>", r.a1(), esc_attr(&name))
+fn range_source_attrs(sheet: &str, r: RangeRef) -> String {
+    format!("ref=\"{}\" sheet=\"{}\"", r.a1(), esc_attr(sheet))
 }
 
 fn header_text(v: &Value) -> String {
@@ -373,8 +697,8 @@ fn header_text(v: &Value) -> String {
 
 /// Whether a slicer on `field` of `pt` can be written: the PivotTable's cache can be built and its
 /// source has the field.
-pub(crate) fn slicer_field_ok(wb: &Workbook, pt: &PivotTable, pivot_sheet: usize, field: &str) -> bool {
-    let Some((si, r, _)) = resolve_source(wb, &pt.source, pivot_sheet, 0) else { return false };
+pub(crate) fn slicer_field_ok(wb: &Workbook, catalog: &Workbook, pt: &PivotTable, pivot_sheet: usize, field: &str) -> bool {
+    let Some((si, r, _)) = resolve_pivot(wb, catalog, pt, pivot_sheet) else { return false };
     let Some(sh) = wb.sheet(si) else { return false };
     r.count() <= MAX_SOURCE_CELLS && (r.start.col..=r.end.col).any(|c| same(&header_text(&sh.value(CellRef::new(r.start.row, c)).scalar()), field))
 }
@@ -385,14 +709,14 @@ pub(crate) fn slicer_field_ok(wb: &Workbook, pt: &PivotTable, pivot_sheet: usize
 /// tables), and a date-grouped field (which a cache groups for all its tables) has the same base
 /// grouping (the finest level, on the axes or by the filters) in every table that uses it,
 /// `slicer_fields` counting as used by all.
-pub(crate) fn can_share(wb: &Workbook, members: &[(usize, usize)], slicer_fields: &[String]) -> bool {
+pub(crate) fn can_share(wb: &Workbook, catalog: &Workbook, members: &[(usize, usize)], slicer_fields: &[String]) -> bool {
     let pts: Vec<(&PivotTable, usize)> = members.iter().filter_map(|&(si, pi)| Some((wb.sheet(si)?.pivots.get(pi)?, si))).collect();
     if pts.len() != members.len() {
         return false;
     }
     let mut source: Option<(usize, RangeRef, String)> = None;
     for (pt, si) in &pts {
-        let Some(here) = resolve_source(wb, &pt.source, *si, 0) else { return false };
+        let Some(here) = resolve_pivot(wb, catalog, pt, *si) else { return false };
         if source.as_ref().is_some_and(|x| *x != here) {
             return false;
         }
@@ -426,9 +750,9 @@ pub(crate) fn can_share(wb: &Workbook, members: &[(usize, usize)], slicer_fields
 
 /// The cache of `tables` (PivotTable, its sheet), which [`can_share`] one, and each table's axis
 /// map. `slicer_fields`: fields slicers filter, which need shared items.
-fn build_cache(wb: &Workbook, tables: &[(&PivotTable, usize)], slicer_fields: &[String]) -> Option<(Cache, Vec<AxisMap>)> {
+fn build_cache(wb: &Workbook, catalog: &Workbook, tables: &[(&PivotTable, usize)], slicer_fields: &[String]) -> Option<(Cache, Vec<AxisMap>)> {
     let (first, pivot_sheet) = tables.first()?;
-    let (si, r, source_xml) = resolve_source(wb, &first.source, *pivot_sheet, 0)?;
+    let (si, r, source_xml) = resolve_pivot(wb, catalog, first, *pivot_sheet)?;
     if r.count() > MAX_SOURCE_CELLS {
         return None;
     }
@@ -558,7 +882,7 @@ fn build_cache(wb: &Workbook, tables: &[(&PivotTable, usize)], slicer_fields: &[
             source_xml,
             records,
             slicer_fields: slicer_idx,
-            slicer_id: None,
+            slicer_id: tables.iter().any(|(pt, _)| pt.had_x14_cache_id.0).then_some(0),
         },
         axis_maps,
     ))

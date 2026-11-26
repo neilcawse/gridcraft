@@ -342,6 +342,17 @@ pub fn split_sheet(reference: &str) -> (Option<String>, &str) {
     }
 }
 
+/// Splits an unquoted A1 location whose sheet name starts with a literal `#`.
+/// Call this after removing the hyperlink marker, not on the original target.
+pub fn hash_sheet_location(location: &str) -> Option<(&str, &str)> {
+    if !location.starts_with('#') {
+        return None;
+    }
+    let (sheet, body) = location.rsplit_once('!')?;
+    RangeRef::parse(body)?;
+    Some((sheet.trim_end(), body))
+}
+
 /// The areas of a reference list, split at the commas between them. A comma inside a quoted
 /// sheet name (`'Sales, West'!A1`) is part of the name, and a doubled quote inside the quotes
 /// (`'O''Brien, Jr'!A1`) is an escaped quote, not the end of the name: a quote toggles the

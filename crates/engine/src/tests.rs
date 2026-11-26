@@ -571,7 +571,14 @@ fn kept_value_session(cells: &[(&str, &str, f64)], names: &[(&str, &str)]) -> Se
     wb.external_books = vec![gridcraft_model::ExternalBook { names: linked, ..Default::default() }].into();
     for (name, refers_to) in names {
         let formula = refers_to.to_string();
-        wb.names.push(gridcraft_model::DefinedName { name: name.to_string(), scope: None, formula, comment: String::new(), hidden: false });
+        wb.names.push(gridcraft_model::DefinedName {
+            name: name.to_string(),
+            scope: None,
+            formula,
+            comment: String::new(),
+            hidden: false,
+            uid: Default::default(),
+        });
     }
     for (at, input, saved) in cells {
         let cell = if let Some(f) = input.strip_prefix('=') {
@@ -2457,18 +2464,27 @@ fn changing_the_font_name_drops_the_old_fonts_charset_and_family() {
 }
 
 #[test]
-fn table_rename_keeps_a_defined_name_with_the_same_name() {
+fn table_rename_keeps_a_defined_name_with_the_same_name() -> Result<(), Box<dyn std::error::Error>> {
     let mut s = s();
     s.execute("range.setValues", json!({"range": "A1", "values": [["Qty"], [7]]})).unwrap();
     s.execute("cell.set", json!({"cell": "D1", "input": "100"})).unwrap();
     s.execute("insert.table", json!({"range": "A1:A2", "header": true, "name": "Data"})).unwrap();
-    s.execute("formulas.defineName", json!({"name": "Data", "refersTo": "=Sheet1!$D$1"})).unwrap();
+    // A malformed in-memory workbook can still contain a collision; the name command now rejects it.
+    std::sync::Arc::make_mut(&mut s.doc_mut()?.wb).names.push(gridcraft_model::DefinedName {
+        name: "Data".into(),
+        scope: None,
+        formula: "Sheet1!$D$1".into(),
+        comment: String::new(),
+        hidden: false,
+        uid: Default::default(),
+    });
     s.execute("cell.set", json!({"cell": "E1", "input": "=Data"})).unwrap();
     s.execute("cell.set", json!({"cell": "F1", "input": "=SUM(Data[Qty])"})).unwrap();
     s.execute("table.rename", json!({"table": "Data", "name": "Later"})).unwrap();
     assert_eq!(s.execute("cell.get", json!({"cell": "E1"})).unwrap()["formula"], "=Data");
     assert_eq!(s.execute("cell.get", json!({"cell": "F1"})).unwrap()["formula"], "=SUM(Later[Qty])");
     assert_eq!((v(&s, "E1"), v(&s, "F1")), (Value::Number(100.0), Value::Number(7.0)));
+    Ok(())
 }
 
 #[test]
@@ -4008,12 +4024,38 @@ fn save_reports_what_the_file_is_written_without() {
     assert!(r.get("warnings").is_none(), "{r}");
     let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
     for name in ["Rate", "RATE"] {
-        wb.names.push(gridcraft_model::DefinedName { name: name.into(), scope: None, formula: "1".into(), comment: String::new(), hidden: false });
+        wb.names.push(gridcraft_model::DefinedName {
+            name: name.into(),
+            scope: None,
+            formula: "1".into(),
+            comment: String::new(),
+            hidden: false,
+            uid: Default::default(),
+        });
     }
     let r = s.execute("file.save", json!({"path": dir.join("names.xlsx")})).unwrap();
     let warnings = r["warnings"].as_array().unwrap();
     assert!(warnings.len() == 1 && warnings[0].as_str().unwrap().contains("differ only in case"), "{r}");
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn saving_bytes_reports_table_renames() -> Result<(), Box<dyn std::error::Error>> {
+    let mut s = s();
+    s.execute("range.setValues", json!({"range": "A1:A2", "values": [["Header"], [1]]}))?;
+    s.execute("insert.table", json!({"range": "A1:A2", "name": "DataRows"}))?;
+    let clean = s.execute("file.saveBytes", json!({}))?;
+    assert!(clean.get("warnings").is_none());
+    let sheet = std::sync::Arc::make_mut(&mut s.doc_mut()?.wb).sheet_mut(0).ok_or("missing sheet")?;
+    sheet.tables[0].name = "Data?Rows".into();
+    let saved = s.execute("file.saveBytes", json!({}))?;
+    assert_eq!(saved["warnings"], json!([r#"Table "Data?Rows" on sheet "Sheet1" was renamed to "Data_Rows"."#]));
+    let bytes = saved["base64"].as_str().and_then(crate::io::base64_decode).ok_or("missing workbook bytes")?;
+    assert_eq!(saved["bytes"], json!(bytes.len()));
+    let (wb, warnings) = crate::io::open_bytes("Book.xlsx", &bytes)?;
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(wb.table("Data_Rows"), Some((0, 0)));
+    Ok(())
 }
 
 /// An XLSX opened by its content under an unknown extension (`budget.dat`) saves back to its own

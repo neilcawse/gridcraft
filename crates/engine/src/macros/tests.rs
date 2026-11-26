@@ -133,7 +133,14 @@ fn macros_round_trip_through_xlsx_and_json() {
 }
 
 fn hidden(name: &str, text: &str) -> DefinedName {
-    DefinedName { name: name.into(), scope: None, formula: format!("\"{}\"", text.replace('"', "\"\"")), comment: String::new(), hidden: true }
+    DefinedName {
+        name: name.into(),
+        scope: None,
+        formula: format!("\"{}\"", text.replace('"', "\"\"")),
+        comment: String::new(),
+        hidden: true,
+        uid: Default::default(),
+    }
 }
 
 #[test]
@@ -225,7 +232,7 @@ fn a_macro_built_in_code_goes_through_the_size_check_too() {
 }
 
 fn visible(name: &str) -> DefinedName {
-    DefinedName { name: name.into(), scope: None, formula: "Sheet1!$A$1".into(), comment: String::new(), hidden: false }
+    DefinedName { name: name.into(), scope: None, formula: "Sheet1!$A$1".into(), comment: String::new(), hidden: false, uid: Default::default() }
 }
 
 /// Saves `wb` to xlsx and returns the names in the file and the workbook opened from it.

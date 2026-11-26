@@ -10,8 +10,9 @@ mod pivot;
 mod print;
 
 pub use pivot::{
-    PIVOT_INDEXER, PivotCacheId, PivotCalcField, PivotDataCell, PivotDateGroup, PivotField, PivotFilter, PivotFunc, PivotIndexer, PivotItemRef,
-    PivotLayout, PivotLookup, PivotScopeItem, PivotShowAs, PivotSort, PivotTable, PivotValue, pivot_key,
+    Binding, BindingKind, PIVOT_INDEXER, PivotCacheId, PivotCalcField, PivotDataCell, PivotDateGroup, PivotField, PivotFilter, PivotFunc,
+    PivotIndexer, PivotItemRef, PivotLayout, PivotLookup, PivotScopeItem, PivotShowAs, PivotSort, PivotTable, PivotValue, SourceBinding,
+    WorksheetSourceAttrs, X14CacheId, pivot_key,
 };
 pub use print::{EditRange, HfPage, LineInfo, Orientation, PageOrder, PrintSettings, SheetProtection, password_hash};
 
@@ -102,6 +103,9 @@ pub struct Table {
     /// The connection (`xl/connections.xml`) an XML table is bound through.
     #[serde(default)]
     pub connection_id: Option<u32>,
+    /// The table's identity while the app runs ([`crate::DefinitionUid`]). Not in JSON or the file.
+    #[serde(skip)]
+    pub uid: crate::DefinitionUid,
 }
 
 impl Table {
@@ -387,6 +391,7 @@ pub struct NoteCorner {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(from = "SavedHyperlink")]
 pub struct Hyperlink {
     /// URL, `mailto:`, a file path (`Book.xlsx`, `Book.xlsx#Sheet1!A2`), or an in-workbook location
     /// like `Sheet2!A1`.
@@ -394,8 +399,32 @@ pub struct Hyperlink {
     pub tooltip: Option<String>,
     /// The target is outside this workbook (Excel's "Existing File or Web Page"): a relationship in
     /// the file, not a `location`. A bare file name can't be told from a defined name by its text.
-    #[serde(default)]
     pub external: bool,
+}
+
+#[derive(Deserialize)]
+struct SavedHyperlink {
+    target: String,
+    tooltip: Option<String>,
+    #[serde(default, deserialize_with = "present_link_kind")]
+    external: Option<bool>,
+}
+
+fn present_link_kind<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<bool>, D::Error> {
+    bool::deserialize(d).map(Some)
+}
+
+impl From<SavedHyperlink> for Hyperlink {
+    fn from(saved: SavedHyperlink) -> Self {
+        let external = saved.external.unwrap_or_else(|| {
+            // Flagless JSON relied on the old XLSX writer to recognize these targets.
+            let target = saved.target.trim();
+            target.contains("://")
+                || target.starts_with("\\\\")
+                || target.split_once(':').is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("mailto") || scheme.eq_ignore_ascii_case("file"))
+        });
+        Self { target: saved.target, tooltip: saved.tooltip, external }
+    }
 }
 
 // ---------------------------------------------------------------- drawing objects
@@ -1159,6 +1188,23 @@ pub struct Slicer {
     /// Button height in pixels; `None` uses the default.
     #[serde(default)]
     pub row_height: Option<f32>,
+    /// XLSX cache provenance used only to preserve the cache's name on save.
+    #[serde(skip)]
+    pub imported_cache: SlicerCacheOrigin,
+}
+
+/// The XLSX cache name and the identity of its workbook marker, if present.
+/// Not part of the slicer's editable content.
+#[derive(Clone, Debug, Default)]
+pub struct SlicerCacheOrigin {
+    pub name: String,
+    pub marker: Option<crate::DefinitionUid>,
+}
+
+impl PartialEq for SlicerCacheOrigin {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 impl Slicer {

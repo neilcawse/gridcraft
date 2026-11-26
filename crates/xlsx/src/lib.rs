@@ -39,6 +39,7 @@ mod sheet_read;
 mod sheet_write;
 mod slicer;
 mod styles;
+mod table_names;
 mod tables;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
@@ -241,15 +242,13 @@ pub fn write_xlsx_named(wb: &Workbook, kind: XlsxKind, book_name: &str) -> Resul
     write::write_xlsx_named(wb, kind, Some(book_name))
 }
 
-/// What a save wrote the file without: content of the workbook (most of it kept from the file it
-/// was read from) that the package could not hold as it stands, each said once.
+/// Changes or omissions made when writing the workbook to an XLSX-family package.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WriteReport {
     pub warnings: Vec<String>,
 }
 
-/// Writes a workbook with caller-supplied function facts and file name, with what the file was
-/// written without.
+/// Writes a workbook with caller-supplied function facts and file name, returning any save warnings.
 pub fn write_xlsx_named_with(wb: &Workbook, kind: XlsxKind, book_name: &str, functions: FunctionInfo) -> Result<(Vec<u8>, WriteReport), IoError> {
     write::write_xlsx_named_with(wb, kind, Some(book_name), functions)
 }

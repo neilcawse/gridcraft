@@ -324,6 +324,10 @@ fn list_functions(_: &mut Session, p: &Json) -> Result<Json> {
     Ok(Json::Array(v))
 }
 
+fn table_uses_name(wb: &Workbook, name: &str) -> bool {
+    wb.sheets.iter().flat_map(|s| &s.tables).any(|t| gridcraft_formula::same_name(&t.name, name))
+}
+
 fn define_name(s: &mut Session, p: &Json) -> Result<Json> {
     let Some(name) = str_param(p, "name").map(str::to_string) else {
         s.ui_requests.push(crate::UiRequest::Dialog("defineName".into(), json!({})));
@@ -340,6 +344,15 @@ fn define_name(s: &mut Session, p: &Json) -> Result<Json> {
         None | Some("Workbook") => None,
         Some(sh) => Some(d.wb.sheet_index(sh).ok_or_else(|| bad("formulas.defineName", "no such sheet"))?),
     };
+    // A new spelling may not collide with a table. A name that already has the spelling (from a
+    // file or an earlier version) can still be edited or defined over: that adds no collision.
+    let keeps_spelling = match str_param(p, "oldName") {
+        Some(old) => old.eq_ignore_ascii_case(&name),
+        None => d.wb.name_in_scope(&name, scope).is_some(),
+    };
+    if !keeps_spelling && table_uses_name(&d.wb, &name) {
+        return Err(EngineError::Other(format!("A table already uses the name \"{name}\". Enter a unique name.")));
+    }
     let mut refers = match str_param(p, "refersTo") {
         // As in Excel, relative references are relative to the active cell; names keep them
         // relative to A1, as files do.
@@ -389,14 +402,25 @@ fn define_name(s: &mut Session, p: &Json) -> Result<Json> {
         None => None,
     };
     edit(s, |cx| {
+        // The name edited (or defined over) keeps its identity: what is bound to it, a
+        // PivotTable's source, still is. A new name gets a new one.
+        let same = |n: &DefinedName, name: &str, scope: Option<usize>| n.name.eq_ignore_ascii_case(name) && n.scope == scope;
+        let mut uid = None;
         if let Some((old_name, old_scope)) = &old {
-            cx.wb.names.retain(|n| !(n.name.eq_ignore_ascii_case(old_name) && n.scope == *old_scope));
+            uid = cx.wb.names.iter().find(|n| same(n, old_name, *old_scope)).map(|n| n.uid);
+            cx.wb.names.retain(|n| !same(n, old_name, *old_scope));
             if !old_name.eq_ignore_ascii_case(&name) {
                 rename_name_in_formulas(&mut cx.wb, old_name, *old_scope, &name);
             }
         }
-        cx.wb.names.retain(|n| !(n.name.eq_ignore_ascii_case(&name) && n.scope == scope));
-        cx.wb.names.push(DefinedName { name: name.clone(), scope, formula: refers.clone(), comment: comment.clone(), hidden: false });
+        let renamed = uid.filter(|_| old.as_ref().is_some_and(|(old_name, _)| *old_name != name));
+        uid = uid.or_else(|| cx.wb.names.iter().find(|n| same(n, &name, scope)).map(|n| n.uid));
+        cx.wb.names.retain(|n| !same(n, &name, scope));
+        let uid = uid.unwrap_or_default();
+        cx.wb.names.push(DefinedName { name: name.clone(), scope, formula: refers.clone(), comment: comment.clone(), hidden: false, uid });
+        if let Some(uid) = renamed {
+            cx.wb.follow_renamed_definition(uid);
+        }
         cx.structural = true;
         Ok(json!({"name": name, "refersTo": format!("={refers}")}))
     })
@@ -560,13 +584,13 @@ fn create_from_selection(s: &mut Session, p: &Json) -> Result<Json> {
     // (see `refuse_stash_name`).
     let force = bool_param(p, "force").unwrap_or(false);
     let ours = |n: &str| !force && holds_gridcraft_data(&d.wb, n);
-    let (made, skipped): (Vec<_>, Vec<_>) = made.into_iter().partition(|(n, _)| !ours(n) && (replace || !exists(n)));
+    let (made, skipped): (Vec<_>, Vec<_>) = made.into_iter().partition(|(n, _)| !ours(n) && !table_uses_name(&d.wb, n) && (replace || !exists(n)));
     let skipped: Vec<String> = skipped.into_iter().map(|(n, _)| n).collect();
     let n = made.len();
     edit(s, |cx| {
         for (name, f) in made {
             cx.wb.names.retain(|x| !(x.name.eq_ignore_ascii_case(&name) && x.scope.is_none()));
-            cx.wb.names.push(DefinedName { name, scope: None, formula: f, comment: String::new(), hidden: false });
+            cx.wb.names.push(DefinedName { name, scope: None, formula: f, comment: String::new(), hidden: false, uid: Default::default() });
         }
         cx.structural = true;
         Ok(json!({"created": n, "skipped": skipped}))
@@ -971,6 +995,100 @@ mod tests {
     use super::*;
 
     #[test]
+    fn define_and_rename_refuse_table_names_in_every_scope() -> Result<()> {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("range.setValues", json!({"range": "A1:A2", "values": [["Header"], [1]]}))?;
+        s.execute("insert.table", json!({"range": "A1:A2", "name": "DataRows"}))?;
+        s.execute("formulas.defineName", json!({"name": "Existing", "refersTo": "=1"}))?;
+        for scope in ["Workbook", "Sheet1"] {
+            for old in [None, Some("Existing")] {
+                let mut p = json!({"name": "DATAROWS", "scope": scope, "refersTo": "=2"});
+                if let Some(old) = old {
+                    p["oldName"] = json!(old);
+                }
+                assert!(matches!(s.execute("formulas.defineName", p), Err(e) if e.to_string().contains("A table already uses")));
+            }
+        }
+        let wb = &s.doc()?.wb;
+        assert_eq!(wb.names.len(), 1);
+        assert_eq!(wb.names[0].name, "Existing");
+        assert_eq!(wb.names[0].formula, "1");
+        Ok(())
+    }
+
+    /// A name that already has a table's spelling (an older document allowed it) can still be
+    /// edited or defined over; only a new spelling is refused.
+    #[test]
+    fn a_name_already_spelled_like_a_table_can_still_be_edited() -> Result<()> {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("range.setValues", json!({"range": "A1:A2", "values": [["Header"], [1]]}))?;
+        s.execute("insert.table", json!({"range": "A1:A2", "name": "DataRows"}))?;
+        std::sync::Arc::make_mut(&mut s.doc_mut()?.wb).names.push(DefinedName {
+            name: "DataRows".into(),
+            scope: None,
+            formula: "1".into(),
+            comment: String::new(),
+            hidden: false,
+            uid: Default::default(),
+        });
+        s.execute("formulas.defineName", json!({"name": "DataRows", "oldName": "DataRows", "refersTo": "=2", "comment": "kept"}))?;
+        s.execute("formulas.defineName", json!({"name": "DATAROWS", "refersTo": "=3"}))?;
+        let refused = s.execute("formulas.defineName", json!({"name": "DataRows", "scope": "Sheet1", "refersTo": "=4"}));
+        assert!(matches!(refused, Err(e) if e.to_string() == "A table already uses the name \"DataRows\". Enter a unique name."));
+        let wb = &s.doc()?.wb;
+        assert_eq!(wb.names.len(), 1);
+        assert_eq!((wb.names[0].name.as_str(), wb.names[0].formula.as_str(), wb.names[0].scope), ("DATAROWS", "3", None));
+        s.execute("formulas.defineName", json!({"name": "DATAROWS", "oldName": "DATAROWS", "scope": "Sheet1", "refersTo": "=4"}))?;
+        assert_eq!(s.doc()?.wb.name_in_scope("DATAROWS", Some(0)).map(|n| n.formula.as_str()), Some("4"));
+        s.execute("edit.undo", json!({}))?;
+        assert_eq!(s.doc()?.wb.name_in_scope("DATAROWS", None).map(|n| n.formula.as_str()), Some("3"));
+        s.execute("edit.redo", json!({}))?;
+        assert_eq!(s.doc()?.wb.name_in_scope("DATAROWS", Some(0)).map(|n| n.formula.as_str()), Some("4"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_fold_equivalent_name_is_not_an_existing_definition() -> Result<()> {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("range.setValues", json!({"range": "A1:A2", "values": [["Header"], [1]]}))?;
+        s.execute("insert.table", json!({"range": "A1:A2", "name": "Größe"}))?;
+        std::sync::Arc::make_mut(&mut s.doc_mut()?.wb).names.push(DefinedName {
+            name: "Größe".into(),
+            scope: None,
+            formula: "1".into(),
+            comment: String::new(),
+            hidden: false,
+            uid: Default::default(),
+        });
+        for params in [json!({"name": "GRÖSSE", "refersTo": "=2"}), json!({"name": "GRÖSSE", "oldName": "Größe", "refersTo": "=2"})] {
+            let refused = s.execute("formulas.defineName", params);
+            assert!(matches!(refused, Err(e) if e.to_string() == "A table already uses the name \"GRÖSSE\". Enter a unique name."));
+        }
+        let wb = &s.doc()?.wb;
+        assert_eq!(wb.names.len(), 1);
+        assert_eq!(wb.name_in_scope("Größe", None).map(|n| n.formula.as_str()), Some("1"));
+        Ok(())
+    }
+
+    #[test]
+    fn create_names_from_selection_skips_table_names_even_when_replacing() -> Result<()> {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("range.setValues", json!({"range": "A1:A2", "values": [["Header"], [1]]}))?;
+        s.execute("insert.table", json!({"range": "A1:A2", "name": "DataRows"}))?;
+        s.execute("range.setValues", json!({"range": "D1:E2", "values": [["datarows", "Allowed"], [2, 3]]}))?;
+        let result = s.execute("formulas.createFromSelection", json!({"range": "D1:E2", "replace": true}))?;
+        assert_eq!(result, json!({"created": 1, "skipped": ["datarows"]}));
+        let wb = &s.doc()?.wb;
+        assert_eq!(wb.names.len(), 1);
+        assert_eq!(wb.names[0].name, "Allowed");
+        Ok(())
+    }
+
+    #[test]
     fn names_with_relative_references() {
         let mut s = Session::new();
         s.new_workbook();
@@ -998,9 +1116,23 @@ mod tests {
         let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
         let text = "m".repeat(9_000);
         stash::set(wb, "macro_1", &text).unwrap();
-        wb.names.push(DefinedName { name: "_sc_watch".into(), scope: None, formula: "\"[]\"".into(), comment: String::new(), hidden: true });
+        wb.names.push(DefinedName {
+            name: "_sc_watch".into(),
+            scope: None,
+            formula: "\"[]\"".into(),
+            comment: String::new(),
+            hidden: true,
+            uid: Default::default(),
+        });
         // A legacy item is read whether or not it is hidden, so a visible one is data too.
-        wb.names.push(DefinedName { name: "_sc_old".into(), scope: None, formula: "\"[]\"".into(), comment: String::new(), hidden: false });
+        wb.names.push(DefinedName {
+            name: "_sc_old".into(),
+            scope: None,
+            formula: "\"[]\"".into(),
+            comment: String::new(),
+            hidden: false,
+            uid: Default::default(),
+        });
         let names = |s: &Session| s.doc().unwrap().wb.names.clone();
         let before = names(&s);
         assert!(before.len() >= 3, "the item takes two chunks");
@@ -1026,7 +1158,14 @@ mod tests {
         assert_eq!(stash::get(&s.doc().unwrap().wb, "macro_1").as_deref(), Some(text.as_str()));
         // A visible name of the shape is the person's own (the stash never reads it): the name
         // commands change and remove it without `force`, as Name Manager cannot pass one.
-        let own = DefinedName { name: "_gc_rate_0".into(), scope: None, formula: "=1".into(), comment: String::new(), hidden: false };
+        let own = DefinedName {
+            name: "_gc_rate_0".into(),
+            scope: None,
+            formula: "=1".into(),
+            comment: String::new(),
+            hidden: false,
+            uid: Default::default(),
+        };
         std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).names.push(own.clone());
         s.execute("formulas.defineName", json!({"name": "Rate0", "refersTo": "=2", "oldName": "_gc_rate_0"})).unwrap();
         s.execute("formulas.deleteName", json!({"name": "Rate0"})).unwrap();
@@ -1077,6 +1216,34 @@ mod tests {
         assert_eq!(v(&mut s, "E1"), json!(15.0));
     }
 
+    /// A PivotTable source read from a file is bound to the name it named: renaming the name
+    /// renames the source, still bound to it, and undo brings both back.
+    #[test]
+    fn a_bound_pivot_source_follows_its_renamed_name() {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("range.setValues", json!({"range": "A1", "values": [["K", "V"], ["a", 1], ["b", 2]]})).unwrap();
+        s.execute("formulas.defineName", json!({"name": "rData", "refersTo": "=Sheet1!$A$1:$B$3"})).unwrap();
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let binding = wb.bind_pivot_source("rData", 0);
+        assert!(binding.0.is_some());
+        let pt = gridcraft_model::PivotTable { name: "P1".into(), source: "rData".into(), binding, ..Default::default() };
+        wb.sheet_mut(0).unwrap().pivots.push(pt);
+        let source = |s: &Session| {
+            let wb = &s.doc().unwrap().wb;
+            let pt = &wb.sheets[0].pivots[0];
+            let found = wb.pivot_source(pt, 0).map(|f| match f.source {
+                gridcraft_model::PivotSource::Name { name, .. } => (name.name.clone(), f.rebound.is_some()),
+                other => panic!("{other:?}"),
+            });
+            (pt.source.clone(), found)
+        };
+        s.execute("formulas.defineName", json!({"name": "rNew", "refersTo": "=Sheet1!$A$1:$B$3", "oldName": "rData"})).unwrap();
+        assert_eq!(source(&s), ("rNew".to_string(), Ok(("rNew".to_string(), false))));
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(source(&s), ("rData".to_string(), Ok(("rData".to_string(), false))));
+    }
+
     #[test]
     fn name_manager_previews_a_name_over_several_ranges() {
         let mut s = Session::new();
@@ -1105,6 +1272,7 @@ mod tests {
             formula: formula.into(),
             comment: String::new(),
             hidden,
+            uid: Default::default(),
         };
         wb.names.push(name("_Filter", None, "Sheet1!$A$1:$B$9", true));
         wb.names.push(name("TAX", Some(0), "0.25", false));

@@ -1561,6 +1561,9 @@ fn plain_open_warning_becomes_an_info_notice() {
     assert_eq!(n.kind, gridcraft_ui_egui::NoticeKind::Info);
     assert!(n.action.is_none());
     assert!(n.text.contains("external"));
+    let rename = r#"Table "VBA?Macros" on sheet "Sheet1" was renamed to "VBA_Macros"."#;
+    h.state_mut().show_open_warnings(&json!({"warnings": [rename]}));
+    assert_eq!(h.state().notice.as_ref().map(|n| (n.kind, n.text.as_str())), Some((gridcraft_ui_egui::NoticeKind::Info, rename)));
     // No warnings → no notice, no panic.
     h.state_mut().show_open_warnings(&json!({"warnings": []}));
     assert!(h.state().notice.is_none());

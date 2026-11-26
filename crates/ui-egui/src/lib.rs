@@ -252,6 +252,9 @@ pub struct SheetApp {
     pub toast: Option<(String, f64)>,
     /// Dismissible info bar under the ribbon (open-time notices).
     pub notice: Option<Notice>,
+    /// Per open workbook (its `uid`): the path it was saved to and the save warnings last shown
+    /// for it there, so AutoSave shows a notice again only when the warnings change.
+    save_warnings_shown: std::collections::HashMap<u64, (Option<String>, Vec<String>)>,
     pub services: Services,
     pub printing: printing::State,
     print_feedback_seen: Option<printing::Feedback>,

@@ -13,11 +13,14 @@ pub use gridcraft_core::quote_sheet;
 use gridcraft_core::{CellError, CellRef, MAX_COLS, MAX_ROWS, RangeRef, Value, number_to_text, split_sheet};
 use gridcraft_model::{
     BorderLine, BorderStyle, Cell, Chart, Color, Fill, HAlign, NumFmt, PivotDataCell, PivotDateGroup, PivotField, PivotFilter, PivotFunc,
-    PivotItemRef, PivotLayout, PivotLookup, PivotShowAs, PivotSort, PivotTable, PivotValue, Series, SlicerCrossFilter, Style, StyleId, Workbook,
+    PivotItemRef, PivotLayout, PivotLookup, PivotShowAs, PivotSort, PivotSource, PivotTable, PivotValue, Series, SlicerCrossFilter, Style, StyleId,
+    Workbook,
 };
 
 use crate::pivot_calc::CalcSet;
 
+#[cfg(test)]
+mod binding_tests;
 mod charts;
 mod compute;
 mod items;
@@ -122,8 +125,34 @@ pub fn resolve_source(wb: &Workbook, text: &str, default_sheet: usize) -> Result
     resolve_inner(wb, text, default_sheet, 0)
 }
 
+/// Resolves the source of `pt`, a PivotTable on the `host`th sheet, to (sheet, range including
+/// header): what it stands for ([`Workbook::pivot_source`]: the definition an imported source is
+/// bound to, or the one of the same kind that took its place), else its text. The XLSX writer
+/// saves the PivotTable from the same definition.
+pub fn resolve_pivot(wb: &Workbook, pt: &PivotTable, host: usize) -> Result<(usize, RangeRef), String> {
+    match wb.pivot_source(pt, host)?.source {
+        PivotSource::Text(text) if pt.binding.unresolved(text) => Err(INVALID.into()),
+        PivotSource::Text(text) => resolve_source(wb, text, host),
+        PivotSource::Table { sheet, table, .. } => {
+            let tb = wb.sheet(sheet).and_then(|s| s.tables.get(table)).ok_or_else(|| INVALID.to_string())?;
+            Ok((sheet, table_range(tb)?))
+        }
+        PivotSource::Name { name, from, .. } => resolve_inner(wb, &name.formula, from, 1),
+    }
+}
+
+const INVALID: &str = "The reference isn't valid.";
+
+/// A table's source range: its header row and data, not its totals row.
+fn table_range(tb: &gridcraft_model::Table) -> Result<RangeRef, String> {
+    if !tb.header_row {
+        return Err("The table needs a header row to be used as a PivotTable source.".into());
+    }
+    let end_row = tb.range.end.row.saturating_sub(tb.totals_row as u32).max(tb.range.start.row);
+    Ok(RangeRef::new(tb.range.start, CellRef::new(end_row, tb.range.end.col)))
+}
+
 fn resolve_inner(wb: &Workbook, text: &str, default_sheet: usize, depth: u32) -> Result<(usize, RangeRef), String> {
-    const INVALID: &str = "The reference isn't valid.";
     let t = text.trim().trim_start_matches('=').trim();
     if t.is_empty() || depth > 4 {
         return Err(INVALID.into());
@@ -131,11 +160,7 @@ fn resolve_inner(wb: &Workbook, text: &str, default_sheet: usize, depth: u32) ->
     if let Some((si, ti)) = wb.table(t)
         && let Some(tb) = wb.sheet(si).and_then(|s| s.tables.get(ti))
     {
-        if !tb.header_row {
-            return Err("The table needs a header row to be used as a PivotTable source.".into());
-        }
-        let end_row = tb.range.end.row.saturating_sub(tb.totals_row as u32).max(tb.range.start.row);
-        return Ok((si, RangeRef::new(tb.range.start, CellRef::new(end_row, tb.range.end.col))));
+        return Ok((si, table_range(tb)?));
     }
     let (sheet, body) = split_sheet(t);
     if let Some(r) = RangeRef::parse(body) {
@@ -152,11 +177,21 @@ fn resolve_inner(wb: &Workbook, text: &str, default_sheet: usize, depth: u32) ->
         };
         return Ok((si, r));
     }
-    if sheet.is_none()
-        && let Some(n) = wb.name(t, default_sheet)
-    {
-        let f = n.formula.clone();
-        return resolve_inner(wb, &f, default_sheet, depth + 1);
+    match sheet {
+        // `Data!rData`: the name of sheet `Data` only, never a same-named one of another scope.
+        Some(s) => {
+            let si = wb.sheet_index(&s).ok_or_else(|| INVALID.to_string())?;
+            if let Some(n) = wb.name_in_scope(body, Some(si)) {
+                let f = n.formula.clone();
+                return resolve_inner(wb, &f, si, depth + 1);
+            }
+        }
+        None => {
+            if let Some(n) = wb.name(t, default_sheet) {
+                let f = n.formula.clone();
+                return resolve_inner(wb, &f, default_sheet, depth + 1);
+            }
+        }
     }
     Err(INVALID.into())
 }
@@ -166,7 +201,16 @@ const FIELD_NAME_ERR: &str =
 
 /// Reads the source list.
 pub fn read_source(wb: &Workbook, text: &str, default_sheet: usize) -> Result<Source, String> {
-    let (si, r) = resolve_source(wb, text, default_sheet)?;
+    read_range(wb, resolve_source(wb, text, default_sheet)?)
+}
+
+/// Reads the source list of `pt`, a PivotTable on the `host`th sheet ([`resolve_pivot`]).
+pub fn read_pivot_source(wb: &Workbook, pt: &PivotTable, host: usize) -> Result<Source, String> {
+    read_range(wb, resolve_pivot(wb, pt, host)?)
+}
+
+/// Reads the source list in range `r` of the `si`th sheet.
+fn read_range(wb: &Workbook, (si, r): (usize, RangeRef)) -> Result<Source, String> {
     let sh = wb.sheet(si).ok_or("The reference isn't valid.")?;
     if r.count() > MAX_SOURCE_CELLS {
         return Err("The source range is too large for a PivotTable.".into());
@@ -235,7 +279,7 @@ pub fn read_source(wb: &Workbook, text: &str, default_sheet: usize) -> Result<So
 
 /// Computes a PivotTable report from the workbook.
 pub fn compute(wb: &Workbook, pt: &PivotTable, pivot_sheet: usize) -> Result<Output, String> {
-    let src = read_source(wb, &pt.source, pivot_sheet)?;
+    let src = read_pivot_source(wb, pt, pivot_sheet)?;
     compute_from(wb, pt, &src, None)
 }
 
@@ -264,7 +308,7 @@ pub fn refresh(wb: &mut Workbook, sheet: usize, idx: usize, replace: bool) -> Re
     if sh.is_protected() {
         return Err("The cell or chart you're trying to change is on a protected sheet.".into());
     }
-    if let Ok((ssi, sr)) = resolve_source(wb, &pt.source, sheet)
+    if let Ok((ssi, sr)) = resolve_pivot(wb, &pt, sheet)
         && ssi == sheet
         && sr.intersects(&area)
     {
@@ -457,5 +501,79 @@ mod fit_tests {
         let set = rebuilt_item_set(items);
         assert!(set.contains(first.as_slice()));
         assert!(!set.contains([String::from("C")].as_slice()));
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use std::sync::Arc;
+
+    use gridcraft_core::{RangeRef, quote_sheet};
+    use gridcraft_model::{DefinedName, PivotTable, Sheet, Workbook};
+    use serde_json::json;
+
+    use super::resolve_source;
+
+    fn name(name: &str, scope: Option<usize>, formula: &str) -> DefinedName {
+        DefinedName { name: name.into(), scope, formula: formula.into(), comment: String::new(), hidden: false, uid: Default::default() }
+    }
+
+    /// Sheets `Report` and `data`; `rData` of sheet `data` is its A1:B3, the workbook's `rData`
+    /// is Report!D1:E3.
+    fn book(data: &str) -> Workbook {
+        let mut wb = Workbook::new();
+        Arc::make_mut(&mut wb.sheets[0]).name = "Report".into();
+        wb.sheets.push(Arc::new(Sheet::new(data.to_string())));
+        wb.names.push(name("rData", Some(1), &format!("{}!$A$1:$B$3", quote_sheet(data))));
+        wb.names.push(name("rData", None, "Report!$D$1:$E$3"));
+        wb
+    }
+
+    fn range(a: &str) -> RangeRef {
+        RangeRef::parse(a).unwrap()
+    }
+
+    #[test]
+    fn a_qualified_source_is_that_sheets_name_only() {
+        let mut wb = book("Data");
+        assert_eq!(resolve_source(&wb, "Data!rData", 0), Ok((1, range("A1:B3"))), "the local name, not the workbook's");
+        // A bare name is looked up from the PivotTable's sheet, as before.
+        assert_eq!(resolve_source(&wb, "rData", 0), Ok((0, range("D1:E3"))));
+        assert_eq!(resolve_source(&wb, "rData", 1), Ok((1, range("A1:B3"))));
+        // The local name deleted: the workbook's same-named one is not taken for it.
+        wb.names.retain(|n| n.scope.is_none());
+        assert!(resolve_source(&wb, "Data!rData", 0).is_err());
+        assert!(resolve_source(&wb, "Nowhere!rData", 0).is_err());
+    }
+
+    #[test]
+    fn a_qualified_source_on_a_sheet_that_needs_quotes() {
+        let sheet = "My 'Data'";
+        let wb = book(sheet);
+        let source = format!("{}!rData", quote_sheet(sheet));
+        assert_eq!(source, "'My ''Data'''!rData");
+        assert_eq!(resolve_source(&wb, &source, 0), Ok((1, range("A1:B3"))));
+    }
+
+    #[test]
+    fn renaming_the_source_sheet_renames_the_source_and_undo_reverts_it() {
+        let mut s = crate::Session::new();
+        s.new_workbook();
+        {
+            let d = s.doc_mut().unwrap();
+            let wb = Arc::make_mut(&mut d.wb);
+            *wb = book("Data");
+            Arc::make_mut(&mut wb.sheets[0]).pivots.push(PivotTable { name: "P".into(), source: "Data!rData".into(), ..PivotTable::default() });
+        }
+        let source = |s: &crate::Session| s.doc().unwrap().wb.sheet(0).unwrap().pivots[0].source.clone();
+        s.execute("sheet.rename", json!({"sheet": 1, "name": "O'Brien Data"})).unwrap();
+        assert_eq!(source(&s), "'O''Brien Data'!rData");
+        let wb = &s.doc().unwrap().wb;
+        assert_eq!(resolve_source(wb, &source(&s), 0), Ok((1, range("A1:B3"))));
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(source(&s), "Data!rData");
+        // Deleted, the sheet takes its name with it: the source no longer resolves.
+        s.execute("home.deleteSheet", json!({"sheet": 1})).unwrap();
+        assert!(resolve_source(&s.doc().unwrap().wb, &source(&s), 0).is_err());
     }
 }

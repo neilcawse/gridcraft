@@ -99,6 +99,14 @@ impl SheetApp {
         {
             self.deliver_pdf(r);
         }
+        // A dialog request is not a write; its picker or host callback reports its own result.
+        // PDF and other exported copies also leave the workbook's save-warning record alone.
+        if matches!(id, "file.save" | "file.saveAs")
+            && let Ok(r) = &r
+            && r.get("path").and_then(Json::as_str).is_some_and(|p| self.session.active().is_some_and(|d| d.path.as_deref() == Some(p)))
+        {
+            self.show_save_warnings(r);
+        }
         // The scan stopped at its cell allowance: say that some cells were not checked.
         if id == "data.circleInvalid"
             && let Ok(r) = &r
@@ -500,6 +508,7 @@ impl SheetApp {
             match host(&name, &b, save_as) {
                 Ok(()) => {
                     self.mark_active_saved_xlsx(&name);
+                    self.show_save_warnings(&r);
                     true
                 }
                 Err(e) => {
@@ -509,6 +518,7 @@ impl SheetApp {
             }
         } else if let Some(dl) = &self.services.download {
             dl(&name, &b);
+            self.show_save_warnings(&r);
             true
         } else {
             false

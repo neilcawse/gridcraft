@@ -63,7 +63,7 @@ pub(super) fn open_link(s: &mut Session, p: &Json) -> Result<Json> {
         }
     };
     match crate::links::classify(&target) {
-        crate::links::LinkKind::Internal(r) => crate::cmd::edit::go_to(s, &json!({"reference": r.trim_start_matches('#')})),
+        crate::links::LinkKind::Internal(r) => crate::cmd::edit::go_to(s, &json!({"reference": r})),
         crate::links::LinkKind::External(u) => {
             if s.link_policy != crate::links::LinkPolicy::Allow {
                 return Err(EngineError::Other(crate::links::NEEDS_CONFIRMATION.into()));

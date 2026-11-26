@@ -242,7 +242,7 @@ pub(super) fn update(s: &mut Session, p: &Json, f: impl FnOnce(&mut PivotTable, 
     let replace = bool_param(p, "replace").unwrap_or(false);
     edit(s, |cx| {
         let pt = cx.wb.sheet(si).and_then(|sh| sh.pivots.get(pi)).cloned().ok_or_else(|| other("There's no such PivotTable."))?;
-        let src = pv::read_source(&cx.wb, &pt.source, si).map_err(other)?;
+        let src = pv::read_pivot_source(&cx.wb, &pt, si).map_err(other)?;
         let mut new = pt.clone();
         let mut out = f(&mut new, &src, &cx.wb)?;
         if let Some(slot) = cx.sheet_mut(si)?.pivots.get_mut(pi) {
@@ -265,7 +265,7 @@ pub(super) fn fields(s: &mut Session, p: &Json) -> Result<Json> {
     let d = s.doc()?;
     let pt = d.wb.sheet(si).and_then(|sh| sh.pivots.get(pi)).ok_or_else(|| other("There's no such PivotTable."))?;
     let mut out = pivot_json(&d.wb, si, pt);
-    let src = pv::read_source(&d.wb, &pt.source, si);
+    let src = pv::read_pivot_source(&d.wb, pt, si);
     let list: Vec<Json> = match &src {
         Ok(src) => src
             .headers

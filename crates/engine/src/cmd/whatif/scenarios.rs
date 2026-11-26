@@ -72,6 +72,7 @@ fn store_scenarios(wb: &mut Workbook, list: &[Scenario]) {
             .join("&"),
         comment: "GridCraft Scenario Manager data".into(),
         hidden: true,
+        uid: Default::default(),
     });
 }
 

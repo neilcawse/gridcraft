@@ -1,23 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::*;
-
-/// Valid table name: letters, digits, `_` and `.`, starting with a letter, `_` or `\`
-/// (Microsoft "Names in formulas" rules).
-pub(super) fn table_name(name: &str, used: &mut HashSet<String>, n: u32) -> String {
-    let mut s: String =
-        name.chars().enumerate().map(|(i, c)| if c.is_alphanumeric() || c == '_' || c == '.' || (i == 0 && c == '\\') { c } else { '_' }).collect();
-    if s.is_empty() || !s.starts_with(|c: char| c.is_alphabetic() || c == '_' || c == '\\') || gridcraft_core::CellRef::parse(&s).is_some() {
-        s = format!("Table{n}");
-    }
-    let mut out = s.clone();
-    let mut k = 2;
-    while !used.insert(out.to_ascii_lowercase()) {
-        out = format!("{s}{k}");
-        k += 1;
-    }
-    out
-}
 
 /// Column names for a table: one per column of its range, unique and non-empty.
 pub(super) fn table_columns(t: &Table) -> Vec<String> {
@@ -421,6 +404,7 @@ mod tests {
             filter: vec![],
             table_type: None,
             connection_id: None,
+            uid: Default::default(),
         };
         let names = table_columns(&t);
         assert_eq!(names.len(), 10_000);

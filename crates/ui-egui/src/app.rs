@@ -40,6 +40,7 @@ impl SheetApp {
             message: None,
             toast: None,
             notice: None,
+            save_warnings_shown: Default::default(),
             services,
             printing: Default::default(),
             print_feedback_seen: None,
@@ -478,27 +479,109 @@ mod lifecycle_tests {
     }
 
     #[test]
-    /// A hidden logic tick saves a dirty file-backed workbook once and clears its dirty state.
-    fn a_logic_only_tick_autosaves_a_dirty_workbook_once() {
+    /// A hidden logic tick saves a dirty file-backed workbook once and surfaces any repairs.
+    fn a_logic_only_tick_autosaves_a_dirty_workbook_once() -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+
         let ctx = egui::Context::default();
         let mut app = app();
         let dir = std::env::temp_dir().join(format!("gridcraft-logic-autosave-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir)?;
         let path = dir.join("autosave.xlsx");
-        app.run("cell.set", serde_json::json!({"cell": "A1", "input": "42"})).unwrap();
+        app.run("range.setValues", json!({"range": "A1:A2", "values": [["Header"], [1]]}))?;
+        app.run("insert.table", json!({"range": "A1:A2", "name": "DataRows"}))?;
         app.ui.autosave = true;
-        app.session.active_mut().unwrap().path = Some(path.to_string_lossy().into_owned());
+        let doc = app.session.active_mut().ok_or("missing workbook")?;
+        std::sync::Arc::make_mut(&mut doc.wb).sheet_mut(0).ok_or("missing sheet")?.tables[0].name = "Data?Rows".into();
+        doc.path = Some(path.to_string_lossy().into_owned());
         app.grid.last_autosave = monotonic_ms() - 3000.0;
 
         let _ = ctx.run_logic(&egui::RawInput::default(), |ctx| app.logic(ctx));
         assert!(path.exists(), "a hidden logic-only tick saves a dirty workbook with a file");
-        assert!(!app.session.active().unwrap().is_dirty(), "the save clears the dirty state");
+        assert!(!app.session.active().ok_or("missing workbook")?.is_dirty(), "the save clears the dirty state");
+        assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some(r#"Table "Data?Rows" on sheet "Sheet1" was renamed to "Data_Rows"."#));
         let saved_at = app.grid.last_autosave;
         let _ = ctx.run_logic(&egui::RawInput::default(), |ctx| app.logic(ctx));
         assert_eq!(app.grid.last_autosave, saved_at, "the same change is not saved a second time");
 
         let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    /// AutoSave shows a workbook's save warnings once while they and its path stay the same, so a
+    /// dismissed notice stays dismissed; a changed set or a new path shows them again, and a save
+    /// the user asks for always does.
+    fn autosave_shows_unchanged_save_warnings_once() -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+
+        let ctx = egui::Context::default();
+        let mut app = app();
+        let dir = std::env::temp_dir().join(format!("gridcraft-autosave-warnings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let path = |name: &str| dir.join(name).to_string_lossy().into_owned();
+        app.run("range.setValues", json!({"range": "A1:A2", "values": [["Header"], [1]]}))?;
+        app.run("insert.table", json!({"range": "A1:A2", "name": "DataRows"}))?;
+        app.ui.autosave = true;
+        let doc = app.session.active_mut().ok_or("missing workbook")?;
+        std::sync::Arc::make_mut(&mut doc.wb).sheet_mut(0).ok_or("missing sheet")?.tables[0].name = "Data?Rows".into();
+        doc.path = Some(path("first.xlsx"));
+        let one = r#"Table "Data?Rows" on sheet "Sheet1" was renamed to "Data_Rows"."#;
+        // Edit, let AutoSave run, and return the notice it left; the user then dismisses it.
+        let autosave = |app: &mut SheetApp, cell: &str| -> Result<Option<String>, Box<dyn std::error::Error>> {
+            app.run("cell.set", json!({"cell": cell, "input": "7"}))?;
+            app.grid.last_autosave = monotonic_ms() - 3000.0;
+            let _ = ctx.run_logic(&egui::RawInput::default(), |ctx| app.logic(ctx));
+            assert!(!app.session.active().ok_or("missing workbook")?.is_dirty(), "AutoSave ran");
+            Ok(app.notice.take().map(|n| n.text))
+        };
+
+        assert_eq!(autosave(&mut app, "C1")?.as_deref(), Some(one));
+        for cell in ["C2", "C3", "C4"] {
+            assert_eq!(autosave(&mut app, cell)?, None, "unchanged warnings after {cell}");
+        }
+        app.run("range.setValues", json!({"range": "E1:E2", "values": [["Other"], [2]]}))?;
+        app.run("insert.table", json!({"range": "E1:E2", "name": "OtherRows"}))?;
+        let doc = app.session.active_mut().ok_or("missing workbook")?;
+        std::sync::Arc::make_mut(&mut doc.wb).sheet_mut(0).ok_or("missing sheet")?.tables[1].name = "Other?Rows".into();
+        let two = format!("2 items in this file were handled differently. First: {one}");
+        assert_eq!(autosave(&mut app, "C5")?, Some(two.clone()), "a changed set shows again");
+        assert_eq!(autosave(&mut app, "C6")?, None);
+        app.session.active_mut().ok_or("missing workbook")?.path = Some(path("second.xlsx"));
+        assert_eq!(autosave(&mut app, "C7")?, Some(two.clone()), "a new path starts afresh");
+        assert_eq!(autosave(&mut app, "C8")?, None);
+        app.run("file.save", json!({}))?;
+        assert_eq!(app.notice.take().map(|n| n.text), Some(two), "a manual save always shows its warnings");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_host_save_keeps_the_last_shown_warnings() -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+
+        let mut app = app();
+        app.run("range.setValues", json!({"range": "A1:A2", "values": [["Header"], [1]]}))?;
+        app.run("insert.table", json!({"range": "A1:A2", "name": "DataRows"}))?;
+        let doc = app.session.active_mut().ok_or("missing workbook")?;
+        std::sync::Arc::make_mut(&mut doc.wb).sheet_mut(0).ok_or("missing sheet")?.tables[0].name = "Data?Rows".into();
+        app.services.host_save = Some(Box::new(|_, _, _| Ok(())));
+        app.run("file.saveAs", json!({}))?;
+        let notice = app.notice.take().ok_or("successful host save should show a warning")?;
+        assert!(notice.text.contains("Data_Rows"));
+        let shown = app.save_warnings_shown.clone();
+        let uid = app.session.active().ok_or("missing workbook")?.uid;
+        assert!(shown.get(&uid).is_some_and(|(_, warnings)| warnings.iter().any(|w| w.contains("Data_Rows"))));
+
+        app.services.host_save = Some(Box::new(|_, _, _| Err("host write failed".into())));
+        app.run("file.saveAs", json!({}))?;
+        assert!(app.message.as_ref().is_some_and(|(_, text)| text.contains("host write failed")));
+        assert!(app.notice.is_none());
+        assert_eq!(app.save_warnings_shown, shown);
+        Ok(())
     }
 
     #[test]
