@@ -154,26 +154,7 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
             max_y = if pg.rows_complete { (ey as f32 - g.cells.height() / g.z).max(0.0) } else { 1.0e9 };
         }
     }
-    let mut scroll_cap = vec2(max_x, max_y);
-    let mut geo = None;
-    if !paper {
-        let end = sel.moving_end();
-        let row = sel.active.row.max(end.row);
-        let col = sel.active.col.max(end.col);
-        // The usual caps leave the last few lines to be visible within the viewport. A small
-        // viewport may not fit them: let a selected endpoint near the physical sheet edge stay
-        // visible on subsequent frames, without changing the scrollbar's used-range extent.
-        if row >= MAX_ROWS - 40 || col >= MAX_COLS - 20 {
-            let g = make_geo(app, view.scroll);
-            if row >= (MAX_ROWS - 40).max(g.fr) {
-                scroll_cap.y = scroll_cap.y.max(edge_row_scroll(&g, sh, row));
-            }
-            if col >= (MAX_COLS - 20).max(g.fc) {
-                scroll_cap.x = scroll_cap.x.max(edge_col_scroll(&g, sh, col));
-            }
-            geo = Some(g);
-        }
-    }
+    let (scroll_cap, geo) = edge_scroll_bounds(sh, &sel, paper, vec2(max_x, max_y), || make_geo(app, view.scroll));
     view.scroll = view.scroll.min(scroll_cap);
     let mut geo = geo.filter(|g| g.scroll == view.scroll).unwrap_or_else(|| make_geo(app, view.scroll));
     // Keep the active cell (or the moving end of an extension) visible after keyboard moves.
@@ -262,6 +243,34 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
     ui.painter().rect_filled(Rect::from_min_max(pos2(track_x.0, rect.top()), pos2(track_x.1, rect.bottom())), 0.0, t.tab_bar);
     vertical_scrollbar(app, ui, sh, &geo, track_x, max_y, &t);
     update_clipboard_repaint(app, ui, now);
+}
+
+/// A small viewport may not fit the lines after the legacy caps. Keep the selected endpoint
+/// visible on subsequent frames, without changing the scrollbar's used-range extent.
+fn edge_scroll_bounds(
+    sh: &Sheet,
+    sel: &gridcraft_engine::Selection,
+    paper: bool,
+    mut cap: egui::Vec2,
+    make_geo: impl FnOnce() -> Geo,
+) -> (egui::Vec2, Option<Geo>) {
+    if paper {
+        return (cap, None);
+    }
+    let end = sel.moving_end();
+    let row = sel.active.row.max(end.row);
+    let col = sel.active.col.max(end.col);
+    if row < MAX_ROWS - 40 && col < MAX_COLS - 20 {
+        return (cap, None);
+    }
+    let g = make_geo();
+    if row >= (MAX_ROWS - 40).max(g.fr) {
+        cap.y = cap.y.max(edge_row_scroll(&g, sh, row));
+    }
+    if col >= (MAX_COLS - 20).max(g.fc) {
+        cap.x = cap.x.max(edge_col_scroll(&g, sh, col));
+    }
+    (cap, Some(g))
 }
 
 fn edge_row_scroll(g: &Geo, sh: &Sheet, row: u32) -> f32 {
