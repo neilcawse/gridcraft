@@ -164,23 +164,18 @@ impl Sheet {
     /// whether its outermost group touches `area`: that group's own box or the box around its
     /// members overlaps it (a box without extent counts where it starts).
     pub fn grouped_objects(&self, area: ObjectRect) -> HashMap<ObjRef, bool> {
-        let overlaps = |lo: f64, len: f64, a_lo: f64, a_len: f64| lo < a_lo + a_len && (lo >= a_lo || lo + len > a_lo);
-        let mut out = HashMap::new();
-        for g in self.groups.iter().filter(|g| self.parent_group(DrawingRef::Group(g.id)).is_none()) {
-            let own = self.anchor_rect(&g.anchor);
-            let r = self.drawing_rect(DrawingRef::Group(g.id)).map_or(own, |m| {
-                let (x, y) = (own.x.min(m.x), own.y.min(m.y));
-                ObjectRect { x, y, w: (own.x + own.w).max(m.x + m.w) - x, h: (own.y + own.h).max(m.y + m.h) - y }
-            });
-            let touches = overlaps(r.x, r.w, area.x, area.w) && overlaps(r.y, r.h, area.y, area.h);
-            for m in std::iter::once(DrawingRef::Group(g.id)).chain(self.group_contents(g.id)) {
-                out.insert(drawing_obj(m), touches);
-            }
-        }
-        // Groups that only hold each other have no outermost group; they touch nothing.
+        let overlaps = |lo: f64, len: f64, a_lo: f64, a_len: f64| a_len > 0.0 && lo < a_lo + a_len && (lo >= a_lo || lo + len > a_lo);
+        let touches = |r: ObjectRect| overlaps(r.x, r.w, area.x, area.w) && overlaps(r.y, r.h, area.y, area.h);
+        let mut out: HashMap<_, _> = self.groups.iter().flat_map(|g| g.members.iter().copied()).map(|m| (drawing_obj(m), false)).collect();
         for g in &self.groups {
-            for m in std::iter::once(DrawingRef::Group(g.id)).chain(g.members.iter().copied()) {
-                out.entry(drawing_obj(m)).or_insert(false);
+            let group = DrawingRef::Group(g.id);
+            // A group in the member map has a parent. Cycles without a root stay false.
+            if out.contains_key(&drawing_obj(group)) {
+                continue;
+            }
+            let held = touches(self.anchor_rect(&g.anchor)) || self.drawing_rect(group).is_some_and(touches);
+            for m in std::iter::once(group).chain(self.group_contents(g.id)) {
+                out.insert(drawing_obj(m), held);
             }
         }
         out

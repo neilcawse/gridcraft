@@ -435,6 +435,27 @@ fn a_sort_over_unequal_rows_keeps_groups_in_place_through_save_and_undo() {
     }
 }
 
+#[test]
+fn a_sort_fit_discards_file_markers_for_a_group_beside_the_block() {
+    let mut s = group_sort_session();
+    {
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let large = wb.styles.derive(StyleId::DEFAULT, |st| st.font.size = 36.0);
+        wb.sheet_mut(0).unwrap().set_style(CellRef::new(6, 0), large);
+    }
+    let before = s.doc().unwrap().wb.sheets[0].clone();
+    let group = DrawingRef::Group(before.groups[1].id);
+    assert!(before.drawing_files.contains_key(&group));
+    let rect = before.drawing_rect(group).unwrap();
+    // The groups start in column B, exactly on the excluded right edge of this sort.
+    s.execute("data.sort", json!({"range": "A5:A10", "header": false, "keys": [{"column": "A"}]})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    let growth = f64::from(sh.row_height(7) - before.row_height(7));
+    assert!(growth > 20.0);
+    assert_rect(sh.drawing_rect(group).unwrap(), ObjectRect { h: rect.h + growth, ..rect }, "the group follows the row fit");
+    assert!(!sh.drawing_files.contains_key(&group));
+}
+
 /// Only groups touching the sorted block keep their place on the sheet. A group beside it, or
 /// below it once a hidden row inside it takes another height, follows its moved rows like the
 /// ungrouped picture next to it.

@@ -205,7 +205,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-11-25 | minor | §17: X34 keeps grouped shapes in place during the sort permutation, replacing X28's member-by-member movement. |
+| 2026-11-25 | minor | §17: X34 keeps groups overlapping the visible sorted block in place during the permutation, replacing X28's member-by-member movement there. |
 | 2026-11-02 | minor | §17: equations (Insert › Equation, LaTeX source, gallery, editor) |
 | 2026-11-02 | minor | §13: Solver Sensitivity report: shadow prices, reduced costs and allowable ranges for Simplex LP; Lagrange multipliers and reduced gradients for GRG Nonlinear |
 | 2026-11-02 | minor | §4: charts, like every floating object, move and resize from eight handles (#190), so resizing is no longer listed as missing; the evidence is one paragraph again, without the stale "PRs #158, #161 open" |

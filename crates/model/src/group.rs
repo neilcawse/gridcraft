@@ -504,6 +504,42 @@ mod tests {
     }
 
     #[test]
+    fn sort_group_overlap_requires_a_nonempty_block() {
+        let sh = sheet_with_nested_group();
+        for area in [ObjectRect { x: 160.0, y: 60.0, w: 0.0, h: 30.0 }, ObjectRect { x: 150.0, y: 80.0, w: 30.0, h: 0.0 }] {
+            let grouped = sh.grouped_objects(area);
+            assert_eq!(grouped.len(), 5);
+            assert!(grouped.values().all(|&held| !held), "collapsed sort block {area:?} has no overlap");
+        }
+    }
+
+    #[test]
+    fn sort_group_overlap_uses_outer_box_and_half_open_edges() {
+        let mut sh = sheet_with_nested_group();
+        sh.groups[1].anchor = sh.rect_anchor(ObjectRect { x: 80.0, y: 40.0, w: 140.0, h: 60.0 }, AnchorMode::MoveOnly);
+        let held = |sh: &Sheet, x| {
+            let area = ObjectRect { x, y: 40.0, w: 10.0, h: 10.0 };
+            let grouped = sh.grouped_objects(area);
+            assert_eq!(grouped.len(), 5);
+            assert!(grouped.values().all(|&hold| hold == grouped[&crate::ObjRef::new(crate::ObjKind::Group, 4)]));
+            grouped[&crate::ObjRef::new(crate::ObjKind::Group, 4)]
+        };
+        assert!(!held(&sh, 70.0)); // block ends exactly at the stored box's left edge
+        assert!(held(&sh, 75.0)); // stored box, not member bounds, overlaps
+        assert!(!held(&sh, 220.0)); // block starts exactly at the stored box's right edge
+        sh.groups[1].anchor = sh.rect_anchor(ObjectRect { x: 60.0, y: 40.0, w: 20.0, h: 10.0 }, AnchorMode::MoveOnly);
+        assert!(!held(&sh, 85.0)); // the gap between stored and member boxes doesn't overlap
+        sh.groups[0].members.push(DrawingRef::Group(4));
+        assert!(!held(&sh, 75.0)); // a cycle without an outermost group does not hold
+        sh.groups.remove(0);
+        sh.groups[0].members.clear();
+        sh.groups[0].anchor = sh.rect_anchor(ObjectRect { x: 80.0, y: 40.0, w: 0.0, h: 0.0 }, AnchorMode::MoveOnly);
+        let group = crate::ObjRef::new(crate::ObjKind::Group, 4);
+        assert!(sh.grouped_objects(ObjectRect { x: 80.0, y: 40.0, w: 10.0, h: 10.0 })[&group]);
+        assert!(!sh.grouped_objects(ObjectRect { x: 70.0, y: 40.0, w: 10.0, h: 10.0 })[&group]);
+    }
+
+    #[test]
     fn a_group_cycle_does_not_recurse_forever() {
         let mut sh = sheet_with_nested_group();
         if let Some(g) = sh.groups.iter_mut().find(|g| g.id == 5) {
