@@ -411,6 +411,79 @@ fn a_sort_keeps_groups_in_place_before_the_separate_row_fit() {
     assert_rect(group_box(sh, 1), ObjectRect { y: inside.y + grown, ..inside }, "row 8 fits above the inside group");
 }
 
+/// Rows of different heights trade places under both groups: each member keeps its box on the
+/// sheet, re-anchored to the rows now under it, through save/reopen and undo.
+#[test]
+fn a_sort_over_unequal_rows_keeps_groups_in_place_through_save_and_undo() {
+    let mut s = group_sort_session();
+    s.execute("home.rowHeight", json!({"rows": "5:5", "points": 30})).unwrap();
+    s.execute("home.rowHeight", json!({"rows": "9:9", "points": 24.75})).unwrap();
+    let before = s.doc().unwrap().wb.sheets[0].clone();
+    sort_group_rows(&mut s);
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert_ne!(sh.row_height(4), before.row_height(4), "the sort moved row heights");
+    let bytes = crate::io::save_bytes(&s.doc().unwrap().wb, "groups.xlsx").unwrap();
+    let (reopened, _) = crate::io::open_bytes("groups.xlsx", &bytes).unwrap();
+    for index in 0..2 {
+        assert_group_boxes(s.doc().unwrap().wb.sheet(0).unwrap(), &before, index);
+        assert_group_boxes(reopened.sheet(0).unwrap(), &before, index);
+    }
+    s.execute("edit.undo", json!({})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    for (group, old) in sh.groups.iter().zip(&before.groups) {
+        assert_eq!(group.anchor, old.anchor, "undo restores the group's anchor");
+    }
+}
+
+/// Only groups touching the sorted block keep their place on the sheet. A group beside it, or
+/// below it once a hidden row inside it takes another height, follows its moved rows like the
+/// ungrouped picture next to it.
+#[test]
+fn a_sort_leaves_groups_clear_of_the_block_to_follow_their_rows() {
+    let mut s = s();
+    s.execute("range.setValues", json!({"range": "A5", "values": [[6], [5], [4], [3], [2], [1]]})).unwrap();
+    let mut pictures = |cells: [&str; 3]| {
+        let [a, b, lone] = cells.map(|cell| DrawingRef::Image(add_image(&mut s, cell, AnchorMode::MoveAndSize)));
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let id = wb.next_object_id();
+        let sh = wb.sheet_mut(0).unwrap();
+        let (first, last) = (sh.drawing_rect(a).unwrap(), sh.drawing_rect(b).unwrap());
+        let rect = ObjectRect { w: last.x + last.w - first.x, ..first };
+        sh.groups.push(gridcraft_model::DrawingGroup {
+            id,
+            name: format!("Group {id}"),
+            anchor: sh.rect_anchor(rect, AnchorMode::MoveAndSize),
+            child_offset: (0, 0),
+            child_extent: ((rect.w * EMU_PER_PX) as i64, (rect.h * EMU_PER_PX) as i64),
+            flip: (false, false),
+            rotation: 0,
+            member_rotations: Vec::new(),
+            members: vec![a, b],
+            file: None,
+        });
+        [a, b, lone]
+    };
+    let beside = pictures(["H10", "J10", "L10"]);
+    let below = pictures(["H15", "J15", "L15"]);
+    {
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.rows.insert(5, gridcraft_model::LineInfo { size: Some(20.0), hidden: true, ..Default::default() });
+        sh.rows.insert(8, gridcraft_model::LineInfo { size: Some(60.0), custom: true, ..Default::default() });
+    }
+    let before = s.doc().unwrap().wb.sheets[0].clone();
+    s.execute("data.sort", json!({"range": "A5:A10", "header": false, "keys": [{"column": "A"}]})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    for [a, b, lone] in [beside, below] {
+        let (was, now) = (before.drawing_rect(lone).unwrap(), sh.drawing_rect(lone).unwrap());
+        assert!((was.y - now.y).abs() > 20.0, "the picture's rows moved: {was:?} -> {now:?}");
+        for member in [a, b] {
+            let (old, got) = (before.drawing_rect(member).unwrap(), sh.drawing_rect(member).unwrap());
+            assert_rect(got, ObjectRect { y: now.y, h: now.h, ..old }, "grouped picture follows its rows");
+        }
+    }
+}
+
 /// The row fit after a deletion re-measures the chart against the remapped rows.
 #[test]
 fn a_row_fit_after_a_deletion_sizes_the_shifted_chart() {

@@ -2,10 +2,18 @@ use super::{
     Anchor, AnchorMode, Arc, Cell, CellRef, Comment, EngineError, Hyperlink, Json, LineInfo, Ordering, RangeRef, Result, Session, Sheet, Value, bad,
     bool_param, col_param, data_range, edit, guess_header, json, ok, sort_compare, split_sheet, str_param, target_sheet,
 };
+use gridcraft_model::ObjectRect;
 
 enum SortGeometry {
-    Grouped { top: f64 },
-    Refit { bottom: (u32, u32, f32, f32) },
+    /// In a group touching the sorted block: keeps its place on the sheet.
+    Grouped {
+        top: f64,
+    },
+    /// In a group clear of the block: left to follow the line changes by its mode.
+    Follow,
+    Refit {
+        bottom: (u32, u32, f32, f32),
+    },
 }
 
 #[derive(Clone)]
@@ -228,16 +236,21 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
             v
         };
         // Read geometry before the row heights are permuted. Ungrouped objects may be refitted
-        // to their new lines using their bottom-right corner. Groups and their members keep
-        // their sheet position, not their position relative to the permuted rows.
-        let grouped = sh.grouped_objects();
+        // to their new lines using their bottom-right corner. Groups touching the sorted block,
+        // and their members, keep their sheet position, not their position relative to the
+        // permuted rows; other groups follow the line changes like any drawing outside it.
+        let (x0, y0) = (sh.col_left(body.start.col), sh.row_top(body.start.row));
+        let block = ObjectRect { x: x0, y: y0, w: sh.col_left(body.end.col + 1) - x0, h: sh.row_top(body.end.row + 1) - y0 };
+        let grouped = sh.grouped_objects(block);
         let objs: Vec<_> = sh
             .object_refs()
             .zip(sh.object_anchors().copied())
             .map(|(o, a)| {
                 let top = sh.row_top(a.cell.row) + f64::from(a.dy);
-                if grouped.contains(&o) {
-                    return (o, a, SortGeometry::Grouped { top });
+                match grouped.get(&o) {
+                    Some(true) => return (o, a, SortGeometry::Grouped { top }),
+                    Some(false) => return (o, a, SortGeometry::Follow),
+                    None => {}
                 }
                 let x2 = sh.col_left(a.cell.col) + a.dx as f64 + a.width.max(0.0) as f64;
                 let y2 = top + f64::from(a.height.max(0.0));
@@ -293,6 +306,7 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
             .map(|(o, a, geometry)| {
                 let anchor = match geometry {
                     SortGeometry::Grouped { top } => Some(fixed_sort_anchor(shm, a, top)),
+                    SortGeometry::Follow => None,
                     SortGeometry::Refit { bottom } => {
                         let other = if by_cols { a.cell.row } else { a.cell.col };
                         if other < o0 || other > o1 { None } else { sorted_anchor(shm, a, bottom, by_cols, b0, b1, &dst_of) }
