@@ -53,6 +53,8 @@ Base: published X11 form drop-downs head `b435c44f`. Legacy form check boxes bec
 - `crates/engine/src/cmd/controls.rs`: `insert.checkBoxControl`; `control.list` reports `kind: "checkBox"`, `value` (0/1/2), `state`, `text`, `link`, `threeD`; `control.setValue` takes `false`/`true`, 0/1/2 or the state name (it reuses the slider/drop-down convention rather than `control.press`, which stays the button's run-an-action command, so the state is explicit and scripts can set mixed). `control.format` sets caption, state, link and `threeD`. Linked-cell writes go through `cell.set`, so Undo, protection (a locked linked cell on a protected sheet refuses the change) and the linked-cell sync behave as for sliders and drop-downs; links move with structural edits and renames through the shared control-link rewrite.
 - `crates/ui-egui/src/{form_controls,control_ui}.rs`, `ribbon/insert.rs`: draws the box, tick or mixed shading and caption; a click or Space toggles (mixed → checked); Format Control has caption, state, cell link and 3-D shading; Insert > Controls has Check Box.
 
+Public corpus (GridCraft CLI `control.list`, 46 workbooks): the review fixes raised editable legacy check boxes from 536 to 1,185 of 1,231. By comparing editable counts with VML checkbox counts, fully editable workbooks rose from 16 to 36, partial fell from 11 to 6, and none-editable fell from 19 to 4. No workbook lost editable check boxes, and the CLI reported no errors. This measures import coverage, not Excel rendering or round-trip fidelity.
+
 Measured (Excel object model, synthetic workbook): Excel lists all three VML-only check boxes `GC Check 1..3` by name at every stage.
 
 Documented, not measured (Microsoft's form check box documentation, ECMA-376, [MS-OI29500], [MS-XLSX]):
