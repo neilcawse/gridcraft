@@ -509,10 +509,11 @@ fn references_into_linked_workbooks_read_the_saved_values() {
     let prices = ExternalSheet {
         name: "P&L Prices".into(),
         cells: vec![(c("A1"), Value::text("gas")), (c("B1"), Value::Number(4.5)), (c("A2"), Value::text("power")), (c("B2"), Value::Number(61.0))],
-        refresh_error: false,
+        ..Default::default()
     };
-    let rates = ExternalSheet { name: "Rates".into(), cells: vec![(c("C3"), Value::Number(2.0))], refresh_error: false };
-    let failed = ExternalSheet { name: "Failed".into(), cells: vec![(c("A1"), Value::Number(9.0))], refresh_error: true };
+    let rates = ExternalSheet { name: "Rates".into(), cells: vec![(c("C3"), Value::Number(2.0))], ..Default::default() };
+    let failed = ExternalSheet { name: "Failed".into(), cells: vec![(c("A1"), Value::Number(9.0))], refresh_error: true, ..Default::default() };
+    let unreadable = ExternalSheet { name: "Unreadable".into(), refresh_error: true, ..Default::default() };
     let names = vec![
         ExternalName { name: "Gas".into(), sheet: None, refers_to: "'P&L Prices'!$B$1".into() },
         ExternalName { name: "Rate".into(), sheet: Some(1), refers_to: "$C$3".into() },
@@ -524,7 +525,8 @@ fn references_into_linked_workbooks_read_the_saved_values() {
         ExternalName { name: "Span".into(), sheet: None, refers_to: "Rates:Failed!$A$1".into() },
         ExternalName { name: "Loose".into(), sheet: None, refers_to: "$E$9".into() },
     ];
-    t.wb.external_books = vec![ExternalBook::default(), ExternalBook { sheets: vec![prices, rates, failed], names, ..Default::default() }].into();
+    t.wb.external_books =
+        vec![ExternalBook::default(), ExternalBook { sheets: vec![prices, rates, failed, unreadable], names, ..Default::default() }].into();
     t.wb.names.push(gridcraft_model::DefinedName {
         name: "Price".into(),
         scope: None,
@@ -552,11 +554,13 @@ fn references_into_linked_workbooks_read_the_saved_values() {
     // A reference Excel found deleted in a linked workbook is #REF!.
     t.set("A14", "=[2]Rates!#REF!+1");
     assert_eq!(t.get("A14"), Value::Error(CellError::Ref));
-    // A whole column, or more columns than a block can hold, reaches the same uncached cells.
+    // A whole column, or more columns than a block can hold, reaches the same uncached cells, and
+    // every cell of a failed sheet that saved none is #REF!.
     t.set("A11", "=SUM([2]Failed!A:A)");
     t.set("A12", "=SUM([2]Failed!A1:A2)");
     t.set("A13", "=SUM([2]Failed!A:Z)");
-    for at in ["A11", "A12", "A13"] {
+    t.set("A15", "=[2]Unreadable!C3");
+    for at in ["A11", "A12", "A13", "A15"] {
         assert_eq!(t.get(at), Value::Error(CellError::Ref), "{at}");
     }
     // The linked workbook's own names: workbook-scoped and sheet-scoped.
@@ -586,11 +590,43 @@ fn references_into_linked_workbooks_read_the_saved_values() {
 }
 
 #[test]
+fn external_names_resolve_on_sheets_with_literal_exclamation_marks() {
+    use gridcraft_model::{ExternalBook, ExternalName, ExternalSheet};
+    let mut t = T::new();
+    let sheet = ExternalSheet {
+        name: "A!B's".into(),
+        cells: vec![(c("A1"), Value::Number(4.0)), (c("X1"), Value::Number(3.0)), (c("A2"), Value::Number(9.0))],
+        ..Default::default()
+    };
+    let names = vec![
+        ExternalName { name: "Rates".into(), sheet: Some(0), refers_to: "$A$1:$A$2".into() },
+        ExternalName { name: "Rates".into(), sheet: None, refers_to: "'A!B''s'!$X$1".into() },
+        ExternalName { name: "Alias".into(), sheet: None, refers_to: "'A!B''s'!Rates".into() },
+    ];
+    t.wb.external_books = vec![ExternalBook { sheets: vec![sheet], names, ..Default::default() }].into();
+    for (at, text, value) in [
+        ("B1", "='[1]A!B''s'!X1", 3.0),
+        ("B2", "=@'[1]A!B''s'!Rates", 9.0),
+        ("C2", "=[1]!Rates", 3.0),
+        ("D2", "=SUMPRODUCT(SQRT('[1]A!B''s'!Rates))", 5.0),
+        ("E2", "=SUM([1]!Alias)", 13.0),
+    ] {
+        t.set(at, text);
+        assert_eq!(t.get(at), Value::Number(value), "{text}");
+    }
+    // An index too large for any link names no linked workbook, like `[2]` here.
+    for (at, text) in [("F2", "=[2]!Rates"), ("G2", "=[18446744073709551616]!Rates")] {
+        t.set(at, text);
+        assert_eq!(t.get(at), Value::Error(CellError::Ref), "{text}");
+    }
+}
+
+#[test]
 fn linked_names_that_cannot_be_calculated_keep_their_saved_value() {
     use gridcraft_model::{ExternalBook, ExternalName, ExternalSheet};
     let mut t = T::new();
-    let data = ExternalSheet { name: "Data".into(), cells: vec![(c("A1"), Value::Number(7.0))], refresh_error: false };
-    let failed = ExternalSheet { name: "Failed".into(), cells: vec![], refresh_error: true };
+    let data = ExternalSheet { name: "Data".into(), cells: vec![(c("A1"), Value::Number(7.0))], ..Default::default() };
+    let failed = ExternalSheet { name: "Failed".into(), cells: vec![], refresh_error: true, ..Default::default() };
     let name = |name: &str, refers_to: &str| ExternalName { name: name.into(), sheet: None, refers_to: refers_to.into() };
     let names = vec![
         name("Broken", "#REF!"),
@@ -630,8 +666,8 @@ fn linked_names_that_cannot_be_calculated_keep_their_saved_value() {
         assert_eq!([t.num("B3"), t.num("B4"), t.num("B5"), t.num("B6")], [3.0, 4.0, 5.0, 6.0]);
         // What the saved values can answer is calculated, and users of a kept value see it.
         assert_eq!((t.num("B7"), t.num("B10")), (14.0, 21.0));
-        // A name the link doesn't define, a refresh-error sheet's unsaved cell, and a formula
-        // with no saved value are still #REF!.
+        // A name the link doesn't define, a cell of a refresh-error sheet that saved no cells,
+        // and a formula with no saved value are still #REF!.
         for at in ["B8", "B9", "B11"] {
             assert_eq!(t.get(at), Value::Error(CellError::Ref), "{at}");
         }
@@ -750,6 +786,30 @@ fn dde_and_ole_links_read_saved_items_and_keep_other_values() {
 }
 
 #[test]
+fn quoted_dde_items_read_their_saved_values() {
+    use gridcraft_core::Array;
+    use gridcraft_model::ExternalBook;
+    let mut t = T::new();
+    // An item that isn't a plain word is quoted in the formula (`''` for a quote), not in the link.
+    let column = Value::from(Array::new(3, 1, vec![Value::text("first"), Value::text("second"), Value::text("third")]).unwrap());
+    let items = vec![("'bid[slot]!ask'".into(), column), ("it's".into(), Value::Number(7.0))];
+    t.wb.external_books = vec![ExternalBook { opaque: true, items, ..Default::default() }].into();
+    t.set("A1", "=ROWS([1]!'''bid[slot]!ask''')");
+    t.set("A2", "=INDEX([1]!'''bid[slot]!ask''',3)");
+    t.set("A3", "=[1]!'it''s'*2");
+    assert_eq!((t.num("A1"), t.get("A2"), t.num("A3")), (3.0, Value::text("third"), 14.0));
+    t.set("B1", "=@[1]!'''bid[slot]!ask'''");
+    let mut cse = Formula::new("=[1]!'''bid[slot]!ask'''");
+    cse.array = gridcraft_core::RangeRef::parse("C1:C2");
+    t.wb.sheet_mut(0).unwrap().cells.set(c("C1"), Cell::formula(cse));
+    t.calc.cells_changed(&mut t.wb, &[(0, c("C1"))]);
+    assert_eq!(
+        [t.get("B1"), t.get("B2"), t.get("C1"), t.get("C2")],
+        [Value::text("first"), Value::Empty, Value::text("first"), Value::text("second")]
+    );
+}
+
+#[test]
 fn if_family_range_arguments_with_a_deleted_linked_reference_are_ref() {
     let mut t = T::new();
     t.set("A1", "1");
@@ -771,7 +831,7 @@ fn references_into_linked_workbooks_keep_their_position_and_size() {
     }
     cells.sort_by_key(|(p, _)| *p);
     t.wb.external_books =
-        vec![ExternalBook { sheets: vec![ExternalSheet { name: "Data".into(), cells, refresh_error: false }], ..Default::default() }].into();
+        vec![ExternalBook { sheets: vec![ExternalSheet { name: "Data".into(), cells, ..Default::default() }], ..Default::default() }].into();
     // `@` takes the cell on the formula's row (or column), as for this workbook's references.
     for at in ["D2", "D3", "D4", "D5", "D6"] {
         t.set(at, "=@[1]Data!B:B");
@@ -799,6 +859,147 @@ fn references_into_linked_workbooks_keep_their_position_and_size() {
 }
 
 #[test]
+fn linked_sheets_saved_without_cells_keep_the_saved_values() {
+    use gridcraft_model::{ExternalBook, ExternalSheet};
+    let mut t = T::new();
+    // The link names the sheets but saved no `sheetData` for them: nothing to calculate with.
+    let missing = |name: &str| ExternalSheet { name: name.into(), missing: true, ..Default::default() };
+    let saved_one = ExternalSheet { name: "Kept".into(), cells: vec![(c("A1"), Value::Number(3.0))], ..Default::default() };
+    t.wb.external_books = vec![ExternalBook { sheets: vec![missing("Rates"), missing("Census"), saved_one], ..Default::default() }].into();
+    let saved = [
+        ("A1", "=[1]Rates!$W$29", Value::text("")),
+        ("A2", "='[1]Census'!B33", Value::Number(1.0)),
+        ("A3", "=SUM([1]Census!A1:A9)+1", Value::Number(7.0)),
+        ("A4", "=A2+[1]Kept!A1", Value::Number(0.0)),
+    ];
+    for (at, formula, value) in saved {
+        let mut cell = Cell::formula(Formula::new(formula));
+        cell.value = value;
+        t.wb.sheet_mut(0).unwrap().cells.set(c(at), cell);
+    }
+    for _ in 0..2 {
+        t.calc.recalc_all(&mut t.wb);
+        assert_eq!((t.get("A1"), t.num("A2"), t.num("A3")), (Value::text(""), 1.0, 7.0));
+        // A sheet the link did save is read, and formulas over kept values see them.
+        assert_eq!(t.num("A4"), 4.0);
+    }
+}
+
+#[test]
+fn lookups_into_an_unreadable_linked_sheet_are_na_and_error_indexes_come_first_elsewhere() {
+    use gridcraft_model::{ExternalBook, ExternalSheet};
+    let mut t = T::new();
+    // Synthetic failed sheet with no cached cells. The opspackage cache shows #N/A when the
+    // lookup index itself reads an uncached cell (#REF!) of the failed table's sheet.
+    let data = ExternalSheet { name: "Data".into(), refresh_error: true, ..Default::default() };
+    t.wb.external_books = vec![ExternalBook { sheets: vec![data], ..Default::default() }].into();
+    t.set("A1", "46349");
+    t.set("B1", "=VLOOKUP(A1,[1]Data!$E$1:$FM$65536,[1]Data!$FI$1)");
+    t.set("B2", "=-VLOOKUP(A1,'[1]Data'!$B$4:$AM$3999,'[1]Data'!$AA$1,FALSE)");
+    t.set("B3", "=HLOOKUP(A1,[1]Data!$A$1:$Z$9,[1]Data!$A$12)");
+    t.set("B4", "=SUMPRODUCT([1]Data!C1:C9,[1]Data!D1:D9)");
+    t.set("B8", "=VLOOKUP(1/0,[1]Data!$A$1:$B$9,2)");
+    t.set("B9", "=VLOOKUP(A1,[1]Data!A1:B9,1/0,FALSE)");
+    t.set("B10", "=VLOOKUP(A1,[1]Data!A1:B9,2,#NAME?)");
+    t.set("B11", "=HLOOKUP(A1,[1]Data!A1:B9,10,FALSE)");
+    let na = Value::Error(CellError::NA);
+    assert_eq!([t.get("B1"), t.get("B2"), t.get("B3")], [na.clone(), na.clone(), na]);
+    assert_eq!((t.get("B4"), t.get("B8")), (Value::Error(CellError::Ref), Value::Error(CellError::Div0)));
+    assert_eq!(
+        [t.get("B9"), t.get("B10"), t.get("B11")],
+        [Value::Error(CellError::Div0), Value::Error(CellError::Name), Value::Error(CellError::Ref)]
+    );
+    // Over any other table an error index is the answer, whether or not the key is found.
+    for (at, v) in [("D1", "x"), ("D2", "y"), ("E1", "1"), ("E2", "2")] {
+        t.set(at, v);
+    }
+    t.set("B5", "=VLOOKUP(\"y\",D1:E2,1/0,FALSE)");
+    t.set("B6", "=VLOOKUP(\"z\",D1:E2,1/0,FALSE)");
+    t.set("B7", "=VLOOKUP(\"z\",{\"x\",1;\"y\",2},#NAME?,FALSE)");
+    assert_eq!(
+        [t.get("B5"), t.get("B6"), t.get("B7")],
+        [Value::Error(CellError::Div0), Value::Error(CellError::Div0), Value::Error(CellError::Name)]
+    );
+}
+
+#[test]
+fn lookups_into_unreadable_links_still_lift_over_arrays() {
+    use gridcraft_model::{ExternalBook, ExternalSheet};
+    let mut t = T::new();
+    let sheet = ExternalSheet { name: "Data".into(), refresh_error: true, ..Default::default() };
+    t.wb.external_books = vec![ExternalBook { sheets: vec![sheet], ..Default::default() }].into();
+    t.set("A1", "=VLOOKUP({1;#DIV/0!},[1]Data!A1:B2,{2;2},FALSE)");
+    t.set("C1", "=HLOOKUP(1,[1]Data!A1:B2,2,{TRUE,FALSE})");
+    t.set("E1", "=VLOOKUP(1,[1]Data!A1:B2,{#REF!;#DIV/0!},FALSE)");
+    t.set("F1", "=HLOOKUP(1,[1]Data!A1:B2,2,#NAME?)");
+    let na = Value::Error(CellError::NA);
+    assert_eq!([t.get("A1"), t.get("A2")], [na.clone(), Value::Error(CellError::Div0)]);
+    assert_eq!([t.get("C1"), t.get("D1")], [na.clone(), na]);
+    assert_eq!([t.get("E1"), t.get("E2"), t.get("F1")], [Value::Error(CellError::NA), Value::Error(CellError::Div0), Value::Error(CellError::Name)]);
+}
+
+#[test]
+fn linked_blank_cells_are_not_uncached_cells() {
+    use gridcraft_model::{ExternalBook, ExternalSheet};
+    let mut t = T::new();
+    let failed = ExternalSheet { name: "Failed".into(), refresh_error: true, cells: vec![(c("A1"), Value::Empty)], ..Default::default() };
+    let empty = ExternalSheet { name: "Empty".into(), ..Default::default() };
+    t.wb.external_books = vec![ExternalBook { sheets: vec![failed, empty], ..Default::default() }].into();
+    for (at, formula) in [
+        ("A1", "=ISBLANK([1]Failed!A1)"),
+        ("B1", "=ISBLANK([1]Failed!A1:A2)"),
+        ("C1", "=VLOOKUP(1,[1]Failed!A1:B2,#REF!,FALSE)"),
+        ("D1", "=VLOOKUP(1,[1]Empty!A1:B2,#REF!,FALSE)"),
+    ] {
+        t.set(at, formula);
+    }
+    assert_eq!([t.get("A1"), t.get("B1"), t.get("B2")], [Value::Bool(true), Value::Bool(true), Value::Bool(false)]);
+    assert_eq!([t.get("C1"), t.get("D1")], [const { Value::Error(CellError::Ref) }; 2]);
+}
+
+#[test]
+fn approximate_lookups_over_a_whole_linked_column_search_the_whole_column() {
+    use gridcraft_model::{ExternalBook, ExternalSheet};
+    let mut t = T::new();
+    // Sort!C10:C147: a 3, a heading, ascending dates 35462.. in C12:C142, then 5s in C143:C147;
+    // D holds a value only beside the dates.
+    let mut cells = vec![(c("C10"), Value::Number(3.0)), (c("C11"), Value::text("ER Date"))];
+    for r in 12..=142u32 {
+        cells.push((CellRef::new(r - 1, 2), Value::Number(35_462.0 + 91.0 * f64::from(r - 12))));
+        cells.push((CellRef::new(r - 1, 3), Value::Number(f64::from(r))));
+    }
+    for r in 143..=147u32 {
+        cells.push((CellRef::new(r - 1, 2), Value::Number(5.0)));
+    }
+    cells.sort_by_key(|(p, _)| *p);
+    t.wb.external_books =
+        vec![ExternalBook { sheets: vec![ExternalSheet { name: "Sort".into(), cells: cells.clone(), ..Default::default() }], ..Default::default() }]
+            .into();
+    // Excel's bisection starts at the middle of the column, far past the saved cells: its first
+    // probe is the last number saved, a 5 below the key, so it answers with C147's row.
+    t.set("A1", "=VLOOKUP(35797,[1]Sort!$C:$Z,2,TRUE)");
+    t.set("A2", "=LOOKUP(35797,[1]Sort!$C:$C,[1]Sort!$D:$D)");
+    t.set("A3", "=LOOKUP(35797,[1]Sort!$C:$D)");
+    t.set("A4", "=HLOOKUP(5,[1]Sort!$1:$2,2)");
+    assert_eq!([t.num("A1"), t.num("A2"), t.num("A3")], [0.0, 0.0, 0.0]);
+    assert_eq!(t.get("A4"), Value::Error(CellError::NA));
+    // A block of the size written is searched as such.
+    t.set("A5", "=VLOOKUP(35797,[1]Sort!$C$1:$D$147,2,TRUE)");
+    assert_eq!(t.num("A5"), 15.0);
+    // This workbook's own whole columns are searched over the used range, as before.
+    for (p, v) in cells {
+        let text = match v {
+            Value::Number(n) => n.to_string(),
+            Value::Text(s) => s.to_string(),
+            _ => continue,
+        };
+        t.set(&p.to_string(), &text);
+    }
+    t.set("A6", "=VLOOKUP(35797,$C:$D,2,TRUE)");
+    assert_eq!(t.num("A6"), 15.0);
+}
+
+#[test]
 fn offset_refuses_a_base_in_a_linked_workbook() {
     use gridcraft_model::{ExternalBook, ExternalSheet};
     let mut t = T::new();
@@ -809,8 +1010,8 @@ fn offset_refuses_a_base_in_a_linked_workbook() {
     let backup = vec![(c("D38"), Value::Number(39.0))];
     t.wb.external_books = vec![ExternalBook {
         sheets: vec![
-            ExternalSheet { name: "Curve".into(), cells: curve, refresh_error: false },
-            ExternalSheet { name: "Backup".into(), cells: backup, refresh_error: false },
+            ExternalSheet { name: "Curve".into(), cells: curve, ..Default::default() },
+            ExternalSheet { name: "Backup".into(), cells: backup, ..Default::default() },
         ],
         ..Default::default()
     }]

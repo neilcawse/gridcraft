@@ -41,10 +41,11 @@ pub(crate) fn read(cx: &mut Ctx<'_>, wb_xml: &El, wb_rels: &[Rel]) -> Result<Vec
 
 /// Whether a formula is saved as the legacy formula it was read as, whatever it calculates to: it
 /// was read from a file without dynamic-array metadata (and isn't a Ctrl+Shift+Enter array, which
-/// keeps its range), and reads a linked workbook (`[1]Data!B:B`, `[1]!Rates`). Excel reads such a
-/// cell with implicit intersection; writing it as a dynamic array, because a linked range in it
-/// spills here, would change what Excel shows. Formulas typed over a linked workbook are saved
-/// like any other.
+/// keeps its range), reads a linked workbook (`[1]Data!B:B`, `[1]!Rates`), and reading it needed
+/// no `@` (a formula the reader rewrote with `@` is saved without them, like any legacy formula).
+/// Excel reads such a cell with implicit intersection; writing it as a dynamic array, because a
+/// linked range in it spills here, would change what Excel shows. Formulas typed over a linked
+/// workbook are saved like any other.
 pub(crate) fn saved_as_read(formula: &gridcraft_model::Formula) -> bool {
     use gridcraft_formula::{Expr, SheetSel};
     let Some(expr) = formula.expr_arc().filter(|_| formula.legacy && formula.array.is_none()) else { return false };
@@ -95,21 +96,24 @@ fn dde_value(v: &El) -> Value {
 }
 
 fn book(x: &El) -> ExternalBook {
+    // A sheet the link saved no `sheetData` for stays missing: what references into it showed
+    // isn't known.
     let mut sheets: Vec<ExternalSheet> = x
         .child("sheetNames")
         .map(|n| {
             n.kids("sheetName")
-                .map(|s| ExternalSheet { name: s.attr("val").map(xml::decode_xstring).unwrap_or_default(), ..Default::default() })
+                .map(|s| ExternalSheet { name: s.attr("val").map(xml::decode_xstring).unwrap_or_default(), missing: true, ..Default::default() })
                 .collect()
         })
         .unwrap_or_default();
     for data in x.child("sheetDataSet").into_iter().flat_map(|d| d.kids("sheetData")) {
         let Some(sheet) = data.attr_u32("sheetId").and_then(|i| sheets.get_mut(i as usize)) else { continue };
+        sheet.missing = false;
         sheet.refresh_error = data.flag("refreshError", false);
         for c in data.kids("row").flat_map(|r| r.kids("cell")) {
             let Some(pos) = c.attr("r").and_then(CellRef::parse).filter(|p| p.row < MAX_ROWS && p.col < MAX_COLS) else { continue };
             let v = value(c);
-            if !v.is_empty() {
+            if !v.is_empty() || (sheet.refresh_error && c.child("v").is_none()) {
                 sheet.cells.push((pos, v));
             }
         }
@@ -160,6 +164,32 @@ mod tests {
     }
 
     #[test]
+    fn sheets_saved_without_cells_are_missing_and_failed_refreshes_are_kept() {
+        use gridcraft_core::{CellRef, Value};
+        let x = br#"<externalBook><sheetNames><sheetName val="Stock "/><sheetName val="Failed"/><sheetName val="Unsaved"/><sheetName val="Blank"/><sheetName val="Empty"/></sheetNames><sheetDataSet><sheetData sheetId="0" refreshError="1"><row r="1"><cell r="B1" t="str"><v>AAPL</v></cell><cell r="C1"/><cell r="D1" t="str"><v/></cell></row></sheetData><sheetData sheetId="1" refreshError="1"/><sheetData sheetId="3" refreshError="1"><row r="1"><cell r="A1"/></row></sheetData><sheetData sheetId="4"/></sheetDataSet></externalBook>"#;
+        let book = super::book(&crate::xml::parse(x).unwrap());
+        let flags: Vec<_> = book.sheets.iter().map(|s| (s.name.as_str(), s.refresh_error, s.missing, s.unreadable())).collect();
+        assert_eq!(
+            flags,
+            [
+                ("Stock ", true, false, false),
+                ("Failed", true, false, true),
+                ("Unsaved", false, true, false),
+                ("Blank", true, false, false),
+                ("Empty", false, false, false)
+            ]
+        );
+        // A cell saved without a value is blank; one saved as an empty string is "".
+        let stock = book.sheet("stock ").unwrap();
+        let at = |s: &str| CellRef::parse(s).unwrap();
+        assert_eq!((stock.value(at("B1")), stock.value(at("C1")), stock.value(at("D1"))), (Value::text("AAPL"), Value::Empty, Value::text("")));
+        assert_eq!(book.sheet("Blank").unwrap().cells, [(at("A1"), Value::Empty)]);
+        // A link saved without any `sheetDataSet` has every sheet missing.
+        let bare = super::book(&crate::xml::parse(br#"<externalBook><sheetNames><sheetName val="Rates"/></sheetNames></externalBook>"#).unwrap());
+        assert!(bare.sheets.iter().all(|s| s.missing));
+    }
+
+    #[test]
     fn dde_ole_and_missing_links_are_opaque_and_keep_positions() {
         use gridcraft_core::{Array, Value};
         const NS: &str = r#"xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main""#;
@@ -189,5 +219,46 @@ mod tests {
         assert_eq!(books[0].item("ene"), Some(&Value::Number(85.33)));
         assert!(books[1].items.is_empty() && books[2].items.is_empty());
         assert_eq!(books[3].sheet_index("Data"), Some(0));
+    }
+
+    /// A legacy formula over a DDE item saved as an array shows its first value, as Excel does,
+    /// and is saved as written; a Ctrl+Shift+Enter array over it keeps the whole item.
+    #[test]
+    fn legacy_formulas_over_array_dde_items_read_with_implicit_intersection() {
+        const NS: &str = r#"xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main""#;
+        let dde = format!(
+            r#"<externalLink {NS}><ddeLink ddeService="MockService" ddeTopic="Topic"><ddeItems><ddeItem name="'bid!ask[slot]'"><values rows="2"><value t="str"><val>first</val></value><value t="str"><val>second</val></value></values></ddeItem><ddeItem name="Price"><values><value><val>8</val></value></values></ddeItem></ddeItems></ddeLink></externalLink>"#
+        );
+        let rels = r#"<Relationship Id="rId11" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink" Target="externalLinks/externalLink1.xml"/>"#;
+        let refs = r#"<externalReferences><externalReference r:id="rId11"/></externalReferences>"#;
+        let body = r#"<sheetData><row r="1"><c r="A1" t="str"><f>[1]!'''bid!ask[slot]'''</f><v>first</v></c><c r="B1"><f>[1]!Price</f><v>8</v></c><c r="C1" t="str"><f t="array" ref="C1:C2">[1]!'''bid!ask[slot]'''</f><v>first</v></c></row></sheetData>"#;
+        let parts = [("xl/externalLinks/externalLink1.xml", dde.as_str())];
+        let (wb, _) = crate::read_xlsx(&crate::tests::minimal(body, &parts, rels, refs)).unwrap();
+        let check_formulas = |wb: &gridcraft_model::Workbook| {
+            let sheet = wb.sheet(0).unwrap();
+            let text = |a: &str| sheet.cell(gridcraft_core::CellRef::parse(a).unwrap()).unwrap().formula.as_ref().unwrap().text.as_str();
+            assert_eq!((text("A1"), text("B1"), text("C1")), ("@[1]!'''bid!ask[slot]'''", "[1]!Price", "[1]!'''bid!ask[slot]'''"));
+        };
+        check_formulas(&wb);
+        let bytes = crate::write_xlsx(&wb).unwrap();
+        let sheet = crate::package::Package::open(&bytes).unwrap().read_xml("xl/worksheets/sheet1.xml").unwrap().unwrap();
+        let saved = sheet.child("sheetData").unwrap().kids("row").flat_map(|r| r.kids("c")).find(|c| c.attr("r") == Some("A1")).unwrap();
+        assert_eq!((saved.attr("cm"), saved.child("f").unwrap().text.as_str()), (None, "[1]!'''bid!ask[slot]'''"));
+        let (reopened, _) = crate::read_xlsx(&bytes).unwrap();
+        check_formulas(&reopened);
+    }
+
+    #[test]
+    fn legacy_dde_array_does_not_pick_up_a_same_named_local_definition() {
+        // Synthetic workbook: `[1]!Quote` and the local scalar `Quote` are different names.
+        let link = r#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><ddeLink ddeService="MockService" ddeTopic="Topic"><ddeItems><ddeItem name="Quote"><values rows="2"><value><val>8</val></value><value><val>9</val></value></values></ddeItem></ddeItems></ddeLink></externalLink>"#;
+        let rels = r#"<Relationship Id="rId11" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink" Target="externalLinks/externalLink1.xml"/>"#;
+        let refs = r#"<externalReferences><externalReference r:id="rId11"/></externalReferences><definedNames><definedName name="Quote">2</definedName></definedNames>"#;
+        let body = r#"<sheetData><row r="1"><c r="A1"><f>[1]!Quote</f><v>8</v></c></row></sheetData>"#;
+        let parts = [("xl/externalLinks/externalLink1.xml", link)];
+        let (wb, _) = crate::read_xlsx(&crate::tests::minimal(body, &parts, rels, refs)).unwrap();
+        assert!(wb.name("Quote", 0).is_some());
+        let cell = wb.sheet(0).unwrap().cell(gridcraft_core::CellRef::new(0, 0)).unwrap();
+        assert_eq!(cell.formula.as_ref().unwrap().text, "@[1]!Quote");
     }
 }

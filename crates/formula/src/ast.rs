@@ -39,14 +39,30 @@ pub enum SheetSel {
     Span(String, String),
 }
 
+/// `[2]Prices` → `("2", "Prices")`: the all-digit workbook index as written, and the rest.
+fn book_digits(sheet: &str) -> Option<(&str, &str)> {
+    let (book, rest) = sheet.strip_prefix('[')?.split_once(']')?;
+    (!book.is_empty() && book.bytes().all(|b| b.is_ascii_digit())).then_some((book, rest))
+}
+
 /// `[2]Prices` (a sheet in linked workbook 2) → `(2, "Prices")`; `[2]` alone (before a linked
 /// workbook's name) → `(2, "")`. `None` when the name has no workbook index.
 pub(crate) fn book_prefix(sheet: &str) -> Option<(usize, &str)> {
-    let (book, rest) = sheet.strip_prefix('[')?.split_once(']')?;
-    if book.is_empty() || !book.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
+    let (book, rest) = book_digits(sheet)?;
     Some((book.parse().ok()?, rest))
+}
+
+/// Splits a decoded `Expr::Name` into the workbook index, sheet (empty for a bare book),
+/// and name or DDE item. The item keeps its original quotes and punctuation. The lexer accepts
+/// any all-digit index; one too large for `usize` is `usize::MAX`, which, like any index past
+/// the last link, names no linked workbook.
+pub fn split_external_name(name: &str) -> Option<(usize, &str, &str)> {
+    let (book, rest) = book_digits(name)?;
+    let (sheet, name) = match rest.strip_prefix('!') {
+        Some(item) if item.starts_with('\'') && item.ends_with('\'') => ("", item),
+        _ => rest.rsplit_once('!')?,
+    };
+    (!name.is_empty()).then(|| (book.parse().unwrap_or(usize::MAX), sheet, name))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

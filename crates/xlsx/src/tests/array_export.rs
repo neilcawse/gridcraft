@@ -467,32 +467,95 @@ fn implicit_intersection_metadata_distinguishes_table_rows_and_columns() {
     );
 }
 
-/// A legacy formula over a linked workbook (read without `cm`) is saved as it was read, even when
-/// it spills here: Excel reads it with implicit intersection. One read as a dynamic array, or
-/// typed, is saved by its shape, whether or not it spills.
+/// A legacy formula over a linked workbook (read without `cm`) reads with Excel's implicit
+/// intersection, like any legacy formula, and is saved as it was read, without the `@`. One read
+/// as a dynamic array, or typed, is saved by its shape, whether or not it spills.
 #[test]
-fn legacy_formulas_into_linked_workbooks_stay_legacy_even_when_they_spill() {
-    let body = r#"<sheetData><row r="6"><c r="D6"><f>[1]Data!B:B</f><v>14</v></c><c r="E6" cm="1"><f t="array" ref="E6:E8">[1]Data!B2:B4</f><v>1</v></c></row></sheetData>"#;
+fn legacy_formulas_into_linked_workbooks_read_with_implicit_intersection() {
+    let body = r#"<sheetData><row r="6"><c r="D6"><f>[1]Data!B:B</f><v>14</v></c><c r="E6" cm="1"><f t="array" ref="E6:E8">[1]Data!B2:B4</f><v>1</v></c><c r="G6"><f>SUM('[1]Data'!$S$3:$S$255+1)</f><v>2</v></c></row></sheetData>"#;
     let (mut wb, _) = read_xlsx(&super::minimal(body, &[], "", "")).unwrap();
+    let text = |wb: &Workbook, a: &str| wb.sheet(0).unwrap().cell(at(a)).unwrap().formula.as_ref().unwrap().text.clone();
+    assert_eq!(text(&wb, "D6"), "@[1]Data!B:B");
+    assert_eq!(text(&wb, "G6"), "SUM(@[1]Data!$S$3:$S$255+1)");
     let sh = wb.sheet_mut(0).unwrap();
-    // As calculated: both spill.
-    for (a, r) in [("D6", "D6:D11"), ("E6", "E6:E8")] {
-        sh.spill_ranges.insert(at(a), range(r));
-        for c in range(r).iter().skip(1) {
-            sh.spill.insert(c, Value::Number(1.0));
-        }
+    // As calculated: the dynamic array spills.
+    sh.spill_ranges.insert(at("E6"), range("E6:E8"));
+    for c in range("E6:E8").iter().skip(1) {
+        sh.spill.insert(c, Value::Number(1.0));
     }
     // Typed, blocked by a value under it: no spill.
     sh.cells.set(at("F6"), formula("[1]Data!B2:B4", 0.0));
     sh.cells.set(at("F7"), Cell::value(Value::Number(1.0)));
     let bytes = write_xlsx(&wb).unwrap();
     let sheet = Package::open(&bytes).unwrap().read_xml("xl/worksheets/sheet1.xml").unwrap().unwrap();
-    assert_scalar(&sheet, "D6");
-    assert_eq!(cell(&sheet, "D6").child("f").unwrap().text, "[1]Data!B:B");
-    assert!(sheet.child("sheetData").unwrap().kids("row").flat_map(|r| r.kids("c")).all(|c| c.attr("r") != Some("D7")), "no spilled values");
+    for (a, f) in [("D6", "[1]Data!B:B"), ("G6", "SUM([1]Data!$S$3:$S$255+1)")] {
+        assert_scalar(&sheet, a);
+        assert_eq!(cell(&sheet, a).child("f").unwrap().text, f);
+    }
     assert_dynamic(&sheet, "E6", "E6:E8");
     assert_eq!(cell(&sheet, "F6").attr("cm"), Some("1"));
 }
+
+#[test]
+fn legacy_external_range_names_intersect_only_in_value_positions() {
+    let cases = [
+        ("B2", "[1]!Rates", "@[1]!Rates"),
+        ("C2", "SUM(SQRT([1]!Rates))", "SUM(SQRT(@[1]!Rates))"),
+        ("D2", "SUM('[1]A!B''s'!Rates*2)", "SUM(@'[1]A!B''s'!Rates*2)"),
+        ("E2", "SUMPRODUCT(SQRT('[1]A!B''s'!Rates))", "SUMPRODUCT(SQRT('[1]A!B''s'!Rates))"),
+        ("F2", "SUM([1]!Rates)", "SUM([1]!Rates)"),
+        ("G2", "[1]!FixedRate*2", "[1]!FixedRate*2"),
+    ];
+    let mut body = String::from(r#"<sheetData><row r="2">"#);
+    for (at, file, _) in cases {
+        body.push_str(&format!(r#"<c r="{at}"><f>{file}</f><v>0</v></c>"#));
+    }
+    body.push_str(r#"<c r="H2" cm="1"><f t="array" ref="H2:H3">SQRT([1]!Rates)</f><v>2</v></c></row></sheetData>"#);
+    let link = r#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><externalBook><sheetNames><sheetName val="A!B's"/></sheetNames><definedNames><definedName name="Rates" refersTo="'A!B''s'!$A$1:$A$2"/><definedName name="Rates" sheetId="0" refersTo="$A$1:$A$2"/><definedName name="FixedRate" refersTo="'A!B''s'!$A$1"/></definedNames><sheetDataSet><sheetData sheetId="0"/></sheetDataSet></externalBook></externalLink>"#;
+    let bytes = super::minimal(
+        &body,
+        &[("xl/externalLinks/externalLink1.xml", link)],
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink" Target="externalLinks/externalLink1.xml"/>"#,
+        r#"<externalReferences><externalReference r:id="rId2"/></externalReferences>"#,
+    );
+    let (wb, _) = read_xlsx(&bytes).unwrap();
+    let saved = write_xlsx(&wb).unwrap();
+    let xml = Package::open(&saved).unwrap().read_xml("xl/worksheets/sheet1.xml").unwrap().unwrap();
+    let (reopened, _) = read_xlsx(&saved).unwrap();
+    for (address, file, evaluated) in cases {
+        for book in [&wb, &reopened] {
+            let formula = book.sheet(0).and_then(|s| s.cell(at(address))).and_then(|c| c.formula.as_ref()).unwrap();
+            assert_eq!(formula.text, evaluated, "{address}");
+        }
+        assert_scalar(&xml, address);
+        assert_eq!(cell(&xml, address).child("f").unwrap().text, file);
+    }
+    let dynamic = cell(&xml, "H2");
+    assert_eq!(dynamic.attr("cm"), Some("1"));
+    assert_eq!(dynamic.child("f").unwrap().text, "SQRT([1]!Rates)");
+}
+
+#[test]
+fn unreadable_external_name_ignores_same_named_host_range() {
+    let body = r#"<sheetData><row r="2"><c r="B2"><f>[1]!Rates</f><v>17</v></c><c r="C2"><f>Rates</f><v>0</v></c><c r="D2"><f>[18446744073709551616]!Rates</f><v>0</v></c></row></sheetData>"#;
+    // The link contains a definition but no saved sheet data. The host range is unrelated, also
+    // to an index too large for any link.
+    let link = r#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><externalBook><sheetNames><sheetName val="Remote"/></sheetNames><definedNames><definedName name="Rates" refersTo="Remote!$A$1:$A$3"/></definedNames></externalBook></externalLink>"#;
+    let bytes = super::minimal(
+        body,
+        &[("xl/externalLinks/externalLink1.xml", link)],
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink" Target="externalLinks/externalLink1.xml"/>"#,
+        r#"<externalReferences><externalReference r:id="rId2"/></externalReferences><definedNames><definedName name="Rates">Data!$A$1:$A$3</definedName></definedNames>"#,
+    );
+    let (wb, _) = read_xlsx(&bytes).unwrap();
+    let sheet = wb.sheet(0).unwrap();
+    let linked = sheet.cell(at("B2")).unwrap();
+    assert_eq!(linked.formula.as_ref().unwrap().text, "[1]!Rates");
+    assert_eq!(linked.value, Value::Number(17.0));
+    assert_eq!(sheet.cell(at("C2")).unwrap().formula.as_ref().unwrap().text, "@Rates");
+    assert_eq!(sheet.cell(at("D2")).unwrap().formula.as_ref().unwrap().text, "[18446744073709551616]!Rates");
+}
+
 /// How `export` saved a formula, as comparable text.
 fn export_text(wb: &Workbook, at: CellRef, text: &str, names: &mut crate::array_formula::NameCache) -> String {
     use crate::array_formula::{Export, export};

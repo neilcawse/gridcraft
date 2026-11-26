@@ -147,9 +147,12 @@ pub fn struct_ref_file(s: &StructRef) -> String {
     write_struct_ref(s, false)
 }
 
-/// Splits a sheet-qualified name at its last `!` outside brackets. A `!` inside brackets
-/// belongs to a structured reference's column (`Table1[Done!]`, `Table1[#REF!]`).
-fn sheet_split(n: &str) -> Option<(&str, &str)> {
+/// Splits a qualified name at the last `!` outside brackets. After a numeric workbook index,
+/// the sheet is already decoded, and a bare-book DDE item may itself contain `!` or brackets.
+pub fn split_qualified_name(n: &str) -> Option<(&str, &str)> {
+    if let Some((_, _, name)) = crate::ast::split_external_name(n) {
+        return Some((&n[..n.len() - name.len() - 1], name));
+    }
     let mut depth = 0usize;
     let mut escaped = false;
     let mut at = None;
@@ -275,7 +278,7 @@ fn write_expr(s: &mut String, e: &Expr, r1c1: Option<CellRef>) {
             s.push_str(&sheet_prefix(sheet));
             s.push_str("#REF!");
         }
-        Expr::Name(n) => match sheet_split(n) {
+        Expr::Name(n) => match split_qualified_name(n) {
             // A sheet-qualified name is stored with the bare sheet name (`My Sheet!Total`): quote it so it parses back.
             // A linked workbook's own name (`[1]!Rate`, `[Source.xlsx]!Rate`) has no sheet to quote.
             Some((sheet, name)) => {

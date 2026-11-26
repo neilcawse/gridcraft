@@ -362,7 +362,7 @@ fn typed_references_to_workbooks_that_are_not_linked_are_refused_on_entry() {
         sheets: vec![gridcraft_model::ExternalSheet {
             name: "S".into(),
             cells: vec![(CellRef::parse("A1").unwrap(), Value::Number(5.0))],
-            refresh_error: false,
+            ..Default::default()
         }],
         ..Default::default()
     };
@@ -3848,6 +3848,13 @@ fn export_csv_values_writes_raw_values_and_the_default_stays_displayed_text() {
 
 /// A workbook whose B1 is `=[1]Sheet1!A1`, linked to `link` (an external relationship target).
 fn linked_workbook(link: &str) -> Vec<u8> {
+    linked_workbook_with_data(
+        link,
+        r#"<sheetDataSet><sheetData sheetId="0"><row r="1"><cell r="A1"><v>10</v></cell></row></sheetData></sheetDataSet>"#,
+    )
+}
+
+fn linked_workbook_with_data(link: &str, data: &str) -> Vec<u8> {
     use std::io::{Cursor, Write};
     const NS_REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
     let types = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/externalLinks/externalLink1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.externalLink+xml"/></Types>"#.to_string();
@@ -3862,7 +3869,7 @@ fn linked_workbook(link: &str) -> Vec<u8> {
     );
     let sheet = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="B1"><f>[1]Sheet1!A1</f><v>10</v></c></row></sheetData></worksheet>"#.to_string();
     let link_part = format!(
-        r#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="{NS_REL}"><externalBook r:id="rId1"><sheetNames><sheetName val="Sheet1"/></sheetNames><sheetDataSet><sheetData sheetId="0"><row r="1"><cell r="A1"><v>10</v></cell></row></sheetData></sheetDataSet></externalBook></externalLink>"#
+        r#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="{NS_REL}"><externalBook r:id="rId1"><sheetNames><sheetName val="Sheet1"/></sheetNames>{data}</externalBook></externalLink>"#
     );
     let link_rels = format!(
         r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{NS_REL}/externalLinkPath" Target="{link}" TargetMode="External"/></Relationships>"#
@@ -3881,6 +3888,48 @@ fn linked_workbook(link: &str) -> Vec<u8> {
         zip.write_all(data.as_bytes()).unwrap();
     }
     zip.finish().unwrap().into_inner()
+}
+
+#[test]
+fn quoted_dde_item_with_punctuation_is_accepted_on_entry() {
+    let mut s = s();
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    wb.external_books = vec![gridcraft_model::ExternalBook {
+        opaque: true,
+        items: vec![("'bid[slot]!ask'".into(), Value::Number(8.0)), ("bid[slot]!ask".into(), Value::Number(9.0)), ("".into(), Value::Number(7.0))],
+        ..Default::default()
+    }]
+    .into();
+    let formula = "=[1]!'''bid[slot]!ask'''";
+    s.execute("cell.set", json!({"cell": "A1", "input": formula})).unwrap();
+    assert_eq!(v(&s, "A1"), Value::Number(8.0));
+    assert_eq!(s.execute("cell.get", json!({"cell": "A1"})).unwrap()["formula"], formula);
+    for (cell, input, expected) in [("A2", "=[1]!'bid[slot]!ask'", 9.0), ("A3", "=[1]!''", 7.0)] {
+        s.execute("cell.set", json!({"cell": cell, "input": input})).unwrap();
+        assert_eq!(v(&s, cell), Value::Number(expected));
+    }
+    assert!(s.execute("cell.set", json!({"cell": "A1", "input": "=[2]!'''bid[slot]!ask'''"})).is_err());
+}
+
+#[test]
+fn a_linked_sheet_without_sheet_data_keeps_its_formula_cache_through_reopen() {
+    // Synthetic XLSX: the link lists Sheet1, but provides no sheetData for it.
+    let mut s = s();
+    let bytes = linked_workbook_with_data("Missing.xlsx", "");
+    s.execute("file.open", json!({"name": "Linked.xlsx", "base64": crate::io::base64_encode(&bytes)})).unwrap();
+    assert_eq!(v(&s, "B1"), Value::Number(10.0));
+    s.execute("formulas.calculateNow", json!({})).unwrap();
+    assert_eq!(v(&s, "B1"), Value::Number(10.0));
+    s.execute("cell.set", json!({"cell": "A1", "input": "99"})).unwrap();
+    assert_eq!(v(&s, "B1"), Value::Number(10.0));
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(v(&s, "A1"), Value::Empty);
+    assert_eq!(v(&s, "B1"), Value::Number(10.0));
+    let saved = s.execute("file.saveBytes", json!({"format": "xlsx"})).unwrap();
+    s.execute("file.open", json!({"name": "Reopened.xlsx", "base64": saved["base64"]})).unwrap();
+    s.execute("formulas.calculateNow", json!({})).unwrap();
+    assert_eq!(v(&s, "B1"), Value::Number(10.0));
+    assert_eq!(s.execute("cell.get", json!({"cell": "B1"})).unwrap()["formula"], "=[1]Sheet1!A1");
 }
 
 /// The target of the linked workbook in a saved file.

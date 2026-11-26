@@ -117,7 +117,7 @@ fn sheets_named(e: &gridcraft_formula::Expr) -> Vec<(&str, bool)> {
             SheetSel::Span(a, b) => vec![(a.as_str(), false), (b.as_str(), true)],
             SheetSel::Current => vec![],
         },
-        Expr::Name(n) => n.rsplit_once('!').map(|(s, _)| vec![(s, false)]).unwrap_or_default(),
+        Expr::Name(n) => gridcraft_formula::printer::split_qualified_name(n).map(|(s, _)| vec![(s, false)]).unwrap_or_default(),
         _ => vec![],
     }
 }

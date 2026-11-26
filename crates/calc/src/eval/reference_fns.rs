@@ -4,6 +4,14 @@ use super::{Area, Arg, Array, CellError, Ev, Evaluator, Expr, FnCtx, MAX_CELLS, 
 use gridcraft_core::{CellRef, MAX_COLS, MAX_ROWS, RangeRef};
 use std::sync::Arc;
 
+/// How many entries an approximate search over the keys of `area`, read as `keys`, runs over:
+/// a range of a linked workbook is as long as written, its cells past the saved ones blank
+/// (`[1]Data!A:A` is a whole column, not the saved block); any other range as read.
+fn search_len(area: &Area, keys: &Area, vertical: bool) -> usize {
+    let r = if linked_parts(area.sheet).is_some() { area.range } else { keys.range };
+    (if vertical { r.height() } else { r.width() }) as usize
+}
+
 impl<'h> Evaluator<'h> {
     /// Whole rows/columns trimmed for ROW()/COLUMN() arrays.
     pub(super) fn trim_lines(&mut self, a: &Area) -> RangeRef {
@@ -316,16 +324,15 @@ impl<'h> Evaluator<'h> {
                 let r3 = matches!(e3, Some(Ev::R(_)));
                 let v3 = e3.map(|e| self.deref(e));
                 let max_len = if vertical { area.range.width() } else { area.range.height() } as usize;
-                let eff = self.read_range(&area);
-                let key_area = Area {
-                    sheet: area.sheet,
-                    range: if vertical {
-                        RangeRef::new(eff.start, CellRef::new(eff.end.row, eff.start.col))
-                    } else {
-                        RangeRef::new(eff.start, CellRef::new(eff.start.row, eff.end.col))
-                    },
+                let linked = linked_parts(area.sheet).is_some();
+                let (keys_val, len) = if self.linked_sheet(area.sheet).is_some_and(|s| s.unreadable()) {
+                    (None, 0)
+                } else {
+                    let eff = self.read_range(&area);
+                    let end = if vertical { CellRef::new(eff.end.row, eff.start.col) } else { CellRef::new(eff.start.row, eff.end.col) };
+                    let key_area = Area { sheet: area.sheet, range: RangeRef::new(eff.start, end) };
+                    (Some(self.area_value(&key_area)), search_len(&area, &key_area, vertical))
                 };
-                let keys_val = self.area_value(&key_area);
                 let read_hit = |this: &mut Self, pos: usize, idx: usize| -> Value {
                     let c = if vertical {
                         CellRef::new(area.range.start.row + pos as u32, area.range.start.col + idx as u32)
@@ -336,10 +343,19 @@ impl<'h> Evaluator<'h> {
                 };
                 let lifted = matches!(v0, Value::Array(_)) || matches!(v2, Value::Array(_)) || matches!(v3, Some(Value::Array(_)));
                 if !lifted {
-                    return Ev::V(match gridcraft_functions::vh_lookup_pos(&v0, &keys_val, (&v2, r2), v3.as_ref().map(|v| (v, r3)), max_len) {
-                        Ok((pos, idx)) => read_hit(self, pos, idx),
-                        Err(e) => Value::Error(e),
-                    });
+                    return Ev::V(
+                        match gridcraft_functions::vh_lookup_pos(
+                            &v0,
+                            keys_val.as_ref(),
+                            (&v2, r2),
+                            v3.as_ref().map(|v| (v, r3)),
+                            max_len,
+                            linked.then_some(len),
+                        ) {
+                            Ok((pos, idx)) => read_hit(self, pos, idx),
+                            Err(e) => Value::Error(e),
+                        },
+                    );
                 }
                 let as_arr = |v: &Value| match v {
                     Value::Array(a) => Arc::clone(a),
@@ -363,7 +379,14 @@ impl<'h> Evaluator<'h> {
                         let n0 = a0.get_broadcast(r, c);
                         let n2 = a2.get_broadcast(r, c);
                         let n3 = a3.as_ref().map(|a| a.get_broadcast(r, c));
-                        let v = match gridcraft_functions::vh_lookup_pos(&n0, &keys_val, (&n2, r2), n3.as_ref().map(|v| (v, r3)), max_len) {
+                        let v = match gridcraft_functions::vh_lookup_pos(
+                            &n0,
+                            keys_val.as_ref(),
+                            (&n2, r2),
+                            n3.as_ref().map(|v| (v, r3)),
+                            max_len,
+                            linked.then_some(len),
+                        ) {
                             Ok((pos, idx)) => read_hit(self, pos, idx),
                             Err(e) => Value::Error(e),
                         };
@@ -400,7 +423,8 @@ impl<'h> Evaluator<'h> {
                         },
                     };
                     let keys_val = self.area_value(&key_area);
-                    return Ev::V(match gridcraft_functions::lookup_vec_pos(&v0, &keys_val) {
+                    let len = search_len(&area, &key_area, !wide);
+                    return Ev::V(match gridcraft_functions::lookup_vec_pos(&v0, &keys_val, len) {
                         Ok(pos) => {
                             let c = if wide {
                                 CellRef::new(area.range.end.row, area.range.start.col + pos as u32)
@@ -432,8 +456,10 @@ impl<'h> Evaluator<'h> {
                         RangeRef::new(eff_l.start, CellRef::new(eff_l.end.row, eff_l.start.col))
                     };
                     let key_len = key_range.count() as usize;
-                    let keys_val = self.area_value(&Area { sheet: l.sheet, range: key_range });
-                    return Ev::V(match gridcraft_functions::lookup_vec_pos(&v0, &keys_val) {
+                    let key_area = Area { sheet: l.sheet, range: key_range };
+                    let keys_val = self.area_value(&key_area);
+                    let len = search_len(&l, &key_area, !(l.range.height() == 1 && l.range.width() > 1));
+                    return Ev::V(match gridcraft_functions::lookup_vec_pos(&v0, &keys_val, len) {
                         Ok(pos) => {
                             let target = if r.range.height() == 1 {
                                 (pos < r.range.width() as usize).then(|| CellRef::new(r.range.start.row, r.range.start.col + pos as u32))

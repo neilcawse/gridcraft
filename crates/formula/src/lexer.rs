@@ -53,6 +53,11 @@ fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, '_' | '.' | '$' | '\\' | '?')
 }
 
+/// `[2]`: a linked workbook's index with no sheet name, as before `!` in `[2]!Rates`.
+pub(crate) fn book_prefix_only(s: &str) -> bool {
+    s.strip_prefix('[').and_then(|r| r.strip_suffix(']')).is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// `[1]Prices!`, `[1]Jan:Dec!` or `[1]!` (before a linked workbook's name) at `i`: the position of
 /// the `!` after a linked workbook's index and unquoted sheet names, and of the `:` between the two
 /// sheets of a sheet range (MS-XLSX `sheet-range = [workbook-index] sheet-name ":" sheet-name`).
@@ -137,6 +142,12 @@ fn quoted(src: &str, chars: &[(usize, char)], i: usize, start: usize, out: &mut 
         return Ok(j);
     }
     if char_at(chars, j) != Some('!') {
+        // A quoted item of a linked (DDE) book, `[2]!'0#NG: 2 16 6'`: a name, kept as written.
+        if out.last().is_some_and(|t| t.end == start && matches!(&t.tok, Tok::Sheet(s, None) if book_prefix_only(s))) {
+            let text = src.get(start..byte_pos(src, chars, j)).unwrap_or_default().to_string();
+            emit(src, chars, out, Tok::Word(text), start, j);
+            return Ok(j);
+        }
         return Err(LexError { msg: "expected ! after sheet name".into(), pos: byte_pos(src, chars, j) });
     }
     let (first, last) = match value.split_once(':') {

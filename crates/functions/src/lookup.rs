@@ -72,15 +72,23 @@ fn find_exact_in_array(x: &Value, arr: &Array, wild: bool, reverse: bool) -> Opt
 /// fall back to a compatible key before it. On equality, use the end of the contiguous run of
 /// equal keys.
 fn bsearch_last(x: &Value, hay: &[Value], desc: bool) -> Option<usize> {
-    let mut hi = hay.len().checked_sub(1)?;
+    bsearch_last_within(x, hay, desc, hay.len())
+}
+
+/// Approximate search over `len` entries, with blanks beyond the materialized `hay`.
+/// A whole linked column's midpoint may be past the saved cells, so a probe falls back
+/// to the last compatible saved entry without scanning the implicit blank tail.
+fn bsearch_last_within(x: &Value, hay: &[Value], desc: bool, len: usize) -> Option<usize> {
+    let last = hay.len().checked_sub(1)?;
+    let mut hi = len.max(hay.len()) - 1;
     let mut lo = 0usize;
     let mut best = None;
     let typed = |j: &usize| hay.get(*j).is_some_and(|v| same_type(x, v));
     while lo <= hi {
         let mid = lo + (hi - lo) / 2;
-        let (j, above) = match (mid..=hi).find(typed) {
+        let (j, above) = match (mid..=hi.min(last)).find(typed) {
             Some(j) => (j, true),
-            None => match (lo..mid).rev().find(typed) {
+            None => match (lo..mid.min(hay.len())).rev().find(typed) {
                 Some(j) => (j, false),
                 None => break,
             },
@@ -156,21 +164,51 @@ fn row(a: &Array, r: usize) -> Vec<Value> {
 
 /// Resolves the 0-based `(row_or_col_pos, col_or_row_index)` of a `VLOOKUP` or `HLOOKUP` against a
 /// 1-D key array, without requiring the caller to materialize the rest of `table_array`.
-/// The index and `range_lookup` arguments come with whether each was read from a cell.
-pub fn vh_lookup_pos(needle_val: &Value, keys_val: &Value, idx: (&Value, bool), approx: Option<(&Value, bool)>, max_len: usize) -> R<(usize, usize)> {
+/// The index and `range_lookup` arguments include whether each was read from a cell.
+/// `linked_len` is the linked key vector's written length; a linked sheet with a failed,
+/// empty cache provides no `keys_val`.
+pub fn vh_lookup_pos(
+    needle_val: &Value,
+    keys_val: Option<&Value>,
+    idx: (&Value, bool),
+    approx: Option<(&Value, bool)>,
+    max_len: usize,
+    linked_len: Option<usize>,
+) -> R<(usize, usize)> {
     let x = match needle_val.scalar() {
         Value::Error(e) => return Err(e),
         Value::Empty => Value::Number(0.0),
         v => v,
     };
-    let approx = match approx {
-        Some((v, from_ref)) => range_lookup_arg(v, from_ref)?,
-        None => true,
+    let (approx, linked_idx) = if linked_len.is_some() {
+        // A failed, empty linked table reports no match when the index is #REF! and
+        // the search mode is valid. Other errors keep the linked lookup's precedence.
+        if keys_val.is_none() && matches!(idx.0, Value::Error(CellError::Ref)) && approx.is_none_or(|(v, _)| v.to_bool().is_ok()) {
+            return Err(CellError::NA);
+        }
+        let index = zero_based_lookup_index(idx.0.to_number()?)?;
+        let approx = approx.map_or(Ok(true), |(v, _)| v.to_bool())?;
+        if index >= max_len {
+            return Err(CellError::Ref);
+        }
+        (approx, Some(index))
+    } else {
+        (approx.map_or(Ok(true), |(v, from_ref)| range_lookup_arg(v, from_ref))?, None)
     };
-    let keys = as_array(keys_val);
-    let pos = if approx { bsearch_last(&x, &keys.data, false) } else { find_exact_in_array(&x, &keys, true, false) };
+    let keys = as_array(keys_val.ok_or(CellError::NA)?);
+    let pos = if approx {
+        bsearch_last_within(&x, &keys.data, false, linked_len.unwrap_or(keys.data.len()))
+    } else {
+        find_exact_in_array(&x, &keys, true, false)
+    };
     let pos = pos.ok_or(CellError::NA)?;
-    Ok((pos, lookup_index(idx.0, idx.1, max_len)?))
+    Ok((
+        pos,
+        match linked_idx {
+            Some(index) => index,
+            None => lookup_index(idx.0, idx.1, max_len)?,
+        },
+    ))
 }
 
 /// The `range_lookup` of VLOOKUP / HLOOKUP. Text read from a cell is `#VALUE!`, even "TRUE"
@@ -195,23 +233,28 @@ fn lookup_index(v: &Value, from_ref: bool, len: usize) -> R<usize> {
         Value::Text(t) if from_ref => parse_number_text(&t).filter(|n| n.fract() == 0.0).ok_or(CellError::Ref)?,
         v => v.to_number()?,
     };
+    let idx = zero_based_lookup_index(idx)?;
+    if idx >= len { Err(CellError::Ref) } else { Ok(idx) }
+}
+
+fn zero_based_lookup_index(idx: f64) -> R<usize> {
     // NaN too: it would pass `idx < 1.0` and become index 0 (#2163).
     if idx.is_nan() || idx < 1.0 {
         return Err(CellError::Value);
     }
-    let idx = (idx.trunc() as usize).saturating_sub(1);
-    if idx >= len { Err(CellError::Ref) } else { Ok(idx) }
+    Ok((idx.trunc() as usize).saturating_sub(1))
 }
 
-/// Resolves the 0-based match position of `LOOKUP` against a 1-D key array.
-pub fn lookup_vec_pos(needle_val: &Value, keys_val: &Value) -> R<usize> {
+/// Resolves the 0-based match position of `LOOKUP` against a 1-D key array; `len` as for
+/// [`vh_lookup_pos`].
+pub fn lookup_vec_pos(needle_val: &Value, keys_val: &Value, len: usize) -> R<usize> {
     let x = match needle_val.scalar() {
         Value::Error(e) => return Err(e),
         Value::Empty => Value::Number(0.0),
         v => v,
     };
     let keys = as_array(keys_val);
-    bsearch_last(&x, &keys.data, false).ok_or(CellError::NA)
+    bsearch_last_within(&x, &keys.data, false, len).ok_or(CellError::NA)
 }
 
 /// `VLOOKUP` (`vertical = true`) and `HLOOKUP` (`vertical = false`) over an evaluated table array.

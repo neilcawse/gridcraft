@@ -3,6 +3,7 @@ use super::{
     SheetSel, Value, Workbook,
 };
 use gridcraft_core::{CellRef, MAX_COLS, MAX_ROWS, RangeRef};
+pub(super) use gridcraft_formula::ast::split_external_name as external_name;
 
 /// SUMIF and AVERAGEIF with a sum range: Excel sizes the sum range like the criteria range.
 pub(super) fn resizes_sum_range(name: &str, args: usize) -> bool {
@@ -28,16 +29,6 @@ pub fn resized_sum_range(sum: RangeRef, height: u32, width: u32) -> RangeRef {
     let row = sum.start.row.saturating_add(height.saturating_sub(1)).min(MAX_ROWS - 1);
     let col = sum.start.col.saturating_add(width.saturating_sub(1)).min(MAX_COLS - 1);
     RangeRef::new(sum.start, CellRef::new(row, col))
-}
-
-/// `[2]!Rates` → linked workbook 2, no sheet, `Rates`; `[2]Prices!Rates` → sheet `Prices`.
-pub(super) fn external_name(name: &str) -> Option<(usize, &str, &str)> {
-    let (book, rest) = name.strip_prefix('[')?.split_once(']')?;
-    let (sheet, bare) = rest.split_once('!')?;
-    if book.is_empty() || !book.bytes().all(|b| b.is_ascii_digit()) || bare.is_empty() {
-        return None;
-    }
-    Some((book.parse().ok()?, sheet, bare))
 }
 
 /// Whether argument `i` of `name` is a range parameter that takes only a reference.
@@ -84,21 +75,22 @@ pub(crate) fn used_range_of(wb: &Workbook, sheet: usize) -> Option<RangeRef> {
 
 /// Whether a linked workbook's name `def` (parsed as `expr`) can be calculated from the values
 /// saved with the link: no `#REF!` in it, and only the link's saved sheets and names. A sheet
-/// range, a sheetless reference in a workbook-level name and a table can't be read either.
+/// range, a sheetless reference in a workbook-level name, a table and a sheet the link saved no
+/// cells for can't be read either.
 pub(super) fn linked_definition_readable(b: &ExternalBook, def: &ExternalName, expr: &Expr) -> bool {
-    let scope = def.sheet.and_then(|i| b.sheets.get(i)).map(|s| s.name.as_str());
+    let scope = def.sheet.and_then(|i| b.sheets.get(i));
     let mut readable = true;
     expr.walk(&mut |e| {
         readable &= match e {
             Expr::Error(CellError::Ref) | Expr::Struct(_) | Expr::LinkedRefError(_) => false,
             Expr::Ref(r) => match &r.sheet {
-                SheetSel::Named(s) => b.sheet_index(s).is_some(),
-                SheetSel::Current => scope.is_some(),
+                SheetSel::Named(s) => b.sheet(s).is_some_and(|s| !s.missing),
+                SheetSel::Current => scope.is_some_and(|s| !s.missing),
                 SheetSel::Span(..) => false,
             },
-            Expr::Name(n) => match n.split_once('!') {
-                Some((s, bare)) => b.name(bare, Some(s.trim_matches('\''))).is_some(),
-                None => b.name(n, scope).is_some(),
+            Expr::Name(n) => match n.rsplit_once('!') {
+                Some((s, bare)) => b.name(bare, Some(s)).is_some(),
+                None => b.name(n, scope.map(|s| s.name.as_str())).is_some(),
             },
             _ => true,
         };
@@ -109,8 +101,12 @@ pub(super) fn linked_definition_readable(b: &ExternalBook, def: &ExternalName, e
 /// A value read from a linked sheet's saved cells. When the last update of the link failed for
 /// the sheet (`refreshError`), Excel keeps the values it had and shows `#REF!` for anything it
 /// hadn't saved.
-pub fn linked_value(s: &ExternalSheet, v: Value) -> Value {
-    if v.is_empty() && s.refresh_error { Value::Error(CellError::Ref) } else { v }
+pub fn linked_value(s: &ExternalSheet, v: Option<&Value>) -> Value {
+    match v {
+        Some(v) => v.clone(),
+        None if s.refresh_error => Value::Error(CellError::Ref),
+        None => Value::Empty,
+    }
 }
 
 /// Most expression nodes [`precedents`] visits before giving up and marking the formula dynamic.

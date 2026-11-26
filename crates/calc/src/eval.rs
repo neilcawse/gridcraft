@@ -386,17 +386,19 @@ impl<'h> Evaluator<'h> {
     /// the position and size written, read from the values saved with the link, as Excel
     /// calculates while the source is closed (see [`LINKED_SHEETS`]). `None` = not a reference
     /// into a linked workbook; `#REF!` = the link didn't save that workbook or sheet, noted to the
-    /// host when the link has no saved workbook to look in (see [`Host::note_unknown_link`]).
+    /// host when the link has no saved values to look in: a link that isn't to a workbook, or a
+    /// sheet with no `sheetData` entry (see [`Host::note_unknown_link`]).
     fn linked_area(&mut self, r: &Reference) -> Option<Result<Area, CellError>> {
         let SheetSel::Named(name) = &r.sheet else { return None };
         let (book, sheet) = external_sheet(name)?;
         let wb = self.host.workbook();
         let linked = book.checked_sub(1).and_then(|b| Some((b, wb.external_books.get(b)?)));
-        if linked.is_some_and(|(_, l)| l.opaque) {
+        let found = linked.and_then(|(b, l)| Some((b, l.sheet_index(sheet)?)));
+        let missing = found.and_then(|(b, s)| wb.external_books.get(b)?.sheets.get(s)).is_some_and(|s| s.missing);
+        if missing || linked.is_some_and(|(_, l)| l.opaque) {
             self.host.note_unknown_link();
             return Some(Err(CellError::Ref));
         }
-        let found = linked.and_then(|(b, l)| Some((b, l.sheet_index(sheet)?)));
         Some(found.and_then(|(b, s)| linked_sheet_number(b, s)).map(|sheet| Area { sheet, range: r.range() }).ok_or(CellError::Ref))
     }
 
@@ -412,7 +414,7 @@ impl<'h> Evaluator<'h> {
             return self.host.cell_value(sheet, c);
         }
         match self.linked_sheet(sheet) {
-            Some(s) => linked_value(s, s.value(c)),
+            Some(s) => linked_value(s, s.cached_value(c)),
             None => Value::Error(CellError::Ref),
         }
     }
@@ -424,7 +426,7 @@ impl<'h> Evaluator<'h> {
         }
         let Some(s) = self.linked_sheet(sheet) else { return vec![Value::Error(CellError::Ref); range.count() as usize] };
         let w = range.width() as usize;
-        let mut out = vec![linked_value(s, Value::Empty); range.height() as usize * w];
+        let mut out = vec![linked_value(s, None); range.height() as usize * w];
         for (c, v) in s.cells_in(range) {
             let i = (c.row - range.start.row) as usize * w + (c.col - range.start.col) as usize;
             if let Some(slot) = out.get_mut(i) {
