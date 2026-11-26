@@ -154,9 +154,40 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
             max_y = if pg.rows_complete { (ey as f32 - g.cells.height() / g.z).max(0.0) } else { 1.0e9 };
         }
     }
-    view.scroll.x = view.scroll.x.min(max_x);
-    view.scroll.y = view.scroll.y.min(max_y);
-    let mut geo = make_geo(app, view.scroll);
+    let mut scroll_cap = vec2(max_x, max_y);
+    let mut geo = None;
+    if !paper {
+        let end = sel.moving_end();
+        let row = sel.active.row.max(end.row);
+        let col = sel.active.col.max(end.col);
+        // The usual caps leave the last few lines to be visible within the viewport. A small
+        // viewport may not fit them: let a selected endpoint near the physical sheet edge stay
+        // visible on subsequent frames, without changing the scrollbar's used-range extent.
+        if row >= MAX_ROWS - 40 || col >= MAX_COLS - 20 {
+            let g = make_geo(app, view.scroll);
+            if row >= (MAX_ROWS - 40).max(g.fr) {
+                scroll_cap.y = scroll_cap.y.max(reveal_scroll_cap(
+                    g.scroll_top_of(sh, row),
+                    sh.row_height(row),
+                    g.cells.height() - g.frozen_h,
+                    g.z,
+                    g.scroll_top_of(sh, MAX_ROWS - 1),
+                ));
+            }
+            if col >= (MAX_COLS - 20).max(g.fc) {
+                scroll_cap.x = scroll_cap.x.max(reveal_scroll_cap(
+                    g.scroll_left_of(sh, col),
+                    sh.col_width(col),
+                    g.cells.width() - g.frozen_w,
+                    g.z,
+                    g.scroll_left_of(sh, MAX_COLS - 1),
+                ));
+            }
+            geo = Some(g);
+        }
+    }
+    view.scroll = view.scroll.min(scroll_cap);
+    let mut geo = geo.filter(|g| g.scroll == view.scroll).unwrap_or_else(|| make_geo(app, view.scroll));
     // Keep the active cell (or the moving end of an extension) visible after keyboard moves.
     ActiveCellVisibility { app, wb: &wb, si, sh, selection: &sel, paper, make_geo: &make_geo }.update(&mut view, &mut geo);
     // Snap scrolling to whole rows/columns at rest like Excel? Keep smooth (better on trackpads).
@@ -245,6 +276,12 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
     update_clipboard_repaint(app, ui, now);
 }
 
+/// The first offset that fits the endpoint, or its start if the line is wider/taller than the
+/// viewport. Use the same two-point inset as the keyboard reveal.
+fn reveal_scroll_cap(start: f32, size: f32, viewport: f32, zoom: f32, last: f32) -> f32 {
+    (start + (size - (viewport - 2.0) / zoom).min(0.0)).min(last)
+}
+
 /// The vertical scroll bar's width: none when the workbook hides it (File › Options ›
 /// Display options for this workbook), and the grid takes its room.
 fn vertical_bar_width(app: &SheetApp, available: Rect) -> f32 {
@@ -325,8 +362,8 @@ impl<F: Fn(&mut SheetApp, egui::Vec2) -> Geo> ActiveCellVisibility<'_, F> {
             crate::paper_view::ensure_covers(app, wb, si, target);
             *geo = (self.make_geo)(app, view.scroll);
         }
-        let cr = geo.cell_rect(sh, target);
-        let area = Rect::from_min_max(pos2(geo.cells.left() + geo.frozen_w, geo.cells.top() + geo.frozen_h), geo.cells.max);
+        let mut cr = geo.cell_rect(sh, target);
+        let mut area = Rect::from_min_max(pos2(geo.cells.left() + geo.frozen_w, geo.cells.top() + geo.frozen_h), geo.cells.max);
         if target.row >= geo.fr {
             if cr.top() < area.top() {
                 view.scroll.y -= (area.top() - cr.top()) / geo.z;
@@ -338,6 +375,15 @@ impl<F: Fn(&mut SheetApp, egui::Vec2) -> Geo> ActiveCellVisibility<'_, F> {
             // row 1) brings the scrolled rows back to their top; the rows it passed over would
             // otherwise stay out of sight.
             view.scroll.y = 0.0;
+        }
+        // Scrolling to a much longer row number can widen the headings. At the physical
+        // column edge, use the post-scroll width before placing the target against it.
+        if !paper && target.col >= MAX_COLS - 20 && view.scroll.y != before.y {
+            let mut scroll = view.scroll;
+            scroll.y = scroll.y.max(0.0);
+            *geo = (self.make_geo)(app, scroll);
+            cr = geo.cell_rect(sh, target);
+            area = Rect::from_min_max(pos2(geo.cells.left() + geo.frozen_w, geo.cells.top() + geo.frozen_h), geo.cells.max);
         }
         if target.col >= geo.fc {
             if cr.left() < area.left() {
@@ -511,7 +557,10 @@ fn vertical_scrollbar(app: &mut SheetApp, ui: &mut egui::Ui, sh: &Sheet, geo: &G
     if resp.hovered() {
         next -= ui.input(|i| i.smooth_scroll_delta.y) / geo.z;
     }
-    next = next.clamp(0.0, limit);
+    // An idle scrollbar must not undo a keyboard reveal beyond its nominal extent.
+    if next != scroll {
+        next = next.clamp(0.0, limit);
+    }
     if next != scroll {
         if let Some(v) = app.view_mut() {
             v.scroll.y = next;

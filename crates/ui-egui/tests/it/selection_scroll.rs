@@ -107,6 +107,45 @@ fn ctrl_shift_home_and_end_scroll_the_moving_end_into_view() {
     assert_extended(&h, "CV200", "A1");
 }
 
+#[test]
+fn keyboard_navigation_keeps_the_sheet_edge_visible_after_the_reveal_frame() {
+    let mut s = Session::new();
+    s.new_workbook();
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let sh = wb.sheet_mut(0).unwrap();
+    let last = CellRef::parse("XFD1048576").unwrap();
+    sh.rows.insert(last.row, gridcraft_engine::model::LineInfo { size: Some(22.0), ..Default::default() });
+    sh.cols
+        .insert(last.col, gridcraft_engine::model::LineInfo { style: Some(gridcraft_engine::model::style::StyleId::DEFAULT), ..Default::default() });
+    let builder = crate::common::builder().with_os(egui::os::OperatingSystem::Nix).with_size(egui::vec2(600.0, 420.0));
+    let mut h = crate::common::harness_with(builder, crate::common::app(s), 4);
+    let fully_visible = |h: &Harness| {
+        let app = h.state();
+        let sheet = app.session.active().unwrap().wb.active().unwrap();
+        let geo = app.grid.geo.as_ref().unwrap();
+        geo.cells.contains_rect(geo.cell_rect(sheet, last))
+    };
+
+    // Even without a used cell, Ctrl+Down and Ctrl+Right reach the physical sheet edge.
+    key(&mut h, Key::ArrowDown, CTRL);
+    key(&mut h, Key::ArrowRight, CTRL);
+    assert_eq!(active(&h), last);
+    h.run_steps(3);
+    assert!(fully_visible(&h), "the sheet-edge arrow destination must stay visible");
+
+    key(&mut h, Key::Home, CTRL);
+    key(&mut h, Key::End, CTRL_SHIFT);
+    h.run_steps(3);
+    assert_extended(&h, "A1", "XFD1048576");
+    assert!(fully_visible(&h), "the extended formatting-only Last Cell must stay fully visible");
+
+    key(&mut h, Key::Home, CTRL);
+    key(&mut h, Key::End, CTRL);
+    h.run_steps(3);
+    assert_eq!(active(&h), last);
+    assert!(fully_visible(&h), "a formatting-only Last Cell must stay visible");
+}
+
 fn control(h: &mut Harness, method: &str, params: Json) -> Json {
     let ctx = h.ctx.clone();
     let out = match handle(h.state_mut(), &ctx, method, &params) {
