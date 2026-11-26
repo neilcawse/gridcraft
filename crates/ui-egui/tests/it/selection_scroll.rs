@@ -107,6 +107,73 @@ fn ctrl_shift_home_and_end_scroll_the_moving_end_into_view() {
     assert_extended(&h, "CV200", "A1");
 }
 
+#[test]
+fn keyboard_navigation_keeps_the_sheet_edge_visible_after_the_reveal_frame() {
+    let mut s = Session::new();
+    s.new_workbook();
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let sh = wb.sheet_mut(0).unwrap();
+    let last = CellRef::parse("XFD1048576").unwrap();
+    sh.rows.insert(last.row, gridcraft_engine::model::LineInfo { size: Some(22.0), ..Default::default() });
+    sh.cols
+        .insert(last.col, gridcraft_engine::model::LineInfo { style: Some(gridcraft_engine::model::style::StyleId::DEFAULT), ..Default::default() });
+    let builder = crate::common::builder().with_os(egui::os::OperatingSystem::Nix).with_size(egui::vec2(600.0, 420.0));
+    let mut h = crate::common::harness_with(builder, crate::common::app(s), 4);
+    let fully_visible = |h: &Harness| {
+        let app = h.state();
+        let sheet = app.session.active().unwrap().wb.active().unwrap();
+        let geo = app.grid.geo.as_ref().unwrap();
+        let cell = geo.cell_rect(sheet, last);
+        assert!(geo.cells.contains_rect(cell), "{cell:?} outside {:?} at scroll {:?}", geo.cells, geo.scroll);
+    };
+
+    // Even without a used cell, Ctrl+Down and Ctrl+Right reach the physical sheet edge.
+    key(&mut h, Key::ArrowDown, CTRL);
+    key(&mut h, Key::ArrowRight, CTRL);
+    assert_eq!(active(&h), last);
+    h.run_steps(3);
+    fully_visible(&h);
+
+    key(&mut h, Key::Home, CTRL);
+    assert_eq!(h.state().grid.geo.as_ref().unwrap().scroll, egui::Vec2::ZERO);
+    key(&mut h, Key::End, CTRL_SHIFT);
+    h.run_steps(3);
+    assert_extended(&h, "A1", "XFD1048576");
+    fully_visible(&h);
+
+    key(&mut h, Key::Home, CTRL);
+    key(&mut h, Key::End, CTRL);
+    h.run_steps(3);
+    assert_eq!(active(&h), last);
+    fully_visible(&h);
+}
+
+#[test]
+fn wheeling_down_over_the_scrollbar_at_the_sheet_edge_does_not_scroll_back_up() {
+    let mut s = Session::new();
+    s.new_workbook();
+    let builder = crate::common::builder().with_os(egui::os::OperatingSystem::Nix).with_size(egui::vec2(600.0, 420.0));
+    let mut h = crate::common::harness_with(builder, crate::common::app(s), 4);
+    key(&mut h, Key::ArrowDown, CTRL);
+    h.run_steps(3);
+    let geo = h.state().grid.geo.clone().unwrap();
+    let revealed = geo.scroll.y;
+    // The vertical scrollbar's track runs just right of the cells.
+    let at = egui::pos2(geo.cells.right() + 4.0, geo.cells.center().y);
+    h.input_mut().events.push(Event::PointerMoved(at));
+    h.run_steps(2);
+    h.input_mut().events.push(Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -120.0),
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Unknown,
+        modifiers: Modifiers::NONE,
+    });
+    h.run_steps(30);
+    let after = h.state().grid.geo.as_ref().unwrap().scroll.y;
+    assert!(after >= revealed, "wheeling down moved the view up: {revealed} → {after}");
+}
+
 fn control(h: &mut Harness, method: &str, params: Json) -> Json {
     let ctx = h.ctx.clone();
     let out = match handle(h.state_mut(), &ctx, method, &params) {

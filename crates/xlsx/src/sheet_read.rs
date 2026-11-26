@@ -808,7 +808,7 @@ fn read_craft_row(cx: &mut Ctx<'_>, sheet: &mut Sheet, st: &mut RowState, row: &
         let pos = CellRef::new(c.at.row, c.at.col);
         read_craft_cell(cx, sheet, st, c, pos);
     }
-    // A `<row>` with nothing else kept is still a row element (measured: UsedRange, H5 fitting).
+    // Retain a bare row for writeback and fitting on a switched custom-default sheet (H5).
     if bare && !sheet.row_has_cells(r) {
         sheet.rows.insert(r, LineInfo { saved_element: true, ..info });
     }

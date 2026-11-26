@@ -36,6 +36,13 @@ cargo install --path apps/gridcraft-cli     # or: cargo run -p gridcraft-cli -- 
 | `send <port> <method> [json]` | `gridcraft-cli send 7979 engine.execute '{"command":"home.bold","params":{"range":"A1:C1"}}'` — one control-channel request to a running app (`gridcraft --control 7979`). |
 | `version` | Prints `gridcraft-cli <version>`. |
 
+`info --json` uses `document.inspect`: each sheet's `usedRange` is the reported worksheet extent
+in A1 notation, or `null` when empty. It includes qualifying row or column formatting even when
+there are no cells on those lines. `review.workbookStatistics` supplies `sheet.endOfSheet`, the
+Last Cell address (or `null` on an empty sheet). The address can differ from the bottom-right
+corner of `usedRange` because Last Cell skips trailing hidden or zero-size rows and columns.
+These fields do not set the default print or export bounds.
+
 ## `display`
 
 `gridcraft-cli display book.xlsx --json [--sheet NAME] [--range A1:Z99]` opens the workbook without saving it. Import warnings go to stderr. Output is a single streamed JSON object; `--json` is required. Sheet names match exactly, and the optional inclusive A1 range applies independently to each selected sheet. Without `--sheet`, sheets (including hidden sheets) appear in workbook order.

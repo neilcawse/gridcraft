@@ -270,8 +270,8 @@ pub struct LineInfo {
     /// Row boundary flags are independent of a cell's border style.
     #[serde(default, skip_serializing_if = "no_thick_edges")]
     pub thick_edges: (bool, bool),
-    /// The file saved a `<row>` element that carries nothing else kept here (a bare row). Excel
-    /// counts it in UsedRange and fits it on a switched custom-default sheet, so it is written back.
+    /// A saved `<row>` carrying no other metadata. Retained for XLSX writeback and automatic
+    /// fitting on switched custom-default sheets; it does not extend UsedRange on its own.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub saved_element: bool,
 }

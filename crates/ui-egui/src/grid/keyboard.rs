@@ -113,7 +113,7 @@ pub(super) fn keyboard(app: &mut SheetApp, ctx: &egui::Context, resp: &egui::Res
                         app.grid.ensure_visible = true;
                     }
                     Key::End if cmd => {
-                        let end = sh.used_range().map(|u| u.end).unwrap_or_default();
+                        let end = sh.last_cell();
                         let _ = app.session.run("selection.set", json!({"cell": end.a1()}));
                         app.grid.ensure_visible = true;
                     }
