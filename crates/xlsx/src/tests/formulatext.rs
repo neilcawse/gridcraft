@@ -129,11 +129,19 @@ fn trim_file_tokens_and_defined_name_calls_stay_distinct_on_write() -> Result<()
 
 #[test]
 fn imported_base_column_width_is_distinct_from_geometry() {
-    for (attrs, expected) in [("", Some(10)), (r#" defaultColWidth="12""#, None)] {
-        let body = format!(r#"<sheetFormatPr baseColWidth="10"{attrs}/><sheetData/>"#);
-        let (wb, _) = crate::read_xlsx(&super::minimal(&body, &[], "", "")).unwrap();
-        let sheet = wb.sheet(0).unwrap();
-        assert_eq!(sheet.default_col_width, if expected.is_some() { 80.0 } else { 84.0 });
-        assert_eq!(sheet.xlsx_base_col_width, expected);
+    use gridcraft_model::{Font, Geometry};
+
+    for (profile, base_px, explicit_px) in [
+        ((|_: &Font| Geometry::Legacy) as fn(&Font) -> Geometry, 80.0, 84.0),
+        (|_: &Font| Geometry::Mac { digit_pt: 6 }, (65.0_f64 * (4.0 / 3.0)) as f32, 96.0),
+    ] {
+        for (attrs, expected, width_px) in [("", Some(10), base_px), (r#" defaultColWidth="12""#, None, explicit_px)] {
+            let body = format!(r#"<sheetFormatPr baseColWidth="10"{attrs}/><sheetData/>"#);
+            let bytes = super::minimal(&body, &[], "", "");
+            let (wb, _) = crate::read::read_xlsx(&bytes, crate::ReadOptions::default(), profile).unwrap();
+            let sheet = wb.sheet(0).unwrap();
+            assert_eq!(sheet.default_col_width, width_px);
+            assert_eq!(sheet.xlsx_base_col_width, expected);
+        }
     }
 }
