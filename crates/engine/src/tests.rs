@@ -5413,6 +5413,7 @@ fn source_group_placement_survives_copy_and_only_safe_line_edits() {
                     has_transform: true,
                     edited: false,
                     held_collapse: [None; 2],
+                    sort_lost_collapsed_rows: false,
                     complete: true,
                     flip: (false, false),
                     rotation: 0,

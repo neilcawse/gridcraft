@@ -274,10 +274,9 @@ impl Sheet {
 
     /// Keep layout recovery when a row permutation re-encodes a collapsed imported group's
     /// anchors without moving any of its boxes. Keep only the response of coincident spans
-    /// to later line sizing, not the old worksheet placement for export. `row_to` is where the
-    /// permutation put each row: the collapsed rows travel with it, so the retained pair names
-    /// them where they now are, and is dropped when they no longer form one run.
-    pub fn keep_sorted_group_collapse(&mut self, before: &Sheet, id: u32, placement_affected: bool, row_to: &dyn Fn(u32) -> u32) {
+    /// to later line sizing, not the old worksheet placement for export. The permutation
+    /// must leave the rows in the half-open collapsed span under the group, in any order.
+    pub fn keep_sorted_group_collapse(&mut self, before: &Sheet, id: u32, placement_affected: bool, rows_stay: &dyn Fn(u32, u32) -> bool) {
         let Some(g) = before.drawing_group(id) else { return };
         let Some(source) = &g.file else { return };
         let r = DrawingRef::Group(id);
@@ -312,10 +311,16 @@ impl Sheet {
                 coincident(true, a.height, from.row, to.row, from.row_off, to.row_off),
             ];
         }
-        spans[1] = spans[1].and_then(|(start, end)| {
-            let first = row_to(start);
-            (start < end && (start + 1..end).all(|row| row_to(row) == first + (row - start))).then_some((first, first + (end - start)))
-        });
+        if spans[1].is_some_and(|(start, end)| !rows_stay(start.min(end), start.max(end))) {
+            // Even equal-height rows can leave the span. Neither live markers nor an existing
+            // layout-only hold should let a later fit recover it in that case.
+            self.invalidate_drawing_file(r);
+            if let Some(file) = self.groups.iter_mut().find(|g| g.id == id).and_then(|g| g.file.as_mut()) {
+                file.held_collapse = [None; 2];
+                file.sort_lost_collapsed_rows = true;
+            }
+            return;
+        }
         if spans.iter().all(Option::is_none) {
             return;
         }
@@ -395,7 +400,10 @@ impl Sheet {
                         continue;
                     }
                     let held = self.held_group_resize(before, &new, id, a);
-                    let next = held.or_else(|| follow(before, &new, &a, self.live_drawing_placement(DrawingRef::Group(id), a))).unwrap_or(a);
+                    let mut next = held.or_else(|| follow(before, &new, &a, self.live_drawing_placement(DrawingRef::Group(id), a))).unwrap_or(a);
+                    if a.height == 0.0 && self.drawing_group(id).and_then(|g| g.file.as_ref()).is_some_and(|f| f.sort_lost_collapsed_rows) {
+                        next.height = 0.0;
+                    }
                     self.carry_group(id, before, &a, next);
                     if held.is_some() && !same_rect(before.anchor_rect(&a), self.anchor_rect(&next)) {
                         self.invalidate_drawing_file(DrawingRef::Group(id));

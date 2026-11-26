@@ -53,6 +53,9 @@ pub struct GroupFile {
     /// Named line pairs (columns, rows) for a coincident two-cell span held in sheet space
     /// by a sort. This is layout-only: the original worksheet markers must not be exported.
     pub held_collapse: [Option<(u32, u32)>; 2],
+    /// A row sort moved rows out of the held span. The editable anchor's inferred far
+    /// edge must not resolve to a different coincident row and grow the rejected span.
+    pub sort_lost_collapsed_rows: bool,
     /// Every retained leaf had its own offset and extent.
     pub complete: bool,
     pub flip: (bool, bool),

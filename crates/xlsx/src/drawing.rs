@@ -426,6 +426,7 @@ fn read_object_inner(
                 has_transform: xf.is_some(),
                 edited: false,
                 held_collapse: [None; 2],
+                sort_lost_collapsed_rows: false,
                 complete: file_complete,
                 flip,
                 rotation,

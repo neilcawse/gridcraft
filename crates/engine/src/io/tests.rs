@@ -325,6 +325,7 @@ fn open_places_a_group_over_the_rows_it_fits() {
             has_transform: true,
             edited: false,
             held_collapse: [None; 2],
+            sort_lost_collapsed_rows: false,
             complete: true,
             flip: (false, false),
             rotation: 0,
@@ -584,7 +585,8 @@ fn collapsed_group_recovers_during_sort_row_fit() {
     let (mut wb, _) = open_bytes("group.xlsx", &bytes).unwrap();
     let sh = wb.sheet_mut(0).unwrap();
     sh.rows.insert(3, LineInfo { size: Some(60.0), custom: true, ..Default::default() });
-    let keys = [2.0, 3.0, 4.0, 1.0];
+    sh.rows.insert(5, LineInfo { size: Some(0.0), custom: true, ..Default::default() });
+    let keys = [1.0, 3.0, 2.0, 5.0, 4.0, 6.0];
     for (row, key) in keys.into_iter().enumerate() {
         // Keep the large font in the original zero-height rows.
         sh.set_value(CellRef::new(row as u32, 0), gridcraft_core::Value::Number(key));
@@ -601,27 +603,47 @@ fn collapsed_group_recovers_during_sort_row_fit() {
         session.execute(cmd, params).unwrap();
         session.doc().unwrap().wb.clone()
     };
-    let sort = |wb| run(wb, "data.sort", json!({"range": "A1:D4", "header": false, "keys": [{"column": "A"}]}));
+    let sort = |wb| run(wb, "data.sort", json!({"range": "A1:D6", "header": false, "keys": [{"column": "A"}]}));
     let held = sort(wb.clone());
     let held_sheet = held.sheet(0).unwrap();
-    for (row, key) in [1.0, 2.0, 3.0, 4.0].into_iter().enumerate() {
+    for (row, key) in [1.0, 2.0, 3.0, 4.0, 5.0, 6.0].into_iter().enumerate() {
         assert_eq!(held_sheet.value(CellRef::new(row as u32, 0)), gridcraft_core::Value::Number(key));
     }
-    assert_ne!(held_sheet.raw_drawing_anchor(root), wb.sheet(0).unwrap().raw_drawing_anchor(root));
     for (actual, expected) in boxes(&held).into_iter().zip(boxes(&wb)) {
         assert_box(actual, expected, "held group box before fitting");
     }
 
-    assert!(!held_sheet.drawing_files.contains_key(&root), "the original markers do not describe the held anchor");
+    assert!(!held_sheet.drawing_files.contains_key(&root), "row heights changed between the named marks and the members");
     assert!(held_sheet.source_group(held_sheet.drawing_group(1).unwrap()).is_none(), "the held source is layout-only");
 
-    let control = run(wb.clone(), "home.autofitRowHeight", json!({"rows": "3:3"}));
+    let control = run(wb.clone(), "home.autofitRowHeight", json!({"rows": "2:2"}));
     wb.sheet_mut(0).unwrap().rows.get_mut(&1).unwrap().custom = false;
     let sorted = sort(wb);
-    let fitted_later = run((*held).clone(), "home.autofitRowHeight", json!({"rows": "3:3"}));
+    let fit = |wb| run(wb, "home.autofitRowHeight", json!({"rows": "2:2"}));
+    let fitted_later = fit((*held).clone());
+
+    // A second sort can reorder the held run again without losing recovery.
+    let mut reordered = (*held).clone();
+    let sh = reordered.sheet_mut(0).unwrap();
+    sh.set_value(CellRef::new(1, 0), gridcraft_core::Value::Number(3.0));
+    sh.set_value(CellRef::new(2, 0), gridcraft_core::Value::Number(2.0));
+    let fitted_after_second_sort = fit((*sort(reordered)).clone());
+
+    // A second sort that exchanges equally sized rows across the boundary must drop the hold
+    // even though no line height changes during that sort.
+    let mut exchanged = (*held).clone();
+    let sh = exchanged.sheet_mut(0).unwrap();
+    sh.set_value(CellRef::new(2, 0), gridcraft_core::Value::Number(6.0));
+    sh.set_value(CellRef::new(5, 0), gridcraft_core::Value::Number(3.0));
+    let exchanged = sort(exchanged);
+    let exchanged_sheet = exchanged.sheet(0).unwrap();
+    assert!((0..=6).all(|row| held_sheet.row_top(row) == exchanged_sheet.row_top(row)));
+    let fitted = fit((*exchanged).clone());
+    assert!(fitted.sheet(0).unwrap().row_top(2) > held_sheet.row_top(2));
+    assert_eq!(boxes(&fitted)[0].h, 0.0);
     let expected = boxes(&control);
     assert!(expected[0].h > 0.0 && expected[1..].iter().all(|r| r.w > 0.0), "control: {expected:?}");
-    for actual in [&sorted, &fitted_later] {
+    for actual in [&sorted, &fitted_later, &fitted_after_second_sort] {
         for (actual, expected) in boxes(actual).into_iter().zip(&expected) {
             assert_box(actual, *expected, "collapsed group box after sort and fit");
         }
@@ -660,16 +682,12 @@ fn held_collapsed_group_ignores_rows_it_no_longer_spans_after_sort() {
         s.execute("home.rowHeight", json!({"sheet": 0, "rows": rows, "height": height})).unwrap();
         s.doc().unwrap().wb.clone()
     };
-    // The short row sorted to the top, so the held group now sits inside the tall row (row 2)
-    // and the collapsed rows it was read over travelled to rows 3 and 4. Resizing row 2 is not
-    // growth of the group's collapsed span; growing rows 3 and 4 is, by both rows.
-    let after = root(&resized("2:2", 150.0));
-    assert_eq!((after.y, after.h), (held.y, 0.0), "{after:?}");
-    let wb = resized("3:4", 30.0);
-    let sh = wb.sheet(0).unwrap();
-    let span = sh.row_top(4) - sh.row_top(2);
-    let grown = root(&wb);
-    assert!(span > 0.0 && (grown.h - span).abs() < 0.01 && grown.y == held.y, "{grown:?} vs {span}");
+    // The held box stays inside row 2, but its original zero-height rows moved to rows 3–4.
+    // Neither set of rows can grow a group whose collapsed span no longer sits under it.
+    for (rows, height) in [("2:2", 150.0), ("3:4", 30.0)] {
+        let after = root(&resized(rows, height));
+        assert_eq!((after.y, after.h), (held.y, 0.0), "resizing {rows}: {after:?}");
+    }
 }
 
 #[test]
