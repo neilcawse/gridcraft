@@ -542,21 +542,25 @@ fn worksheet_and_vml_auto_flags_round_trip_independently() {
     }
 }
 
-/// Default sizing and automatic pictures are outside the editable model.
+/// Default sizing and automatic pictures are outside the editable model, and so is an automatic
+/// fill or line flag set to anything but false: the check box stays kept, entry and all.
 #[test]
-fn a_control_entry_with_unsupported_sizing_or_picture_stays_kept() {
+fn a_control_entry_with_unsupported_sizing_picture_or_flag_stays_kept() {
     let sheet_part = "xl/worksheets/sheet1.xml";
     let original = legacy_check_boxes(true);
     let sheet = text(&mut Package::open(&original).unwrap(), sheet_part);
-    for bytes in [
-        replace_part(&original, sheet_part, &sheet.replacen("defaultSize=\"0\" ", "", 1)),
-        replace_part(&original, sheet_part, &sheet.replacen(" autoPict=\"0\"", "", 1)),
-    ] {
+    for (from, to) in
+        [("defaultSize=\"0\" ", ""), (" autoPict=\"0\"", ""), (" autoFill=\"0\"", " autoFill=\"1\""), (" autoLine=\"0\"", " autoLine=\"maybe\"")]
+    {
+        let bytes = replace_part(&original, sheet_part, &sheet.replacen(from, to, 1));
         let (wb, _) = read_xlsx(&bytes).unwrap();
-        assert_eq!(check_boxes(&wb), expected()[1..]);
+        assert_eq!(check_boxes(&wb), expected()[1..], "{to:?}");
         let out = write_xlsx(&wb).unwrap();
         assert_eq!(written_vml(&out).matches("Ship it").count(), 1);
+        if !to.is_empty() {
+            assert!(text(&mut Package::open(&out).unwrap(), sheet_part).contains(to), "{to}");
+        }
         let (back, _) = read_xlsx(&out).unwrap();
-        assert_eq!(check_boxes(&back), expected()[1..]);
+        assert_eq!(check_boxes(&back), expected()[1..], "{to:?}");
     }
 }
