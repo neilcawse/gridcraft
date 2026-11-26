@@ -1,7 +1,7 @@
 use super::geo::Geo;
 use super::{
-    BorderLine, BorderStyle, CellRef, CfCache, CfLook, Color, Color32, FontId, HAlign, MAX_COLS, Painter, PatternType, Pos2, RangeRef, Rect, Sheet,
-    Stroke, Style, Underline, VAlign, Value, Workbook, pos2, theme, vec2,
+    BorderLine, BorderStyle, CellRef, CfCache, CfLook, Color, Color32, FontId, HAlign, MAX_COLS, Painter, Pos2, RangeRef, Rect, Sheet, Stroke, Style,
+    VAlign, Value, Workbook, pos2, theme, vec2,
 };
 
 /// Resolved look of a cell for painting.
@@ -29,71 +29,8 @@ pub(super) fn center_across_end(start: u32, limit: u32, continues: impl Fn(u32) 
 }
 
 pub(super) fn look(wb: &Workbook, si: usize, sh: &Sheet, c: CellRef, cf: &mut CfCache) -> (Look, Option<CfLook>) {
-    let mut style = wb.styles.get(sh.style_id(c)).clone();
-    if let Some(t) = sh.table_at(c) {
-        style = gridcraft_engine::tables::table_cell_shown_style(wb, si, t, cf.table_edges(sh, t), c);
-    }
-    let cfl = cf.look(wb, si, c);
-    if let Some(l) = &cfl
-        && let Some(st) = &l.style
-    {
-        if st.fill.pattern != PatternType::None {
-            style.fill = st.fill;
-        }
-        if st.font.color != Color::Auto {
-            style.font.color = st.font.color;
-        }
-        if st.font.bold {
-            style.font.bold = true;
-        }
-        if st.font.italic {
-            style.font.italic = true;
-        }
-        if st.font.underline != Underline::None {
-            style.font.underline = st.font.underline;
-        }
-        if st.font.strike {
-            style.font.strike = true;
-        }
-        // In a differential style General means "not set" (#1163).
-        if st.num_fmt.as_str() != "General" {
-            style.num_fmt = st.num_fmt.clone();
-        }
-        if st.align.reading_order.is_some() {
-            style.align.reading_order = st.align.reading_order;
-        }
-        for (dst, src) in [
-            (&mut style.borders.left, st.borders.left),
-            (&mut style.borders.right, st.borders.right),
-            (&mut style.borders.top, st.borders.top),
-            (&mut style.borders.bottom, st.borders.bottom),
-        ] {
-            if !src.is_none() {
-                *dst = src;
-            }
-        }
-    }
-    let mut fill = match style.fill.pattern {
-        PatternType::None => None,
-        PatternType::Solid => style.fill.fg.resolve(&wb.theme).map(theme::color32),
-        _ => {
-            // Patterns: approximate with a blend of foreground and background.
-            let fg = style.fill.fg.resolve(&wb.theme).unwrap_or([0, 0, 0]);
-            let bg = style.fill.bg.resolve(&wb.theme).unwrap_or([255, 255, 255]);
-            Some(Color32::from_rgb(
-                ((fg[0] as u16 + bg[0] as u16 * 3) / 4) as u8,
-                ((fg[1] as u16 + bg[1] as u16 * 3) / 4) as u8,
-                ((fg[2] as u16 + bg[2] as u16 * 3) / 4) as u8,
-            ))
-        }
-    };
-    if let Some(l) = &cfl
-        && let Some(rgb) = l.scale_fill
-    {
-        fill = Some(theme::color32(rgb));
-    }
-    let text_color = col32(style.font.color, wb, Color32::BLACK);
-    (Look { style, fill, text_color }, cfl)
+    let lk = gridcraft_engine::display::cell_look(wb, si, sh, c, cf);
+    (Look { style: lk.style, fill: lk.fill.map(theme::color32), text_color: theme::color32(lk.text_color) }, lk.conditional)
 }
 
 /// Text for a value with General narrowing to the available width.
@@ -106,29 +43,7 @@ pub(super) fn display_text(
     width_px: f32,
     char_w: f32,
 ) -> (String, Option<Color32>, bool, Option<(char, usize)>) {
-    if sh.show_formulas
-        && let Some(f) = sh.cell(c).and_then(|x| x.formula.as_ref())
-    {
-        return (format!("={}", f.text), None, false, None);
-    }
-    if !sh.show_zeros && v.as_f64() == Some(0.0) {
-        return (String::new(), None, false, None);
-    }
-    let code = st.num_fmt.as_str();
-    // A checkbox cell draws TRUE/FALSE (and empty) as a box; other values show as General.
-    if code == "checkbox" && matches!(v, Value::Bool(_) | Value::Empty) {
-        return (String::new(), None, false, None);
-    }
-    if code == "General"
-        && let Value::Number(n) = v
-    {
-        let max_chars = ((width_px - 4.0) / char_w).floor().max(1.0) as usize;
-        return match gridcraft_engine::numfmt::format_general_fit(*n, max_chars.min(11)) {
-            Some(t) => (t, None, true, None),
-            None => ("#".repeat(max_chars.max(1)), None, true, None),
-        };
-    }
-    let f = gridcraft_engine::display::format(v, code, wb);
+    let f = gridcraft_engine::display::grid_text(wb, sh, c, v, st.num_fmt.as_str(), width_px, char_w);
     (f.text, f.color.map(numfmt_color), f.numeric, f.fill)
 }
 

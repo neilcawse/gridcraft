@@ -314,6 +314,108 @@ fn should_expand_text(filter_space: f32, overflows: bool, across_end: u32, col: 
     filter_space == 0.0 && (overflows || across_end > col) && !in_merge
 }
 
+pub(super) struct CellTextInput<'a> {
+    pub wb: &'a Workbook,
+    pub si: usize,
+    pub sh: &'a Sheet,
+    pub c: CellRef,
+    pub style: &'a gridcraft_engine::model::Style,
+    pub text_color: Color32,
+    pub value: &'a Value,
+    pub width: f32,
+    pub z: f32,
+}
+
+pub(super) struct CellText {
+    pub text: String,
+    font: FontId,
+    pub color: Color32,
+    direction: egui::epaint::text::TextDirection,
+    pub halign: HAlign,
+    numeric: bool,
+    fill: Option<(char, usize)>,
+}
+
+impl CellTextInput<'_> {
+    pub(super) fn prepare(self, p: &Painter) -> Option<CellText> {
+        let Self { wb, si, sh, c, style: st, text_color, value, width, z } = self;
+        let font = FontId::new(st.font.size * 96.0 / 72.0 * z, theme::cell_family(&st.font.name, st.font.bold, st.font.italic));
+        // Digits fit by the cell's own font and size, not the default 11pt.
+        let char_w = p.layout_no_wrap("0".to_string(), font.clone(), Color32::PLACEHOLDER).size().x.max(1.0);
+        let (mut text, ncolor, numeric, fill) = display_text(wb, sh, c, value, st, width / z.max(0.1) * z, char_w);
+        if sh.show_formulas && sh.cell(c).is_some_and(|cell| cell.formula.is_some()) {
+            text = crate::formula_locale::display(&text, crate::i18n::current(p.ctx()).formula_locale(), wb, si);
+        }
+        if text.is_empty() {
+            return None;
+        }
+        let color = ncolor.unwrap_or(text_color);
+        let direction = crate::text_direction::cell_direction(st.align.reading_order, &text);
+        let halign = match st.align.h {
+            HAlign::General => match value {
+                Value::Number(_) => HAlign::Right,
+                Value::Bool(_) | Value::Error(_) => HAlign::Center,
+                _ if numeric => HAlign::Right,
+                _ if direction == egui::epaint::text::TextDirection::RightToLeft && !sh.right_to_left => HAlign::Right,
+                _ => HAlign::Left,
+            },
+            h => painted_halign(h, sh.right_to_left),
+        };
+        Some(CellText { text, font, color, direction, halign, numeric, fill })
+    }
+}
+
+pub(super) fn wraps_across_column(align: gridcraft_engine::model::Alignment) -> bool {
+    matches!(align.rotation, 0 | 255) && (align.wrap || align.h == HAlign::Justify)
+}
+
+impl CellText {
+    pub(super) fn single_line(
+        self,
+        p: &Painter,
+        align: gridcraft_engine::model::Alignment,
+        value: &Value,
+        width: f32,
+        z: f32,
+    ) -> (std::sync::Arc<egui::Galley>, FontId) {
+        let Self { mut text, font, color, direction, numeric, fill, .. } = self;
+        let room = width - 2.0 * (2.5 * z);
+        // Without Wrap Text the grid ignores line breaks. Adjust the fill's byte offset first.
+        let fill = fill.map(|(ch, pos)| (ch, pos.saturating_sub(text.get(..pos).map_or(0, |s| s.matches(['\n', '\r']).count()))));
+        text.retain(|ch| !matches!(ch, '\n' | '\r'));
+        let small = (align.shrink && matches!(align.rotation, 0 | 255) && align.h != HAlign::Fill && fill.is_none())
+            .then(|| shrink_font(p, &text, &font, room - align.indent as f32 * 9.0 * z))
+            .flatten();
+        let shrunk = small.is_some();
+        let font = small.unwrap_or(font);
+        let layout = |text: String| {
+            let mut job = egui::text::LayoutJob::simple(text, font.clone(), color, f32::INFINITY);
+            job.direction = direction;
+            job.halign_min_is_start = false;
+            p.layout_job(job)
+        };
+        let mut galley = layout(text);
+        let w = galley.size().x;
+        // Numbers and dates never overflow. Measure # itself: it may be wider than 0.
+        if !shrunk && (numeric || matches!(value, Value::Number(_))) && w > room && align.h != HAlign::Fill {
+            let hash_w = p.layout_no_wrap("#".to_string(), font.clone(), color).size().x.max(1.0);
+            let n = ((room / hash_w).floor().max(1.0) as usize).min(MAX_FILL_REPEATS);
+            galley = layout("#".repeat(n));
+        } else if let Some((ch, pos)) = fill
+            && galley.job.text.is_char_boundary(pos)
+        {
+            let cw = p.layout_no_wrap(ch.to_string(), font.clone(), color).size().x.max(1.0);
+            let n = (((room - w) / cw).floor().max(0.0) as usize).min(MAX_FILL_REPEATS);
+            if n != 0 {
+                let mut filled = galley.job.text.clone();
+                filled.insert_str(pos, &ch.to_string().repeat(n));
+                galley = layout(filled);
+            }
+        }
+        (galley, font)
+    }
+}
+
 /// Paint one worksheet cell using its computed appearance and visible geometry.
 ///
 /// Handles text layout, wrapping, alignment, overflow into neighbouring cells,
@@ -353,36 +455,16 @@ fn paint_cell(q: &QuadrantPaint<'_>, painted: &(CellRef, Rect, Look, Option<CfLo
     let text_rect = Rect::from_min_max(rect.min, pos2((rect.right() - filter_space).max(rect.left()), rect.bottom()));
     let rect = &text_rect;
     let st = &lk.style;
-    let size = st.font.size * 96.0 / 72.0 * z;
-    let fam = theme::cell_family(&st.font.name, st.font.bold, st.font.italic);
-    let font = FontId::new(size, fam);
-    // Digits fit by the cell's own font and size, not the default 11pt (9pt marks in narrow columns).
-    let char_w = p.layout_no_wrap("0".to_string(), font.clone(), Color32::PLACEHOLDER).size().x.max(1.0);
     let avail_w = rect.right() - text_left;
-    let (mut text, ncolor, numeric, fill_char) = display_text(wb, sh, c, &v, st, avail_w / z.max(0.1) * z, char_w);
-    if sh.show_formulas && sh.cell(c).is_some_and(|cell| cell.formula.is_some()) {
-        text = crate::formula_locale::display(&text, crate::i18n::current(p.ctx()).formula_locale(), wb, si);
-    }
-    if text.is_empty() {
+    let Some(text_cell) = (CellTextInput { wb, si, sh, c, style: st, text_color: lk.text_color, value: &v, width: avail_w, z }).prepare(p) else {
         return;
-    }
-    let color = ncolor.unwrap_or(lk.text_color);
-    let direction = crate::text_direction::cell_direction(st.align.reading_order, &text);
-    let halign = match st.align.h {
-        HAlign::General => match v {
-            Value::Number(_) => HAlign::Right,
-            Value::Bool(_) | Value::Error(_) => HAlign::Center,
-            _ if numeric => HAlign::Right,
-            _ if direction == egui::epaint::text::TextDirection::RightToLeft && !sh.right_to_left => HAlign::Right,
-            _ => HAlign::Left,
-        },
-        h => painted_halign(h, geo.rtl),
     };
+    let CellText { text, font, color, direction, halign, numeric, fill } = text_cell;
     let indent = st.align.indent as f32 * 9.0 * z;
     let pad = 2.5 * z;
     let rotated = st.align.rotation != 0 && st.align.rotation != 255;
     // Rotated text wraps along its own direction (below), not across the column width.
-    if !rotated && (st.align.wrap || st.align.h == HAlign::Justify) {
+    if wraps_across_column(st.align) {
         let wrap_w = (rect.width() - 2.0 * pad - indent).max(4.0);
         let mut job = egui::text::LayoutJob::simple(text.clone(), font.clone(), color, wrap_w);
         job.direction = direction;
@@ -405,51 +487,10 @@ fn paint_cell(q: &QuadrantPaint<'_>, painted: &(CellRef, Rect, Look, Option<CfLo
         paint_upright_galley(&cp, pos2(x, y), &galley, color, faux_bold, z);
         return;
     }
-    // Wrap Text off: Excel ignores the line breaks and draws the whole string on one line.
-    let first_line: String = text.chars().filter(|&ch| ch != '\n' && ch != '\r').collect();
-    // The fill position indexes `text`; move it back by the breaks removed before it.
-    let fill_char = fill_char.map(|(ch, pos)| (ch, pos.saturating_sub(text.get(..pos).map_or(0, |s| s.matches(['\n', '\r']).count()))));
-    // Shrink to fit: too-wide content is drawn in a smaller font so it fits the cell (or the
-    // merged area): it neither spills, nor is clipped, nor turns into ####.
-    let small = (st.align.shrink && !rotated && st.align.h != HAlign::Fill && fill_char.is_none())
-        .then(|| shrink_font(p, &first_line, &font, avail_w - 2.0 * pad - indent))
-        .flatten();
-    let shrunk = small.is_some();
-    let font = small.unwrap_or(font);
-    let layout = |text: String| {
-        let mut job = egui::text::LayoutJob::simple(text, font.clone(), color, f32::INFINITY);
-        job.direction = direction;
-        job.halign_min_is_start = false;
-        p.layout_job(job)
-    };
-    let mut galley = layout(first_line.clone());
-    let mut w = galley.size().x;
-    // Numbers and dates never overflow: they show #### when too narrow.
-    let hashed = !shrunk && (numeric || matches!(v, Value::Number(_))) && w > avail_w - 2.0 * pad && st.align.h != HAlign::Fill;
-    if hashed {
-        // Measured on `#` itself: it is wider than `0` in some fonts, and #### must fit its cell.
-        let hash_w = p.layout_no_wrap("#".to_string(), font.clone(), color).size().x.max(1.0);
-        let n = ((avail_w - 2.0 * pad) / hash_w).floor().max(1.0) as usize;
-        galley = layout("#".repeat(n));
-        w = galley.size().x;
-    }
-    // Repeat fill (`*` in number formats) / Fill alignment. A number already shown as #### keeps
-    // it: rebuilding it from the text would overflow and clip its leading digits.
-    if let Some((ch, pos)) = fill_char
-        && !hashed
-        && pos <= first_line.len()
-    {
-        let base_w = w;
-        let cw = p.layout_no_wrap(ch.to_string(), font.clone(), color).size().x.max(1.0);
-        // A merged cell's width counts offscreen columns: no screen shows more repeats than this.
-        let n = ((((avail_w - 2.0 * pad) - base_w) / cw).floor().max(0.0) as usize).min(MAX_FILL_REPEATS);
-        let mut s = first_line.clone();
-        if first_line.is_char_boundary(pos) {
-            s.insert_str(pos, &ch.to_string().repeat(n));
-        }
-        galley = layout(s);
-        w = galley.size().x;
-    }
+    let line = CellText { text, font, color, direction, halign, numeric, fill };
+    let rotated_wrap = (rotated && st.align.wrap && st.align.rotation.abs() == 90).then(|| line.text.clone());
+    let (galley, font) = line.single_line(p, st.align, &v, avail_w, z);
+    let w = galley.size().x;
     // Center Across Selection: the text is centred over this cell and the empty cells to its right that also use it.
     let across_end = if halign == HAlign::CenterAcross && !rotated && in_merge(c).is_none() {
         center_across_end(c.col, c1 + 20, |col| {
@@ -511,8 +552,8 @@ fn paint_cell(q: &QuadrantPaint<'_>, painted: &(CellRef, Rect, Look, Option<CfLo
     let deco_w = if rotated {
         let angle = -(st.align.rotation as f32).to_radians();
         // Upright (±90°) wrapped text wraps to the row height: lines then stack across the column.
-        let galley = if st.align.wrap && st.align.rotation.abs() == 90 {
-            let mut job = egui::text::LayoutJob::simple(text.clone(), font.clone(), color, (rect.height() - 2.0 * pad).max(4.0));
+        let galley = if let Some(text) = rotated_wrap {
+            let mut job = egui::text::LayoutJob::simple(text, font, color, (rect.height() - 2.0 * pad).max(4.0));
             job.direction = direction;
             p.layout_job(job)
         } else {

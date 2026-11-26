@@ -23,6 +23,18 @@ pub enum Visibility {
     VeryHidden,
 }
 
+fn drawing_reference(o: ObjRef) -> Option<crate::DrawingRef> {
+    use crate::DrawingRef;
+    match o.kind {
+        ObjKind::Chart => Some(DrawingRef::Chart(o.id)),
+        ObjKind::Image => Some(DrawingRef::Image(o.id)),
+        ObjKind::Shape | ObjKind::Equation => Some(DrawingRef::Shape(o.id)),
+        ObjKind::Group => Some(DrawingRef::Group(o.id)),
+        ObjKind::Slicer => Some(DrawingRef::Slicer(o.id)),
+        ObjKind::Control => None,
+    }
+}
+
 /// How a sheet is displayed (View › Workbook Views; `<sheetView view="…">` in XLSX).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -117,6 +129,11 @@ pub struct Sheet {
     /// Only CELL("width") reads this; layout uses `default_col_width`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub xlsx_base_col_width: Option<u8>,
+    /// Geometry profile of the worksheet, separate from the values saved in the source file.
+    #[serde(default, skip_serializing_if = "crate::Geometry::is_legacy")]
+    pub geometry: crate::Geometry,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_geometry: Option<crate::SavedSheetGeometry>,
     pub merges: Vec<RangeRef>,
     /// Frozen rows and columns (top/left).
     pub freeze: Option<(u32, u32)>,
@@ -157,6 +174,15 @@ pub struct Sheet {
     /// Groups of floating objects (members back to front; nested groups too).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<crate::DrawingGroup>,
+    /// Source DrawingML placements, keyed by the imported object's model identity.
+    #[serde(skip)]
+    pub drawing_files: std::collections::HashMap<crate::DrawingRef, crate::DrawingFile>,
+    /// DrawingML nonvisual IDs and names, independent of editable geometry.
+    #[serde(skip)]
+    pub drawing_names: std::collections::HashMap<crate::DrawingRef, (usize, String)>,
+    /// Imported top-level drawing order, independent of geometry edits and object IDs.
+    #[serde(skip)]
+    pub drawing_order: std::collections::HashMap<crate::DrawingRef, usize>,
     /// Form controls (buttons, sliders, spin buttons). They paint above every other object and
     /// take clicks first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -222,6 +248,8 @@ impl Sheet {
             default_col_width: DEFAULT_COL_WIDTH,
             default_row_height: DEFAULT_ROW_HEIGHT,
             xlsx_base_col_width: None,
+            geometry: crate::Geometry::default(),
+            saved_geometry: None,
             merges: vec![],
             freeze: None,
             tab_color: None,
@@ -247,6 +275,9 @@ impl Sheet {
             sparklines: vec![],
             slicers: vec![],
             groups: vec![],
+            drawing_files: std::collections::HashMap::new(),
+            drawing_names: std::collections::HashMap::new(),
+            drawing_order: std::collections::HashMap::new(),
             controls: vec![],
             pivots: vec![],
             unimported_pivots: vec![],
@@ -346,6 +377,9 @@ impl Sheet {
     }
 
     pub fn object_anchor_mut(&mut self, o: ObjRef) -> Option<&mut Anchor> {
+        if let Some(reference) = drawing_reference(o) {
+            self.invalidate_drawing_file(reference);
+        }
         match o.kind {
             ObjKind::Chart => self.charts.iter_mut().find(|c| c.id == o.id).map(|c| &mut c.anchor),
             ObjKind::Image => self.images.iter_mut().find(|c| c.id == o.id).map(|c| &mut c.anchor),
@@ -363,6 +397,11 @@ impl Sheet {
             let n = v.len();
             v.retain(|x| !f(x));
             v.len() != n
+        }
+        if let Some(reference) = drawing_reference(o) {
+            self.invalidate_drawing_file(reference);
+            self.drawing_names.remove(&reference);
+            self.drawing_order.remove(&reference);
         }
         match o.kind {
             ObjKind::Chart => take(&mut self.charts, |c| c.id == o.id),
@@ -560,8 +599,14 @@ impl Sheet {
         sheet.into_iter().chain(tables).collect()
     }
     pub fn is_col_hidden(&self, col: u32) -> bool {
-        self.cols.get(&col).is_some_and(|r| r.hidden)
+        self.cols.get(&col).is_some_and(|line| line.hidden || (self.geometry != crate::Geometry::Legacy && line.size == Some(0.0)))
     }
+    /// Whether the row stores any cell, styled blanks included, or a cell picture.
+    pub fn row_has_cells(&self, row: u32) -> bool {
+        self.cells.row(row, 0, gridcraft_core::MAX_COLS - 1).next().is_some()
+            || self.cell_pictures.range(CellRef::new(row, 0)..=CellRef::new(row, gridcraft_core::MAX_COLS - 1)).next().is_some()
+    }
+
     /// Y offset (points) of the top of `row`.
     pub fn row_top(&self, row: u32) -> f64 {
         let mut y = row as f64 * self.default_row_height as f64;

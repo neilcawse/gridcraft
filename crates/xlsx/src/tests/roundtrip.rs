@@ -117,7 +117,7 @@ fn sample() -> Workbook {
     s.cols.insert(1, LineInfo { size: Some(100.0), ..Default::default() });
     s.cols.insert(3, LineInfo { hidden: true, outline: 1, ..Default::default() });
     s.cols.insert(5, LineInfo { style: Some(money), ..Default::default() });
-    s.rows.insert(0, LineInfo { size: Some(30.0), ..Default::default() });
+    s.rows.insert(0, LineInfo { size: Some(32.0), custom: true, ..Default::default() });
     s.rows.insert(9, LineInfo { hidden: true, outline: 2, collapsed: true, ..Default::default() });
     s.rows.insert(10, LineInfo { style: Some(bold), ..Default::default() });
     s.default_row_height = 24.0;
@@ -578,8 +578,13 @@ fn assert_sheet_cells_and_settings(wb: &Workbook, back: &Workbook, a: &Sheet, b:
     }
     // Spilled cells are written as cached values and dropped again on read.
     assert!(b.cell(at("H2")).is_none());
-    assert_eq!(b.cols, a.cols);
-    assert_eq!(b.rows, a.rows);
+    for (saved, expected) in [(&b.cols, &a.cols), (&b.rows, &a.rows)] {
+        assert_eq!(saved.len(), expected.len());
+        for (index, line) in expected {
+            let actual = saved[index];
+            assert_eq!(LineInfo { saved_size: None, saved_col_flags: None, ..actual }, *line, "line {index}");
+        }
+    }
     assert_eq!(b.default_row_height, a.default_row_height);
     assert_eq!(b.default_col_width, a.default_col_width);
     assert_eq!(b.merges, a.merges);
@@ -831,6 +836,127 @@ fn empty_workbook_roundtrip() {
     assert_eq!(back.sheets[0].default_col_width, 64.0);
     assert_eq!(back.sheets[0].default_row_height, 20.0);
     assert!(crate::sniff(&bytes) == crate::Format::Xlsx);
+}
+
+#[test]
+fn xlsx_geometry_attributes_survive_layout_conversion() {
+    // W1, W4, H1–H3 and H5 must not rewrite the saved numeric widths and heights.
+    let custom_format = r#"<sheetFormatPr baseColWidth="4" defaultColWidth="13.25123" defaultRowHeight="21.75" customHeight="1"/>"#;
+    for format in ["", custom_format] {
+        let cols = r#"<cols><col min="1" max="1" width="8.30078125" customWidth="1"/></cols>"#;
+        let rows = r#"<sheetData><row r="1" ht="15.51" customHeight="1"/><row r="2" ht="14.1234"/></sheetData>"#;
+        let bytes = super::minimal(&format!("{format}{cols}{rows}"), &[], "", "");
+        let wb = crate::read::read_xlsx(&bytes, crate::ReadOptions::default(), Geometry::mac).unwrap().0;
+        let sheet = &wb.sheets[0];
+        assert_eq!(sheet.rows[&0].saved_size, Some(15.51));
+        assert_eq!(sheet.rows[&1].saved_size, Some(14.1234));
+        assert_eq!(sheet.cols[&0].saved_size, Some(8.30078125));
+        assert_eq!(sheet.row_height(0), 20.0);
+        assert_eq!(sheet.row_height(1), if format.is_empty() { 20.0 } else { 28.0 });
+        let bytes = write_xlsx(&wb).unwrap();
+        let mut pkg = Package::open(&bytes).unwrap();
+        let xml = pkg.read_xml("xl/worksheets/sheet1.xml").unwrap().unwrap();
+        assert_eq!(xml.child("sheetFormatPr").is_some(), !format.is_empty());
+        if let Some(fmt) = xml.child("sheetFormatPr") {
+            assert_eq!(fmt.attr("baseColWidth"), Some("4"));
+            assert_eq!(fmt.attr("defaultColWidth"), Some("13.25123"));
+            assert_eq!(fmt.attr("defaultRowHeight"), Some("21.75"));
+            assert_eq!(fmt.attr("customHeight"), Some("1"));
+        }
+        assert_eq!(xml.child("cols").unwrap().child("col").unwrap().attr("width"), Some("8.30078125"));
+        let mut saved = xml.child("sheetData").unwrap().kids("row");
+        assert_eq!(saved.next().unwrap().attr("ht"), Some("15.51"));
+        assert_eq!(saved.next().unwrap().attr("ht"), Some("14.1234"));
+    }
+}
+
+#[test]
+fn mac_width_font_and_default_cell_font_survive_save_and_reopen() {
+    let styles_rel =
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>"#;
+    for (first, named, default, digit_pt, row_pt, with_format, without_format) in
+        [(("Arial", 14), ("Arial", 8), ("Calibri", 11), 8, 15., 69., 85.), (("Arial", 8), ("Calibri", 11), ("Arial", 14), 4, 18., 35., 43.)]
+    {
+        let (f0, sz0) = first;
+        let (f1, sz1) = named;
+        let (f2, sz2) = default;
+        let styles = format!(
+            r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+          <fonts count="3"><font><sz val="{sz0}"/><name val="{f0}"/></font><font><sz val="{sz1}"/><name val="{f1}"/></font><font><sz val="{sz2}"/><name val="{f2}"/></font></fonts>
+          <cellStyleXfs count="1"><xf fontId="1"/></cellStyleXfs><cellXfs count="1"><xf fontId="2" xfId="0" applyFont="1"/></cellXfs>
+          <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>"#
+        );
+        for (format, col_pt) in [("", without_format), (r#"<sheetFormatPr defaultRowHeight="28.75"/>"#, with_format)] {
+            let body = format!(r#"{format}<sheetData><row r="1"/><row r="3"><c r="A3"><v>1</v></c></row></sheetData>"#);
+            let bytes = super::minimal(&body, &[("xl/styles.xml", &styles)], styles_rel, "");
+            let read = |bytes: &[u8]| crate::read::read_xlsx(bytes, crate::ReadOptions::default(), Geometry::mac).unwrap().0;
+            let wb = read(&bytes);
+            let saved = write_xlsx(&wb).unwrap();
+            let reopened = read(&saved);
+            for book in [&wb, &reopened] {
+                let sh = &book.sheets[0];
+                assert_eq!(sh.geometry, Geometry::Mac { digit_pt });
+                assert_eq!(sh.col_width(0), (col_pt * (4.0 / 3.0)) as f32);
+                for row in [0, 1, 2] {
+                    assert_eq!(sh.row_height(row), row_pt * (4.0 / 3.0));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn mac_custom_sheet_height_switch_follows_any_saved_row_height() {
+    // H5 (measured): any `<row ht>` switches, with or without valued cells or `customHeight`, at
+    // any value; `customHeight="0"` or row flags alone do not.
+    for (first, other, switches) in [
+        ("", "", false),
+        (r#" ht="30.75""#, "", true),
+        (r#" customHeight="0""#, "", false),
+        (r#" ht="30.75" customHeight="0""#, "", true),
+        ("", r#"<row r="3" ht="30.75"/>"#, true),
+        ("", r#"<row r="3" ht="21"/>"#, true),
+        ("", r#"<row r="3" ht="15"/>"#, true),
+        ("", r#"<row r="3" ht="30.75" customHeight="1"/>"#, true),
+        ("", r#"<row r="3" thickBot="1"/>"#, false),
+        ("", r#"<row r="3"/>"#, false),
+    ] {
+        let body = format!(
+            r#"<sheetFormatPr defaultRowHeight="21.75" customHeight="1"/>
+          <sheetData><row r="1"{first}><c r="A1"><v>1</v></c></row>{other}</sheetData>"#
+        );
+        let bytes = super::minimal(&body, &[], "", "");
+        let wb = crate::read::read_xlsx(&bytes, crate::ReadOptions::default(), Geometry::mac).unwrap().0;
+        let sheet = &wb.sheets[0];
+        assert_eq!(sheet.saved_geometry.unwrap().fit_automatic_rows, switches, "{first} {other}");
+        assert_eq!(sheet.default_row_height, 28.0, "floor(21.75) pt");
+    }
+}
+
+#[test]
+fn mac_ignores_a_non_positive_custom_sheet_default() {
+    let body = r#"<sheetFormatPr defaultRowHeight="0" customHeight="1"/><sheetData><row r="1" ht="30.75"/></sheetData>"#;
+    let wb = crate::read::read_xlsx(&super::minimal(body, &[], "", ""), crate::ReadOptions::default(), Geometry::mac).unwrap().0;
+    assert_eq!(wb.sheets[0].default_row_height, 20.0, "Calibri 11 Normal row");
+    assert!(!wb.sheets[0].saved_geometry.unwrap().fit_automatic_rows, "no valid custom default to switch");
+}
+
+#[test]
+fn bare_rows_survive_import_and_save() {
+    // Measured (boundary set): a bare `<row r="N"/>` is a row element; Excel counts a trailing
+    // one in UsedRange and fits it on a switched custom-default sheet, so it is kept and saved.
+    let body = r#"<sheetFormatPr defaultRowHeight="21.75" customHeight="1"/>
+          <sheetData><row r="1" ht="30.75"><c r="A1"><v>1</v></c></row><row r="3"/><row r="5"/></sheetData>"#;
+    for geometry in [Geometry::mac as fn(&gridcraft_model::Font) -> Geometry, |_: &gridcraft_model::Font| Geometry::Legacy] {
+        let wb = crate::read::read_xlsx(&super::minimal(body, &[], "", ""), crate::ReadOptions::default(), geometry).unwrap().0;
+        let rows = &wb.sheets[0].rows;
+        assert!(rows.contains_key(&2) && rows.contains_key(&4) && !rows.contains_key(&3), "{rows:?}");
+        let saved = write_xlsx(&wb).unwrap();
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(saved)).unwrap();
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut zip.by_name("xl/worksheets/sheet1.xml").unwrap(), &mut xml).unwrap();
+        assert!(xml.contains(r#"<row r="3"/>"#) && xml.contains(r#"<row r="5"/>"#) && !xml.contains(r#"<row r="4""#), "{xml}");
+    }
 }
 
 #[test]

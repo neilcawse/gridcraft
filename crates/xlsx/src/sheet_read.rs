@@ -21,7 +21,7 @@ use crate::fmla::{formula_bar_text, from_file, unwrap_google_sheets};
 use crate::package::{Rel, craft_error};
 use crate::read::Ctx;
 use crate::styles::read_color;
-use crate::tables::{col_width_to_px, paper_name, pt_to_px};
+use crate::tables::{paper_name, pt_to_px};
 use crate::xml::{self, El};
 
 mod parts;
@@ -213,6 +213,7 @@ pub fn read_sheet(cx: &mut Ctx<'_>, part: &str, name: &str) -> Result<(Sheet, cr
     }
     let rels = cx.pkg.rels(part)?;
     let mut sheet = Sheet::new(name);
+    sheet.geometry = cx.geometry;
     let mut st = RowState::default();
     let entry = CraftSheetEntry {
         name: name.to_string(),
@@ -252,6 +253,7 @@ pub fn read_sheet(cx: &mut Ctx<'_>, part: &str, name: &str) -> Result<(Sheet, cr
     if too_many_merges {
         cx.warn(format!("sheet \"{name}\" is damaged: more than {} merge cells", crate::xml::MAX_XML_NODES));
     }
+    sheet.default_row_height = cx.normal_row_height_px;
     for row in &rows {
         read_craft_row(cx, &mut sheet, &mut st, row).map_err(craft_error)?;
     }
@@ -281,24 +283,34 @@ fn apply_craft_sheet_part(
     for r in rels {
         rel_by_id.entry(r.id.as_str()).or_insert(r);
     }
-    if let Some(fmt) = &sp.features.format {
-        if let Some(h) = fmt.default_row_height {
-            let px = pt_to_px(h);
-            if px > 0.0 {
-                sheet.default_row_height = px;
-            }
+    let format = sp.features.format.as_ref();
+    let base = format.and_then(|f| f.base_col_width);
+    let width = format.and_then(|f| f.default_col_width);
+    sheet.xlsx_base_col_width = base.filter(|_| width.is_none()).map(|b| b.min(255) as u8);
+    let height = format.and_then(|f| f.default_row_height);
+    let custom = format.and_then(|f| f.custom_height);
+    sheet.default_col_width = sheet.geometry.inherited_width_px(format.is_some(), base, width);
+    let mut saved = gridcraft_model::SavedSheetGeometry {
+        has_format: format.is_some(),
+        base_col_width: base,
+        default_col_width: width,
+        default_row_height: height,
+        custom_height: custom,
+        original_width_px: sheet.default_col_width,
+        ..Default::default()
+    };
+    if sheet.geometry == gridcraft_model::Geometry::Legacy {
+        if let Some(ht) = height.filter(|h| h.is_finite() && *h > 0.0) {
+            sheet.default_row_height = pt_to_px(ht);
         }
-        if let Some(w) = fmt.default_col_width {
-            let px = col_width_to_px(w);
-            if px > 0.0 {
-                sheet.default_col_width = px;
-            }
-        } else if let Some(b) = fmt.base_col_width {
-            let px = ((f64::from(b.min(255)) * 7.0 + 5.0) / 8.0).ceil() * 8.0;
-            sheet.default_col_width = px as f32;
-            sheet.xlsx_base_col_width = Some(b.min(255) as u8);
-        }
+    } else if let Some(ht) = saved.effective_custom_row_height_pt() {
+        sheet.default_row_height = sheet.geometry.custom_height_px(ht);
+        // H5: any saved row `ht`, regardless of value, contents or `customHeight`,
+        // switches a custom sheet default to fitting its automatic rows.
+        saved.fit_automatic_rows = sheet.rows.values().any(|info| info.saved_size.is_some());
     }
+    saved.original_height_px = sheet.default_row_height;
+    sheet.saved_geometry = Some(saved);
     let cols_blocks = sp.root.children.iter().filter(|n| matches!(n, craft_xml::Node::El(e) if e.name == "cols")).count();
     if cols_blocks > 1 {
         apply_xml_cols(cx, sp, sheet)?;
@@ -441,6 +453,7 @@ struct RawCol {
     max: u32,
     width: Option<f64>,
     custom_width: bool,
+    best_fit: bool,
     hidden: bool,
     outline_level: u8,
     collapsed: bool,
@@ -453,10 +466,10 @@ fn apply_col_entry(cx: &Ctx<'_>, c: RawCol, remaining: &mut u64, sheet: &mut She
     if min == 0 || min > MAX_COLS || max < min {
         return Ok(());
     }
-    let mut info = LineInfo::default();
+    let mut info = LineInfo { saved_size: c.width.filter(|w| w.is_finite()), ..Default::default() };
     if let Some(w) = c.width {
-        let px = col_width_to_px(w);
-        if c.custom_width || px != sheet.default_col_width {
+        let px = sheet.geometry.stored_width_px(w);
+        if c.custom_width || px != sheet.default_col_width || matches!(sheet.geometry, gridcraft_model::Geometry::Mac { .. }) {
             info.size = Some(px);
         }
     }
@@ -469,9 +482,10 @@ fn apply_col_entry(cx: &Ctx<'_>, c: RawCol, remaining: &mut u64, sheet: &mut She
             info.style = Some(id);
         }
     }
-    if info == LineInfo::default() {
+    if info == LineInfo::default() && !c.custom_width && !c.best_fit {
         return Ok(());
     }
+    info.saved_col_flags = Some((c.custom_width, c.best_fit));
     *remaining = remaining
         .checked_sub(u64::from(max - min + 1))
         .ok_or_else(|| IoError::TooLarge(format!("sheet \"{}\": more than {MAX_COLUMN_ASSIGNMENTS} expanded column assignments", sheet.name)))?;
@@ -489,6 +503,7 @@ fn apply_craft_cols(cx: &Ctx<'_>, cols: &[craft_xlsx::Column], sheet: &mut Sheet
             max: c.last + 1,
             width: c.width,
             custom_width: c.custom_width,
+            best_fit: c.best_fit,
             hidden: c.hidden,
             outline_level: c.outline_level,
             collapsed: c.collapsed,
@@ -512,6 +527,7 @@ fn apply_xml_cols(cx: &Ctx<'_>, sp: &CraftSheetPart, sheet: &mut Sheet) -> Resul
                     max: c.attr_u32("max").unwrap_or(0),
                     width: c.attr_f64("width"),
                     custom_width: c.flag("customWidth", false),
+                    best_fit: c.flag("bestFit", false),
                     hidden: c.flag("hidden", false),
                     outline_level: c.attr_u32("outlineLevel").unwrap_or(0).min(7) as u8,
                     collapsed: c.flag("collapsed", false),
@@ -768,11 +784,13 @@ fn charge_cells(cx: &mut Ctx<'_>, n: u64) -> Result<(), IoError> {
 
 fn read_craft_row(cx: &mut Ctx<'_>, sheet: &mut Sheet, st: &mut RowState, row: &CraftRow) -> Result<(), craft_xlsx::Error> {
     let r = row.index;
-    let mut info = LineInfo::default();
+    let mut info = LineInfo { custom: row.custom_height, saved_size: row.height.filter(|h| h.is_finite()), ..Default::default() };
+    let flag = |name| row.attrs.iter().any(|(k, v)| k == name && (v == "1" || v == "true"));
+    info.thick_edges = (flag("thickTop"), flag("thickBot"));
     if let Some(ht) = row.height {
-        info.custom = row.custom_height;
-        if info.custom || (pt_to_px(ht) - sheet.default_row_height).abs() > 0.5 {
-            info.size = Some(pt_to_px(ht));
+        let px = sheet.geometry.custom_height_px(ht);
+        if info.custom || (sheet.geometry == gridcraft_model::Geometry::Legacy && (px - sheet.default_row_height).abs() > 0.5) {
+            info.size = Some(px);
         }
     }
     info.hidden = row.hidden;
@@ -781,13 +799,18 @@ fn read_craft_row(cx: &mut Ctx<'_>, sheet: &mut Sheet, st: &mut RowState, row: &
     if let Some(s) = row.style {
         info.style = Some(cx.style(Some(s)));
     }
-    if info != LineInfo::default() {
+    let bare = info == LineInfo::default();
+    if !bare {
         sheet.rows.insert(r, info);
     }
     for c in &row.cells {
         charge_cells(cx, 1).map_err(|e| craft_xlsx::Error::TooLarge(e.to_string()))?;
         let pos = CellRef::new(c.at.row, c.at.col);
         read_craft_cell(cx, sheet, st, c, pos);
+    }
+    // A `<row>` with nothing else kept is still a row element (measured: UsedRange, H5 fitting).
+    if bare && !sheet.row_has_cells(r) {
+        sheet.rows.insert(r, LineInfo { saved_element: true, ..info });
     }
     Ok(())
 }
@@ -1175,6 +1198,8 @@ mod tests {
             dxfs: vec![],
             palette: vec![],
             date_system: DateSystem::D1900,
+            geometry: gridcraft_model::Geometry::Legacy,
+            normal_row_height_px: gridcraft_model::DEFAULT_ROW_HEIGHT,
             styles: Default::default(),
             persons: Default::default(),
             next_id: 1,

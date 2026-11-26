@@ -198,11 +198,42 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 - Font weights beyond regular/bold (#168), system font list (#4), Calibri metrics (#29), macOS
   chrome (#169, #170), Linux title bar (#54), icon consistency across apps (#173). **Estimate:** 7–12 h.
 
+### 25. Used worksheet extent and whole-line Paste Special (F)
+
+- The extent reported by workbook inspection and CLI `info` includes stored cells (including cell
+  formatting) and spills, not row or column records. The same extent backs Ctrl+End, Go To Special
+  (Last Cell), the review report's end-of-sheet field and grid navigation. In X25 measurements
+  on Excel for Mac 16.115.2, from a base extent of `C3:E5`, a height-only or styled row extended
+  it to `C3:E40` and a styled column to `C3:J5`. A width-only column and a bare XLSX row did not
+  extend it in these cases; a separate sizing probe did count a trailing bare row. After whole-row
+  paste in the X25 fixture, Excel reported UsedRange `A1:I10` and Last Cell `H10`, not `I10`.
+  See the [X25 case results](parity/INTEGRATION_NOTES.md#x25--whole-row-and-whole-column-paste)
+  and [Microsoft's last-cell guidance](https://support.microsoft.com/en-us/excel/locate-and-reset-the-last-cell-on-a-worksheet).
+- Do not widen the shared extent based on those observations alone. It also bounds default and
+  selected-area print/PDF layout, CSV and range/text/HTML export, calculation, charts and pivots
+  (including XLSX serialization ranges), conditional formatting, selection, clipboard, fill, clear,
+  sort, validation, AutoFit, sheet operations, spelling, forecast, what-if analysis and macros.
+  In particular, Excel's default print and CSV bounds for bare or geometry-only lines are unmeasured.
+  A separate reported extent for inspection and navigation would avoid changing those work bounds.
+- Whole-line Paste Special modes other than plain All, drag-and-drop, and filtered or packed
+  pastes retain their previous behavior; Excel's line-format behavior on these paths is unmeasured.
+  See [X32](parity/INTEGRATION_NOTES.md#x32--paste-special-all-and-insert-copied-cells-carry-line-formatting)
+  for the measured whole-row Paste Special All and Insert Copied Cells paths.
+  Ordinary whole-column paste transfers inherited column styles and a cut resets the
+  source column's; Excel readbacks of blank cells confirmed both. GridCraft also resets the
+  destination style when copying an unstyled source column. That Excel probe did not measure
+  the destination column's aggregate style or sample a blank destination cell.
+  Hidden/outline/show-detail and saved XML flags were not recovered; a size of zero
+  established only effective geometry.
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
 | 2026-11-25 | minor | §3: table slicers are written to XLSX (they were dropped on save); OLAP slicers remain |
+| 2026-11-25 | minor | §25: Paste Special All and Insert Copied Cells now transfer whole-line formatting; other modes remain unmeasured. |
+| 2026-11-25 | minor | §25: transfer and reset inherited column styles on ordinary whole-column paste, as Excel's blank-cell readbacks show for copy and cut. |
+| 2026-11-25 | minor | §25: copy and cut whole-line geometry and inherited row style on ordinary paste; record the remaining extent and Paste Special gaps. |
 | 2026-11-02 | minor | §17: equations (Insert › Equation, LaTeX source, gallery, editor) |
 | 2026-11-02 | minor | §13: Solver Sensitivity report: shadow prices, reduced costs and allowable ranges for Simplex LP; Lagrange multipliers and reduced gradients for GRG Nonlinear |
 | 2026-11-02 | minor | §4: charts, like every floating object, move and resize from eight handles (#190), so resizing is no longer listed as missing; the evidence is one paragraph again, without the stale "PRs #158, #161 open" |

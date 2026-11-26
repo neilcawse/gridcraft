@@ -70,11 +70,13 @@ pub(super) fn row_height(s: &mut Session, p: &Json) -> Result<Json> {
     let (si, lines) = line_targets(s, p, true)?;
     edit(s, |cx| {
         let sh = cx.sheet_mut(si)?;
+        let effective = if sh.geometry == gridcraft_model::Geometry::Legacy { h as f32 } else { sh.geometry.custom_height_px(h * 0.75) };
         for (a, b) in lines {
             for r in a..=b.min(a.saturating_add(1_048_575)) {
                 let e = sh.rows.entry(r).or_default();
-                e.size = Some(h as f32);
-                e.hidden = h == 0.0;
+                e.size = Some(effective);
+                e.saved_size = (sh.geometry != gridcraft_model::Geometry::Legacy).then_some(h * 0.75);
+                e.hidden = effective == 0.0;
                 e.custom = true;
             }
         }
@@ -84,6 +86,8 @@ pub(super) fn row_height(s: &mut Session, p: &Json) -> Result<Json> {
 }
 
 pub(super) fn col_width(s: &mut Session, p: &Json) -> Result<Json> {
+    let (si, lines) = line_targets(s, p, false)?;
+    let geometry = s.active().and_then(|doc| doc.wb.sheet(si)).map_or(gridcraft_model::Geometry::Legacy, |sh| sh.geometry);
     let w = match (f64_param(p, "width"), f64_param(p, "chars")) {
         (Some(w), _) => {
             if !(0.0..=1800.0).contains(&w) {
@@ -95,17 +99,21 @@ pub(super) fn col_width(s: &mut Session, p: &Json) -> Result<Json> {
             if !(0.0..=255.0).contains(&c) {
                 return Err(EngineError::Other("Column width must be between 0 and 255 characters.".into()));
             }
-            chars_to_points(c)
+            match geometry {
+                gridcraft_model::Geometry::Legacy => chars_to_points(c),
+                gridcraft_model::Geometry::Mac { digit_pt } => gridcraft_model::Geometry::mac_chars_px(digit_pt, c),
+            }
         }
         _ => return Err(bad("home.columnWidth", "missing `width` (pixels) or `chars`")),
     };
-    let (si, lines) = line_targets(s, p, false)?;
     edit(s, |cx| {
         let sh = cx.sheet_mut(si)?;
         for (a, b) in lines {
             for c in a..=b {
                 let e = sh.cols.entry(c).or_default();
                 e.size = Some(w as f32);
+                e.saved_size = None;
+                e.saved_col_flags = None;
                 e.hidden = w == 0.0;
             }
         }
@@ -257,6 +265,8 @@ pub(super) fn autofit_cols(s: &mut Session, p: &Json) -> Result<Json> {
         for (c, w) in widths {
             let e = sh.cols.entry(c).or_default();
             e.size = Some(w.ceil());
+            e.saved_size = None;
+            e.saved_col_flags = None;
             e.hidden = false;
         }
         Ok(Json::Null)
@@ -272,6 +282,7 @@ pub(super) fn autofit_rows(s: &mut Session, p: &Json) -> Result<Json> {
                 for r in a..=b {
                     if let Some(e) = sh.rows.get_mut(&r) {
                         e.custom = false;
+                        e.saved_size = None;
                         e.hidden = false;
                     }
                 }
@@ -310,6 +321,8 @@ pub(super) fn hide(s: &mut Session, p: &Json, rows: bool, on: bool) -> Result<Js
                     e.hidden = false;
                     if e.size == Some(0.0) {
                         e.size = None;
+                        e.saved_size = None;
+                        e.saved_col_flags = None;
                     }
                 }
             }

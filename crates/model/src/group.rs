@@ -22,6 +22,7 @@ pub enum DrawingRef {
     Image(u32),
     Shape(u32),
     Group(u32),
+    Slicer(u32),
 }
 /// The original DrawingML transform and member anchors, retained for a lossless write when the
 /// group has not been edited. This is transient import metadata, not part of the model's JSON.
@@ -41,7 +42,15 @@ pub struct GroupFile {
     pub ext: (i64, i64),
     pub child_offset: (i64, i64),
     pub child_extent: (i64, i64),
-    /// Every member was read and had its own offset and extent.
+    /// Effective child space used by the editor, which can differ from the literal EMUs.
+    pub model_child_offset: (i64, i64),
+    pub model_child_extent: (i64, i64),
+    /// Presence of off, ext, chOff and chExt respectively; absent fields use layout defaults.
+    pub fields: [bool; 4],
+    pub has_transform: bool,
+    /// An explicit edit invalidates reuse even if the anchor later returns to the same value.
+    pub edited: bool,
+    /// Every retained leaf had its own offset and extent.
     pub complete: bool,
     pub flip: (bool, bool),
     pub rotation: i64,
@@ -156,8 +165,51 @@ impl Sheet {
             DrawingRef::Chart(id) => self.charts.iter().find(|o| o.id == id).map(|o| o.anchor),
             DrawingRef::Image(id) => self.images.iter().find(|o| o.id == id).map(|o| o.anchor),
             DrawingRef::Shape(id) => self.shapes.iter().find(|o| o.id == id).map(|o| o.anchor),
+            DrawingRef::Slicer(id) => self.slicers.iter().find(|o| o.id == id).map(|o| o.anchor),
             DrawingRef::Group(_) => None,
         }
+    }
+
+    /// The stored anchor, including a group's own box rather than its members' union.
+    pub fn raw_drawing_anchor(&self, r: DrawingRef) -> Option<Anchor> {
+        match r {
+            DrawingRef::Group(id) => self.drawing_group(id).map(|g| g.anchor),
+            _ => self.drawing_anchor(r),
+        }
+    }
+
+    /// The file transform is reusable only if all dependent objects are unchanged.
+    pub fn source_group<'a>(&self, g: &'a DrawingGroup) -> Option<&'a GroupFile> {
+        self.source_group_at_depth(g, 0)
+    }
+
+    fn source_group_at_depth<'a>(&self, g: &'a DrawingGroup, depth: usize) -> Option<&'a GroupFile> {
+        let f = g.file.as_ref()?;
+        if depth >= MAX_GROUP_DEPTH
+            || f.edited
+            || !f.complete
+            || f.anchor != g.anchor
+            || f.model_child_offset != g.child_offset
+            || f.model_child_extent != g.child_extent
+            || f.flip != g.flip
+            || f.rotation != g.rotation
+            || f.member_rotations != g.member_rotations
+            || f.members.len() != g.members.len()
+        {
+            return None;
+        }
+        f.members
+            .iter()
+            .zip(&g.members)
+            .all(|(m, &r)| {
+                m.reference == r
+                    && self.raw_drawing_anchor(r) == Some(m.anchor)
+                    && match r {
+                        DrawingRef::Group(id) => self.drawing_group(id).and_then(|g| self.source_group_at_depth(g, depth + 1)).is_some(),
+                        _ => true,
+                    }
+            })
+            .then_some(f)
     }
 
     /// An object's box; a group's is the box around its members. `None` when the object is
@@ -195,6 +247,32 @@ impl Sheet {
             }
         }
         Some(cur)
+    }
+
+    /// Discard placement for `r` and any enclosing groups.
+    pub fn invalidate_drawing_file(&mut self, mut r: DrawingRef) {
+        for _ in 0..=MAX_GROUP_DEPTH {
+            self.drawing_files.remove(&r);
+            if let DrawingRef::Group(id) = r
+                && let Some(file) = self.groups.iter_mut().find(|g| g.id == id).and_then(|g| g.file.as_mut())
+            {
+                file.edited = true;
+            }
+            let Some(parent) = self.parent_group(r) else { break };
+            r = DrawingRef::Group(parent);
+        }
+    }
+
+    /// Forget file placement after a bulk operation changes the anchors directly.
+    pub fn discard_changed_drawing_files(&mut self) {
+        let mut files = std::mem::take(&mut self.drawing_files);
+        files.retain(|&r, f| self.raw_drawing_anchor(r) == Some(f.anchor));
+        self.drawing_files = files;
+        let changed: Vec<_> =
+            self.groups.iter().filter(|g| g.file.as_ref().is_some_and(|f| !f.edited) && self.source_group(g).is_none()).map(|g| g.id).collect();
+        for id in changed {
+            self.invalidate_drawing_file(DrawingRef::Group(id));
+        }
     }
 
     /// Everything inside group `id`, nested groups included (not `id` itself).
@@ -247,12 +325,14 @@ impl Sheet {
             to.y -= all.y.min(0.0);
         }
         for (leaf, a) in leaves {
+            self.drawing_files.remove(&leaf);
             let na = self.rect_anchor(map_rect(from, to, self.anchor_rect(&a)), a.mode);
             if let Some(slot) = self.drawing_anchor_mut(leaf) {
                 *slot = na;
             }
         }
         for gid in groups {
+            self.invalidate_drawing_file(DrawingRef::Group(gid));
             let Some(a) = self.drawing_group(gid).map(|g| g.anchor) else { continue };
             let na = self.rect_anchor(map_rect(from, to, self.anchor_rect(&a)), a.mode);
             if let Some(g) = self.groups.iter_mut().find(|g| g.id == gid) {
@@ -265,11 +345,17 @@ impl Sheet {
     pub fn set_group_anchor_mode(&mut self, id: u32, mode: AnchorMode) {
         let contents = self.group_contents(id);
         for r in &contents {
+            self.drawing_files.remove(r);
             if let Some(a) = self.drawing_anchor_mut(*r) {
                 a.mode = mode;
             }
         }
+        self.invalidate_drawing_file(DrawingRef::Group(id));
         for g in self.groups.iter_mut().filter(|g| g.id == id || contents.contains(&DrawingRef::Group(g.id))) {
+            self.drawing_files.remove(&DrawingRef::Group(g.id));
+            if let Some(file) = &mut g.file {
+                file.edited = true;
+            }
             g.anchor.mode = mode;
         }
     }
@@ -277,6 +363,11 @@ impl Sheet {
     /// Deletes group `id` with everything in it.
     pub fn delete_group(&mut self, id: u32) {
         let contents = self.group_contents(id);
+        for r in std::iter::once(&DrawingRef::Group(id)).chain(&contents) {
+            self.drawing_files.remove(r);
+            self.drawing_order.remove(r);
+            self.drawing_names.remove(r);
+        }
         let has = |r: DrawingRef| contents.contains(&r);
         self.charts.retain(|o| !has(DrawingRef::Chart(o.id)));
         self.images.retain(|o| !has(DrawingRef::Image(o.id)));
@@ -289,6 +380,7 @@ impl Sheet {
     /// deleting one member of a group). A group left empty is taken out of its own group and
     /// dropped in turn.
     pub fn remove_from_group(&mut self, r: DrawingRef) {
+        self.invalidate_drawing_file(r);
         let mut pending = vec![r];
         while let Some(cur) = pending.pop() {
             for g in &mut self.groups {
@@ -303,6 +395,8 @@ impl Sheet {
             if let DrawingRef::Group(id) = cur
                 && cur != r
             {
+                self.drawing_order.remove(&cur);
+                self.drawing_names.remove(&cur);
                 self.groups.retain(|g| g.id != id);
             }
         }
@@ -313,6 +407,7 @@ impl Sheet {
             DrawingRef::Chart(id) => self.charts.iter_mut().find(|o| o.id == id).map(|o| &mut o.anchor),
             DrawingRef::Image(id) => self.images.iter_mut().find(|o| o.id == id).map(|o| &mut o.anchor),
             DrawingRef::Shape(id) => self.shapes.iter_mut().find(|o| o.id == id).map(|o| &mut o.anchor),
+            DrawingRef::Slicer(id) => self.slicers.iter_mut().find(|o| o.id == id).map(|o| &mut o.anchor),
             DrawingRef::Group(_) => None,
         }
     }

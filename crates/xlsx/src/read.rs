@@ -30,6 +30,8 @@ pub struct Ctx<'a> {
     pub palette: Vec<u32>,
     pub date_system: DateSystem,
     pub styles: StyleTable,
+    pub geometry: gridcraft_model::Geometry,
+    pub normal_row_height_px: f32,
     /// Threaded-comment person id → display name.
     pub persons: std::collections::HashMap<String, String>,
     pub next_id: u32,
@@ -250,6 +252,14 @@ fn read_shared_strings(cx: &mut Ctx<'_>, wb_rels: &[Rel]) -> Result<(), IoError>
     Ok(())
 }
 
+fn select_geometry(cx: &mut Ctx<'_>, wb: &Workbook, profile: fn(&gridcraft_model::Font) -> gridcraft_model::Geometry) {
+    let default_font = &cx.styles.get(StyleId::DEFAULT).font;
+    cx.geometry = profile(wb.xlsx_width_font.as_ref().unwrap_or(default_font));
+    if cx.geometry != gridcraft_model::Geometry::Legacy {
+        cx.normal_row_height_px = gridcraft_model::geometry::mac_line_height_pt(default_font) * (4.0 / 3.0);
+    }
+}
+
 fn read_workbook_styles(cx: &mut Ctx<'_>, wb: &mut Workbook, wb_rels: &[Rel]) -> Result<(), IoError> {
     // Theme, then styles: a font's link to the theme's body font is read against it.
     if let Some(r) = find_rel(wb_rels, "theme").cloned()
@@ -266,7 +276,7 @@ fn read_workbook_styles(cx: &mut Ctx<'_>, wb: &mut Workbook, wb_rels: &[Rel]) ->
     }
     if let Some(r) = find_rel(wb_rels, "styles").cloned() {
         if let Some(x) = cx.optional_xml(&r.target)? {
-            let StylesIn { xfs, dxfs, palette, named, num_fmts } = read_styles(&x, &checkboxes, &wb.theme.minor_font);
+            let StylesIn { width_font, xfs, dxfs, palette, named, num_fmts } = read_styles(&x, &checkboxes, &wb.theme.minor_font);
             cx.num_fmts = num_fmts;
             // Cell format 0 is the Normal cell format: everything on it (font, number format,
             // fill, borders, alignment, protection) is what a cell without its own format shows
@@ -274,6 +284,7 @@ fn read_workbook_styles(cx: &mut Ctx<'_>, wb: &mut Workbook, wb_rels: &[Rel]) ->
             if let Some(normal) = xfs.first() {
                 cx.styles = StyleTable::with_default(normal.clone());
             }
+            wb.xlsx_width_font = width_font.filter(|font| *font != cx.styles.get(StyleId::DEFAULT).font);
             cx.xf_map = xfs.into_iter().enumerate().map(|(i, s)| if i == 0 { StyleId::DEFAULT } else { cx.styles.intern(s) }).collect();
             cx.dxfs = dxfs;
             cx.palette = palette;
@@ -396,7 +407,11 @@ fn selected_workbook_view(workbook: &El) -> Option<&El> {
     views.kids("workbookView").find(|view| view.attr("visibility").unwrap_or("visible") == "visible").or_else(|| views.child("workbookView"))
 }
 
-pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(Workbook, ReadReport), IoError> {
+pub fn read_xlsx<'a>(
+    bytes: &'a [u8],
+    opts: crate::ReadOptions<'a>,
+    profile: fn(&gridcraft_model::Font) -> gridcraft_model::Geometry,
+) -> Result<(Workbook, ReadReport), IoError> {
     let functions = opts.functions;
     let known_function = opts.known_function;
     let pkg = Package::open(bytes)?;
@@ -411,6 +426,8 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
         palette: crate::tables::INDEXED.to_vec(),
         date_system: DateSystem::D1900,
         styles: StyleTable::default(),
+        geometry: gridcraft_model::Geometry::Legacy,
+        normal_row_height_px: gridcraft_model::DEFAULT_ROW_HEIGHT,
         persons: Default::default(),
         next_id: 1,
         num_fmts: Default::default(),
@@ -449,6 +466,7 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
     wb.sheets.clear();
 
     read_workbook_styles(&mut cx, &mut wb, &wb_rels)?;
+    select_geometry(&mut cx, &wb, profile);
     read_shared_strings(&mut cx, &wb_rels)?;
 
     if let Some(r) = find_rel(&wb_rels, "person").cloned()
@@ -626,6 +644,7 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
     crate::table_names::repair(&mut owned, names, &mut cx.report.warnings);
     wb = owned.into_owned();
     crate::slicer::attach_tables(&mut cx, &mut wb);
+    discard_unresolved_slicer_placements(&mut wb);
     cx.release_shared_strings_unless_needed(false);
     if let Some(w) = cx.python.warning() {
         cx.warn(w);
@@ -674,4 +693,19 @@ pub fn parse_print_titles(text: &str) -> (TitleSpan, TitleSpan) {
         }
     }
     (rows, cols)
+}
+
+/// Removes drawing metadata reserved for frames whose cache could not be resolved.
+fn discard_unresolved_slicer_placements(wb: &mut Workbook) {
+    for sh in &mut wb.sheets {
+        let sh = Arc::make_mut(sh);
+        let slicers = &sh.slicers;
+        let keep = |r: &gridcraft_model::DrawingRef| match r {
+            gridcraft_model::DrawingRef::Slicer(id) => slicers.iter().any(|s| s.id == *id),
+            _ => true,
+        };
+        sh.drawing_files.retain(|r, _| keep(r));
+        sh.drawing_names.retain(|r, _| keep(r));
+        sh.drawing_order.retain(|r, _| keep(r));
+    }
 }

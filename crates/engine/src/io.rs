@@ -95,29 +95,43 @@ pub fn open_bytes_with(name: &str, bytes: &[u8], password: Option<&str>, csv_as_
     Ok((wb, warnings))
 }
 
-/// Excel auto-fits rows to their tallest font when opening a file: rows without a user-set
-/// height grow to fit their content. Rows the file made taller keep their height — our
-/// line-height estimate can differ from Excel's, and shrinking files that already look
-/// right would be a visible regression. Custom-height rows are left alone entirely.
+/// Fit automatic rows on open. The Mac XLSX profile recomputes automatic heights without
+/// inheriting a saved `ht`. Other formats and hosts keep the legacy grow-only fit so that
+/// a saved automatic height cannot shrink. Manual heights are left alone in both cases.
 fn fit_imported_rows(wb: &mut Workbook) {
     // The whole pass shares one budget of merge comparisons: later sheets keep their heights once it is spent.
     let mut left = crate::cmd::MERGE_FIT_WORK;
     for si in 0..wb.sheets.len() {
         let Some(sh) = wb.sheet(si) else { continue };
         let mut rows: Vec<u32> = sh.cells.iter().map(|(c, _)| c.row).collect();
+        let mac = sh.geometry != gridcraft_model::Geometry::Legacy;
+        if mac {
+            // Cell-less row elements also fit: saved heights (H5) and thick edges (H10).
+            rows.extend(sh.rows.keys().copied());
+        }
         rows.sort_unstable();
         rows.dedup();
         // One sweep over the sheet's merges for all of its rows, in ascending order.
         let mut sweep = crate::cmd::MergeSweep::new(left);
         for row in rows {
-            let before = wb.sheet(si).and_then(|sh| sh.rows.get(&row)).and_then(|i| i.size);
+            if mac {
+                crate::cmd::fit_row_height(wb, si, row, &mut sweep);
+                continue;
+            }
+            let before = wb.sheet(si).and_then(|sh| sh.rows.get(&row)).map(|i| (i.size, i.saved_size));
             crate::cmd::fit_row_height(wb, si, row, &mut sweep);
-            let Some(before) = before else { continue };
+            let Some((before, saved)) = before else { continue };
             let after = wb.sheet(si).and_then(|sh| sh.rows.get(&row)).and_then(|i| i.size);
-            if after.is_none_or(|a| before > a + 0.5)
+            let keep_before = before.is_some_and(|b| after.is_none_or(|a| b > a + 0.5));
+            if (keep_before || saved.is_some())
                 && let Some(sh) = wb.sheet_mut(si)
             {
-                sh.rows.entry(row).or_default().size = Some(before);
+                let e = sh.rows.entry(row).or_default();
+                if keep_before {
+                    e.size = before;
+                }
+                // Open may grow the layout, but only an edit invalidates the imported `ht`.
+                e.saved_size = saved;
             }
         }
         left = sweep.left();

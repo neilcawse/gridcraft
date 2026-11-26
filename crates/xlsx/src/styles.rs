@@ -21,6 +21,8 @@ pub const MAX_FONT_NAME_CHARS: usize = 255;
 /// Styles read from a file.
 #[derive(Debug, Default)]
 pub struct StylesIn {
+    /// Font-table entry zero, including when no cell format refers to it.
+    pub width_font: Option<Font>,
     /// Cell formats (`cellXfs`) in file order.
     pub xfs: Vec<Style>,
     /// Differential formats (`dxfs`) in file order.
@@ -396,7 +398,7 @@ pub fn read_styles(root: &El, checkboxes: &[bool], minor_font: &str) -> StylesIn
     // Inline dxf format codes are interned: a code repeated by many dxfs is one allocation.
     let mut inline_fmts = HashMap::new();
     let dxfs = root.child("dxfs").map(|d| d.kids("dxf").map(|x| read_dxf(x, &palette, &shared_fmts, &mut inline_fmts)).collect()).unwrap_or_default();
-    StylesIn { xfs, dxfs, palette, named, num_fmts: fmts }
+    StylesIn { width_font: fonts.into_iter().next(), xfs, dxfs, palette, named, num_fmts: fmts }
 }
 
 /// One differential format (`dxf`): the style it sets over a cell's own.
@@ -682,8 +684,9 @@ pub fn write_styles(wb: &Workbook, dxfs: &[Style], extra_fmts: &[String], mut nf
     let mut fill_map: HashMap<Fill, u32> = fills.iter().enumerate().map(|(i, f)| (*f, i as u32)).collect();
     let mut borders: Vec<Borders> = vec![Borders::default()];
     let mut border_map: HashMap<Borders, u32> = HashMap::from([(Borders::default(), 0)]);
-    // The default style's font is font 0.
-    intern(&mut fonts, &mut font_map, &wb.styles.get(gridcraft_model::StyleId::DEFAULT).font);
+    let default_font = &wb.styles.get(gridcraft_model::StyleId::DEFAULT).font;
+    intern(&mut fonts, &mut font_map, wb.xlsx_width_font.as_ref().unwrap_or(default_font));
+    let normal_font_id = intern(&mut fonts, &mut font_map, default_font);
 
     let mut xfs = String::new();
     let mut count = 0;
@@ -698,7 +701,7 @@ pub fn write_styles(wb: &Workbook, dxfs: &[Style], extra_fmts: &[String], mut nf
         if fmt != 0 {
             xfs.push_str(" applyNumberFormat=\"1\"");
         }
-        if font != 0 {
+        if font != normal_font_id {
             xfs.push_str(" applyFont=\"1\"");
         }
         if fill != 0 {
@@ -730,7 +733,7 @@ pub fn write_styles(wb: &Workbook, dxfs: &[Style], extra_fmts: &[String], mut nf
     }
 
     // Named cell styles.
-    let mut style_xfs = String::from("<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/>");
+    let mut style_xfs = format!("<xf numFmtId=\"0\" fontId=\"{normal_font_id}\" fillId=\"0\" borderId=\"0\"/>");
     let mut cell_styles = String::from("<cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/>");
     let mut named = 1;
     for (name, st) in &wb.cell_styles {
@@ -775,7 +778,7 @@ pub fn write_styles(wb: &Workbook, dxfs: &[Style], extra_fmts: &[String], mut nf
     for (i, f) in fonts.iter().enumerate() {
         // A Normal font in the theme's body face follows the theme, as Excel writes it (#805); so
         // does every other body-face font that kept the scheme link (#2517).
-        s.push_str(&font_xml(f, None, (i == 0 || f.minor) && f.name == wb.theme.minor_font));
+        s.push_str(&font_xml(f, None, (i as u32 == normal_font_id || f.minor) && f.name == wb.theme.minor_font));
     }
     let _ = write!(s, "</fonts><fills count=\"{}\">", fills.len());
     for f in &fills {

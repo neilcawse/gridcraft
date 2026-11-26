@@ -65,8 +65,8 @@ const MAX_SLICERS: usize = 4096;
 /// Slicer pieces found while reading sheets.
 #[derive(Default)]
 pub struct SlicersIn {
-    /// (sheet name, slicer name, anchor) of the `sle:slicer` drawing frames.
-    frames: Vec<(String, String, Anchor)>,
+    /// (sheet name, slicer name, anchor, reserved object ID) of each drawing frame.
+    frames: Vec<(String, String, Anchor, u32)>,
     /// (sheet name, slicer) of the slicers the sheets list.
     parts: Vec<(String, PartIn)>,
     /// Table slicers joined with their caches, to bind once table names are repaired.
@@ -89,6 +89,7 @@ struct TableIn {
     sheet: usize,
     part: PartIn,
     anchor: Anchor,
+    id: u32,
     table: TableCache,
     /// The cache's `sourceName`: the column's header.
     source: String,
@@ -141,16 +142,15 @@ fn cross_filter(v: Option<&str>) -> SlicerCrossFilter {
     }
 }
 
-/// Records a drawing frame's slicer; returns false when `gd` is not a slicer frame.
-pub fn read_frame(cx: &mut Ctx<'_>, sheet: &str, gd: &El, anchor: Anchor) -> bool {
-    if gd.attr("uri") != Some(FRAME_URI) {
-        return false;
+/// Records a drawing frame for delayed attachment and returns its reserved model ID.
+pub fn read_frame(cx: &mut Ctx<'_>, sheet: &str, gd: &El, anchor: Anchor) -> Option<u32> {
+    let name = gd.child("slicer")?.attr("name")?;
+    if gd.attr("uri") != Some(FRAME_URI) || cx.slicers.frames.len() >= MAX_SLICERS {
+        return None;
     }
-    let Some(name) = gd.child("slicer").and_then(|s| s.attr("name")) else { return false };
-    if cx.slicers.frames.len() < MAX_SLICERS {
-        cx.slicers.frames.push((sheet.to_string(), name.to_string(), anchor));
-    }
-    true
+    let id = cx.next_object_id();
+    cx.slicers.frames.push((sheet.to_owned(), name.to_owned(), anchor, id));
+    Some(id)
 }
 
 /// Reads a worksheet's slicer parts: those its relationships name (which its `x14` and `x15`
@@ -265,7 +265,7 @@ pub fn resolve(
         let Some(si) = wb.sheet_index(&sheet_name) else { continue };
         // The part's frame is accounted for even when the slicer is skipped below with its own
         // warning.
-        let fi = found.frames.iter().position(|(s, n, _)| s.eq_ignore_ascii_case(&sheet_name) && n.eq_ignore_ascii_case(&part.name));
+        let fi = found.frames.iter().position(|(s, n, _, _)| s.eq_ignore_ascii_case(&sheet_name) && n.eq_ignore_ascii_case(&part.name));
         if let Some(u) = fi.and_then(|i| used.get_mut(i)) {
             *u = true;
         }
@@ -274,7 +274,7 @@ pub fn resolve(
             continue;
         };
         if def.is_table() {
-            let Some(&(_, _, anchor)) = fi.and_then(|i| found.frames.get(i)) else {
+            let Some(&(_, _, anchor, id)) = fi.and_then(|i| found.frames.get(i)) else {
                 cx.warn(format!("slicer \"{}\" has no drawing frame and was skipped", part.name));
                 continue;
             };
@@ -284,7 +284,7 @@ pub fn resolve(
                 items: TableSlicerItems { descending: false, custom_list_sort: true, cross_filter: SlicerCrossFilter::ShowItemsWithDataAtTop },
             });
             if tables.len() < MAX_SLICERS {
-                tables.push(TableIn { sheet: si, part, anchor, table, source: decode_xstring(&def.source), origin: origin(wb, def) });
+                tables.push(TableIn { sheet: si, part, anchor, id, table, source: decode_xstring(&def.source), origin: origin(wb, def) });
             }
             continue;
         }
@@ -327,10 +327,13 @@ pub fn resolve(
             cx.warn(format!("slicer \"{}\": its PivotTable is missing or could not be read; skipped", part.name));
             continue;
         }
-        let Some(&(_, _, anchor)) = fi.and_then(|i| found.frames.get(i)) else {
+        let Some(&(_, _, anchor, id)) = fi.and_then(|i| found.frames.get(i)) else {
             cx.warn(format!("slicer \"{}\" has no drawing frame and was skipped", part.name));
             continue;
         };
+        if wb.sheet(si).is_some_and(|sh| sh.slicers.iter().any(|s| s.id == id)) {
+            continue;
+        }
         // The cache field's items and date grouping. A PivotTable without a filter on the field
         // takes the cache's selection; with everything selected it still keeps the field's
         // grouping (the cache field's, ECMA-376 §18.10.1.33) when no Rows/Columns field has it.
@@ -361,7 +364,6 @@ pub fn resolve(
                 Some(SlicerPivot { sheet: sh.name.clone(), name: sh.pivots.get(pi)?.name.clone() })
             })
             .collect();
-        let id = cx.next_object_id();
         let slicer = Slicer {
             id,
             source: SlicerSource::Pivot {
@@ -383,7 +385,7 @@ pub fn resolve(
             sh.slicers.push(slicer);
         }
     }
-    for ((_, name, _), u) in found.frames.iter().zip(used) {
+    for ((_, name, _, _), u) in found.frames.iter().zip(used) {
         if !u {
             cx.warn(format!("slicer \"{name}\" has no slicer part and was skipped"));
         }
@@ -424,7 +426,7 @@ pub fn attach_tables(cx: &mut Ctx<'_>, wb: &mut Workbook) {
         };
         let selected = saved_table_column_selection(wb, t.sheet, table, column);
         let (table, column) = (table.to_owned(), column.to_owned());
-        let id = cx.next_object_id();
+        let id = t.id;
         let caption = if t.part.caption.is_empty() { column.clone() } else { t.part.caption };
         let slicer = Slicer {
             id,
@@ -437,7 +439,9 @@ pub fn attach_tables(cx: &mut Ctx<'_>, wb: &mut Workbook) {
             row_height: t.part.row_height,
             imported_cache: t.origin,
         };
-        if let Some(sh) = wb.sheet_mut(t.sheet) {
+        if let Some(sh) = wb.sheet_mut(t.sheet)
+            && !sh.slicers.iter().any(|s| s.id == id)
+        {
             sh.slicers.push(slicer);
         }
     }
@@ -939,7 +943,7 @@ fn builtin_style(style: &str) -> Option<&str> {
 
 /// The drawing XML of a slicer frame, with a fallback shape for readers without slicers. A table
 /// slicer's choice requires Excel 2013's `sle15` namespace, a PivotTable slicer's Excel 2010's `a14`.
-pub fn frame_xml(id: usize, name: &str, table: bool, xfrm: &str, a_xfrm: &str) -> String {
+pub fn frame_xml(id: usize, name: &str, drawing_name: Option<&str>, table: bool, xfrm: &str, a_xfrm: &str) -> String {
     let (choice, message) = if table {
         (format!("xmlns:sle15=\"{NS_SLE15}\" Requires=\"sle15\""), "This is a table slicer. Table slicers need Excel 2013 or later.")
     } else {
@@ -948,9 +952,11 @@ pub fn frame_xml(id: usize, name: &str, table: bool, xfrm: &str, a_xfrm: &str) -
             "This is a PivotTable slicer. Slicers need Excel 2010 or later.",
         )
     };
+    let n = esc_attr(name);
+    let nv = drawing_name.map(esc_attr);
+    let nv = nv.as_deref().unwrap_or(&n);
     format!(
-        "<mc:AlternateContent xmlns:mc=\"{NS_MC}\"><mc:Choice {choice}><xdr:graphicFrame macro=\"\"><xdr:nvGraphicFramePr><xdr:cNvPr id=\"{id}\" name=\"{n}\"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>{xfrm}<a:graphic><a:graphicData uri=\"{FRAME_URI}\"><sle:slicer xmlns:sle=\"{FRAME_URI}\" name=\"{n}\"/></a:graphicData></a:graphic></xdr:graphicFrame></mc:Choice><mc:Fallback><xdr:sp macro=\"\" textlink=\"\"><xdr:nvSpPr><xdr:cNvPr id=\"0\" name=\"\"/><xdr:cNvSpPr><a:spLocks noTextEdit=\"1\"/></xdr:cNvSpPr></xdr:nvSpPr><xdr:spPr>{a_xfrm}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr><xdr:txBody><a:bodyPr vertOverflow=\"clip\" horzOverflow=\"clip\"/><a:lstStyle/><a:p><a:r><a:rPr lang=\"en-US\" sz=\"1100\"/><a:t>{message}</a:t></a:r></a:p></xdr:txBody></xdr:sp></mc:Fallback></mc:AlternateContent>",
-        n = esc_attr(name)
+        "<mc:AlternateContent xmlns:mc=\"{NS_MC}\"><mc:Choice {choice}><xdr:graphicFrame macro=\"\"><xdr:nvGraphicFramePr><xdr:cNvPr id=\"{id}\" name=\"{nv}\"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>{xfrm}<a:graphic><a:graphicData uri=\"{FRAME_URI}\"><sle:slicer xmlns:sle=\"{FRAME_URI}\" name=\"{n}\"/></a:graphicData></a:graphic></xdr:graphicFrame></mc:Choice><mc:Fallback><xdr:sp macro=\"\" textlink=\"\"><xdr:nvSpPr><xdr:cNvPr id=\"0\" name=\"\"/><xdr:cNvSpPr><a:spLocks noTextEdit=\"1\"/></xdr:cNvSpPr></xdr:nvSpPr><xdr:spPr>{a_xfrm}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr><xdr:txBody><a:bodyPr vertOverflow=\"clip\" horzOverflow=\"clip\"/><a:lstStyle/><a:p><a:r><a:rPr lang=\"en-US\" sz=\"1100\"/><a:t>{message}</a:t></a:r></a:p></xdr:txBody></xdr:sp></mc:Fallback></mc:AlternateContent>"
     )
 }
 

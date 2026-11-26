@@ -1,3 +1,4 @@
+use super::paste_special::LineAxis;
 use super::{CellRef, EngineError, Json, RangeRef, Result, Session, bad, edit, f64_param, json, str_param, target_range, target_sheet};
 
 // ---------------------------------------------------------------- fill
@@ -63,11 +64,56 @@ pub(super) fn auto_fill(s: &mut Session, p: &Json) -> Result<Json> {
     if !crate::fill::holds_source_in_corner(src, target) {
         return Err(bad("edit.autoFill", "the target must contain the source in one of its corners"));
     }
+    // Whole-line modes that copy cell formats also repeat line size and style. Visibility
+    // remains on the original line; Fill Without Formatting skips the line transfer entirely.
+    let line_axis = match (mode, src.is_full_rows(), src.is_full_cols()) {
+        (crate::fill::FillMode::ValuesOnly, ..) => None,
+        (_, true, false) => Some(LineAxis::Rows),
+        (_, false, true) => Some(LineAxis::Columns),
+        _ => None,
+    };
     edit(s, |cx| {
+        let protected = line_axis.and_then(|_| cx.wb.sheets.get(sheet).filter(|sh| sh.is_protected()).cloned());
+        if let Some(axis) = line_axis {
+            fill_lines(cx, sheet, axis, src, target)?;
+        }
         crate::fill::fill(cx, sheet, src, target, mode)?;
+        if let (Some(axis), Some(before)) = (line_axis, protected.as_deref()) {
+            let (first, last) = (axis.index(src.start), axis.index(src.end));
+            let (lo, hi) = (axis.index(target.start), axis.index(target.end));
+            for (a, b) in [(lo, first), (last + 1, hi + 1)] {
+                if a < b {
+                    axis.check_protection(&cx.wb, sheet, before, axis.span(a, b - 1))?;
+                }
+            }
+        }
         *cx.sel = crate::Selection { active: src.start, anchor: src.start, ranges: vec![target.union(&src)] };
         Ok(Json::Null)
     })
+}
+
+/// Repeats the source lines' formatting over the lines `target` adds to `src`, in the cell fill's
+/// order: each target line takes the source line it lines up with, counting in source-sized steps
+/// from the source's first line (above the source as well as below it).
+fn fill_lines(cx: &mut crate::cmd::Ctx, sheet: usize, axis: LineAxis, src: RangeRef, target: RangeRef) -> Result<()> {
+    let (first, last) = (axis.index(src.start), axis.index(src.end));
+    let (lo, hi) = (axis.index(target.start), axis.index(target.end));
+    let Some(sh) = cx.wb.sheet(sheet) else { return Ok(()) };
+    let pattern: Vec<_> = axis.lines(sh).range(first..=last).map(|(&i, &info)| (i - first, info)).collect();
+    let n = last - first + 1;
+    let source_line = |i: u32| {
+        let k = if i >= first { (i - first) % n } else { (n - (first - i) % n) % n };
+        pattern.binary_search_by_key(&k, |x| x.0).ok().and_then(|j| pattern.get(j)).map(|x| (i, x.1))
+    };
+    // Same workbook: the styles need no re-interning.
+    let mut same_styles = |id, _: &mut gridcraft_model::Workbook| id;
+    if lo < first {
+        axis.replace(cx, sheet, lo..=first - 1, (lo..first).filter_map(source_line), &mut same_styles, false)?;
+    }
+    if hi > last {
+        axis.replace(cx, sheet, last + 1..=hi, (last + 1..=hi).filter_map(source_line), &mut same_styles, false)?;
+    }
+    Ok(())
 }
 
 pub(super) fn fill_series(s: &mut Session, p: &Json) -> Result<Json> {

@@ -261,6 +261,23 @@ pub struct LineInfo {
     /// The size was set by the user (rows): automatic heights follow the content.
     #[serde(default)]
     pub custom: bool,
+    /// Original file width in characters or height in points. Auto-fit changes only `size`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_size: Option<f64>,
+    /// Original column's `customWidth` and `bestFit` flags, including when width is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_col_flags: Option<(bool, bool)>,
+    /// Row boundary flags are independent of a cell's border style.
+    #[serde(default, skip_serializing_if = "no_thick_edges")]
+    pub thick_edges: (bool, bool),
+    /// The file saved a `<row>` element that carries nothing else kept here (a bare row). Excel
+    /// counts it in UsedRange and fits it on a switched custom-default sheet, so it is written back.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub saved_element: bool,
+}
+
+fn no_thick_edges(edges: &(bool, bool)) -> bool {
+    *edges == (false, false)
 }
 
 #[cfg(test)]

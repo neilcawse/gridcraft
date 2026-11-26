@@ -11,6 +11,13 @@ documentation (the Office bundle is off limits under this repo's clean-room rule
 support comes from `crates/engine/src/io.rs` (`FileKind`), `crates/xlsx/src` and the tests in
 `crates/xlsx/src/tests/` (round-trip, fixtures, malformed input, CSV, ODS, XLSB, XLS, PivotTables).
 
+On macOS, XLSX imports use worksheet sizing measured with Excel for Mac 16.115.2 on synthetic fixtures, including the boundary probes. The font-table entry at index zero sets the maximum digit width *d* and the column padding 2⌈*d*/4⌉+1 pt, measured for *d* = 3–13 and 16–18 and interpolated at 14 and 15. Stored widths convert to whole points; a stored `defaultColWidth` takes precedence over `baseColWidth`. Without either attribute the default uses eight characters if `sheetFormatPr` is present, and ten if it is absent. The default cell format (`cellXfs[0]`), not the named Normal style, supplies the automatic row-height baseline. Manual heights floor to whole points. A custom sheet default (`customHeight="1"` with a positive `defaultRowHeight`) gives every row its floor until any `<row>` saves an `ht`, with or without valued cells or `customHeight`, at any value; a `<row>` without `ht` does not switch it. On such a sheet every automatic `<row>` element fits, including a bare `<row r="N"/>`, which reads the Normal row height; manual rows floor their `ht`, and row numbers without a `<row>` element keep the floor, inside the used range and past it. Off the switch, bare and absent rows both keep the floor. Bare rows are kept on import and written back, since Excel counts a trailing bare row in its used range; GridCraft's saved `<dimension>` still covers cells only. Unmeasured font sizes and families, and mixed-font or soft-wrapped text, still use estimates; an unmeasured size of a measured family follows that family's neighbouring digit widths. Other hosts retain the legacy geometry rules.
+
+An automatic row with one explicitly styled cell fits the larger of its row format's font (`s` with `customFormat="1"`; without `customFormat` the row style is ignored) and that cell's font, valued or not. Measured with Calibri 36 against Calibri 11 in a Calibri 11 workbook, one cell in column A and no column styles, identically on ordinary and switched sheets: a 36 pt row format over an 11 pt cell, valued or not, and an 11 pt row format over a valueless 36 pt cell all fit to 47 pt, like a populated 36 pt cell; a 36 pt row style without `customFormat` reads 15 pt. On a custom-default sheet that no saved `ht` has switched, every row keeps the floor. Unmeasured: rows with several cells (GridCraft takes the tallest cell), cells without `s`, other families and sizes, and wrapped valueless cells. Bare rows were measured only in an unstyled Calibri 11 workbook.
+
+Layout conversions do not overwrite imported numeric width or height values on save, although the XLSX codec may normalize spelling and equivalent boolean attributes. On other hosts an automatic row can grow during import without changing its original saved `ht`. If a later edit changes the fitted height, the original `ht` no longer overrides the new height on save. Unchanged drawing placements and group transforms are kept from the source; edits that invalidate them regenerate those fields from the model.
+After import, an automatic row inside a two-cell anchor can grow, leaving the in-app editable box stale until the next edit. Saved placement is unaffected.
+
 Legacy scalar `INDEX(range, MATCH(...))` formulas remain ordinary formulas on save, including when
 shared formulas are expanded during import (`array_export.rs`, #1505).
 
@@ -53,6 +60,41 @@ colour, integer width and anchor. Curves, filled paths, transforms and unsupport
 not interpreted as ink. This does not implement Office InkML or fix inserted icons (#551).
 Command and package tests cover repeated saves and unrelated cell edits; external Excel rendering
 and repair-free opening remain unverified.
+
+Untouched supported worksheet drawings in XLSX and XLSM keep their original `twoCellAnchor`,
+`oneCellAnchor`, or `absoluteAnchor` spelling and placement. This includes the presence of
+`editAs`, signed and out-of-cell marker offsets, exact EMU position and extent, and optional
+`off`, `ext`, `chOff`, and `chExt` in nested group transforms. Saved placement does not depend
+on the host's sheet metrics. This does not correct the in-app display position when automatic
+row heights change after drawing import.
+
+An explicit move, resize, anchor-mode change, or member edit discards the affected source
+placement and regenerates it from editable geometry. A whole-sheet copy keeps placement because
+it copies the same row and column geometry. For row and column insertion/deletion, genuine
+absolute coordinates are independent of the grid. Moving anchors keep their original marker
+offsets when the edit is wholly before their span; their marked lines shift. Edits after the
+span leave placement alone. Intersecting edits and earlier edits to cell-relative `absolute`
+placement regenerate it rather than assuming the old markers still describe the result.
+This conservative policy follows the distinction in ECMA-376 `ST_EditAs` between moving and
+sizing with cells, moving without sizing, and remaining fixed. It is not a claim about which
+anchor spelling Excel chooses after an edit. Separate chart `userShapes` annotations, VML,
+and unsupported drawing objects do not acquire worksheet placement from this path.
+
+Other edits that change row heights, column widths or line visibility after opening (row height
+and column width, standard width, hide/unhide, filters, outlines, sorted row heights, automatic
+row fits after an edit) drop the placement of any object over a changed line, and of a fixed
+(`absolute`) object after an earlier changed line, because the object the user sees no longer
+matches the stored markers. The span includes both a marker's named cell and the cell reached
+by its signed offset. Disjoint line changes do not affect objects in the gap, and an automatic
+row fit after a structural edit is checked against the remapped placement. A fixed object keeps
+its cell through an insert or delete, so its placement is also dropped when the rounded EMU
+box of the object or a grouped member changes.
+
+Imported objects keep their source stacking order and nonvisual IDs and names; a name is kept
+even when its ID is the placeholder `0`, which is renumbered. Bring Forward and Send Backward
+reorder the affected objects' stacking slots without clearing the ranks of unrelated objects.
+Moving a chart writes it above earlier drawings. A slicer inside a group is read as a separate
+slicer, as before.
 
 Dynamic-array formulas keep their mark on save. A formula read with dynamic-array cell metadata
 (`cm`, the `XLDAPR` record in `xl/metadata.xml`) is written back with it, together with the

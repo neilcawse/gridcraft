@@ -30,6 +30,7 @@ mod active_row;
 pub use active_row::active_row_band;
 mod cell_paint;
 mod cursor;
+pub mod display;
 mod editor;
 mod geo;
 mod interact;

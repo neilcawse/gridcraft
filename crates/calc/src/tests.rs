@@ -3176,6 +3176,19 @@ fn cell_width_is_the_column_width_dialog_value_rounded() {
     assert_eq!([t.num("H1"), t.num("H2"), t.num("H3"), t.num("H4"), t.num("H5")], [8.0, 11.0, 12.0, 11.0, 3.0]);
 }
 
+#[test]
+fn cell_width_uses_mac_geometry_for_explicit_and_inherited_columns() {
+    // W1, W3 and W4: CELL rounds the displayed character width, not the model pixels.
+    let mut t = T::new();
+    let sh = t.wb.sheet_mut(0).unwrap();
+    sh.geometry = gridcraft_model::Geometry::Mac { digit_pt: 6 };
+    sh.default_col_width = sh.geometry.inherited_width_px(false, None, None);
+    sh.cols.insert(1, gridcraft_model::LineInfo { size: Some(sh.geometry.stored_width_px(12.0)), ..Default::default() });
+    t.set("A2", "=CELL(\"width\",A1)");
+    t.set("B2", "=CELL(\"width\",B1)");
+    assert_eq!([t.num("A2"), t.num("B2")], [10.0, 11.0]);
+}
+
 /// Expected results are Excel's, from Apache POI's `DGet.xls` (rows 46-49): a criteria cell holding
 /// a formula under a label that names no field is evaluated for every record.
 #[test]

@@ -120,6 +120,8 @@ fn set_hidden(e: &mut LineInfo, hidden: bool) {
     e.hidden = hidden;
     if !hidden && e.size == Some(0.0) {
         e.size = None;
+        e.saved_size = None;
+        e.saved_col_flags = None;
     }
 }
 

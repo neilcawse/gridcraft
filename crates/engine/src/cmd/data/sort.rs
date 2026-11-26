@@ -268,6 +268,7 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
                 None => {
                     if let Some(e) = shm.rows.get_mut(&row) {
                         e.size = None;
+                        e.saved_size = None;
                     }
                 }
             }
@@ -289,6 +290,7 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
         for (a, n) in shm.object_anchors_mut().zip(new_anchors) {
             *a = n;
         }
+        shm.discard_changed_drawing_files();
         for (c, _) in moved {
             cx.changed.push((sheet, c));
         }

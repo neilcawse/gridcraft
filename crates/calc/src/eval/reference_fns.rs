@@ -527,7 +527,7 @@ impl<'h> Evaluator<'h> {
                     {
                         return f64::from(base);
                     }
-                    gridcraft_model::points_to_chars(f64::from(s.col_width(c.col)))
+                    s.geometry.width_chars(f64::from(s.col_width(c.col)))
                 });
                 Ev::V(Value::number(chars.round()))
             }

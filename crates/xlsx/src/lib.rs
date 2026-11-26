@@ -135,7 +135,7 @@ impl Default for FunctionInfo {
 /// package relationships, so every main-part content type is accepted), with the default
 /// [`FunctionInfo`].
 pub fn read_xlsx(bytes: &[u8]) -> Result<(Workbook, ReadReport), IoError> {
-    read::read_xlsx(bytes, ReadOptions::default())
+    read::read_xlsx(bytes, ReadOptions::default(), gridcraft_model::Geometry::host)
 }
 
 /// Caller-supplied function facts for [`read_xlsx_with`]: both legacy-formula [`FunctionInfo`]
@@ -166,7 +166,7 @@ impl<'a, F: Fn(&str) -> bool> From<&'a F> for ReadOptions<'a> {
 
 /// [`read_xlsx`] with caller-supplied function facts and/or Google Sheets export unwrap predicate (#2871).
 pub fn read_xlsx_with<'a>(bytes: &[u8], opts: impl Into<ReadOptions<'a>>) -> Result<(Workbook, ReadReport), IoError> {
-    read::read_xlsx(bytes, opts.into())
+    read::read_xlsx(bytes, opts.into(), gridcraft_model::Geometry::host)
 }
 
 /// The part of a zip package that declares more than [`MAX_PART`] unpacked bytes, with that size:

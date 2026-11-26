@@ -1,5 +1,10 @@
 //! Integration-style tests: round trips, hand-written fixtures, hostile input and CSV.
 
+/// Open test fixtures with the legacy (Windows) grid geometry regardless of the test host.
+fn read_xlsx_legacy(bytes: &[u8]) -> Result<(gridcraft_model::Workbook, crate::ReadReport), crate::IoError> {
+    crate::read::read_xlsx(bytes, crate::ReadOptions::default(), |_| gridcraft_model::Geometry::Legacy)
+}
+
 mod array_export;
 mod cellmetadata;
 mod chart_book_names;

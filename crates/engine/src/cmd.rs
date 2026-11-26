@@ -482,6 +482,11 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
         edits,
         ..
     } = ctx;
+    let shifted: Vec<u64> = edits
+        .iter()
+        .filter(|(_, e)| matches!(e, gridcraft_formula::adjust::Edit::Insert { .. } | gridcraft_formula::adjust::Edit::Delete { .. }))
+        .filter_map(|(s, _)| wb.sheet_index(s).and_then(|i| wb.sheet(i)).filter(|sh| !sh.drawing_files.is_empty()).map(|sh| sh.uid.get()))
+        .collect();
     if let Some(log) = d.edits.as_mut() {
         log.extend(edits);
     }
@@ -526,21 +531,38 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
     fit_rows.sort_unstable();
     fit_rows.dedup();
     let mut sweep: Option<(usize, MergeSweep)> = None;
+    let mut shifted_fit = None::<(usize, sheet::ShiftedDrawingFit)>;
     let mut left = MERGE_FIT_WORK;
     for (si, row) in fit_rows {
         if sweep.as_ref().is_none_or(|(at, _)| *at != si) {
+            if let Some((prev, fit)) = shifted_fit.take() {
+                fit.finish(&mut wb, prev);
+            }
+            if let Some(sh) = wb.sheet(si).filter(|sh| !shifted.is_empty() && shifted.contains(&sh.uid.get())) {
+                shifted_fit = Some((si, sheet::ShiftedDrawingFit::new(sh)));
+            }
             if let Some((_, old)) = &sweep {
                 left = old.left();
             }
             sweep = Some((si, MergeSweep::new(left)));
         }
         if let Some((_, sw)) = sweep.as_mut() {
+            let before = shifted_fit.as_ref().and_then(|_| wb.sheet(si)).map(|sh| sh.row_height(row));
             fit_row_height(&mut wb, si, row, sw);
+            if let Some((_, fit)) = shifted_fit.as_mut()
+                && let (Some(before), Some(sh)) = (before, wb.sheet(si))
+            {
+                fit.note(row, before, sh.row_height(row));
+            }
         }
+    }
+    if let Some((si, fit)) = shifted_fit {
+        fit.finish(&mut wb, si);
     }
     if let Some(t0) = t0 {
         eprintln!("commit: + rows {:?}", since(t0));
     }
+    sheet::discard_placement_after_line_changes(&d.wb, &mut wb, &shifted);
     d.wb = std::sync::Arc::new(wb);
     d.selection = sel;
     Ok(r)
@@ -692,6 +714,8 @@ fn check_protection(old: &Workbook, new: &Workbook, unlocked: &[(String, String)
     Ok(())
 }
 
+pub(crate) const PROTECTION_FLAGS: &str = "You can't change cell protection on a protected sheet. Unprotect it first.";
+
 /// Refuses an action a protected sheet does not allow, by the tick box for it in Review ▸ Protect
 /// Sheet. `what` names the action in the message. An unprotected sheet allows everything.
 ///
@@ -776,7 +800,7 @@ fn same_content(a: Option<&gridcraft_model::Cell>, b: Option<&gridcraft_model::C
 /// words (egui's LayoutJob), so dividing the total width by the column width undercounts: each
 /// drawn line ends early at the last word that fits. A word wider than the column breaks
 /// mid-word, the way egui does. (#1969)
-fn wrapped_line_count(line: &str, width: f32, size: f32, bold: bool) -> f32 {
+fn wrapped_line_count(line: &str, width: f32, size: f32, bold: bool, mac: bool) -> f32 {
     let word_w = |w: &str| crate::cmd::format::approx_text_width(w, size, bold);
     let space_w = word_w(" ");
     let mut lines = 1.0f32;
@@ -788,7 +812,7 @@ fn wrapped_line_count(line: &str, width: f32, size: f32, bold: bool) -> f32 {
             if used > 0.0 {
                 lines += 1.0;
             }
-            let chunks = (w / width).ceil();
+            let chunks = if mac { (w / width).ceil().min(word.chars().count() as f32) } else { (w / width).ceil() };
             lines += chunks - 1.0;
             used = w - (chunks - 1.0) * width;
             continue;
@@ -892,6 +916,15 @@ impl MergeSweep {
     }
 }
 
+/// On a triggered sheet, fit automatic rows with cells or a saved `<row>` element, bare ones
+/// included. Row numbers without a `<row>` element keep the sheet default.
+fn mac_fits_automatic_row(sh: &gridcraft_model::Sheet, row: u32) -> bool {
+    sh.saved_geometry.is_some_and(|g| g.fit_automatic_rows)
+        // An entry holding only a fitted size is this function's own, not a saved `<row>`.
+        && (sh.rows.get(&row).is_some_and(|info| gridcraft_model::LineInfo { size: None, ..*info } != gridcraft_model::LineInfo::default())
+            || sh.row_has_cells(row))
+}
+
 /// [`auto_row_height`] with the sheet's merges taken from `sweep`.
 pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut MergeSweep) {
     // Out of budget: the row keeps the height it has.
@@ -902,27 +935,46 @@ pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut
     if sh.rows.get(&row).is_some_and(|i| i.custom) {
         return;
     }
+    let mac = sh.geometry != gridcraft_model::Geometry::Legacy;
+    let custom_sheet_height = mac && sh.saved_geometry.and_then(|g| g.effective_custom_row_height_pt()).is_some();
+    let edges = sh.rows.get(&row).map_or(0, |i| u8::from(i.thick_edges.0) + u8::from(i.thick_edges.1));
     let default = sh.default_row_height;
-    // Fast path: rows of default-size, unwrapped content keep the default height.
-    let plain = sh.cells.row(row, 0, gridcraft_core::MAX_COLS - 1).all(|(_, cell)| {
-        let st = wb.styles.get(cell.style);
-        st.font.size <= gridcraft_model::DEFAULT_FONT_SIZE && !st.align.wrap
-    });
+    // Rows that inherit the sheet height must also discard any previous fit.
+    let plain = if custom_sheet_height {
+        !mac_fits_automatic_row(sh, row)
+    } else {
+        !mac && sh.cells.row(row, 0, gridcraft_core::MAX_COLS - 1).all(|(_, cell)| {
+            let st = wb.styles.get(cell.style);
+            st.font.size <= gridcraft_model::DEFAULT_FONT_SIZE && !st.align.wrap
+        })
+    };
     if plain {
         if sh.rows.get(&row).is_some_and(|i| i.size.is_some())
             && let Some(shm) = wb.sheet_mut(si)
             && let Some(e) = shm.rows.get_mut(&row)
         {
-            {
-                e.size = None;
-                if *e == gridcraft_model::LineInfo::default() {
-                    shm.rows.remove(&row);
-                }
+            e.size = None;
+            // A Legacy edit must not save the old `ht` after changing the displayed height.
+            if !mac {
+                e.saved_size = None;
+            }
+            if *e == gridcraft_model::LineInfo::default() {
+                shm.rows.remove(&row);
             }
         }
         return;
     }
-    let mut need: f32 = default;
+    let mut need = if custom_sheet_height {
+        gridcraft_model::geometry::mac_line_height_pt(&wb.styles.get(gridcraft_model::StyleId::DEFAULT).font) * (4.0 / 3.0)
+    } else {
+        default
+    };
+    // Excel for Mac fits a row to the larger of its row format's font (`s` with `customFormat`;
+    // without it the reader keeps no row style) and its styled cell's font, valued or not
+    // (measured with one styled cell; several cells take the tallest, unmeasured).
+    if mac && let Some(style) = sh.rows.get(&row).and_then(|i| i.style) {
+        need = need.max((gridcraft_model::geometry::mac_line_height_pt(&wb.styles.get(style).font) * (4.0 / 3.0)).min(546.0));
+    }
     // The cell loop must not rescan every merge per cell: the merges touching this row are
     // picked out once, and per cell the candidates are re-checked (normally none or a couple;
     // a sheet with many merges and many saved columns would otherwise scan all of them per
@@ -941,9 +993,6 @@ pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut
         }
         let st = wb.styles.get(cell.style);
         let size = st.font.size;
-        // Scaled from an 11pt row's height, not the sheet's default: a sheet whose default
-        // already fits a bigger font (21pt rows for 16pt text) would otherwise scale it twice.
-        let line = (size * 1.8).round().max(gridcraft_model::DEFAULT_ROW_HEIGHT * size / gridcraft_model::DEFAULT_FONT_SIZE);
         let mut lines = 1.0f32;
         if !cell.value.is_empty() || cell.formula.is_some() {
             // Only a wrapping cell is laid out over several lines: each explicit line break
@@ -951,17 +1000,39 @@ pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut
             if st.align.wrap {
                 let text = crate::display::cell_text(wb, sh, CellRef::new(row, c));
                 let w = sh.col_width(c).max(1.0) - 6.0;
-                lines = text.lines().map(|l| wrapped_line_count(l, w.max(1.0), size, st.font.bold)).sum::<f32>().max(1.0);
+                let width = w.max(1.0);
+                lines = if mac {
+                    text.split('\n').map(|l| wrapped_line_count(l, width, size, st.font.bold, true)).sum::<f32>()
+                } else {
+                    text.lines().map(|l| wrapped_line_count(l, width, size, st.font.bold, false)).sum::<f32>().max(1.0)
+                };
             }
-        } else if st.font.size <= gridcraft_model::DEFAULT_FONT_SIZE {
+        } else if !mac && st.font.size <= gridcraft_model::DEFAULT_FONT_SIZE {
             continue;
         }
-        let h = if lines > 1.0 { (size * 96.0 / 72.0 * 1.22 * lines + 5.0).ceil() } else { line };
+        let h = if mac {
+            let points = gridcraft_model::geometry::mac_line_height_pt(&st.font);
+            let text = !cell.value.is_empty() || cell.formula.is_some();
+            let points = if st.align.wrap && text { (points + 1.0) * lines } else { points };
+            points * (4.0 / 3.0)
+        } else if lines > 1.0 {
+            (size * 96.0 / 72.0 * 1.22 * lines + 5.0).ceil()
+        } else {
+            // Scale from an 11 pt row so a larger sheet default does not scale twice.
+            (size * 1.8).round().max(gridcraft_model::DEFAULT_ROW_HEIGHT * size / gridcraft_model::DEFAULT_FONT_SIZE)
+        };
         need = need.max(h.min(546.0));
+    }
+    if mac {
+        need = (need + f32::from(edges) * (4.0 / 3.0)).min(546.0);
     }
     let Some(shm) = wb.sheet_mut(si) else { return };
     let e = shm.rows.entry(row).or_default();
-    e.size = if (need - default).abs() < 0.5 { None } else { Some(need) };
+    let fitted = if (need - default).abs() < 0.5 { None } else { Some(need) };
+    if !mac && e.size != fitted {
+        e.saved_size = None;
+    }
+    e.size = fitted;
     if *e == gridcraft_model::LineInfo::default() {
         shm.rows.remove(&row);
     }
@@ -982,6 +1053,35 @@ impl Ctx<'_> {
 #[cfg(test)]
 mod merge_sweep_tests {
     use super::*;
+
+    #[test]
+    fn mac_fit_uses_wrapped_line_height_and_preserves_custom_height() {
+        // H1, H5, H8 and H10: custom height, fixed sheet default, wrap and thick edges.
+        use gridcraft_core::Value;
+        use gridcraft_model::{Cell, Geometry, LineInfo, SavedSheetGeometry, Style};
+
+        let mut wb = Workbook::new();
+        let wrapped = wb.styles.intern(Style { align: gridcraft_model::Alignment { wrap: true, ..Default::default() }, ..Default::default() });
+        {
+            let sh = wb.sheet_mut(0).unwrap();
+            sh.geometry = Geometry::Mac { digit_pt: 6 };
+            for row in 0..3 {
+                sh.cells.set(CellRef::new(row, 0), Cell::styled(Value::Text("a\nb\nc".into()), wrapped));
+            }
+            sh.rows.insert(1, LineInfo { size: Some(28.0), custom: true, saved_size: Some(21.75), ..LineInfo::default() });
+        }
+        let mut sweep = MergeSweep::new(MERGE_FIT_WORK);
+        fit_row_height(&mut wb, 0, 0, &mut sweep);
+        fit_row_height(&mut wb, 0, 1, &mut sweep);
+        let sh = wb.sheet_mut(0).unwrap();
+        assert_eq!(sh.row_height(0), 64.0);
+        assert_eq!(sh.row_height(1), 28.0);
+        assert_eq!(sh.rows[&1].saved_size, Some(21.75));
+        sh.default_row_height = 28.0;
+        sh.saved_geometry = Some(SavedSheetGeometry { custom_height: Some(true), default_row_height: Some(21.75), ..Default::default() });
+        fit_row_height(&mut wb, 0, 2, &mut sweep);
+        assert_eq!(wb.sheet(0).unwrap().row_height(2), 28.0);
+    }
 
     #[test]
     fn the_budget_carries_from_one_sheets_sweep_to_the_next() {

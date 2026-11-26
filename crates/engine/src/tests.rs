@@ -1,5 +1,5 @@
 use gridcraft_core::{CellRef, Value};
-use serde_json::json;
+use serde_json::{Value as Json, json};
 
 use crate::Session;
 
@@ -2315,7 +2315,9 @@ fn open_keeps_custom_height_rows() {
     let mut s = Session::new();
     s.execute("file.open", json!({"name": "custom.xlsx", "base64": crate::io::base64_encode(&big_font_workbook(Some((25.0, true, false)), true))}))
         .unwrap();
-    assert_eq!(s.doc().unwrap().wb.active().unwrap().row_height(4), 25.0, "custom-height rows are left alone on open");
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    assert_eq!(sh.row_height(4), sh.geometry.custom_height_px(18.75), "manual height is evaluated by the host profile");
+    assert_eq!(sh.rows[&4].saved_size, Some(18.75));
 }
 
 #[test] // C — Review Focus 2 (Some→Some: the fit shrinks the row, the clamp keeps the taller height)
@@ -2323,7 +2325,12 @@ fn open_never_shrinks_taller_auto_rows() {
     let mut s = Session::new();
     s.execute("file.open", json!({"name": "tall.xlsx", "base64": crate::io::base64_encode(&big_font_workbook(Some((60.0, false, false)), true))}))
         .unwrap();
-    assert_eq!(s.doc().unwrap().wb.active().unwrap().row_height(4), 60.0, "open is grow-only: a 60px auto-height row keeps its height");
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    match sh.geometry {
+        gridcraft_model::Geometry::Legacy => assert_eq!(sh.row_height(4), 60.0, "legacy opening never shrinks saved auto heights"),
+        gridcraft_model::Geometry::Mac { .. } => assert_eq!(sh.row_height(4) * 0.75, 26.0, "Mac open recalculates the automatic row"),
+    }
+    assert_eq!(sh.rows[&4].saved_size, Some(45.0));
 }
 
 #[test] // C′ — Review Focus 2 (Some→None: a plain tall row's entry is removed by the fit, the clamp restores it)
@@ -2334,7 +2341,10 @@ fn open_restores_height_of_plain_rows_the_fit_removed() {
         json!({"name": "tall-plain.xlsx", "base64": crate::io::base64_encode(&big_font_workbook(Some((60.0, false, false)), false))}),
     )
     .unwrap();
-    assert_eq!(s.doc().unwrap().wb.active().unwrap().row_height(4), 60.0, "a tall plain row keeps its height after the fit removes its entry");
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    let expected = if sh.geometry == gridcraft_model::Geometry::Legacy { 60.0 } else { 20.0 };
+    assert_eq!(sh.row_height(4), expected);
+    assert_eq!(sh.rows[&4].saved_size, Some(45.0));
 }
 
 #[test] // D — Review Focus 5
@@ -5406,6 +5416,385 @@ fn object_commands_on_a_grouped_member_act_on_the_group() {
 }
 
 #[test]
+fn source_drawing_placement_shifts_or_drops_by_anchor_mode() {
+    use DrawingPlacement::{Absolute, OneCell, TwoCell};
+    use gridcraft_model::{AnchorMode, DrawingFile, DrawingMarker, DrawingPlacement, DrawingRef};
+    let from = DrawingMarker { col: 1, row: 4, col_off: -22, row_off: 99 };
+    let to = DrawingMarker { col: 2, row: 7, col_off: 23, row_off: -100 };
+    let two = |edit: Option<&str>| TwoCell { from, to, edit_as: edit.map(str::to_owned) };
+    for (mode, placement, retained_before) in [
+        (AnchorMode::MoveAndSize, two(None), true),
+        (AnchorMode::MoveAndSize, two(Some("twoCell")), true),
+        (AnchorMode::MoveOnly, two(Some("oneCell")), true),
+        (AnchorMode::Absolute, two(Some("absolute")), false),
+        (AnchorMode::MoveOnly, OneCell { from, ext: (380_999, 381_111) }, true),
+        (AnchorMode::Absolute, Absolute { pos: (609_600, 762_099), ext: (380_999, 381_111) }, true),
+    ] {
+        let mut s = s();
+        let id = add_image(&mut s, "B5", mode);
+        let r = DrawingRef::Image(id);
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.drawing_files.insert(r, DrawingFile { anchor: sh.images[0].anchor, placement: placement.clone() });
+        sh.drawing_names.insert(r, (67, "Source".into()));
+        sh.drawing_order.insert(r, 3);
+        s.execute("sheet.move", json!({"sheet": 0, "to": 1, "copy": true})).unwrap();
+        let copy = s.doc().unwrap().wb.sheet(1).unwrap();
+        let copied = DrawingRef::Image(copy.images[0].id);
+        assert_ne!(r, copied);
+        assert_eq!(copy.drawing_files[&copied].placement, placement);
+        assert_eq!(copy.drawing_names[&copied], (67, "Source".into()));
+        assert_eq!(copy.drawing_order[&copied], 3);
+
+        let file = |s: &Session| s.doc().unwrap().wb.sheet(0).unwrap().drawing_files.get(&r).cloned();
+        s.execute("home.insertRows", json!({"sheet": 0, "rows": "20:20"})).unwrap();
+        assert_eq!(file(&s).unwrap().placement, placement);
+        s.execute("home.insertRows", json!({"sheet": 0, "rows": "1:1"})).unwrap();
+        assert_eq!(file(&s).is_some(), retained_before);
+        let shift = |mut m: DrawingMarker| {
+            m.row += 1;
+            m
+        };
+        if let Some(f) = file(&s) {
+            let shifted = match placement.clone() {
+                TwoCell { from, to, edit_as } => TwoCell { from: shift(from), to: shift(to), edit_as },
+                OneCell { from, ext } => OneCell { from: shift(from), ext },
+                absolute @ Absolute { .. } => absolute,
+            };
+            assert_eq!(f.placement, shifted);
+            assert_eq!(Some(f.anchor), s.doc().unwrap().wb.sheet(0).unwrap().raw_drawing_anchor(r));
+        }
+        s.execute("home.deleteRows", json!({"sheet": 0, "rows": "1:1"})).unwrap();
+        assert_eq!(file(&s).map(|f| f.placement), retained_before.then_some(placement.clone()));
+        s.execute("home.deleteRows", json!({"sheet": 0, "rows": "6:6"})).unwrap();
+        assert_eq!(file(&s).is_some(), matches!(placement, Absolute { .. }));
+    }
+}
+
+#[test]
+fn source_group_placement_survives_copy_and_only_safe_line_edits() {
+    use gridcraft_model::{AnchorMode, DrawingFile, DrawingGroup, DrawingMarker, DrawingPlacement, DrawingRef, GroupFile, GroupFileMember};
+    let mut s = s();
+    let id = add_image(&mut s, "B5", AnchorMode::MoveOnly);
+    let (outer, inner) = {
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let inner = wb.next_object_id();
+        let outer = inner + 1;
+        let sh = wb.sheet_mut(0).unwrap();
+        let anchor = sh.images[0].anchor;
+        let extent = (381000, 381000);
+        for (id, name, member) in [(inner, "Inner", DrawingRef::Image(id)), (outer, "Outer", DrawingRef::Group(inner))] {
+            sh.groups.push(DrawingGroup {
+                id,
+                name: name.into(),
+                anchor,
+                child_offset: (0, 0),
+                child_extent: extent,
+                flip: (false, false),
+                rotation: 0,
+                member_rotations: vec![],
+                members: vec![member],
+                file: Some(GroupFile {
+                    anchor,
+                    off: (0, 0),
+                    ext: extent,
+                    child_offset: (0, 0),
+                    child_extent: extent,
+                    model_child_offset: (0, 0),
+                    model_child_extent: extent,
+                    fields: [true; 4],
+                    has_transform: true,
+                    edited: false,
+                    complete: true,
+                    flip: (false, false),
+                    rotation: 0,
+                    member_rotations: vec![],
+                    members: vec![GroupFileMember { reference: member, anchor, off: (0, 0), ext: extent }],
+                }),
+            });
+        }
+        // The negative offset places the file marker several rows before the named row.
+        let from = DrawingMarker { col: 1, row: 4, col_off: 0, row_off: -600_000 };
+        sh.drawing_files.insert(DrawingRef::Group(outer), DrawingFile { anchor, placement: DrawingPlacement::OneCell { from, ext: extent } });
+        (outer, inner)
+    };
+    s.execute("sheet.move", json!({"sheet": 0, "to": 1, "copy": true})).unwrap();
+    {
+        let original = s.doc().unwrap().wb.sheet(0).unwrap();
+        let copy = s.doc().unwrap().wb.sheet(1).unwrap();
+        let g = copy.groups.iter().find(|g| g.name == "Outer").unwrap();
+        let f = copy.source_group(g).unwrap();
+        assert_ne!(g.id, outer);
+        assert_ne!(f.members[0].reference, DrawingRef::Group(inner));
+        assert_eq!(copy.drawing_files[&DrawingRef::Group(g.id)].placement, original.drawing_files[&DrawingRef::Group(outer)].placement);
+    }
+    s.execute("home.insertRows", json!({"sheet": 0, "rows": "1:1"})).unwrap();
+    {
+        let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+        let g = sh.drawing_group(outer).unwrap();
+        let DrawingPlacement::OneCell { from, .. } = sh.drawing_files[&DrawingRef::Group(outer)].placement else { panic!("lost one-cell spelling") };
+        assert_eq!((from.row, from.row_off), (5, -600_000));
+        assert_eq!(sh.source_group(g).unwrap().members[0].anchor.cell.row, 5);
+        assert_eq!(sh.source_group(sh.drawing_group(inner).unwrap()).unwrap().members[0].anchor.cell.row, 5);
+    }
+    s.execute("home.deleteRows", json!({"sheet": 0, "rows": "4:4"})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert!(!sh.drawing_files.contains_key(&DrawingRef::Group(outer)));
+    assert!(sh.source_group(sh.drawing_group(outer).unwrap()).is_none());
+    assert!(sh.source_group(sh.drawing_group(inner).unwrap()).is_none());
+}
+
+/// Changing the size or visibility of a line under (or, for a fixed object, before) a source
+/// placement moves or resizes the object the user sees without changing its anchor: the stored
+/// markers must not be written for it any more. Undo brings them back with the old lines.
+#[test]
+fn source_drawing_placement_drops_when_its_lines_are_resized_or_hidden() {
+    use gridcraft_model::{AnchorMode, DrawingFile, DrawingMarker, DrawingPlacement, DrawingRef};
+    let from = DrawingMarker { col: 1, row: 4, col_off: 0, row_off: 0 };
+    let to = DrawingMarker { col: 2, row: 7, col_off: 23, row_off: 100 };
+    let moving = DrawingPlacement::TwoCell { from, to, edit_as: None };
+    let fixed = DrawingPlacement::Absolute { pos: (609_600, 762_000), ext: (381_000, 381_000) };
+    for (mode, placement, command, params, kept) in [
+        (AnchorMode::MoveAndSize, &moving, "home.rowHeight", json!({"sheet": 0, "rows": "12:12", "height": 50}), true),
+        (AnchorMode::MoveAndSize, &moving, "home.rowHeight", json!({"sheet": 0, "rows": "2:2", "height": 50}), true),
+        (AnchorMode::MoveAndSize, &moving, "home.rowHeight", json!({"sheet": 0, "rows": "6:6", "height": 50}), false),
+        (AnchorMode::MoveAndSize, &moving, "home.rowHeight", json!({"sheet": 0, "rows": "7:7", "height": 0}), false),
+        (AnchorMode::MoveAndSize, &moving, "home.columnWidth", json!({"sheet": 0, "cols": "B:B", "width": 120}), false),
+        (AnchorMode::MoveAndSize, &moving, "home.columnWidth", json!({"sheet": 0, "cols": "H:H", "width": 120}), true),
+        (AnchorMode::Absolute, &fixed, "home.rowHeight", json!({"sheet": 0, "rows": "2:2", "height": 50}), false),
+        (AnchorMode::Absolute, &fixed, "home.columnWidth", json!({"sheet": 0, "cols": "A:A", "width": 120}), false),
+        (AnchorMode::Absolute, &fixed, "home.rowHeight", json!({"sheet": 0, "rows": "12:12", "height": 50}), true),
+    ] {
+        let mut s = s();
+        let id = add_image(&mut s, "B5", mode);
+        let r = DrawingRef::Image(id);
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.drawing_files.insert(r, DrawingFile { anchor: sh.images[0].anchor, placement: placement.clone() });
+        let has = |s: &Session| s.doc().unwrap().wb.sheet(0).unwrap().drawing_files.contains_key(&r);
+        s.execute(command, params.clone()).unwrap();
+        assert_eq!(has(&s), kept, "{mode:?} {command} {params}");
+        s.execute("edit.undo", json!({})).unwrap();
+        assert!(has(&s), "undo restores the placement with the lines");
+    }
+}
+
+#[test]
+fn disjoint_height_changes_keep_the_untouched_drawing_placement() {
+    use gridcraft_model::{AnchorMode, DrawingFile, DrawingMarker, DrawingPlacement, DrawingRef};
+    let mut s = s();
+    let r = DrawingRef::Image(add_image(&mut s, "B5", AnchorMode::MoveOnly));
+    let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+    let from = DrawingMarker { col: 1, row: 4, col_off: 0, row_off: 0 };
+    sh.drawing_files.insert(r, DrawingFile { anchor: sh.images[0].anchor, placement: DrawingPlacement::OneCell { from, ext: (381_000, 381_000) } });
+    s.execute("home.rowHeight", json!({"rows": "2:2,12:12", "height": 50})).unwrap();
+    assert!(s.doc().unwrap().wb.sheet(0).unwrap().drawing_files.contains_key(&r));
+}
+
+#[test]
+fn line_resize_checks_the_named_marker_as_well_as_its_physical_position() {
+    use gridcraft_model::{AnchorMode, DrawingFile, DrawingMarker, DrawingPlacement, DrawingRef};
+    let mut s = s();
+    let r = DrawingRef::Image(add_image(&mut s, "B5", AnchorMode::MoveAndSize));
+    let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+    let from = DrawingMarker { col: 1, row: 4, col_off: 0, row_off: 0 };
+    let row_off = ((sh.row_top(4) - sh.row_top(10) + 40.0) * 9525.0).round() as i64;
+    let to = DrawingMarker { row: 10, row_off, ..from };
+    sh.drawing_files.insert(r, DrawingFile { anchor: sh.images[0].anchor, placement: DrawingPlacement::TwoCell { from, to, edit_as: None } });
+    s.execute("home.rowHeight", json!({"rows": "9:9", "height": 50})).unwrap();
+    assert!(!s.doc().unwrap().wb.sheet(0).unwrap().drawing_files.contains_key(&r));
+}
+
+#[test]
+fn row_fit_after_line_deletion_checks_remapped_drawing_placement() {
+    use gridcraft_model::{AnchorMode, DrawingFile, DrawingMarker, DrawingPlacement, DrawingRef, LineInfo};
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "A6", "input": "=A1"})).unwrap();
+    let r = DrawingRef::Image(add_image(&mut s, "B6", AnchorMode::MoveOnly));
+    let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+    sh.rows.insert(5, LineInfo { size: Some(50.0), ..LineInfo::default() });
+    let from = DrawingMarker { col: 1, row: 5, col_off: 0, row_off: 0 };
+    sh.drawing_files.insert(r, DrawingFile { anchor: sh.images[0].anchor, placement: DrawingPlacement::OneCell { from, ext: (381_000, 381_000) } });
+    s.execute("home.deleteRows", json!({"rows": "1:1"})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert_eq!(sh.images[0].anchor.cell.row, 4);
+    assert_eq!(sh.row_height(4), sh.default_row_height);
+    assert!(!sh.drawing_files.contains_key(&r));
+}
+
+/// An absolute object keeps its model cell through an insert or delete, so lines of a different
+/// size moving in above it move what the user sees; its fixed source placement then no longer
+/// matches. Lines of the same size moving past it leave both in place.
+#[test]
+fn structural_edit_drops_fixed_placement_only_when_its_drawn_position_moves() {
+    use gridcraft_model::{AnchorMode, DrawingFile, DrawingPlacement, DrawingRef, LineInfo};
+    for (edit, params, kept) in [
+        ("home.deleteRows", json!({"rows": "3:3"}), true),
+        ("home.deleteRows", json!({"rows": "2:2"}), false),
+        ("home.insertRows", json!({"rows": "3:3"}), false),
+        ("home.insertColumns", json!({"cols": "A:A"}), true),
+    ] {
+        let mut s = s();
+        let r = DrawingRef::Image(add_image(&mut s, "B10", AnchorMode::Absolute));
+        let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+        sh.rows.insert(1, LineInfo { size: Some(50.0), ..LineInfo::default() });
+        let before = sh.anchor_rect(&sh.images[0].anchor);
+        let placement = DrawingPlacement::Absolute { pos: (609_600, (before.y * 9525.0) as i64), ext: (381_000, 381_000) };
+        sh.drawing_files.insert(r, DrawingFile { anchor: sh.images[0].anchor, placement });
+        s.execute(edit, params).unwrap();
+        let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+        let moved = sh.anchor_rect(&sh.images[0].anchor) != before;
+        assert_eq!(moved, !kept, "{edit}: the drawn position");
+        assert_eq!(sh.drawing_files.contains_key(&r), kept, "{edit}: the stored placement");
+    }
+}
+
+#[test]
+fn structural_edit_keeps_fixed_placement_despite_row_top_roundoff() {
+    use gridcraft_model::{AnchorMode, DrawingFile, DrawingPlacement, DrawingRef, LineInfo};
+    let mut s = s();
+    let r = DrawingRef::Image(add_image(&mut s, "B7", AnchorMode::Absolute));
+    let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+    sh.default_row_height = 20.0;
+    // The same tiny row height leaves and enters the prefix above B7. Its contribution
+    // is added before the large custom height before the deletion, and after it afterward.
+    for (row, size) in [(0, 6e-10), (2, 50.3), (6, 6e-10)] {
+        sh.rows.insert(row, LineInfo { size: Some(size), ..LineInfo::default() });
+    }
+    let anchor = sh.images[0].anchor;
+    let before = sh.anchor_rect(&anchor);
+    let placement = DrawingPlacement::Absolute { pos: (609_600, 1_240_000), ext: (381_000, 381_000) };
+    sh.drawing_files.insert(r, DrawingFile { anchor, placement: placement.clone() });
+    s.execute("home.deleteRows", json!({"rows": "1:1"})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    let after = sh.anchor_rect(&sh.images[0].anchor);
+    assert_ne!(before.y, after.y);
+    assert!((before.y - after.y).abs() < 1e-12);
+    assert_eq!(sh.drawing_files.get(&r).map(|file| &file.placement), Some(&placement));
+}
+
+#[test]
+fn structural_edit_compares_fixed_placement_in_whole_emu() {
+    use gridcraft_model::{AnchorMode, DrawingFile, DrawingPlacement, DrawingRef, LineInfo};
+    for (before_emu, after_emu, kept) in [(0.45, -0.45, true), (0.625, 0.375, false)] {
+        let mut s = s();
+        let r = DrawingRef::Image(add_image(&mut s, "B7", AnchorMode::Absolute));
+        let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+        sh.default_row_height = 20.0;
+        for (row, offset) in [(0, before_emu), (6, after_emu)] {
+            sh.rows.insert(row, LineInfo { size: Some((20.0 + offset / 9525.0) as f32), ..LineInfo::default() });
+        }
+        let anchor = sh.images[0].anchor;
+        let before = sh.anchor_rect(&anchor).y * 9525.0;
+        let placement = DrawingPlacement::Absolute { pos: (609_600, before.round() as i64), ext: (381_000, 381_000) };
+        sh.drawing_files.insert(r, DrawingFile { anchor, placement });
+        s.execute("home.deleteRows", json!({"rows": "1:1"})).unwrap();
+        let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+        let after = sh.anchor_rect(&sh.images[0].anchor).y * 9525.0;
+        assert!((0.2..1.0).contains(&(before - after)));
+        assert_eq!(before.round() == after.round(), kept);
+        assert_eq!(sh.drawing_files.contains_key(&r), kept);
+    }
+}
+
+#[test]
+fn structural_edit_drops_fixed_group_placement_when_only_a_member_moves() {
+    use gridcraft_model::{AnchorMode, DrawingFile, DrawingPlacement, DrawingRef, LineInfo};
+    let mut s = s();
+    let first = add_image(&mut s, "B2", AnchorMode::Absolute);
+    let second = add_image(&mut s, "B7", AnchorMode::Absolute);
+    group_objects(&mut s, vec![DrawingRef::Image(first), DrawingRef::Image(second)]);
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let sh = wb.sheet_mut(0).unwrap();
+    // Keep the tall line on import: Mac ignores an automatic row's saved height.
+    sh.rows.insert(4, LineInfo { size: Some(48.0), custom: true, ..LineInfo::default() });
+    let (mut imported, _) = gridcraft_xlsx::read_xlsx(&gridcraft_xlsx::write_xlsx(wb).unwrap()).unwrap();
+    let sh = imported.sheet_mut(0).unwrap();
+    assert_eq!(sh.row_height(4), 48.0);
+    let group = &sh.groups[0];
+    assert!(sh.source_group(group).is_some());
+    let anchor = group.anchor;
+    let reference = DrawingRef::Group(group.id);
+    let before = sh.anchor_rect(&anchor);
+    let member = group.members[1];
+    let member_before = sh.drawing_rect(member).unwrap();
+    let emu = |px: f64| (px * 9525.0).round() as i64;
+    let placement = DrawingPlacement::Absolute { pos: (emu(before.x), emu(before.y)), ext: (emu(before.w), emu(before.h)) };
+    sh.drawing_files.insert(reference, DrawingFile { anchor, placement });
+    s.doc_mut().unwrap().wb = std::sync::Arc::new(imported);
+    s.execute("home.deleteRows", json!({"rows": "5:5"})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert_eq!(sh.anchor_rect(&sh.groups[0].anchor), before);
+    assert_ne!(sh.drawing_rect(member), Some(member_before));
+    assert!(!sh.drawing_files.contains_key(&reference));
+    assert!(sh.groups[0].file.as_ref().unwrap().edited);
+}
+
+#[test]
+fn line_changes_follow_sheet_identity_through_rename_in_the_same_commit() {
+    use gridcraft_model::{AnchorMode, DrawingFile, DrawingMarker, DrawingPlacement, DrawingRef, LineInfo};
+    let mut s = s();
+    let r = DrawingRef::Image(add_image(&mut s, "B5", AnchorMode::MoveOnly));
+    let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+    let from = DrawingMarker { col: 1, row: 4, col_off: 0, row_off: 0 };
+    sh.drawing_files.insert(r, DrawingFile { anchor: sh.images[0].anchor, placement: DrawingPlacement::OneCell { from, ext: (381_000, 381_000) } });
+    crate::cmd::edit(&mut s, |cx| {
+        let sh = cx.sheet_mut(0)?;
+        sh.name = "Renamed".into();
+        sh.rows.insert(4, LineInfo { size: Some(50.0), ..LineInfo::default() });
+        Ok(())
+    })
+    .unwrap();
+    assert!(!s.doc().unwrap().wb.sheet(0).unwrap().drawing_files.contains_key(&r));
+}
+
+/// Bring Forward / Send Backward and moving a chart change the stacking order the user sees;
+/// the imported order must not undo that on save.
+#[test]
+fn stacking_edits_override_the_source_drawing_order() {
+    use gridcraft_model::{AnchorMode, DrawingRef};
+    let set_order = |s: &mut Session, order: &[(DrawingRef, usize)]| {
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let sh = wb.sheet_mut(0).unwrap();
+        for (i, &(r, n)) in order.iter().enumerate() {
+            sh.drawing_order.insert(r, n);
+            sh.drawing_names.insert(r, (10 + i, format!("Object {n}")));
+        }
+    };
+    let saved_names = |s: &Session| {
+        let (back, _) = gridcraft_xlsx::read_xlsx(&gridcraft_xlsx::write_xlsx(&s.doc().unwrap().wb).unwrap()).unwrap();
+        let sh = back.sheet(0).unwrap().clone();
+        let mut refs: Vec<_> = sh.drawing_order.iter().map(|(r, n)| (*n, sh.drawing_names[r].1.clone())).collect();
+        refs.sort();
+        refs.into_iter().map(|(_, name)| name).collect::<Vec<_>>()
+    };
+    let mut session = s();
+    let first = add_image(&mut session, "B2", AnchorMode::MoveAndSize);
+    let second = add_image(&mut session, "D2", AnchorMode::MoveAndSize);
+    set_order(&mut session, &[(DrawingRef::Image(first), 1), (DrawingRef::Image(second), 2)]);
+    session.execute("arrange.bringForward", json!({"kind": "image", "id": first})).unwrap();
+    assert_eq!(saved_names(&session), ["Object 2", "Object 1"], "the image brought forward is saved in front");
+
+    let mut session = s();
+    let first = add_image(&mut session, "B2", AnchorMode::MoveAndSize);
+    let second = add_image(&mut session, "D2", AnchorMode::MoveAndSize);
+    session.execute("insert.shape", json!({"kind": "rectangle", "at": "F2"})).unwrap();
+    let shape = session.doc().unwrap().wb.sheet(0).unwrap().shapes[0].id;
+    set_order(&mut session, &[(DrawingRef::Image(first), 1), (DrawingRef::Shape(shape), 2), (DrawingRef::Image(second), 3)]);
+    session.execute("arrange.bringForward", json!({"kind": "image", "id": first})).unwrap();
+    assert_eq!(saved_names(&session), ["Object 3", "Object 2", "Object 1"], "the shape keeps its independent stacking slot");
+
+    let mut session = s();
+    session.execute("cell.set", json!({"cell": "A1", "input": "1"})).unwrap();
+    session.execute("insert.chart", json!({"range": "A1:A1", "type": "line", "at": "G2"})).unwrap();
+    let image = add_image(&mut session, "B2", AnchorMode::MoveAndSize);
+    let chart = session.doc().unwrap().wb.sheet(0).unwrap().charts[0].id;
+    set_order(&mut session, &[(DrawingRef::Chart(chart), 1), (DrawingRef::Image(image), 2)]);
+    session.execute("chart.move", json!({"chart": chart})).unwrap();
+    assert_eq!(saved_names(&session).last().map(String::as_str), Some("Object 1"), "a moved chart is saved in front");
+}
+
+#[test]
 fn arrange_align_rejects_grouped_members() {
     use gridcraft_model::{AnchorMode, DrawingRef};
     let mut s = s();
@@ -6280,6 +6669,39 @@ fn line_sizes_and_freeze_panes_take_a_sheet() {
     assert!(s.execute("home.columnWidth", json!({"sheet": "Sheet1", "cols": "Data!B:B", "width": 10})).is_err());
     assert!(s.execute("home.rowHeight", json!({"rows": "Nope!1:1", "height": 10})).is_err());
     assert_eq!(sheet(&s, 0), before);
+}
+
+#[test]
+fn mac_resize_replaces_saved_xlsx_dimensions() {
+    use gridcraft_model::{Geometry, LineInfo};
+    let mut s = s();
+    let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+    sh.geometry = Geometry::Mac { digit_pt: 6 };
+    sh.cols.insert(0, LineInfo { size: Some(64.0), saved_size: Some(8.0), saved_col_flags: Some((true, true)), ..Default::default() });
+    sh.rows.insert(0, LineInfo { saved_size: Some(60.0), ..Default::default() });
+
+    s.execute("home.columnWidth", json!({"cols": "A:A", "chars": 8.43})).unwrap();
+    s.execute("home.rowHeight", json!({"rows": "1:1", "points": 15.51})).unwrap();
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    // W3: the nearest representable width to 8.43 chars is 56 pt at d = 6.
+    assert_eq!(sh.geometry.width_chars(f64::from(sh.col_width(0))), 8.5);
+    assert_eq!((sh.cols[&0].saved_size, sh.cols[&0].saved_col_flags), (None, None));
+    // H1: lay out at 15 points but save the new input height, not the old value or the floor.
+    assert_eq!(sh.row_height(0), 20.0);
+    assert_eq!(sh.rows[&0].saved_size, Some(15.51));
+}
+
+#[test]
+fn mac_character_widths_use_the_stepped_padding() {
+    // W3: 8 characters are 8d + p points, with p = 3 at d = 4 and 7 at d = 9.
+    for (digit_pt, points) in [(4u8, 35.0), (9, 79.0)] {
+        let mut s = s();
+        std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap().geometry = gridcraft_model::Geometry::Mac { digit_pt };
+        s.execute("home.columnWidth", json!({"cols": "A:A", "chars": 8})).unwrap();
+        let sh = s.doc().unwrap().wb.active().unwrap();
+        assert_eq!(sh.col_width(0), (points * (4.0 / 3.0)) as f32, "d = {digit_pt}");
+        assert_eq!(sh.geometry.width_chars(f64::from(sh.col_width(0))), 8.0);
+    }
 }
 
 #[test]
@@ -7160,6 +7582,1081 @@ fn validation_areas(s: &Session) -> Vec<String> {
     let mut out: Vec<String> = sh.validations.iter().map(|dv| dv.ranges.iter().map(|r| r.a1()).collect::<Vec<_>>().join(" ")).collect();
     out.sort();
     out
+}
+
+#[test]
+fn whole_row_paste_copies_hidden_geometry_and_row_style() {
+    use gridcraft_model::{LineInfo, Style};
+
+    for (range, select_rows) in [("3:4", false), ("3:4", true), ("A3:XFD4", false), ("A3:XFD4", true)] {
+        let mut s = s();
+        s.execute("cell.set", json!({"cell": "A3", "input": "source"})).unwrap();
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let mut bold = Style::default();
+        bold.font.bold = true;
+        let bold = wb.styles.intern(bold);
+        let sh = wb.sheet_mut(0).unwrap();
+        for (row, size, hidden, style) in [(2, 44., true, Some(bold)), (3, 62., true, None), (7, 80., false, None), (8, 90., true, Some(bold))] {
+            sh.rows.insert(row, LineInfo { size: Some(size), custom: true, hidden, style, ..Default::default() });
+        }
+        let read = |s: &Session| {
+            let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+            ([sh.row_height(7), sh.row_height(8)], [sh.style_id(CellRef::new(7, 2)), sh.style_id(CellRef::new(8, 2))])
+        };
+        s.execute("edit.copy", json!({"range": range})).unwrap();
+        if select_rows {
+            s.execute("selection.set", json!({"range": "8:9"})).unwrap();
+        }
+        s.execute("edit.paste", if select_rows { json!({}) } else { json!({"at": "A8"}) }).unwrap();
+        assert_eq!(v(&s, "A8"), Value::from("source"));
+        assert_eq!(read(&s), ([0., 0.], [bold, Default::default()]));
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(read(&s), ([80., 0.], [Default::default(), bold]));
+        s.execute("edit.redo", json!({})).unwrap();
+        assert_eq!(read(&s), ([0., 0.], [bold, Default::default()]));
+        let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+        assert_eq!(sh.row_height(2), 0.);
+        assert_eq!(sh.style_id(CellRef::new(2, 2)), bold);
+    }
+}
+
+#[test]
+fn whole_column_paste_copies_hidden_geometry_and_cell_style_to_another_sheet() {
+    use gridcraft_model::{LineInfo, Style};
+
+    for (range, select_cols) in [("C:D", false), ("C:D", true), ("C1:D1048576", false), ("C1:D1048576", true)] {
+        let mut s = s();
+        s.execute("cell.set", json!({"cell": "C1", "input": "source"})).unwrap();
+        s.execute("home.insertSheet", json!({"name": "Destination"})).unwrap();
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let mut bold = Style::default();
+        bold.font.bold = true;
+        let bold = wb.styles.intern(bold);
+        let source = wb.sheet_index("Sheet1").unwrap();
+        let target = wb.sheet_index("Destination").unwrap();
+        let sh = wb.sheet_mut(source).unwrap();
+        sh.set_style(CellRef::new(0, 2), bold);
+        for (col, size) in [(2, 123.), (3, 234.)] {
+            sh.cols.insert(col, LineInfo { size: Some(size), hidden: true, ..Default::default() });
+        }
+        let sh = wb.sheet_mut(target).unwrap();
+        sh.cols.insert(7, LineInfo { size: Some(45.), ..Default::default() });
+        sh.cols.insert(8, LineInfo { size: Some(67.), hidden: true, ..Default::default() });
+        s.execute("edit.copy", json!({"sheet": "Sheet1", "range": range})).unwrap();
+        s.execute("sheet.activate", json!({"sheet": "Destination"})).unwrap();
+        if select_cols {
+            s.execute("selection.set", json!({"range": "H:I"})).unwrap();
+        }
+        s.execute("edit.paste", if select_cols { json!({}) } else { json!({"at": "H1"}) }).unwrap();
+        assert_eq!(v(&s, "H1"), Value::from("source"));
+        let wb = &s.doc().unwrap().wb;
+        let sh = wb.sheet(target).unwrap();
+        assert_eq!(sh.style_id(CellRef::new(0, 7)), bold);
+        assert_eq!([sh.col_width(7), sh.col_width(8)], [0., 0.]);
+        assert_eq!(wb.sheet(source).unwrap().col_width(2), 0.);
+    }
+}
+
+#[test]
+fn whole_column_copy_transfers_style_without_stored_cells() {
+    let mut s = s();
+    s.execute("home.insertSheet", json!({"name": "Destination"})).unwrap();
+    let (bold, italic) = whole_column_style_fixture(&mut s, 1);
+    s.execute("edit.copy", json!({"sheet": "Sheet1", "range": "C:C"})).unwrap();
+    s.execute("selection.set", json!({"range": "H:H"})).unwrap();
+    s.execute("edit.paste", json!({})).unwrap();
+    let wb = &s.doc().unwrap().wb;
+    assert_blank_column_style(wb.sheet(1).unwrap(), 7, &[0, 7, 39], bold);
+    assert_blank_column_style(wb.sheet(0).unwrap(), 2, &[0, 7, 39], bold);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_blank_column_style(s.doc().unwrap().wb.sheet(1).unwrap(), 7, &[0, 7, 39], italic);
+}
+
+fn check_whole_column_cut_style(cross_sheet: bool) {
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "C1", "input": "move me"})).unwrap();
+    if cross_sheet {
+        s.execute("home.insertSheet", json!({"name": "Destination"})).unwrap();
+    }
+    let target = usize::from(cross_sheet);
+    let (bold, _) = whole_column_style_fixture(&mut s, target);
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    wb.sheet_mut(0).unwrap().set_style(CellRef::new(0, 2), bold);
+    s.execute("edit.cut", json!({"sheet": "Sheet1", "range": "C:D"})).unwrap();
+    s.execute("edit.paste", json!({"at": "H1"})).unwrap();
+    assert_eq!(v(&s, "H1"), Value::from("move me"));
+    let wb = &s.doc().unwrap().wb;
+    assert_blank_column_style(wb.sheet(0).unwrap(), 2, &[0, 39], Default::default());
+    assert_blank_column_style(wb.sheet(target).unwrap(), 7, &[39], bold);
+}
+
+#[test]
+fn whole_column_cut_moves_inherited_style_on_same_sheet() {
+    check_whole_column_cut_style(false);
+}
+
+#[test]
+fn whole_column_cut_moves_inherited_style_to_another_sheet() {
+    check_whole_column_cut_style(true);
+}
+
+#[test]
+fn whole_column_copy_from_unstyled_source_resets_inherited_style() {
+    let mut s = s();
+    s.execute("home.insertSheet", json!({"name": "Destination"})).unwrap();
+    let (_, italic) = whole_column_style_fixture(&mut s, 1);
+    s.execute("cell.set", json!({"cell": "H1", "input": "replace me"})).unwrap();
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    wb.sheet_mut(1).unwrap().set_style(CellRef::new(0, 7), italic);
+    s.execute("edit.copy", json!({"sheet": "Sheet1", "range": "F:F"})).unwrap();
+    s.execute("selection.set", json!({"range": "H:H"})).unwrap();
+    s.execute("edit.paste", json!({})).unwrap();
+    assert_blank_column_style(s.doc().unwrap().wb.sheet(1).unwrap(), 7, &[0, 39], Default::default());
+}
+
+/// Copy must transfer the style's contents, not its source workbook's style ID.
+#[test]
+fn whole_column_copy_maps_inherited_style_into_another_workbook() {
+    use gridcraft_model::{LineInfo, Style};
+
+    let mut s = s();
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let mut bold = Style::default();
+    bold.font.bold = true;
+    let source_id = wb.styles.intern(bold.clone());
+    wb.sheet_mut(0).unwrap().cols.insert(2, LineInfo { style: Some(source_id), ..Default::default() });
+    s.execute("edit.copy", json!({"range": "C:C"})).unwrap();
+    s.execute("file.new", json!({})).unwrap();
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let mut strike = Style::default();
+    strike.font.strike = true;
+    wb.styles.intern(strike);
+    assert_ne!(wb.styles.get(source_id), &bold, "a raw ID must not resolve to the expected style");
+    s.execute("edit.paste", json!({"at": "H1"})).unwrap();
+    let wb = &s.doc().unwrap().wb;
+    let sh = wb.sheet(0).unwrap();
+    let cell = CellRef::new(39, 7);
+    assert!(sh.cell(cell).is_none());
+    assert_eq!(wb.styles.get(sh.style_id(cell)), &bold, "H40 must inherit the mapped style");
+}
+
+/// Overlapping same-sheet cut: the source is reset before the destination takes the lines as
+/// they were, so the shared column ends up with the moved style, and undo/redo restore the styles.
+#[test]
+fn whole_column_cut_onto_an_overlapping_column_moves_inherited_styles() {
+    use gridcraft_model::LineInfo;
+
+    let mut s = s();
+    let (bold, italic) = whole_column_style_fixture(&mut s, 0);
+    let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+    sh.cols.remove(&7);
+    sh.cols.insert(3, LineInfo { style: Some(italic), ..Default::default() });
+    let styles = |s: &Session| {
+        let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+        assert!(sh.cells.is_empty(), "whole-column cut must not store blank cells");
+        [2, 3, 4].map(|col| sh.style_id(CellRef::new(39, col)))
+    };
+    let normal = Default::default();
+    s.execute("edit.cut", json!({"range": "C:D"})).unwrap();
+    s.execute("edit.paste", json!({"at": "D1"})).unwrap();
+    assert_eq!(styles(&s), [normal, bold, italic]);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(styles(&s), [bold, italic, normal]);
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(styles(&s), [normal, bold, italic]);
+}
+
+fn whole_column_style_fixture(s: &mut Session, target: usize) -> (gridcraft_model::StyleId, gridcraft_model::StyleId) {
+    use gridcraft_model::{LineInfo, Style};
+
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let mut bold = Style::default();
+    bold.font.bold = true;
+    let bold = wb.styles.intern(bold);
+    let mut italic = Style::default();
+    italic.font.italic = true;
+    let italic = wb.styles.intern(italic);
+    wb.sheet_mut(0).unwrap().cols.insert(2, LineInfo { style: Some(bold), ..Default::default() });
+    wb.sheet_mut(target).unwrap().cols.insert(7, LineInfo { style: Some(italic), ..Default::default() });
+    (bold, italic)
+}
+
+fn assert_blank_column_style(sh: &gridcraft_model::Sheet, col: u32, rows: &[u32], expected: gridcraft_model::StyleId) {
+    for &row in rows {
+        let cell = CellRef::new(row, col);
+        assert!(sh.cell(cell).is_none(), "{} must be unstored", cell.a1());
+        assert_eq!(sh.style_id(cell), expected, "{} must inherit its column style", cell.a1());
+    }
+}
+
+#[test]
+fn ordinary_range_paste_keeps_destination_line_sizes() {
+    use gridcraft_model::LineInfo;
+
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "C3", "input": "source"})).unwrap();
+    let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+    sh.rows.insert(2, LineInfo { size: Some(44.), custom: true, ..Default::default() });
+    sh.rows.insert(7, LineInfo { size: Some(80.), custom: true, ..Default::default() });
+    sh.cols.insert(2, LineInfo { size: Some(123.), ..Default::default() });
+    sh.cols.insert(7, LineInfo { size: Some(234.), ..Default::default() });
+    s.execute("edit.copy", json!({"range": "C3:D4"})).unwrap();
+    s.execute("edit.paste", json!({"at": "H8"})).unwrap();
+    assert_eq!(v(&s, "H8"), Value::from("source"));
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert_eq!(sh.row_height(7), 80.);
+    assert_eq!(sh.col_width(7), 234.);
+}
+
+#[test]
+fn whole_line_paste_resets_custom_geometry_when_source_is_absent() {
+    use gridcraft_model::LineInfo;
+
+    for (is_row, from, to, old_cell) in [(true, "6:6", "8:8", "A8"), (false, "F:F", "H:H", "H1")] {
+        let mut s = s();
+        s.execute("cell.set", json!({"cell": old_cell, "input": "replace me"})).unwrap();
+        let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+        let lines = if is_row { &mut sh.rows } else { &mut sh.cols };
+        lines.insert(7, LineInfo { size: Some(100.), custom: true, ..Default::default() });
+        s.execute("edit.copy", json!({"range": from})).unwrap();
+        s.execute("selection.set", json!({"range": to})).unwrap();
+        s.execute("edit.paste", json!({})).unwrap();
+        assert_eq!(v(&s, old_cell), Value::Empty);
+        let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+        let (actual, default) = if is_row { (sh.row_height(7), sh.default_row_height) } else { (sh.col_width(7), sh.default_col_width) };
+        assert_eq!(actual, default, "{from} over {to}");
+    }
+}
+
+#[test]
+fn whole_line_cut_paste_restores_source_defaults() {
+    use gridcraft_model::LineInfo;
+
+    for (is_row, from, old_cell, new_cell) in [(true, "3:4", "A3", "A8"), (false, "C:D", "C1", "H1")] {
+        for cross_sheet in [false, true] {
+            let mut s = s();
+            s.execute("cell.set", json!({"cell": old_cell, "input": "move me"})).unwrap();
+            if cross_sheet {
+                s.execute("home.insertSheet", json!({"name": "Destination"})).unwrap();
+            }
+            let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+            let lines = if is_row { &mut sh.rows } else { &mut sh.cols };
+            for idx in [2, 3] {
+                lines.insert(idx, LineInfo { size: Some(100.), hidden: true, custom: true, ..Default::default() });
+            }
+            s.execute("edit.cut", json!({"range": from, "sheet": "Sheet1"})).unwrap();
+            s.execute("sheet.activate", json!({"sheet": if cross_sheet { "Destination" } else { "Sheet1" }})).unwrap();
+            s.execute("edit.paste", json!({"at": new_cell})).unwrap();
+            assert_eq!(v(&s, new_cell), Value::from("move me"));
+            let wb = &s.doc().unwrap().wb;
+            let src = wb.sheet(0).unwrap();
+            let dest = wb.active().unwrap();
+            assert_eq!(src.value(CellRef::parse(old_cell).unwrap()), Value::Empty);
+            let size = |sh: &gridcraft_model::Sheet, i| if is_row { sh.row_height(i) } else { sh.col_width(i) };
+            let default = if is_row { src.default_row_height } else { src.default_col_width };
+            assert_eq!([size(src, 2), size(src, 3)], [default, default], "{from}: cross_sheet={cross_sheet}");
+            assert_eq!([size(dest, 7), size(dest, 8)], [0., 0.]);
+        }
+    }
+}
+
+/// Synthetic input for the X32 clipboard cases. Heights are stored in pixels; hidden flags
+/// and outline levels here come from the input fixture, not the Excel action's readbacks.
+fn whole_row_clipboard_fixture(s: &mut Session) {
+    use gridcraft_model::{Color, Fill, LineInfo, Style};
+
+    for (cell, input) in [("A3", "S-A3"), ("A4", "S-A4"), ("A5", "S-A5 summary"), ("A8", "D-A8"), ("A9", "D-A9")] {
+        s.execute("cell.set", json!({"cell": cell, "input": input})).unwrap();
+    }
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let mut style = |rgb, bold, italic| {
+        let mut st = Style { fill: Fill::solid(Color::Rgb(rgb)), ..Default::default() };
+        st.font.bold = bold;
+        st.font.italic = italic;
+        wb.styles.intern(st)
+    };
+    let (red, blue, green, yellow) =
+        (style(0xFF0000, true, false), style(0x0000FF, true, false), style(0x00B050, false, false), style(0xFFFF00, false, true));
+    let sh = wb.sheet_mut(0).unwrap();
+    for (row, points, style, hidden, outline) in
+        [(2, 30., Some(red), true, 0), (3, 38., None, true, 1), (7, 12., Some(green), false, 2), (8, 45., Some(yellow), true, 0)]
+    {
+        sh.rows.insert(row, LineInfo { size: Some(points * 4. / 3.), custom: true, style, hidden, outline, ..Default::default() });
+        if let Some(style) = style {
+            sh.set_style(CellRef::new(row, 0), style);
+        }
+    }
+    sh.cols.insert(2, LineInfo { style: Some(blue), hidden: true, ..Default::default() });
+}
+
+fn check_whole_row_clipboard_all(insert: bool) {
+    let mut s = s();
+    whole_row_clipboard_fixture(&mut s);
+    let before = s.doc().unwrap().wb.active().unwrap().rows.clone();
+    let check_values = |s: &Session, dest: [Option<&str>; 4]| {
+        for (cell, expected) in
+            ["A3", "A4", "A5", "A8", "A9", "A10", "A11"].into_iter().zip([Some("S-A3"), Some("S-A4"), Some("S-A5 summary")].into_iter().chain(dest))
+        {
+            assert_eq!(v(s, cell), expected.map(Value::from).unwrap_or(Value::Empty), "{cell}");
+        }
+    };
+    let applied = |s: &Session| {
+        let shifted = if insert { [Some("D-A8"), Some("D-A9")] } else { [None, None] };
+        check_values(s, [Some("S-A3"), Some("S-A4"), shifted[0], shifted[1]]);
+        let wb = &s.doc().unwrap().wb;
+        let sh = wb.active().unwrap();
+        assert_eq!([sh.row_height(7), sh.row_height(8)], [0., 0.]);
+        for (source, target) in [(2, 7), (3, 8)] {
+            // As with ordinary Paste, size, visibility and style transfer, not outline.
+            let outline = if insert { 0 } else { before[&target].outline };
+            assert_eq!(sh.rows[&target], gridcraft_model::LineInfo { outline, ..before[&source] });
+        }
+        if insert {
+            assert_eq!([sh.row_height(9), sh.row_height(10)], [16., 0.]);
+            assert_eq!([sh.rows[&9], sh.rows[&10]], [before[&7], before[&8]]);
+        } else {
+            // Inferred from Excel's whole-column C Bold readback, not individual samples.
+            for row in [7, 8] {
+                let cell = CellRef::new(row, 2);
+                assert!(sh.cell(cell).is_none(), "{} should inherit its style", cell.a1());
+                assert!(wb.styles.get(sh.style_id(cell)).font.bold, "{} should be bold", cell.a1());
+            }
+        }
+    };
+    s.execute("edit.copy", json!({"range": "3:4"})).unwrap();
+    if insert {
+        s.execute("home.insertCopiedCells", json!({"at": "A8", "shift": "down"})).unwrap();
+    } else {
+        s.execute("edit.pasteSpecial", json!({"what": "all", "at": "A8"})).unwrap();
+    }
+    applied(&s);
+    s.execute("edit.undo", json!({})).unwrap();
+    check_values(&s, [Some("D-A8"), Some("D-A9"), None, None]);
+    assert_eq!(s.doc().unwrap().wb.active().unwrap().rows, before);
+    s.execute("edit.redo", json!({})).unwrap();
+    applied(&s);
+}
+
+#[test]
+fn x32_paste_special_all_carries_whole_row_formatting() {
+    check_whole_row_clipboard_all(false);
+}
+
+#[test]
+fn x32_insert_copied_cells_carries_whole_row_formatting() {
+    check_whole_row_clipboard_all(true);
+}
+
+#[test]
+fn x32_paste_special_partial_and_non_all_modes_keep_line_formatting() {
+    for (range, what) in [("A3:A4", "all"), ("3:4", "values"), ("3:4", "formulas"), ("3:4", "formats"), ("3:4", "allExceptBorders")] {
+        let mut s = s();
+        whole_row_clipboard_fixture(&mut s);
+        let before = s.doc().unwrap().wb.active().unwrap().rows.clone();
+        s.execute("edit.copy", json!({"range": range})).unwrap();
+        s.execute("edit.pasteSpecial", json!({"what": what, "at": "A8"})).unwrap();
+        assert_eq!(v(&s, "A8"), Value::from(if what == "formats" { "D-A8" } else { "S-A3" }));
+        assert_eq!(s.doc().unwrap().wb.active().unwrap().rows, before, "{range}, {what}");
+    }
+    // Paste All with a modifier stays a cell-only paste too.
+    for modifier in [json!({"skipBlanks": true}), json!({"operation": "add"}), json!({"link": true})] {
+        let mut s = s();
+        whole_row_clipboard_fixture(&mut s);
+        let before = s.doc().unwrap().wb.active().unwrap().rows.clone();
+        s.execute("edit.copy", json!({"range": "3:4"})).unwrap();
+        let mut params = json!({"what": "all", "at": "A8"});
+        params.as_object_mut().unwrap().extend(modifier.as_object().unwrap().clone());
+        s.execute("edit.pasteSpecial", params).unwrap();
+        assert_eq!(s.doc().unwrap().wb.active().unwrap().rows, before, "{modifier}");
+    }
+}
+
+#[test]
+fn x32_whole_row_special_paste_and_insert_obey_protection() {
+    use gridcraft_model::{LineInfo, SheetProtection};
+
+    for (command, params) in [("edit.pasteSpecial", json!({"at": "A8", "what": "all"})), ("home.insertCopiedCells", json!({"at": "A8"}))] {
+        let mut s = s();
+        let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+        sh.rows.insert(2, LineInfo { size: Some(40.), custom: true, ..Default::default() });
+        // Leave an existing redo entry: refusal during the insert's paste must not clear it.
+        s.execute("cell.set", json!({"cell": "A8", "input": "redo me"})).unwrap();
+        s.execute("edit.undo", json!({})).unwrap();
+        let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+        sh.protection = Some(SheetProtection { insert_rows: true, ..Default::default() });
+        s.execute("edit.copy", json!({"range": "3:3"})).unwrap();
+        assert_line_edit_refused(&mut s, command, params, "Formatting rows");
+        assert!(s.clipboard.is_some(), "the copy must remain pending");
+    }
+}
+
+/// Insert Copied and Insert Cut Cells move each line's size with its cells, whichever side of
+/// the insertion point the source lies on, for rows and columns. Line `i` holds `Li` and, when
+/// `i` is even, a custom size of `100 + i`; every line keeps that pairing after the insert.
+#[test]
+fn x32_insert_copied_and_cut_lines_follow_their_cells() {
+    use gridcraft_model::LineInfo;
+
+    let line = |rows: bool, i: u32| if rows { CellRef::new(i, 0) } else { CellRef::new(0, i) };
+    let dump = |s: &Session, rows: bool| -> Vec<(Value, Option<f32>)> {
+        let sh = s.doc().unwrap().wb.active().unwrap();
+        let lines = if rows { &sh.rows } else { &sh.cols };
+        (0..12).map(|i| (sh.value(line(rows, i)), lines.get(&i).and_then(|l| l.size))).collect()
+    };
+    // (cut, source lines, first line of the insertion point, the labels expected in lines 0..12)
+    let cases = [
+        (false, (7, 8), 2, [0, 1, 7, 8, 2, 3, 4, 5, 6, 7, 8, 9]),
+        (false, (2, 3), 3, [0, 1, 2, 2, 3, 3, 4, 5, 6, 7, 8, 9]),
+        (false, (2, 3), 7, [0, 1, 2, 3, 4, 5, 6, 2, 3, 7, 8, 9]),
+        (true, (7, 7), 2, [0, 1, 7, 2, 3, 4, 5, 6, 8, 9, -1, -1]),
+        (true, (2, 2), 7, [0, 1, 3, 4, 5, 6, 2, 7, 8, 9, -1, -1]),
+        // Inserting at the cut lines themselves, or just after them, leaves them in place.
+        (true, (2, 3), 2, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, -1, -1]),
+        (true, (2, 3), 4, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, -1, -1]),
+    ];
+    for rows in [true, false] {
+        for (cut, (first, last), at, labels) in cases {
+            let mut s = s();
+            let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+            for i in 0..10 {
+                sh.set_cell(line(rows, i), gridcraft_model::Cell { value: Value::from(format!("L{i}")), ..Default::default() });
+                if i % 2 == 0 {
+                    let lines = if rows { &mut sh.rows } else { &mut sh.cols };
+                    lines.insert(i, LineInfo { size: Some(100. + i as f32), custom: true, ..Default::default() });
+                }
+            }
+            let source = if rows { gridcraft_core::RangeRef::rows(first, last) } else { gridcraft_core::RangeRef::cols(first, last) };
+            s.execute(if cut { "edit.cut" } else { "edit.copy" }, json!({"range": source.a1()})).unwrap();
+            let before = dump(&s, rows);
+            s.execute("home.insertCopiedCells", json!({"at": line(rows, at).a1()})).unwrap();
+            let expected: Vec<(Value, Option<f32>)> = labels
+                .iter()
+                .map(|&k| match u32::try_from(k) {
+                    Ok(k) => (Value::from(format!("L{k}")), (k % 2 == 0).then_some(100. + k as f32)),
+                    Err(_) => (Value::Empty, None),
+                })
+                .collect();
+            assert_eq!(dump(&s, rows), expected, "rows {rows}, cut {cut}, {}, at {at}", source.a1());
+            s.execute("edit.undo", json!({})).unwrap();
+            assert_eq!(dump(&s, rows), before, "undo: rows {rows}, cut {cut}, {}, at {at}", source.a1());
+            s.execute("edit.redo", json!({})).unwrap();
+            assert_eq!(dump(&s, rows), expected, "redo: rows {rows}, cut {cut}, {}, at {at}", source.a1());
+        }
+    }
+}
+
+/// A Cut stays pending across edits and moves its cells as they are when pasted. The lines it
+/// moves are read then too, so a height set after the Cut moves with the row, also when the
+/// destination overlaps the source.
+#[test]
+fn whole_row_cut_moves_line_sizes_as_they_are_when_pasted() {
+    use gridcraft_model::LineInfo;
+
+    for (at, first, expected_height) in [("A2", 1, [Some(50.), Some(100.), None]), ("A4", 2, [None, Some(50.), Some(100.)])] {
+        let mut s = s();
+        s.execute("cell.set", json!({"cell": "A3", "input": "move me"})).unwrap();
+        let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+        for row in [2, 3] {
+            sh.rows.insert(row, LineInfo { size: Some(100.), custom: true, ..Default::default() });
+        }
+        let default = sh.default_row_height;
+        let heights = |s: &Session| {
+            let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+            [first, first + 1, first + 2].map(|r| sh.row_height(r))
+        };
+        s.execute("edit.cut", json!({"range": "3:4"})).unwrap();
+        s.execute("home.rowHeight", json!({"rows": "3:3", "height": 50})).unwrap();
+        let before = heights(&s);
+        s.execute("edit.paste", json!({"at": at})).unwrap();
+        assert_eq!(v(&s, at), Value::from("move me"));
+        assert_eq!(heights(&s), expected_height.map(|h| h.unwrap_or(default)), "pasting at {at}");
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(v(&s, "A3"), Value::from("move me"));
+        assert_eq!(heights(&s), before);
+    }
+}
+
+#[test]
+fn whole_row_cut_paste_refuses_a_replaced_source_index() {
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "A3", "input": "source"})).unwrap();
+    s.execute("edit.cut", json!({"range": "3:3"})).unwrap();
+    s.execute("home.insertSheet", json!({"name": "Other", "before": 0})).unwrap();
+    s.execute("cell.set", json!({"cell": "A3", "input": "keep me"})).unwrap();
+    s.execute("home.rowHeight", json!({"rows": "3:3", "height": 50})).unwrap();
+
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let mut style = gridcraft_model::Style::default();
+    style.protection.locked = false;
+    let unlocked = wb.styles.intern(style);
+    let sh = wb.sheet_mut(wb.active_sheet()).unwrap();
+    sh.rows.get_mut(&2).unwrap().style = Some(unlocked);
+    sh.protection = Some(gridcraft_model::SheetProtection { format_rows: true, ..Default::default() });
+    assert_line_edit_refused(&mut s, "edit.paste", json!({"at": "A8"}), "source sheet for this cut has moved or been deleted");
+    assert_eq!(v(&s, "A3"), Value::from("keep me"));
+    assert_eq!(v(&s, "A8"), Value::Empty);
+    let wb = &s.doc().unwrap().wb;
+    assert_eq!(wb.active().unwrap().row_height(2), 50.);
+    assert_eq!(wb.sheet(1).unwrap().value(CellRef::parse("A3").unwrap()), Value::from("source"));
+}
+
+/// The cell values of A3 and A8 on each sheet, by name.
+fn cut_cells(s: &Session) -> Vec<(String, Value, Value)> {
+    let wb = &s.doc().unwrap().wb;
+    let at = |sh: &gridcraft_model::Sheet, a: &str| sh.value(CellRef::parse(a).unwrap());
+    wb.sheets.iter().map(|sh| (sh.name.clone(), at(sh, "A3"), at(sh, "A8"))).collect()
+}
+
+/// A pending Cut finds its source sheet by index. Inserting, deleting or moving a sheet can put
+/// another sheet at that index; Paste then refuses instead of moving that sheet's cells.
+fn cell_cut_paste_refuses_after(change: &str) {
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "A3", "input": "source"})).unwrap();
+    s.execute("home.insertSheet", json!({"name": "Other"})).unwrap();
+    s.execute("cell.set", json!({"sheet": "Other", "cell": "A3", "input": "keep me"})).unwrap();
+    s.execute("sheet.activate", json!({"sheet": "Sheet1"})).unwrap();
+    s.execute("edit.cut", json!({"range": "A3"})).unwrap();
+    match change {
+        "insert" => {
+            s.execute("home.insertSheet", json!({"name": "New", "before": 0})).unwrap();
+            s.execute("cell.set", json!({"cell": "A3", "input": "keep me too"})).unwrap();
+        }
+        "delete" => {
+            s.execute("home.deleteSheet", json!({"sheet": "Sheet1"})).unwrap();
+        }
+        _ => {
+            s.execute("sheet.move", json!({"sheet": "Sheet1", "to": 1})).unwrap();
+        }
+    }
+    let first = if change == "insert" { "New" } else { "Other" };
+    assert_eq!(s.doc().unwrap().wb.sheets[0].name, first);
+    s.execute("sheet.activate", json!({"sheet": first})).unwrap();
+    let before = cut_cells(&s);
+    let refused = s.execute("edit.paste", json!({"at": "A8"}));
+    assert!(refused.unwrap_err().to_string().contains("Cut it again"));
+    assert_eq!(cut_cells(&s), before);
+    assert!(s.clipboard.as_ref().is_some_and(|c| c.cut));
+}
+
+#[test]
+fn cell_cut_paste_refuses_after_a_sheet_is_inserted_before_the_source() {
+    cell_cut_paste_refuses_after("insert");
+}
+
+#[test]
+fn cell_cut_paste_refuses_after_the_source_sheet_is_deleted() {
+    cell_cut_paste_refuses_after("delete");
+}
+
+#[test]
+fn cell_cut_paste_refuses_after_the_source_sheet_is_moved() {
+    cell_cut_paste_refuses_after("move");
+}
+
+/// Sheets added after the source leave its index alone, so the Cut still moves its cells.
+#[test]
+fn cell_cut_pastes_after_a_sheet_is_added_behind_the_source() {
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "A3", "input": "source"})).unwrap();
+    s.execute("edit.cut", json!({"range": "A3"})).unwrap();
+    s.execute("home.insertSheet", json!({"name": "Other"})).unwrap();
+    s.execute("edit.paste", json!({"at": "A8"})).unwrap();
+    let cells = cut_cells(&s);
+    assert_eq!(cells[0], ("Sheet1".into(), Value::Empty, Value::Empty));
+    assert_eq!(cells[1], ("Other".into(), Value::Empty, Value::from("source")));
+}
+
+#[test]
+fn insert_cut_cells_refuses_when_another_sheet_took_the_source_index() {
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "A3", "input": "source"})).unwrap();
+    s.execute("edit.cut", json!({"range": "3:3"})).unwrap();
+    s.execute("home.insertSheet", json!({"name": "Other", "before": 0})).unwrap();
+    s.execute("cell.set", json!({"cell": "A3", "input": "keep me"})).unwrap();
+    let before = cut_cells(&s);
+    let refused = s.execute("home.insertCopiedCells", json!({"at": "A8"}));
+    assert!(refused.unwrap_err().to_string().contains("Cut it again"));
+    assert_eq!(cut_cells(&s), before);
+    assert!(s.clipboard.as_ref().is_some_and(|c| c.cut));
+}
+
+/// Renaming the source sheet keeps its identity: references to the moved cells follow them.
+#[test]
+fn cell_cut_paste_after_renaming_the_source_moves_references() {
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "A3", "input": "5"})).unwrap();
+    s.execute("cell.set", json!({"cell": "B1", "input": "=A3*2"})).unwrap();
+    s.execute("edit.cut", json!({"range": "A3"})).unwrap();
+    s.execute("sheet.rename", json!({"sheet": 0, "name": "Data"})).unwrap();
+    s.execute("edit.paste", json!({"at": "A8"})).unwrap();
+    assert_eq!(v(&s, "A8"), Value::number(5.));
+    assert_eq!(v(&s, "B1"), Value::number(10.));
+}
+
+/// Pin GridCraft's existing behavior, not Excel parity: even if a filter leaves just one visible
+/// run, the packed copy does not replace destination line settings.
+#[test]
+fn filtered_whole_row_copy_keeps_destination_line_sizes() {
+    use gridcraft_model::LineInfo;
+
+    let mut s = s();
+    s.execute("range.setValues", json!({"range": "A1", "values": [["Val", "Tag"], ["a", "keep"], ["b", "keep"], ["c", "hide"]]})).unwrap();
+    s.execute("selection.set", json!({"range": "A1:B1"})).unwrap();
+    s.execute("data.filter", json!({})).unwrap();
+    assert_eq!(s.execute("data.filterBy", json!({"column": "B", "values": ["keep"]})).unwrap()["hiddenRows"], 1);
+    let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+    sh.rows.insert(1, LineInfo { size: Some(80.), custom: true, ..Default::default() });
+    s.execute("edit.copy", json!({"range": "2:4"})).unwrap();
+    s.execute("edit.paste", json!({"at": "A20"})).unwrap();
+    assert_eq!([v(&s, "A20"), v(&s, "A21"), v(&s, "A22")], [Value::from("a"), Value::from("b"), Value::Empty]);
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert_eq!(sh.row_height(19), sh.default_row_height);
+}
+
+#[test]
+fn whole_row_paste_needs_row_formatting_on_a_protected_sheet() {
+    use gridcraft_model::{LineInfo, SheetProtection};
+
+    for format_rows in [false, true] {
+        let mut s = s();
+        s.execute("home.insertSheet", json!({"name": "Locked"})).unwrap();
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        wb.sheet_mut(0).unwrap().rows.insert(2, LineInfo { size: Some(80.), custom: true, ..Default::default() });
+        let locked = wb.sheet_index("Locked").unwrap();
+        wb.sheet_mut(locked).unwrap().protection = Some(SheetProtection { format_rows, ..Default::default() });
+        s.execute("edit.copy", json!({"sheet": "Sheet1", "range": "3:3"})).unwrap();
+        s.execute("sheet.activate", json!({"sheet": "Locked"})).unwrap();
+        let pasted = s.execute("edit.paste", json!({"at": "A8"}));
+        let sh = s.doc().unwrap().wb.sheet(locked).unwrap();
+        if format_rows {
+            pasted.unwrap();
+            assert_eq!(sh.row_height(7), 80.);
+        } else {
+            assert!(pasted.unwrap_err().to_string().contains("Formatting rows"));
+            assert_eq!(sh.row_height(7), sh.default_row_height);
+        }
+    }
+}
+
+/// Synthetic whole-row AutoFill input: rows 3, 4 and 8 carry a custom height and a row style
+/// (red bold, blue bold, green) that their cells share; column A counts and column B doubles it.
+fn whole_row_autofill_fixture(s: &mut Session) -> [gridcraft_model::StyleId; 3] {
+    use gridcraft_model::{Color, Fill, LineInfo, Style};
+
+    for (row, n) in [(3, 1), (4, 2), (8, 6)] {
+        s.execute("cell.set", json!({"cell": format!("A{row}"), "input": n.to_string()})).unwrap();
+        s.execute("cell.set", json!({"cell": format!("B{row}"), "input": format!("=A{row}*2")})).unwrap();
+    }
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let mut style = |rgb, bold| {
+        let mut st = Style { fill: Fill::solid(Color::Rgb(rgb)), ..Default::default() };
+        st.font.bold = bold;
+        wb.styles.intern(st)
+    };
+    let styles = [style(0xFF0000, true), style(0x0000FF, true), style(0x00B050, false)];
+    let sh = wb.sheet_mut(0).unwrap();
+    for (row, points, style) in [(2, 30., styles[0]), (3, 38., styles[1]), (7, 22., styles[2])] {
+        sh.rows.insert(row, LineInfo { size: Some(points * 4. / 3.), custom: true, style: Some(style), ..Default::default() });
+        for col in 0..2 {
+            sh.set_style(CellRef::new(row, col), style);
+        }
+    }
+    styles
+}
+
+/// X31, measured in Excel for Mac 16.115.2 (`Range("3:4").AutoFill Range("3:9")`, default fill;
+/// case `x25-autofill-whole-rows`): rows 5 to 9 take the heights 30, 38, 30, 38, 30 pt and the row
+/// styles of rows 3:4 in turn, so row 8's green is replaced; the cells continue the series and
+/// shift the formula. Undo and redo carry the row formatting with the cells.
+#[test]
+fn whole_row_autofill_repeats_source_row_formatting_and_undoes_it() {
+    let mut s = s();
+    let [red, blue, green] = whole_row_autofill_fixture(&mut s);
+    let before = s.doc().unwrap().wb.sheet(0).unwrap().rows.clone();
+    let filled = |s: &mut Session| {
+        for a1 in 5..=9 {
+            assert_eq!(s.execute("cell.get", json!({"cell": format!("B{a1}")})).unwrap()["formula"], format!("=A{a1}*2"));
+            assert_eq!(v(s, &format!("A{a1}")), Value::Number(f64::from(a1) - 2.));
+            assert_eq!(v(s, &format!("B{a1}")), Value::Number(2. * (f64::from(a1) - 2.)));
+        }
+        let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+        for (row, (points, style)) in (4..=8).zip([(30., red), (38., blue), (30., red), (38., blue), (30., red)]) {
+            let line = sh.rows.get(&row).copied().unwrap_or_default();
+            assert_eq!((line.size, line.custom, line.style, line.hidden), (Some(points * 4. / 3.), true, Some(style), false), "row {}", row + 1);
+            // A and B were written by the fill; C has no cell and inherits the row style.
+            for col in 0..3 {
+                assert_eq!(sh.style_id(CellRef::new(row, col)), style, "row {} col {col}", row + 1);
+            }
+        }
+        let others = |rows: &std::collections::BTreeMap<u32, gridcraft_model::LineInfo>| {
+            rows.iter().filter(|(r, _)| !(4..=8).contains(*r)).map(|(r, l)| (*r, *l)).collect::<Vec<_>>()
+        };
+        assert_eq!(others(&sh.rows), others(&before), "rows 2, 3, 4 and 10 keep their formatting");
+    };
+    s.execute("edit.autoFill", json!({"source": "3:4", "target": "3:9"})).unwrap();
+    filled(&mut s);
+    s.execute("edit.undo", json!({})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert_eq!(sh.rows, before);
+    assert_eq!(sh.style_id(CellRef::parse("C8").unwrap()), green);
+    assert_eq!(v(&s, "A5"), Value::Empty);
+    assert_eq!(v(&s, "A8"), Value::Number(6.));
+    s.execute("edit.redo", json!({})).unwrap();
+    filled(&mut s);
+}
+
+/// AutoFill of a cell range in the same rows writes cells only: the rows keep their height and style.
+#[test]
+fn partial_row_autofill_keeps_destination_row_formatting() {
+    let mut s = s();
+    let [red, blue, green] = whole_row_autofill_fixture(&mut s);
+    let before = s.doc().unwrap().wb.sheet(0).unwrap().rows.clone();
+    s.execute("edit.autoFill", json!({"source": "A3:B4", "target": "A3:B9"})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert_eq!(sh.rows, before);
+    assert_eq!([sh.style_id(CellRef::parse("A5").unwrap()), sh.style_id(CellRef::parse("B8").unwrap())], [red, blue]);
+    assert_eq!([sh.style_id(CellRef::parse("C5").unwrap()), sh.style_id(CellRef::parse("C8").unwrap())], [Default::default(), green]);
+    assert_eq!(v(&s, "A9"), Value::Number(7.));
+}
+
+/// Not measured: upward fills line the rows up as the cell fill does (the row above the source
+/// takes its last row), and Fill Without Formatting leaves the rows alone.
+#[test]
+fn whole_row_autofill_upward_and_without_formatting() {
+    let mut s = s();
+    let [red, blue, _] = whole_row_autofill_fixture(&mut s);
+    let before = s.doc().unwrap().wb.sheet(0).unwrap().rows.clone();
+    s.execute("edit.autoFill", json!({"source": "3:4", "target": "3:9", "mode": "values"})).unwrap();
+    assert_eq!(s.doc().unwrap().wb.sheet(0).unwrap().rows, before);
+    // A one-row extension of the two-row source starts with its last line, not its first.
+    s.execute("edit.autoFill", json!({"source": "3:4", "target": "2:4"})).unwrap();
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    assert_eq!((sh.rows[&1].style, sh.style_id(CellRef::new(1, 0))), (Some(blue), blue));
+    s.execute("edit.undo", json!({})).unwrap();
+    s.execute("edit.autoFill", json!({"source": "3:4", "target": "1:4"})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert_eq!([0, 1].map(|r| sh.rows.get(&r).and_then(|l| l.style)), [Some(red), Some(blue)]);
+    assert_eq!([0, 1].map(|r| sh.style_id(CellRef::new(r, 0))), [red, blue]);
+    assert_eq!([sh.row_height(0), sh.row_height(1)], [40., 38. * 4. / 3.]);
+}
+
+/// Inferred: a whole column repeats its width and style, and an absent source
+/// column restores the defaults when it replaces custom geometry.
+#[test]
+fn whole_column_autofill_repeats_source_column_formatting() {
+    use gridcraft_model::{LineInfo, Style};
+
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "B1", "input": "1"})).unwrap();
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let mut bold = Style::default();
+    bold.font.bold = true;
+    let bold = wb.styles.intern(bold);
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.cols.insert(1, LineInfo { size: Some(123.), style: Some(bold), ..Default::default() });
+    sh.cols.insert(3, LineInfo { size: Some(45.), ..Default::default() });
+    sh.cols.insert(4, LineInfo { size: Some(55.), style: Some(bold), ..Default::default() });
+    s.execute("edit.autoFill", json!({"source": "B:C", "target": "B:E"})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert_eq!([sh.col_width(3), sh.col_width(4)], [123., sh.default_col_width]);
+    assert_eq!([sh.cols.get(&3).and_then(|l| l.style), sh.cols.get(&4).and_then(|l| l.style)], [Some(bold), None]);
+    assert_eq!(sh.style_id(CellRef::parse("D10").unwrap()), bold);
+    assert_eq!(v(&s, "D1"), Value::Number(1.));
+    s.execute("edit.undo", json!({})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    assert_eq!([sh.col_width(3), sh.col_width(4)], [45., 55.]);
+    assert_eq!([sh.cols.get(&3).and_then(|l| l.style), sh.cols.get(&4).and_then(|l| l.style)], [None, Some(bold)]);
+    assert_eq!(v(&s, "D1"), Value::Empty);
+    assert_line_edit_refused(&mut s, "edit.autoFill", json!({"source": "B:B", "target": "B:F"}), "range too large");
+}
+
+#[test]
+fn whole_row_autofill_keeps_destination_visibility() {
+    let mut s = s();
+    whole_row_autofill_fixture(&mut s);
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let rows = &mut wb.sheet_mut(0).unwrap().rows;
+    rows.get_mut(&2).unwrap().hidden = true;
+    let dest = rows.get_mut(&7).unwrap();
+    dest.hidden = true;
+    dest.outline = 1;
+    dest.collapsed = true;
+    s.execute("edit.autoFill", json!({"source": "3:4", "target": "3:9"})).unwrap();
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    assert!(sh.rows[&2].hidden && !sh.rows[&4].hidden && sh.rows[&7].hidden);
+    assert_eq!((sh.rows[&7].outline, sh.rows[&7].collapsed), (1, true));
+}
+
+#[test]
+fn autofill_formats_uses_inherited_source_style_for_whole_rows_only() {
+    for (source, target, whole) in [("3:3", "3:5", true), ("C3", "C3:C5", false)] {
+        let mut s = s();
+        let [red, _, _] = whole_row_autofill_fixture(&mut s);
+        s.execute("cell.set", json!({"cell": "C5", "input": "=3+4"})).unwrap();
+        s.execute("edit.autoFill", json!({"source": source, "target": target, "mode": "formats"})).unwrap();
+        assert_eq!(s.execute("cell.get", json!({"cell": "C5"})).unwrap()["formula"], "=3+4");
+        let sh = s.doc().unwrap().wb.active().unwrap();
+        assert_eq!(sh.style_id(CellRef::parse("C5").unwrap()), if whole { red } else { Default::default() });
+        assert_eq!(sh.rows.get(&4).and_then(|l| l.style), whole.then_some(red));
+    }
+}
+
+#[test]
+fn autofill_values_uses_inherited_destination_style_for_whole_rows_only() {
+    for (source, target, whole) in [("7:7", "7:8", true), ("C7", "C7:C8", false)] {
+        let mut s = s();
+        let [_, _, green] = whole_row_autofill_fixture(&mut s);
+        s.execute("cell.set", json!({"cell": "C7", "input": "from above"})).unwrap();
+        let before = s.doc().unwrap().wb.active().unwrap().rows.clone();
+        s.execute("edit.autoFill", json!({"source": source, "target": target, "mode": "values"})).unwrap();
+        assert_eq!(v(&s, "C8"), Value::from("from above"));
+        let sh = s.doc().unwrap().wb.active().unwrap();
+        assert_eq!(sh.style_id(CellRef::parse("C8").unwrap()), if whole { green } else { Default::default() });
+        assert_eq!(sh.rows, before);
+    }
+}
+
+fn assert_line_edit_refused(s: &mut Session, id: &str, params: Json, reason: &str) {
+    let d = s.doc().unwrap();
+    let (before, undo, redo, selection) = (d.wb.clone(), d.undo.len(), d.redo.len(), d.selection.clone());
+    let result = s.execute(id, params);
+    assert!(result.unwrap_err().to_string().contains(reason));
+    let d = s.doc().unwrap();
+    assert!(std::sync::Arc::ptr_eq(&d.wb, &before), "refusal must not commit any cells or lines");
+    assert_eq!((d.undo.len(), d.redo.len()), (undo, redo));
+    assert_eq!(d.selection.a1(), selection.a1());
+}
+
+#[test]
+fn whole_row_autofill_refuses_inherited_protection_changes() {
+    use gridcraft_model::{LineInfo, SheetProtection, Style};
+
+    for (locked, hidden) in [(false, false), (true, true)] {
+        let mut s = s();
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let mut style = Style::default();
+        style.protection.locked = locked;
+        style.protection.hidden = hidden;
+        let id = wb.styles.intern(style);
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.rows.insert(2, LineInfo { size: Some(40.), style: Some(id), custom: true, ..Default::default() });
+        sh.protection = Some(SheetProtection { format_rows: true, ..Default::default() });
+        assert_line_edit_refused(&mut s, "edit.autoFill", json!({"source": "3:3", "target": "3:4"}), "can't change cell protection");
+    }
+}
+
+#[test]
+fn whole_row_paste_refuses_inherited_protection_changes() {
+    use gridcraft_model::{LineInfo, SheetProtection, Style};
+
+    let mut s = s();
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let mut unlocked = Style::default();
+    unlocked.protection.locked = false;
+    let id = wb.styles.intern(unlocked);
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.rows.insert(2, LineInfo { style: Some(id), ..Default::default() });
+    sh.protection = Some(SheetProtection { format_rows: true, ..Default::default() });
+    s.execute("edit.copy", json!({"range": "3:3"})).unwrap();
+    assert_line_edit_refused(&mut s, "edit.paste", json!({"at": "A4"}), "can't change cell protection");
+}
+
+#[test]
+fn whole_row_transfer_checks_whether_explicit_style_still_masks_line_protection() {
+    use gridcraft_model::{LineInfo, SheetProtection, Style};
+
+    for (paste, retain_mask) in [(false, false), (true, false), (false, true)] {
+        let mut s = s();
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let mut unlocked = Style::default();
+        unlocked.protection.locked = false;
+        let unlocked = wb.styles.intern(unlocked);
+        let mut locked = Style::default();
+        locked.font.bold = true;
+        let locked = wb.styles.intern(locked);
+        let sh = wb.sheet_mut(0).unwrap();
+        // A4 is the only position where the line replacement can change inherited flags.
+        for col in 1..gridcraft_core::MAX_COLS {
+            sh.cols.insert(col, LineInfo { style: Some(unlocked), ..Default::default() });
+        }
+        sh.rows.insert(2, LineInfo { style: Some(unlocked), ..Default::default() });
+        let at = CellRef::parse("A4").unwrap();
+        sh.set_style(at, locked);
+        if retain_mask {
+            sh.set_style(CellRef::parse("A3").unwrap(), locked);
+        }
+        sh.protection = Some(SheetProtection { format_rows: true, ..Default::default() });
+        if paste {
+            s.execute("edit.copy", json!({"range": "3:3"})).unwrap();
+            assert_line_edit_refused(&mut s, "edit.paste", json!({"at": "A4"}), "can't change cell protection");
+        } else {
+            let params = json!({"source": "3:3", "target": "3:4", "mode": "formats"});
+            if retain_mask {
+                s.execute("edit.autoFill", params).unwrap();
+                let sh = s.doc().unwrap().wb.active().unwrap();
+                assert_eq!(sh.rows[&3].style, Some(unlocked));
+                assert_eq!(sh.style_id(at), locked);
+            } else {
+                assert_line_edit_refused(&mut s, "edit.autoFill", params, "can't change cell protection");
+            }
+        }
+    }
+}
+
+#[test]
+fn whole_row_autofill_allows_formatting_with_unchanged_protection() {
+    let mut s = s();
+    let [red, _, _] = whole_row_autofill_fixture(&mut s);
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.protection = Some(gridcraft_model::SheetProtection { format_rows: true, ..Default::default() });
+    s.execute("edit.autoFill", json!({"source": "3:3", "target": "3:5", "mode": "formats"})).unwrap();
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    assert_eq!((sh.row_height(4), sh.style_id(CellRef::parse("C5").unwrap())), (40., red));
+}
+
+#[test]
+fn whole_row_cut_compares_protection_for_the_final_lines() {
+    use gridcraft_model::{LineInfo, SheetProtection, Style};
+
+    for (unlocked, at) in [(false, "A4"), (true, "A8")] {
+        let mut s = s();
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let mut style = Style::default();
+        style.protection.locked = false;
+        style.font.bold = true;
+        let id = wb.styles.intern(style);
+        let sh = wb.sheet_mut(0).unwrap();
+        for (row, size) in [(2, 40.), (3, 50.)] {
+            sh.rows.insert(row, LineInfo { size: Some(size), style: Some(id), custom: true, ..Default::default() });
+        }
+        if !unlocked {
+            // The vacated source falls back to column styles with the same nondefault flags.
+            for col in 0..gridcraft_core::MAX_COLS {
+                sh.cols.insert(col, LineInfo { style: Some(id), ..Default::default() });
+            }
+            sh.rows.insert(4, LineInfo { style: Some(id), ..Default::default() });
+        }
+        // The non-overlapping destination already has the same protection. Only the source
+        // reset to default can change flags in this case.
+        if unlocked {
+            for row in 7..=8 {
+                sh.rows.insert(row, LineInfo { style: Some(id), ..Default::default() });
+            }
+        }
+        sh.protection = Some(SheetProtection { format_rows: true, ..Default::default() });
+        s.execute("edit.cut", json!({"range": "3:4"})).unwrap();
+        if unlocked {
+            assert_line_edit_refused(&mut s, "edit.paste", json!({"at": at}), "can't change cell protection");
+        } else {
+            let at_source = CellRef::parse("A3").unwrap();
+            assert_eq!(s.doc().unwrap().wb.active().unwrap().style_id(at_source), id);
+            s.execute("edit.paste", json!({"at": at})).unwrap();
+            let sh = s.doc().unwrap().wb.active().unwrap();
+            assert!(!sh.rows.contains_key(&2));
+            assert_eq!(sh.style_id(at_source), id);
+            assert_eq!((sh.row_height(3), sh.rows[&3].style, sh.row_height(4), sh.rows[&4].style), (40., Some(id), 50., Some(id)));
+        }
+    }
+}
+
+#[test]
+fn whole_row_autofill_refusal_leaves_cells_lines_and_history_unchanged() {
+    let mut s = s();
+    whole_row_autofill_fixture(&mut s);
+    assert_line_edit_refused(&mut s, "edit.autoFill", json!({"source": "3:4", "target": "3:308"}), "range too large");
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    wb.sheet_mut(0).unwrap().protection = Some(gridcraft_model::SheetProtection::default());
+    assert_line_edit_refused(&mut s, "edit.autoFill", json!({"source": "3:4", "target": "3:9"}), "Formatting rows");
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    wb.sheet_mut(0).unwrap().protection.as_mut().unwrap().format_rows = true;
+    assert_line_edit_refused(&mut s, "edit.autoFill", json!({"source": "3:4", "target": "3:9"}), "trying to change is on a protected sheet");
+}
+
+/// A blank cell takes its row's style before its column's: a row style filled over a row
+/// relocks the blank cells of an unlocked column unless a filled cell keeps them unlocked.
+#[test]
+fn whole_row_autofill_protection_follows_row_over_column_precedence() {
+    use gridcraft_model::{LineInfo, SheetProtection, Style};
+
+    for (column_unlocked, source_cell_unlocked, allowed) in [(true, false, false), (true, true, true), (false, false, true)] {
+        let mut s = s();
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let mut unlocked = Style::default();
+        unlocked.protection.locked = false;
+        let unlocked = wb.styles.intern(unlocked);
+        let mut bold = Style::default();
+        bold.font.bold = true;
+        let bold = wb.styles.intern(bold);
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.rows.insert(2, LineInfo { style: Some(bold), ..Default::default() });
+        if column_unlocked {
+            sh.cols.insert(2, LineInfo { style: Some(unlocked), ..Default::default() });
+        }
+        if source_cell_unlocked {
+            sh.set_style(CellRef::parse("C3").unwrap(), unlocked);
+        }
+        sh.protection = Some(SheetProtection { format_rows: true, ..Default::default() });
+        let params = json!({"source": "3:3", "target": "3:4"});
+        if allowed {
+            s.execute("edit.autoFill", params).unwrap();
+            let sh = s.doc().unwrap().wb.active().unwrap();
+            assert_eq!(sh.rows[&3].style, Some(bold));
+            let c4 = sh.style_id(CellRef::parse("C4").unwrap());
+            assert_eq!(c4, if column_unlocked { unlocked } else { bold });
+        } else {
+            assert_line_edit_refused(&mut s, "edit.autoFill", params, "can't change cell protection");
+        }
+    }
+}
+
+/// Whole-column AutoFill checks the inherited flags of a million blank cells without visiting them.
+#[test]
+fn whole_column_autofill_refuses_inherited_protection_changes() {
+    use gridcraft_model::{LineInfo, SheetProtection, Style};
+
+    let mut s = s();
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let mut hidden = Style::default();
+    hidden.protection.hidden = true;
+    let hidden = wb.styles.intern(hidden);
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.cols.insert(1, LineInfo { size: Some(90.), style: Some(hidden), ..Default::default() });
+    sh.protection = Some(SheetProtection { format_columns: true, ..Default::default() });
+    assert_line_edit_refused(&mut s, "edit.autoFill", json!({"source": "B:B", "target": "B:C"}), "can't change cell protection");
+}
+
+/// A cut to another sheet resets its source lines: that reset alone may not change the source
+/// sheet's inherited protection flags.
+#[test]
+fn cross_sheet_whole_row_cut_refuses_a_source_reset_that_changes_protection() {
+    use gridcraft_model::{LineInfo, SheetProtection, Style};
+
+    for protect_source in [true, false] {
+        let mut s = s();
+        s.execute("home.insertSheet", json!({"name": "Destination"})).unwrap();
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let mut hidden = Style::default();
+        hidden.protection.hidden = true;
+        let hidden = wb.styles.intern(hidden);
+        let source = wb.sheet_index("Sheet1").unwrap();
+        let sh = wb.sheet_mut(source).unwrap();
+        sh.rows.insert(2, LineInfo { size: Some(40.), custom: true, style: Some(hidden), ..Default::default() });
+        if protect_source {
+            sh.protection = Some(SheetProtection { format_rows: true, ..Default::default() });
+        }
+        s.execute("edit.cut", json!({"sheet": "Sheet1", "range": "3:3"})).unwrap();
+        s.execute("sheet.activate", json!({"sheet": "Destination"})).unwrap();
+        if protect_source {
+            assert_line_edit_refused(&mut s, "edit.paste", json!({"at": "A5"}), "can't change cell protection");
+        } else {
+            s.execute("edit.paste", json!({"at": "A5"})).unwrap();
+            let wb = &s.doc().unwrap().wb;
+            assert!(!wb.sheet(source).unwrap().rows.contains_key(&2));
+            let dest = wb.sheet(wb.sheet_index("Destination").unwrap()).unwrap();
+            assert_eq!((dest.row_height(4), dest.rows[&4].style), (40., Some(hidden)));
+        }
+    }
 }
 
 /// ft-3ir.10.16: pasting whole columns walked every one of their 1,048,576 rows and added one

@@ -1,11 +1,21 @@
+use std::collections::BTreeMap;
+
+use gridcraft_model::{LineInfo, Sheet, Workbook};
+
+use crate::cmd::Ctx;
+
 use super::clipboard::What;
 use super::{
     Cell, CellRef, EngineError, Formula, Json, RangeRef, Result, Session, StyleId, Value, bad, bool_param, cell_param_on, drop_linked_books, edit,
     json, shared_links, str_param, target_sheet,
 };
 
-#[allow(clippy::cognitive_complexity)] // The command applies the selected paste mode in one atomic edit.
 pub(super) fn paste_special(s: &mut Session, p: &Json) -> Result<Json> {
+    paste_internal(s, p, true)
+}
+
+#[allow(clippy::cognitive_complexity)] // The command applies the selected paste mode in one atomic edit.
+pub(super) fn paste_internal(s: &mut Session, p: &Json, transfer_lines: bool) -> Result<Json> {
     let Some(clip) = s.clipboard.clone() else { return Err(EngineError::Other("Nothing to paste.".into())) };
     let what = match str_param(p, "what").unwrap_or("all") {
         "all" => What::All,
@@ -77,10 +87,28 @@ pub(super) fn paste_special(s: &mut Session, p: &Json) -> Result<Json> {
     }
     let same_doc = s.doc()?.uid == clip.doc_uid;
     let cut_move = clip.cut && same_doc && what == What::All;
+    if cut_move {
+        clip.check_cut_source(&s.doc()?.wb)?;
+    }
     let src_wb = clip.wb.clone();
     let Some(src_sheet) = src_wb.sheet(clip.sheet) else { return Err(EngineError::Other("The copied sheet no longer exists.".into())) };
-    let src_sheet_name = src_sheet.name.clone();
+    // A cut rewrites references by the source's current name: it may have been renamed since.
+    let live_name = if cut_move { s.doc()?.wb.sheet(clip.sheet).map(|sh| sh.name.clone()) } else { None };
+    let src_sheet_name = live_name.unwrap_or_else(|| src_sheet.name.clone());
     let shared = if same_doc { vec![] } else { shared_links(&src_wb, &s.doc()?.wb) };
+    // A geometric full-width or full-height source counts regardless of how it was selected.
+    // Packed/filtered, tiled and full-sheet copies are outside the contiguous line case.
+    // Only plain Paste All transfers line formats; modifiers keep their cell-only behavior.
+    let line_axis = if transfer_lines && what == What::All && op == "none" && !skip_blanks && !transpose && !link && whole && !clip.filtered && !tile
+    {
+        match (src.is_full_rows(), src.is_full_cols()) {
+            (true, false) => Some(LineAxis::Rows),
+            (false, true) => Some(LineAxis::Columns),
+            _ => None,
+        }
+    } else {
+        None
+    };
     edit(s, |cx| {
         // Styles from another workbook must be re-interned.
         let dest_name = cx.wb.sheet(dest_sheet).map(|sh| sh.name.clone()).unwrap_or_default();
@@ -91,6 +119,31 @@ pub(super) fn paste_special(s: &mut Session, p: &Json) -> Result<Json> {
             }
             *style_map.entry(id).or_insert_with(|| wb.styles.intern(src_wb.styles.get(id).clone()))
         };
+        let protected_dest = line_axis.and_then(|_| cx.wb.sheets.get(dest_sheet).filter(|sh| sh.is_protected()).cloned());
+        let mut protected_source = None;
+        if let Some(axis) = line_axis {
+            let (first, last) = (axis.index(src.start), axis.index(src.end));
+            let dest = axis.index(at);
+            // A Cut moves its lines as they are now, like its cells; a copy pastes the snapshot.
+            // Hold the pre-reset sheet (checked above) for overlapping moves.
+            let live = if cut_move { cx.wb.sheets.get(clip.sheet).cloned() } else { None };
+            let from = live.as_deref().unwrap_or(src_sheet);
+            let incoming = axis.lines(from).range(first..=last).map(|(&i, &info)| (dest + (i - first), info));
+            let (dest_last, moving) = (dest + (last - first), cut_move && (clip.sheet != dest_sheet || first != dest));
+            if moving && clip.sheet == dest_sheet && first <= dest_last && dest <= last {
+                // Replace overlapping lines directly with their final format so the row/column
+                // formatting permission is checked against actual changes, not a temporary reset.
+                axis.replace(cx, dest_sheet, first.min(dest)..=last.max(dest_last), incoming, &mut map_style, true)?;
+            } else {
+                if moving {
+                    axis.replace(cx, clip.sheet, first..=last, std::iter::empty(), &mut map_style, true)?;
+                }
+                axis.replace(cx, dest_sheet, dest..=dest_last, incoming, &mut map_style, true)?;
+            }
+            if moving && clip.sheet != dest_sheet {
+                protected_source = live.filter(|sh| sh.is_protected());
+            }
+        }
         let mut moved_formulas = std::collections::BTreeMap::new();
         let mut moved_pictures = std::collections::BTreeMap::new();
         if cut_move {
@@ -351,6 +404,21 @@ pub(super) fn paste_special(s: &mut Session, p: &Json) -> Result<Json> {
             }
         }
         let pasted = RangeRef::new(at, at.offset_clamped(i64::from(tiles_r * h) - 1, i64::from(tiles_c * w) - 1));
+        if let Some(axis) = line_axis {
+            if let Some(before) = &protected_dest {
+                if cut_move && clip.sheet == dest_sheet && src.intersects(&pasted) {
+                    axis.check_protection(&cx.wb, dest_sheet, before, src.union(&pasted))?;
+                } else {
+                    axis.check_protection(&cx.wb, dest_sheet, before, pasted)?;
+                    if cut_move && clip.sheet == dest_sheet {
+                        axis.check_protection(&cx.wb, dest_sheet, before, src)?;
+                    }
+                }
+            }
+            if let Some(before) = &protected_source {
+                axis.check_protection(&cx.wb, clip.sheet, before, src)?;
+            }
+        }
         if !link && matches!(what, What::All | What::AllExceptBorders | What::Validation) {
             paste_validations(cx, src_sheet, src, dest_sheet, pasted, PasteMode { transpose, skip_blanks, skip_rows: &skip_rows })?;
         }
@@ -414,6 +482,169 @@ pub(super) fn paste_special(s: &mut Session, p: &Json) -> Result<Json> {
         s.clipboard = None;
     }
     Ok(json!({"pasted": s.doc()?.selection.a1()}))
+}
+
+/// The axis of a whole-line transfer: Paste All of entire rows or columns, and AutoFill of them.
+#[derive(Clone, Copy)]
+pub(super) enum LineAxis {
+    Rows,
+    Columns,
+}
+
+impl LineAxis {
+    pub(super) fn index(self, c: CellRef) -> u32 {
+        match self {
+            Self::Rows => c.row,
+            Self::Columns => c.col,
+        }
+    }
+
+    pub(super) fn span(self, first: u32, last: u32) -> RangeRef {
+        match self {
+            Self::Rows => RangeRef::rows(first, last),
+            Self::Columns => RangeRef::cols(first, last),
+        }
+    }
+
+    pub(super) fn lines(self, sheet: &Sheet) -> &BTreeMap<u32, LineInfo> {
+        match self {
+            Self::Rows => &sheet.rows,
+            Self::Columns => &sheet.cols,
+        }
+    }
+
+    /// Replaces the line formatting of `first..=last` on `sheet` with `incoming` (ascending
+    /// `(index, line)` pairs inside that span; a missing index resets to the default line).
+    pub(super) fn replace(
+        self,
+        cx: &mut Ctx,
+        sheet: usize,
+        span: std::ops::RangeInclusive<u32>,
+        incoming: impl Iterator<Item = (u32, LineInfo)>,
+        map_style: &mut impl FnMut(StyleId, &mut Workbook) -> StyleId,
+        copy_hidden: bool,
+    ) -> Result<()> {
+        let target = cx.wb.sheets.get(sheet).ok_or(EngineError::NoDocument)?;
+        let lines = self.lines(target);
+        let mut incoming = incoming.peekable();
+        // Take the union of recorded source and destination lines, not the entire axis.
+        let mut existing = lines.range(span).map(|(&i, &info)| (i, info)).peekable();
+        let mut changes = Vec::new();
+        while let Some(i) = existing.peek().map(|x| x.0).into_iter().chain(incoming.peek().map(|x| x.0)).min() {
+            let old = existing.next_if(|x| x.0 == i).map(|x| x.1).unwrap_or_default();
+            let new = incoming.next_if(|x| x.0 == i).map(|x| x.1).unwrap_or_default();
+            // Outline, collapse, boundary edges and bare-row markers stay on their own lines.
+            let info = LineInfo {
+                size: new.size,
+                hidden: if copy_hidden { new.hidden } else { old.hidden },
+                custom: new.custom,
+                saved_size: new.saved_size,
+                saved_col_flags: new.saved_col_flags,
+                style: new.style,
+                ..old
+            };
+            if info != old || info.style.is_some() {
+                changes.push((i, old, info));
+            }
+        }
+        changes.retain_mut(|(_, old, info)| {
+            info.style = info.style.map(|id| map_style(id, &mut cx.wb));
+            *info != *old
+        });
+        if changes.is_empty() {
+            return Ok(());
+        }
+        if let Some(protection) = cx.wb.sheet(sheet).and_then(|sh| sh.protection.as_ref()) {
+            let denied = match self {
+                Self::Rows if !protection.format_rows => Some("Formatting rows"),
+                Self::Columns if !protection.format_columns => Some("Formatting columns"),
+                _ => None,
+            };
+            if let Some(what) = denied {
+                return Err(EngineError::Other(format!("{what} isn't allowed on this protected sheet (Review › Unprotect Sheet).")));
+            }
+        }
+        if matches!(self, Self::Rows) {
+            cx.recalc_all |= changes.iter().any(|(_, old, info)| old.hidden != info.hidden);
+        }
+        let target = cx.sheet_mut(sheet)?;
+        let lines = match self {
+            Self::Rows => &mut target.rows,
+            Self::Columns => &mut target.cols,
+        };
+        for (i, _, info) in changes {
+            if info == LineInfo::default() {
+                lines.remove(&i);
+            } else {
+                lines.insert(i, info);
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks protection against the final staged state, including cells that gain or lose
+    /// explicit formatting. Only unrepresented cells need a separate inheritance check.
+    pub(super) fn check_protection(self, wb: &Workbook, sheet: usize, before: &Sheet, span: RangeRef) -> Result<()> {
+        let after = wb.sheet(sheet).ok_or(EngineError::NoDocument)?;
+        let flags = |id| wb.styles.get(id).protection;
+        for (at, _) in before.cells.iter_range(span).chain(after.cells.iter_range(span).filter(|(at, _)| before.cell(*at).is_none())) {
+            if flags(before.style_id(at)) != flags(after.style_id(at)) {
+                return Err(EngineError::Other(crate::cmd::PROTECTION_FLAGS.into()));
+            }
+        }
+        let range = self.index(span.start)..=self.index(span.end);
+        let old = self.lines(before);
+        let new = self.lines(after);
+        let indices = old.range(range.clone()).chain(new.range(range).filter(|(i, _)| !old.contains_key(i)));
+        for (&i, _) in indices {
+            self.check_blank_protection(wb, before, after, i)?;
+        }
+        Ok(())
+    }
+
+    fn check_blank_protection(self, wb: &Workbook, before: &Sheet, after: &Sheet, i: u32) -> Result<()> {
+        // Whole-line transfers never edit the perpendicular line formats.
+        let style = |sh| self.lines(sh).get(&i).and_then(|line| line.style);
+        let flags = |id| wb.styles.get(id).protection;
+        let (old, new) = (style(before).map(flags), style(after).map(flags));
+        if old == new {
+            return Ok(());
+        }
+        let default = flags(StyleId::DEFAULT);
+        let flips = |fallback| old.unwrap_or(fallback) != new.unwrap_or(fallback);
+        // Count cells whose *inherited* flags would change using the sparse perpendicular
+        // formats, then subtract explicit cells (which override both line styles).
+        let flips_default = flips(default);
+        let n = match self {
+            Self::Rows => {
+                let mut n = if flips_default { gridcraft_core::MAX_COLS } else { 0 };
+                if old.is_none() || new.is_none() {
+                    for id in before.cols.values().filter_map(|line| line.style) {
+                        match (flips_default, flips(flags(id))) {
+                            (true, false) => n -= 1,
+                            (false, true) => n += 1,
+                            _ => (),
+                        }
+                    }
+                }
+                n
+            }
+            Self::Columns if flips_default => gridcraft_core::MAX_ROWS - before.rows.values().filter(|line| line.style.is_some()).count() as u32,
+            Self::Columns => 0,
+        };
+        if n != 0 {
+            let span = self.span(i, i);
+            let explicit = before.cells.iter_range(span).chain(after.cells.iter_range(span).filter(|(at, _)| before.cell(*at).is_none()));
+            let masked = explicit.filter(|(at, _)| match self {
+                Self::Rows => flips(before.cols.get(&at.col).and_then(|line| line.style).map_or(default, flags)),
+                Self::Columns => before.rows.get(&at.row).is_none_or(|line| line.style.is_none()),
+            });
+            if masked.take(n as usize).count() < n as usize {
+                return Err(EngineError::Other(crate::cmd::PROTECTION_FLAGS.into()));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Whether a structural edit made a formula read other cells than it did, not the same cells

@@ -287,6 +287,7 @@ fn sheet_of(s: &x::Sheet, styles: &[StyleId], names: &[x::DefinedName], unparsed
             outline: row.outline,
             collapsed: row.collapsed,
             style: row.format.map(|f| style(Some(f))).filter(|&id| id != StyleId::DEFAULT),
+            ..LineInfo::default()
         };
         if info != LineInfo::default() {
             sheet.rows.insert(r, info);

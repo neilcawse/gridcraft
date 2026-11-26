@@ -34,6 +34,41 @@ fn version_and_usage() {
 }
 
 #[test]
+fn display_reads_xlsx_without_modifying_it() {
+    use gridcraft_engine::core::{CellRef, Value};
+    use gridcraft_engine::model::{Cell, Sheet, Workbook};
+    use std::sync::Arc;
+
+    let mut wb = Workbook::new();
+    let mut selected = Sheet::new("Selected");
+    selected.set_cell(CellRef::new(0, 0), Cell::value(Value::text("outside range")));
+    selected.set_cell(CellRef::new(2, 1), Cell::value(Value::text("chosen")));
+    wb.sheets.push(Arc::new(selected));
+    let file = tmpdir("display").join("book.xlsx");
+    let bytes = gridcraft_xlsx::write_xlsx(&wb).unwrap();
+    std::fs::write(&file, &bytes).unwrap();
+    let path = file.to_str().unwrap();
+    let args = ["display", path, "--json", "--sheet", "Selected", "--range", "B3"];
+    let printed = ok(&args);
+    assert_eq!(printed, ok(&args));
+    let result: serde_json::Value = serde_json::from_str(&printed).unwrap();
+    let sheets = result["sheets"].as_array().unwrap();
+    assert_eq!(sheets.len(), 1);
+    assert_eq!(sheets[0]["name"], "Selected");
+    let cells = sheets[0]["cells"].as_array().unwrap();
+    assert_eq!(cells.len(), 1);
+    assert_eq!(cells[0]["a1"], "B3");
+    assert_eq!(cells[0]["text"], "chosen");
+    for flags in [["--sheet", "Missing"], ["--range", "XFE1"]] {
+        let result = run(&["display", path, "--json", flags[0], flags[1]]);
+        assert!(!result.status.success());
+        assert!(result.stdout.is_empty());
+    }
+    assert_eq!(std::fs::read(&file).unwrap(), bytes);
+    std::fs::remove_file(file).unwrap();
+}
+
+#[test]
 fn eval_formulas() {
     assert_eq!(ok(&["eval", "=SUM(1,2,3)"]).trim(), "6");
     assert_eq!(ok(&["eval", "1/4"]).trim(), "0.25");

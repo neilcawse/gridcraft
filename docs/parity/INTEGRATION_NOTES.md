@@ -141,3 +141,151 @@ To be read without parsing XML on every keystroke, a kept sheet's defined name n
 Unmeasured, for the lead to measure in Excel: the message for a taken name (the text is the base's, unmeasured in this lane), the behaviour for `_xlnm.` and `_xlchart.` table names, whether Excel's own `Table<n>` skips a number a sheet-scoped defined name or a differently cased name holds, and Excel's case fold beyond ASCII.
 
 Tests: `crates/engine/src/tests/table_name_scopes.rs` covers every entry point against a synthetic package whose dialog sheet holds sheet-scoped names. It includes case-insensitive, reserved, slicer-cache and non-ASCII cases, and a guard showing that a free name works and the kept names are written back unchanged.
+
+## X25 — Whole-row and whole-column paste
+
+- [Microsoft's move/copy guidance](https://support.microsoft.com/en-us/excel/move-or-copy-cells-rows-and-columns) describes transferring full lines, including their cell formats and hidden cells. [Paste options](https://support.microsoft.com/en-us/excel/paste-options) distinguishes ordinary paste from explicit column-width options. The documentation does not settle how Copy or Cut affects line sizes or inherited line formatting.
+
+The following results were measured in Excel for Mac 16.115.2 using synthetic action probes.
+`Range.Copy Destination:=...` and `Range.Cut Destination:=...` were used to isolate worksheet
+effects from clipboard effects. All the returned `Formula` strings were literals or blank, not
+formulas. The observed styles of sampled populated cells moved with those cells.
+
+| Synthetic action probe | Observed worksheet effect | Excel extent after (UsedRange / Last Cell) |
+|---|---|---|
+| `x25-copy-rows-to-t-a8`, `x25-copy-rows-to-t-8-9`, `x25-copy-rows-explicit-to-t-a8`, `x25-copy-rows-explicit-to-t-8-9` | Both destination heights become zero; the first row takes the source's fill and bold, the second loses the old fill. Source unchanged. | Destination `A1:I10` / `H10` |
+| `x25-copy-cols-to-t-h1`, `x25-copy-cols-to-t-h-i`, `x25-copy-cols-explicit-to-t-h1`, `x25-copy-cols-explicit-to-t-h-i` | Both destination widths become zero; sampled cells take the copied cell styles. Source unchanged. | Destination `A1:J9` / `J8` |
+| `x25-copy-blank-column-style` | An empty styled source column changes the destination column and its blank cells from yellow/italic to blue/bold. Width is unchanged. | Not sampled |
+| `x25-cut-rows-to-s-a8`, `x25-cut-rows-to-t-a8` | Same destination effect as row copy. Source lines return to default height, lose visible row formatting and no longer contain the moved values. | Destination `A1:I10` / `H10` |
+| `x25-cut-cols-to-s-h1`, `x25-cut-cols-to-t-h1` | Same destination geometry as column copy. Blank destination cells inherit the source blue/bold style. Source widths and blank-cell styles reset, and the moved values are gone. | Destination `A1:J9` / `J8` |
+| `x25-default-row-over-custom`, `x25-default-col-over-custom` | A default source resets the destination size, and the destination row loses its prior fill. In the column case only one stored destination cell was sampled; it is cleared and reads Normal. | Destination unchanged: `A1:I9` / `H8` |
+| `x25-bare-row-over-untouched`, `x25-absent-row-over-untouched` | Both empty copies leave destination geometry and formatting unchanged. Bare versus absent row has no measured effect other than the different destination address. | Destination `A1:I11` / `H11` and `A1:I12` / `H12`, respectively |
+| `x25-control-a3-b4` | An ordinary rectangle changes cell formatting and content, not line sizes. The aggregate row style readback becomes mixed, which does not establish loss of inherited formatting on untouched cells. | Destination unchanged: `A1:I9` / `H8` |
+| `x25-used-base`, `x25-used-bare-row`, `x25-used-width-col` | Bare row and width-only column do not extend this data rectangle. | `C3:E5` / `E5` |
+| `x25-used-height-row`, `x25-used-style-row` | Height-only and styled rows extend the reported row bound. | `C3:E40` / `E40` |
+| `x25-used-style-col` | A styled column extends the reported column bound. | `C3:J5` / `J5` |
+
+For the action cases the baseline Excel extent is `A1:I9` / `H8`; a sheet not receiving the paste
+retains that extent. Last Cell need not be UsedRange's bottom-right, including with hidden lines
+in these workbooks. GridCraft still uses stored cells (plus spills) for both reads; the extent
+gap belongs to [worksheet inspection and navigation](../gaps.md#25-used-worksheet-extent-and-whole-line-paste-special-f),
+not the shared bounds for print, export or calculation.
+
+GridCraft transfers size and effective visibility for contiguous whole-line `edit.paste`, and
+transfers inherited row and column styles. An absent source resets those fields. For a default
+source column, that destination style reset is inferred: Excel showed the style reset on blank
+cells in the vacated Cut source, but the default-column Copy did not measure a blank destination
+cell or the destination column's aggregate style. Same-workbook Cut resets the transferred
+fields on the source and moves them as they stand at paste time. If the original source sheet
+is no longer at the recorded index, GridCraft refuses the paste rather than clearing another
+sheet. Full-size explicit ranges and line syntax are equivalent. Line and cell edits share one
+undo entry and line changes respect the sheet's formatting permissions.
+
+As of X31, a protected sheet's formatting permission does not let a whole-line paste or cut
+change inherited Locked or formula-Hidden flags, including on blank cells. A refused transfer
+leaves the workbook unchanged. This guard compares final effective protection, including where
+a cell's explicit style masks a line style; it does not change protection on other paste paths.
+
+Zero size demonstrates effective geometry; the probes did not recover `Hidden`, `OutlineLevel`
+or `ShowDetail` values, nor did they save XML. Outline/collapse, thickness and bare markers stay
+on their existing lines. The system clipboard, drag-and-drop, filtered and packed copies, and
+tiled pastes remain unmeasured and retain their previous behavior. See X32 for Paste Special All
+and Insert Copied Cells.
+
+## X29 — Cut source sheet identity
+
+A pending Cut records its source sheet by position. Inserting a sheet before it, deleting it or
+moving it can leave another sheet at that position. Paste, Insert Cut Cells and the whole-line
+paste of X25 now compare the sheet there with the one that was cut. If they differ, the command
+is refused before anything changes, and the cut stays pending; cutting again works. Sheets
+added after the source, and renames, leave the cut valid. After a rename, references to the moved
+cells follow them under the sheet's new name.
+
+Whether Excel cancels cut mode when a sheet is inserted, deleted, moved or renamed is unmeasured.
+Refusing is the conservative choice; it never moves cells from a sheet the person did not cut.
+Copy is unaffected, because it pastes from the snapshot taken when copying. Drag-and-drop cuts and
+pastes in one step, so no sheet change can come between them.
+
+Enter-to-Paste shows the refusal without dismissing it on the same keystroke and leaves the
+clipboard pending, like Cmd+V and the ribbon. It still ends copy mode after a successful paste.
+Excel's behavior on refusal is unmeasured; this keeps GridCraft's own paste paths consistent.
+
+## X31 — Whole-row AutoFill carries row formatting
+
+Measured in Excel for Mac 16.115.2 on a synthetic workbook using
+`Range("3:4").AutoFill Range("3:9")` with the default fill type, not a fill-handle drag. Sheet
+`S` stores rows 3, 4 and 8 with a row style, `customFormat` and a custom height: red bold 30 pt,
+blue bold 38 pt and green 22 pt. Column A holds 1, 2 and 6 and column B holds `=A<n>*2`.
+
+| Readback | Rows 5–9 after the fill |
+|---|---|
+| Height (`RowHeight`, pt) | 30, 38, 30, 38, 30: the source rows in turn |
+| Row style, fill, bold | GC Red Bold, GC Blue Bold, GC Red Bold, GC Blue Bold, GC Red Bold; row 8 loses its green |
+| Cells A and B | A continues the series 3–7 (row 8's stored 6 is replaced by the series value, also 6); B holds `=A5*2` … `=A9*2` with values 6–14; each cell takes its source row's style |
+| Rows 2, 3, 4, 10 | Unchanged |
+| `Hidden`, `OutlineLevel`, `ShowDetail` | Not returned by Excel (unmeasured) |
+
+The probe did not read UsedRange or Last Cell for this case, did not save the workbook (so no
+`customHeight`/`customFormat` XML), and sampled only columns A and B.
+
+GridCraft `edit.autoFill` now gives each line the target adds to an entire-row source the height,
+custom-height flag, saved size and row style of the source row it lines up with, counting in
+source-sized steps from the source's first row. It reuses X25's `LineAxis::replace`, so line
+and cell edits share one undo entry. Destination visibility, outline/collapse, thickness and
+bare-row markers stay on their own lines.
+
+Inferred, not measured:
+
+- **Hidden** was not measured. AutoFill retains destination visibility; X25 paste still copies it.
+- **A source row with no record** resets the target row to the default height and no row style,
+  as in X25 paste; both measured source rows had a record.
+- **Protected sheets** need row-formatting (or column-formatting) permission for line changes.
+  That permission cannot change inherited Locked or formula-Hidden flags; neither can clearing
+  a cell format expose such a change. Existing protection rules for explicit cell-style writes
+  otherwise remain unchanged.
+- **Upward fills** (target above the source) line rows up as the cell fill does: the row just
+  above the source takes its last row.
+- **Non-default fill modes.** Copy, Formats, Series, Alternate, Extend and the date modes repeat line
+  formatting. Formats leaves content alone: populated cells paired with an absent source cell
+  take its effective format. Fill Without Formatting (`values`) does not transfer line formats;
+  new content in an empty cell takes the destination's effective format. The existing AutoFit
+  pass may recompute automatic heights after a small fill; custom heights are not recomputed.
+- **Whole columns** are handled symmetrically: width, saved width flags and column style
+  repeat across the target. Whole-column AutoFill was not measured. Its reach is
+  limited, as before, by the 5,000,000-cell fill cap (at most four 1,048,576-row columns).
+
+Partial-range AutoFill (any source that is not entire rows or entire columns) and Fill
+Down/Right/Up/Left keep their previous behaviour and leave line formatting alone.
+
+## X32 — Paste Special All and Insert Copied Cells carry line formatting
+
+**Measured (`x25-paste-special-all-rows`, `x25-insert-copied-rows`):** In Excel for Mac 16.115.2,
+copying `S!3:4` then using Paste Special All or Insert Copied Cells at `S!A8` gave rows 8 and 9
+an effective height of 0 pt. Row 8 took row 3's red, bold style; cell A9 took A4's Normal style.
+A3–A5 were unchanged and A8/A9 took A3/A4's values. With Insert, the old A8/A9 and their row
+formats moved to rows 10/11 (12 pt green and 0 pt yellow); with Paste Special All, A10/A11 stayed blank.
+
+GridCraft's internal Paste Special All now shares the ordinary whole-line Paste path. It copies
+the line style, size (including saved size and custom-height flag) and visibility. The shared
+protection guard also applies. Insert Copied Cells uses Paste Special All after shifting the
+existing lines; one undo or redo restores both cell and line changes. The rules for reporting
+UsedRange and Last Cell are unchanged by this lane.
+
+**Inferred or unmeasured:** Column C's whole-column Bold readback changed from `false` to `true`
+after Paste Special All; GridCraft tests C8/C9's inherited bold as an inference, not as a sampled
+Excel cell result. The whole-column readback stayed `false` after Insert. Excel did not return
+hidden, outline or a named style for row 9, and did not save XML. GridCraft follows ordinary
+Paste: visibility transfers and an unstyled source line clears the destination's line style,
+but outline/collapse, boundary edges and bare-row markers stay on their own lines.
+Whole columns use the same rule as rows; the clipboard cases only exercised rows. Protection,
+undo/redo, Insert Cut Cells and the system clipboard were not compared in these probes.
+Insert Copied and Insert Cut Cells check row/column formatting protection against the sheet as
+the insertion left it, so a new line that inherited the format of the line before it and is
+then given a different source format counts as a formatting change and is refused when the
+sheet does not allow formatting rows (or columns). That is GridCraft's choice; Excel was not
+measured on protected sheets here.
+
+Other Paste Special modes (including Values, Formulas, Formats and All Except Borders), arithmetic
+operations, Skip Blanks, Transpose, Paste Link and partial-range paste retain their previous
+behavior. Drag-and-drop and filtered, packed, tiled or full-sheet sources do not transfer line
+formats via this change.

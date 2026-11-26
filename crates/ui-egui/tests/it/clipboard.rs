@@ -142,6 +142,27 @@ fn enter_pastes_the_copied_cells_and_ends_copy_mode() {
 }
 
 #[test]
+fn refused_enter_paste_keeps_the_clipboard_pending() {
+    for command in ["edit.copy", "edit.cut"] {
+        let mut h = harness(Services::default());
+        h.state_mut().run(command, json!({})).unwrap();
+        let destination = if command == "edit.cut" {
+            h.state_mut().run("home.insertSheet", json!({"name": "New", "before": 0})).unwrap();
+            "D5"
+        } else {
+            // The copied block is two columns wide and does not fit here.
+            "XFD1"
+        };
+        h.state_mut().run("selection.set", json!({"cell": destination})).unwrap();
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        assert_eq!(h.state().session.clipboard.as_ref().map(|clip| clip.cut), Some(command == "edit.cut"));
+        assert!(h.state().message.is_some(), "{command}: the paste refusal is shown");
+        assert_eq!(value_at(&h, destination), Some(Value::Empty));
+    }
+}
+
+#[test]
 fn clicking_the_ribbon_paste_button_or_its_menu_does_not_freeze() {
     // #273: a click on Paste deadlocked the UI thread (a click-state query inside the egui context
     // lock), so the frame never returned. Run the clicks on a worker and fail on a timeout instead of

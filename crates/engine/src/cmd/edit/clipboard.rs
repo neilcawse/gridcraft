@@ -1,5 +1,5 @@
 use super::cell::input_to_cell;
-use super::paste_special::paste_special;
+use super::paste_special::paste_internal;
 use super::{
     Cell, CellRef, Clipboard, EngineError, Json, RangeRef, Result, Session, Value, bad, bool_param, cell_param_on, edit, json, ok, str_param,
     target_ranges, target_sheet,
@@ -26,6 +26,7 @@ fn copy_impl(s: &mut Session, p: &Json, cut: bool) -> Result<Json> {
             range
         }
     };
+    let mut filtered = false;
     let (wb, range, areas) = if ranges.len() > 1 {
         let areas: Vec<RangeRef> = ranges.iter().map(|r| trim(*r)).collect();
         let (wb, block) = slide_together(&d.wb, sheet, &areas).ok_or_else(multiple)?;
@@ -36,6 +37,7 @@ fn copy_impl(s: &mut Session, p: &Json, cut: bool) -> Result<Json> {
         // like a multi-area selection stacked top to bottom (formulas as values), as in Excel.
         // A cut still takes every row.
         let hidden = if cut { Default::default() } else { super::filtered_rows(sh, range) };
+        filtered = !hidden.is_empty();
         let visible = if hidden.is_empty() { Vec::new() } else { visible_row_runs(range, &hidden) };
         let any_visible = !visible.is_empty();
         let packed = match visible.as_slice() {
@@ -57,7 +59,7 @@ fn copy_impl(s: &mut Session, p: &Json, cut: bool) -> Result<Json> {
     // The HTML rendering is for the host clipboard (UI); it can reach 4 MB, so agents and
     // scripts get it only when they ask for it.
     let html = if p.get("html").and_then(Json::as_bool) == Some(true) { crate::io::range_html(&wb, sheet, range, &text) } else { None };
-    let clip = Clipboard { wb, sheet, range, cut, doc_uid: d.uid, text: text.clone(), areas, selected, trust: d.trust };
+    let clip = Clipboard { wb, sheet, range, cut, doc_uid: d.uid, text: text.clone(), areas, selected, filtered, trust: d.trust };
     s.clipboard = Some(clip);
     let mut result = json!({"range": range.a1(), "text": text});
     if let Some(html) = html {
@@ -215,19 +217,14 @@ fn slide_together(wb: &gridcraft_model::Workbook, sheet: usize, areas: &[RangeRe
             dst.merges.push(RangeRef::new(s, e));
         }
     }
-    // Column widths (side by side) or row heights and hidden rows (stacked) follow their cells.
-    let mut next = if across { anchor.col } else { anchor.row };
-    for a in &sorted {
+    // Pack line records along the same axis and with the same offsets as the cells. Read the
+    // sparse maps independently of the cell store so lines with only metadata still travel.
+    for (a, &(dr, dc)) in sorted.iter().zip(&shifts) {
         if across {
-            for (c, info) in src.cols.range(a.start.col..=a.end.col) {
-                dst.cols.insert(next.saturating_add(c.saturating_sub(a.start.col)), *info);
-            }
+            dst.cols.extend(src.cols.range(a.start.col..=a.end.col).map(|(&col, &info)| ((i64::from(col) + dc) as u32, info)));
         } else {
-            for (r, info) in src.rows.range(a.start.row..=a.end.row) {
-                dst.rows.insert(next.saturating_add(r.saturating_sub(a.start.row)), *info);
-            }
+            dst.rows.extend(src.rows.range(a.start.row..=a.end.row).map(|(&row, &info)| ((i64::from(row) + dr) as u32, info)));
         }
-        next = next.saturating_add(if across { a.width() } else { a.height() });
     }
     dst.validations.extend(packed_rules);
     Some((out, block))
@@ -271,7 +268,7 @@ pub(super) fn paste(s: &mut Session, p: &Json) -> Result<Json> {
     if s.clipboard.is_none() {
         return Err(EngineError::Other("Nothing to paste.".into()));
     }
-    paste_special(s, &json!({"what": "all", "at": p.get("at").cloned().unwrap_or(Json::Null)}))
+    paste_internal(s, &json!({"what": "all", "at": p.get("at").cloned().unwrap_or(Json::Null)}), true)
 }
 
 /// Drag and drop (dragging the selection's border): moves `range` so its top-left cell lands on
@@ -296,7 +293,7 @@ pub(super) fn range_move(s: &mut Session, p: &Json) -> Result<Json> {
         // On the range's sheet, which `paste` would leave to the active one. The selection
         // belongs to the active sheet: it follows the moved cells only when they are on it.
         let selection = s.doc()?.selection.clone();
-        let pasted = paste_special(s, &json!({"what": "all", "at": to.a1(), "sheet": sheet}))?;
+        let pasted = paste_internal(s, &json!({"what": "all", "at": to.a1(), "sheet": sheet}), false)?;
         if sheet != s.doc()?.wb.active_sheet() {
             s.doc_mut()?.selection = selection;
         }
