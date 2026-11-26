@@ -100,6 +100,33 @@ fn a_check_box_paints_and_toggles_at_minimum_zoom() {
     assert_eq!(cell(&h, "K1"), Value::Bool(true));
 }
 
+/// A press on a check box that is released off it changes nothing, at the smallest zoom too, both
+/// across frames and with press and release in one frame.
+#[test]
+fn a_release_off_the_check_box_does_not_toggle_it_at_minimum_zoom() {
+    let (mut h, id) = fixture();
+    h.state_mut().run("view.zoom", json!({"percent": 10})).unwrap();
+    h.run_steps(30);
+    let r = rect(&h, id);
+    let (inside, outside) = (r.center(), Pos2::new(r.right() + 60.0, r.bottom() + 60.0));
+    let undo = undo_len(&h);
+    h.input_mut().events.push(Event::PointerMoved(inside));
+    h.input_mut().events.push(Event::PointerButton { pos: inside, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    h.input_mut().events.push(Event::PointerMoved(outside));
+    h.step();
+    h.input_mut().events.push(Event::PointerButton { pos: outside, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+    assert_eq!((control(&h, id).checked, cell(&h, "K1"), undo_len(&h)), (CheckState::Unchecked, Value::Empty, undo));
+    h.run_steps(30);
+    h.input_mut().events.push(Event::PointerMoved(inside));
+    h.input_mut().events.push(Event::PointerButton { pos: inside, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.input_mut().events.push(Event::PointerMoved(outside));
+    h.input_mut().events.push(Event::PointerButton { pos: outside, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+    assert_eq!((control(&h, id).checked, cell(&h, "K1"), undo_len(&h)), (CheckState::Unchecked, Value::Empty, undo));
+}
+
 #[test]
 fn a_batched_check_box_click_toggles_in_its_own_frame() {
     let (mut h, id) = fixture();

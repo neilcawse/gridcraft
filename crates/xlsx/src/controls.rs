@@ -31,8 +31,8 @@ use std::fmt::Write as _;
 
 use gridcraft_core::CellRef;
 use gridcraft_model::{
-    Anchor, AnchorMode, CONTROL_MAX, CaptionMarkup, CheckState, ControlAction, ControlKind, DROP_LINES_DEFAULT, DropDisplay, DropStyle, FormControl,
-    MacroInput, Sheet,
+    Anchor, AnchorMode, CONTROL_MAX, CaptionMarkup, CheckState, CheckVmlLook, ControlAction, ControlKind, DROP_LINES_DEFAULT, DropDisplay, DropStyle,
+    FormControl, MacroInput, Sheet,
 };
 
 use crate::package::Rel;
@@ -194,12 +194,23 @@ pub fn write(out: &mut Out, rels: &mut Rels, sheet: &Sheet, shape_id: impl Fn(us
             )
         };
         // A drop-down's box is not sized to its text (`autoLine`), as Excel writes it; a check
-        // box's is neither filled nor sized to its text.
+        // box's is neither filled nor sized to its text, unless its file's VML says otherwise.
         let mut pr = String::from(match c.kind {
             ControlKind::Drop => " defaultSize=\"0\" autoLine=\"0\" autoPict=\"0\"",
-            ControlKind::Check => " defaultSize=\"0\" autoFill=\"0\" autoLine=\"0\" autoPict=\"0\"",
-            _ => " defaultSize=\"0\" autoPict=\"0\"",
+            _ => " defaultSize=\"0\"",
         });
+        if c.kind == ControlKind::Check {
+            let look = c.check_vml_look.as_ref();
+            if look.is_none_or(|l| l.auto_fill_off) {
+                pr.push_str(" autoFill=\"0\"");
+            }
+            if look.is_none_or(|l| l.auto_line_off) {
+                pr.push_str(" autoLine=\"0\"");
+            }
+        }
+        if c.kind != ControlKind::Drop {
+            pr.push_str(" autoPict=\"0\"");
+        }
         if !c.print {
             pr.push_str(" print=\"0\"");
         }
@@ -319,7 +330,10 @@ fn vml_shape(sheet: &Sheet, c: &FormControl, id: u64, z: usize) -> String {
     if !c.locked {
         data.push_str("<x:Locked>False</x:Locked>");
     }
-    data.push_str("<x:AutoFill>False</x:AutoFill>");
+    let look = if c.kind == ControlKind::Check { c.check_vml_look.as_ref() } else { None };
+    if look.is_none_or(|l| l.auto_fill_off) {
+        data.push_str("<x:AutoFill>False</x:AutoFill>");
+    }
     match c.kind {
         ControlKind::Button => {
             if let Some(m) = macro_ref(c) {
@@ -369,7 +383,12 @@ fn vml_shape(sheet: &Sheet, c: &FormControl, id: u64, z: usize) -> String {
             );
         }
         ControlKind::Check => {
-            data.push_str("<x:AutoLine>False</x:AutoLine><x:TextVAlign>Center</x:TextVAlign>");
+            if look.is_none_or(|l| l.auto_line_off) {
+                data.push_str("<x:AutoLine>False</x:AutoLine>");
+            }
+            if look.is_none_or(|l| l.text_v_center) {
+                data.push_str("<x:TextVAlign>Center</x:TextVAlign>");
+            }
             if let Some(m) = macro_ref(c) {
                 let _ = write!(data, "<x:FmlaMacro>{}</x:FmlaMacro>", esc(&m));
             }
@@ -400,21 +419,34 @@ fn vml_shape(sheet: &Sheet, c: &FormControl, id: u64, z: usize) -> String {
     } else {
         let _ = write!(shape, " id=\"_x0000_s{id}\"");
     }
-    let aspect = match (c.kind, c.check_vml_lock_aspect) {
-        (ControlKind::Check, Some(true)) => " aspectratio=\"t\"",
-        (ControlKind::Check, Some(false)) => " aspectratio=\"f\"",
-        _ => "",
+    // A check box from a file keeps the paint, fill, lock and path settings it had; others get
+    // GridCraft's own (no fill or line, rotation locked).
+    let (paint, parts): (Cow<'_, str>, Cow<'_, str>) = match look {
+        Some(l) => {
+            let mut paint = String::new();
+            push_vml_attrs(&mut paint, &l.paint, &VML_PAINT);
+            let mut parts = String::new();
+            for (name, attrs, names) in [("v:fill", &l.fill, &VML_FILL[..]), ("o:lock", &l.lock, &VML_LOCK[..]), ("v:path", &l.path, &VML_PATH[..])] {
+                if let Some(attrs) = attrs {
+                    let _ = write!(parts, "<{name}");
+                    push_vml_attrs(&mut parts, attrs, names);
+                    parts.push_str("/>");
+                }
+            }
+            (paint.into(), parts.into())
+        }
+        None if c.kind == ControlKind::Button => (" o:button=\"t\"".into(), "<o:lock v:ext=\"edit\" rotation=\"t\"/>".into()),
+        None => (" stroked=\"f\" filled=\"f\"".into(), "<o:lock v:ext=\"edit\" rotation=\"t\"/>".into()),
     };
     let _ = write!(
         shape,
-        " type=\"#_x0000_t201\" style=\"position:absolute;margin-left:{:.2}pt;margin-top:{:.2}pt;width:{:.2}pt;height:{:.2}pt;z-index:{}{}\"{} o:insetmode=\"auto\"><o:lock v:ext=\"edit\" rotation=\"t\"{aspect}/>{text}{data}</v:shape>",
+        " type=\"#_x0000_t201\" style=\"position:absolute;margin-left:{:.2}pt;margin-top:{:.2}pt;width:{:.2}pt;height:{:.2}pt;z-index:{}{}\"{paint} o:insetmode=\"auto\">{parts}{text}{data}</v:shape>",
         pt(x),
         pt(y),
         pt(c.anchor.width.max(0.0) as f64),
         pt(c.anchor.height.max(0.0) as f64),
         z + 1,
         if c.kind == ControlKind::Check && c.check_vml_wrap_tight { ";mso-wrap-style:tight" } else { "" },
-        if c.kind == ControlKind::Button { " o:button=\"t\"" } else { " stroked=\"f\" filled=\"f\"" },
     );
     shape
 }
@@ -501,7 +533,7 @@ struct Props {
     check_lock_text: Option<bool>,
     check_vml_lock_text: Option<bool>,
     check_vml_wrap_tight: bool,
-    check_vml_lock_aspect: Option<bool>,
+    check_vml_look: Option<CheckVmlLook>,
     check_ctrl_prop_opaque: bool,
     /// Payload that the drop-down or check box model cannot faithfully rewrite.
     opaque: bool,
@@ -586,7 +618,7 @@ fn props_from_ctrl_prop(e: &El) -> Props {
         check_lock_text: Some(e.attr_bool("lockText").unwrap_or(false)),
         check_vml_lock_text: None,
         check_vml_wrap_tight: false,
-        check_vml_lock_aspect: None,
+        check_vml_look: None,
         check_ctrl_prop_opaque: matches!(kind, Some(ControlKind::Check) | None)
             && (check_ctrl_prop_payload(e) || e.attr("objectType").is_some_and(|_| kind.is_none())),
         opaque: match kind {
@@ -644,16 +676,49 @@ fn props_from_vml(shape: &El) -> Option<Props> {
         check_vml_lock_text: if kind == ControlKind::Check { data.child("LockText").and_then(vml_drop_bool) } else { None },
         check_vml_wrap_tight: kind == ControlKind::Check
             && shape.attr("style").is_some_and(|s| s.split(';').filter_map(vml_style_entry).any(|p| p == ("mso-wrap-style", "tight"))),
-        check_vml_lock_aspect: if kind == ControlKind::Check { shape.child("lock").and_then(|e| e.attr_bool("aspectratio")) } else { None },
+        check_vml_look: (kind == ControlKind::Check).then(|| check_vml_look_of(shape, data)),
         opaque,
         ..Props::default()
     })
 }
 
+/// A check box shape's look ([`CheckVmlLook`]): what [`check_vml_payload`] lets an editable check
+/// box hold, kept so it is written back as read.
+fn check_vml_look_of(shape: &El, data: &El) -> CheckVmlLook {
+    let attrs = |name: &str| shape.child(name).map(|e| e.attrs.clone());
+    let says = |name: &str, v: &str| data.child(name).is_some_and(|c| c.text.trim().eq_ignore_ascii_case(v));
+    CheckVmlLook {
+        paint: shape.attrs.iter().filter(|(k, _)| VML_PAINT.iter().any(|(n, _)| n == k)).cloned().collect(),
+        fill: attrs("fill"),
+        lock: attrs("lock"),
+        path: attrs("path"),
+        auto_fill_off: says("AutoFill", "false"),
+        auto_line_off: says("AutoLine", "false"),
+        text_v_center: says("TextVAlign", "center"),
+    }
+}
+
+/// The attributes a kept [`CheckVmlLook`] writes, by element: (name as read, name as written).
+const VML_PAINT: [(&str, &str); 5] =
+    [("filled", "filled"), ("fillcolor", "fillcolor"), ("stroked", "stroked"), ("strokecolor", "strokecolor"), ("strokeweight", "strokeweight")];
+const VML_FILL: [(&str, &str); 2] = [("color2", "color2"), ("detectmouseclick", "o:detectmouseclick")];
+const VML_LOCK: [(&str, &str); 4] = [("ext", "v:ext"), ("rotation", "rotation"), ("text", "text"), ("aspectratio", "aspectratio")];
+const VML_PATH: [(&str, &str); 3] = [("shadowok", "shadowok"), ("strokeok", "strokeok"), ("fillok", "fillok")];
+
+/// Writes `attrs` that `names` knows, as ` name="value"`.
+fn push_vml_attrs(out: &mut String, attrs: &[(String, String)], names: &[(&str, &str)]) {
+    for (k, v) in attrs {
+        if let Some((_, q)) = names.iter().find(|(n, _)| n == k) {
+            let _ = write!(out, " {q}=\"{}\"", esc_attr(v));
+        }
+    }
+}
+
 /// VML payload beyond the check box model. The look Excel gives a check box (no fill or line of
-/// its own, the window colours) is written back as GridCraft writes every control; anything else
-/// about the shape, and client data other than its anchor, flags, link, macro, state and
-/// shading, is kept by leaving the check box to pass-through.
+/// its own, the window colours, its `v:fill`, `o:lock` and `v:path` settings) is kept as read
+/// ([`CheckVmlLook`]) and written back; anything else about the shape, and client data other than
+/// its anchor, flags, link, macro, state and shading, is kept by leaving the check box to
+/// pass-through.
 fn check_vml_payload(shape: &El, data: &El) -> bool {
     shape.children.len() > 5
         || data.children.len() > 13
@@ -866,7 +931,7 @@ fn build(p: Props, kind: ControlKind, anchor: Anchor, name: Option<&str>, id: u3
         c.check_lock_text = p.check_lock_text;
         c.check_vml_lock_text = p.check_vml_lock_text;
         c.check_vml_wrap_tight = p.check_vml_wrap_tight;
-        c.check_vml_lock_aspect = p.check_vml_lock_aspect;
+        c.check_vml_look = p.check_vml_look;
         c.kept_macro = p.macro_;
         c.caption_markup = p.markup;
     }
@@ -1022,7 +1087,7 @@ pub fn read(cx: &mut Ctx<'_>, controls: Option<&El>, vml_rid: Option<&str>, rels
                             f.markup = v.markup;
                             f.check_vml_lock_text = v.check_vml_lock_text;
                             f.check_vml_wrap_tight = v.check_vml_wrap_tight;
-                            f.check_vml_lock_aspect = v.check_vml_lock_aspect;
+                            f.check_vml_look = v.check_vml_look;
                             f.opaque |= f.kind != v.kind;
                         }
                         _ => {}
@@ -1049,7 +1114,17 @@ pub fn read(cx: &mut Ctx<'_>, controls: Option<&El>, vml_rid: Option<&str>, rels
                 });
         }
         if p.kind == Some(ControlKind::Check) {
+            // The writer gives the control `defaultSize="0"` and `autoPict="0"`, and `autoFill="0"`
+            // and `autoLine="0"` as the VML says them (or always, without VML): a check box whose
+            // entry says otherwise keeps it by staying in pass-through.
+            let off = |k: &str| pr.and_then(|pr| pr.attr_bool(k)) == Some(false);
+            let look = p.check_vml_look.as_ref();
+            let entry_differs = !off("defaultSize")
+                || !off("autoPict")
+                || off("autoFill") != look.is_none_or(|l| l.auto_fill_off)
+                || off("autoLine") != look.is_none_or(|l| l.auto_line_off);
             p.opaque |= p.check_ctrl_prop_opaque
+                || entry_differs
                 || (ctl.attr("id").is_some() && p.check_lock_text.is_none())
                 || check_sheet_control_payload(ctl, pr)
                 || shape.is_some_and(|s| s.child("ClientData").and_then(|d| d.attr("ObjectType")).and_then(kind_of) != Some(ControlKind::Check));

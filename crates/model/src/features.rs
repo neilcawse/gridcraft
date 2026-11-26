@@ -906,6 +906,28 @@ pub struct CaptionMarkup {
     pub font: Option<Vec<(String, String)>>,
 }
 
+/// How a check box's legacy VML shape is drawn, kept as read for saving, so a check box from a
+/// file is written back with the look it had: the shape's paint attributes (`filled`,
+/// `fillcolor`, `stroked`, `strokecolor`, `strokeweight`), the attributes of its `v:fill`,
+/// `o:lock` and `v:path` (`None`: the file left that element out; names without their prefix),
+/// and whether its client data said `x:AutoFill False`, `x:AutoLine False` and
+/// `x:TextVAlign Center` (the properties part's `autoFill="0"` and `autoLine="0"` follow the
+/// first two). The reader only keeps a check box editable when all of these hold values it knows.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CheckVmlLook {
+    pub paint: Vec<(String, String)>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill: Option<Vec<(String, String)>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lock: Option<Vec<(String, String)>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<Vec<(String, String)>>,
+    pub auto_fill_off: bool,
+    pub auto_line_off: bool,
+    pub text_v_center: bool,
+}
+
 /// How a drop-down list is drawn and edited (`dropStyle`). Spreadsheet applications write
 /// `combo` for the form drop-down; the others are kept as read.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1039,9 +1061,10 @@ pub struct FormControl {
     /// The legacy shape explicitly requests tight wrapping.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub check_vml_wrap_tight: bool,
-    /// The legacy shape's aspect-ratio lock, when explicitly specified.
+    /// The legacy shape's look as read (paint, `v:fill`, `o:lock` with its aspect-ratio lock,
+    /// `v:path`, text fitting); `None`: GridCraft's own look for a new check box.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub check_vml_lock_aspect: Option<bool>,
+    pub check_vml_look: Option<CheckVmlLook>,
     /// The macro a check box's file assigns it, as written (`[0]!Toggled`): kept for saving,
     /// never run.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1080,7 +1103,7 @@ impl Default for FormControl {
             check_lock_text: None,
             check_vml_lock_text: None,
             check_vml_wrap_tight: false,
-            check_vml_lock_aspect: None,
+            check_vml_look: None,
             kept_macro: None,
             caption_markup: None,
         }

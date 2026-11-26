@@ -403,3 +403,132 @@ fn hostile_check_box_properties_never_fail() {
         assert!(back.sheet(0).unwrap().controls.iter().all(|c| c.link.as_ref().is_none_or(|l| l.len() <= 300)));
     }
 }
+
+/// Every `<control shapeId>` the sheet writes names exactly one shape in the written drawing, and
+/// no two shapes share a number.
+fn assert_shape_ids_resolve(bytes: &[u8]) -> Vec<String> {
+    let mut pkg = Package::open(bytes).unwrap();
+    let sheet = text(&mut pkg, "xl/worksheets/sheet1.xml");
+    let vml = written_vml(bytes);
+    let doc = crate::xml::parse(vml.as_bytes()).unwrap();
+    let numbers: Vec<u64> = doc.kids("shape").filter_map(crate::controls::number_of).collect();
+    let mut sorted = numbers.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(sorted.len(), numbers.len(), "duplicate shape numbers {numbers:?}: {vml}");
+    let ids: Vec<String> = sheet.split("<control shapeId=\"").skip(1).filter_map(|r| r.split('"').next()).map(str::to_string).collect();
+    for id in &ids {
+        let n: u64 = id.parse().unwrap();
+        assert_eq!(numbers.iter().filter(|&&m| m == n).count(), 1, "control {id} has no shape: {vml}");
+    }
+    ids
+}
+
+/// GC Check 2 holds a setting the model doesn't (`x:Disabled`), so it stays in the kept drawing
+/// beside the option button while GC Check 1 and 3 are written from the model into the same
+/// drawing: every saved `<control>` still names its own shape, no two shapes share a number, and
+/// three saves later all of it is the same.
+#[test]
+fn editable_and_kept_check_boxes_share_one_drawing_with_their_own_shape_ids() {
+    let target = "xl/drawings/vmlDrawing1.vml";
+    for x14 in [false, true] {
+        let original = legacy_check_boxes(x14);
+        let vml = text(&mut Package::open(&original).unwrap(), target).replacen(
+            ">Second</div></v:textbox><x:ClientData ObjectType=\"Checkbox\">",
+            ">Second</div></v:textbox><x:ClientData ObjectType=\"Checkbox\"><x:Disabled/>",
+            1,
+        );
+        assert!(vml.contains("<x:Disabled/>"));
+        let (wb, _) = read_xlsx(&replace_part(&original, target, &vml)).unwrap();
+        let names: Vec<String> = wb.sheet(0).unwrap().controls.iter().map(FormControl::display_name).collect();
+        assert_eq!(names, [CHECK_BOX_NAMES[0], CHECK_BOX_NAMES[2]], "x14={x14}");
+        let mut out = write_xlsx(&wb).unwrap();
+        for round in 0..3 {
+            let ids = assert_shape_ids_resolve(&out);
+            let written = written_vml(&out);
+            assert_eq!(written.matches("<x:Disabled/>").count(), 1, "x14={x14} round {round}: {written}");
+            assert_eq!(written.matches("ObjectType=\"Radio\"").count(), 1, "x14={x14} round {round}");
+            assert_eq!(written.matches("ObjectType=\"Checkbox\"").count(), 3, "x14={x14} round {round}: {written}");
+            let (back, _) = read_xlsx(&out).unwrap();
+            let sh = back.sheet(0).unwrap();
+            let got: Vec<(String, CheckState)> = sh.controls.iter().map(|c| (c.display_name(), c.checked)).collect();
+            assert_eq!(
+                got,
+                [(CHECK_BOX_NAMES[0].to_string(), CheckState::Checked), (CHECK_BOX_NAMES[2].to_string(), CheckState::Mixed)],
+                "x14={x14} round {round} ids {ids:?}"
+            );
+            out = write_xlsx(&back).unwrap();
+        }
+    }
+}
+
+/// The written VML shape of the check box captioned "Ship it", from `<v:shape ` on (not the
+/// shape type before it).
+fn ship_it_shape(bytes: &[u8]) -> String {
+    let vml = written_vml(bytes);
+    let shape = vml.split("</v:shape>").find(|s| s.contains("Ship it")).unwrap_or_default();
+    shape.rfind("<v:shape ").map_or(shape, |i| &shape[i..]).to_string()
+}
+
+/// An editable check box is written back with the look its VML had: paint attributes, `v:fill`,
+/// `o:lock` (with a text lock), `v:path`, and its text fitting elements, each present or left out
+/// as read, and the properties part's `autoFill` follows the VML. A second save writes the same.
+#[test]
+fn an_editable_check_box_writes_back_the_look_it_was_read_with() {
+    let target = "xl/drawings/vmlDrawing1.vml";
+    let original = legacy_check_boxes(false);
+    let vml = text(&mut Package::open(&original).unwrap(), target);
+    let fill = "<v:fill color2=\"window [65]\" o:detectmouseclick=\"t\"/>";
+    // (source text, its replacement, text the written shape has, text it doesn't)
+    for (from, to, has, lacks) in [
+        (fill, fill, fill, "<v:path"),
+        ("x", "x", " filled=\"f\" fillcolor=\"window [65]\" stroked=\"f\" strokecolor=\"windowText [64]\"", "<x:LockText"),
+        ("rotation=\"t\"/>", "rotation=\"t\" text=\"t\"/>", "<o:lock v:ext=\"edit\" rotation=\"t\" text=\"t\"/>", "aspectratio"),
+        (fill, "", "<o:lock", "<v:fill"),
+        ("rotation=\"t\"/>", "rotation=\"t\"/><v:path shadowok=\"t\" fillok=\"t\"/>", "<v:path shadowok=\"t\" fillok=\"t\"/>", "strokeok"),
+        ("filled=\"f\" ", "", " fillcolor=\"window [65]\" stroked=\"f\"", "filled="),
+        ("<x:TextVAlign>Center</x:TextVAlign>", "", "<x:AutoLine>False</x:AutoLine>", "TextVAlign"),
+        ("<x:AutoLine>False</x:AutoLine>", "", "<x:TextVAlign>Center</x:TextVAlign>", "AutoLine"),
+        ("<x:AutoFill>False</x:AutoFill>", "", "<x:TextVAlign>Center</x:TextVAlign>", "AutoFill"),
+    ] {
+        let source = vml.replacen(from, to, 1);
+        let (wb, _) = read_xlsx(&replace_part(&original, target, &source)).unwrap();
+        assert_eq!(check_boxes(&wb), expected(), "{to}");
+        let out = write_xlsx(&wb).unwrap();
+        let shape = ship_it_shape(&out);
+        assert!(shape.contains(has) && !shape.contains(lacks), "{to}: {shape}");
+        let mut pkg = Package::open(&out).unwrap();
+        let sheet = text(&mut pkg, "xl/worksheets/sheet1.xml");
+        let entry = sheet.split("</control>").find(|e| e.contains(CHECK_BOX_NAMES[0])).unwrap_or_default();
+        assert_eq!(entry.contains("autoFill=\"0\""), from != "<x:AutoFill>False</x:AutoFill>", "{to}: {entry}");
+        assert_eq!(entry.contains("autoLine=\"0\""), from != "<x:AutoLine>False</x:AutoLine>", "{to}: {entry}");
+        let (back, _) = read_xlsx(&out).unwrap();
+        assert_eq!(check_boxes(&back), expected(), "{to}");
+        assert_eq!(ship_it_shape(&write_xlsx(&back).unwrap()), shape, "{to}");
+    }
+}
+
+/// A check box whose worksheet control entry says something about sizing or fitting that the
+/// writer wouldn't write again (no `defaultSize="0"`, or an `autoFill` its VML doesn't share)
+/// stays in pass-through, unchanged.
+#[test]
+fn a_control_entry_that_disagrees_with_the_written_one_stays_kept() {
+    let sheet_part = "xl/worksheets/sheet1.xml";
+    let vml_part = "xl/drawings/vmlDrawing1.vml";
+    let original = legacy_check_boxes(true);
+    let sheet = text(&mut Package::open(&original).unwrap(), sheet_part);
+    let vml = text(&mut Package::open(&original).unwrap(), vml_part);
+    for bytes in [
+        replace_part(&original, sheet_part, &sheet.replacen("defaultSize=\"0\" ", "", 1)),
+        replace_part(&original, sheet_part, &sheet.replacen(" autoPict=\"0\"", "", 1)),
+        replace_part(&original, vml_part, &vml.replacen("<x:AutoFill>False</x:AutoFill>", "", 1)),
+        replace_part(&original, sheet_part, &sheet.replacen(" autoLine=\"0\"", "", 1)),
+    ] {
+        let (wb, _) = read_xlsx(&bytes).unwrap();
+        assert_eq!(check_boxes(&wb), expected()[1..]);
+        let out = write_xlsx(&wb).unwrap();
+        assert_eq!(written_vml(&out).matches("Ship it").count(), 1);
+        let (back, _) = read_xlsx(&out).unwrap();
+        assert_eq!(check_boxes(&back), expected()[1..]);
+    }
+}
