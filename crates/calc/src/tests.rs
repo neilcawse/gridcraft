@@ -930,7 +930,17 @@ fn lookups_distinguish_failed_linked_caches_from_local_index_errors() {
     t.set("B5", "=VLOOKUP(\"y\",D1:E2,1/0,FALSE)");
     t.set("B6", "=VLOOKUP(\"z\",D1:E2,1/0,FALSE)");
     t.set("B7", "=VLOOKUP(\"z\",{\"x\",1;\"y\",2},#NAME?,FALSE)");
-    assert_eq!([t.get("B5"), t.get("B6"), t.get("B7")], [Value::Error(CellError::Div0), Value::Error(CellError::NA), Value::Error(CellError::NA)]);
+    t.set("B12", "=VLOOKUP(\"z\",D1:E2,HLOOKUP(1/0,D1:E2,2,FALSE),FALSE)");
+    t.set("B13", "=HLOOKUP(\"z\",D1:E2,HLOOKUP(1/0,D1:E2,2,FALSE),FALSE)");
+    t.set("B14", "=VLOOKUP(\"z\",D1:E2,D3,FALSE)");
+    t.set("B15", "=VLOOKUP(\"z\",D1:E2,9,FALSE)");
+    t.set("B16", "=VLOOKUP(\"z\",{\"x\",1;\"y\",2},9,FALSE)");
+    let div0 = Value::Error(CellError::Div0);
+    assert_eq!([t.get("B5"), t.get("B6"), t.get("B7")], [div0.clone(), div0.clone(), Value::Error(CellError::Name)]);
+    assert_eq!([t.get("B12"), t.get("B13")], [div0.clone(), div0]);
+    // An error read from a cell resolves as X15's index rule does (#REF!); a number past the
+    // table is not checked when the key is missing.
+    assert_eq!([t.get("B14"), t.get("B15"), t.get("B16")], [Value::Error(CellError::Ref), Value::Error(CellError::NA), Value::Error(CellError::NA)]);
 }
 
 #[test]

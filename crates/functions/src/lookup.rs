@@ -185,7 +185,9 @@ pub fn vh_lookup_pos(
         // the search mode is valid. Other errors keep the linked lookup's precedence:
         // the index and search mode are resolved before the search, with the same
         // argument coercion as any other table.
-        if keys_val.is_none() && matches!(idx.0, Value::Error(CellError::Ref)) && approx.is_none_or(|(v, from_ref)| range_lookup_arg(v, from_ref).is_ok())
+        if keys_val.is_none()
+            && matches!(idx.0, Value::Error(CellError::Ref))
+            && approx.is_none_or(|(v, from_ref)| range_lookup_arg(v, from_ref).is_ok())
         {
             return Err(CellError::NA);
         }
