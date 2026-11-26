@@ -30,8 +30,8 @@ pub enum DrawingRef {
 pub struct GroupFileMember {
     pub reference: DrawingRef,
     pub anchor: Anchor,
-    pub off: (i64, i64),
-    pub ext: (i64, i64),
+    /// A missing offset or extent means the member fills the enclosing frame.
+    pub transform: Option<crate::ChildTransform>,
 }
 
 /// The transform a group was read with, for an unedited group to be written back exactly.
@@ -76,8 +76,8 @@ pub struct DrawingGroup {
     /// sheet, mirrored about the group's box on these axes (their own content isn't mirrored).
     #[serde(default, skip_serializing_if = "is_default")]
     pub flip: (bool, bool),
-    /// The group's rotation (`a:xfrm rot`, 60000ths of a degree), kept for saving. Members are
-    /// laid out without it.
+    /// The group's rotation (`a:xfrm rot`, 60000ths of a degree), kept for saving. Exact
+    /// quarter turns also change member boxes, but not their rendered content.
     #[serde(default, skip_serializing_if = "is_default")]
     pub rotation: i64,
     /// The rotations (`a:xfrm rot`) of the charts, pictures and shapes in the group that have

@@ -13,8 +13,9 @@ use craft_xlsx::{Drawing as CraftDrawing, Item as CraftItem, Marker as CraftMark
 
 use gridcraft_core::{CellRef, MAX_COLS, MAX_ROWS};
 use gridcraft_model::{
-    Anchor, AnchorMode, Color, DrawingFile, DrawingGroup, DrawingMarker, DrawingPlacement, DrawingRef, GroupFile, GroupFileMember, Image,
-    MAX_GROUP_DEPTH, ObjectRect, Shape, ShapeFormat, ShapeKind, ShapeTextAlign, ShapeTextAnchor, Sheet, Theme, rotates,
+    Anchor, AnchorMode, ChildTransform, Color, DrawingFile, DrawingGroup, DrawingMarker, DrawingPlacement, DrawingRef, GroupFile, GroupFileMember,
+    GroupProjection, Image, MAX_GROUP_DEPTH, ObjectRect, Shape, ShapeFormat, ShapeKind, ShapeTextAlign, ShapeTextAnchor, Sheet, Theme,
+    group_child_box, group_quarter_turn, group_unturned_box, rotates,
 };
 
 use crate::IoError;
@@ -114,14 +115,12 @@ fn mime_for(name: &str) -> &'static str {
     }
 }
 
-/// Where a drawing object goes: the model anchor pictures, charts and shapes take, the pixel box
-/// a group lays its children out in, and the enclosing space's scale (pixels per EMU) and flips.
+/// A drawing's editable anchor plus the transform and enclosing projection for nested groups.
 #[derive(Clone, Copy)]
 struct Place {
     anchor: Anchor,
-    rect: ObjectRect,
-    scale: (f64, f64),
-    flip: (bool, bool),
+    frame: ObjectRect,
+    parent: Option<GroupProjection>,
 }
 
 /// An object's own transform (`a:xfrm`) inside a group: frames carry it directly, groups in
@@ -136,10 +135,6 @@ fn obj_xfrm(obj: &El) -> Option<&El> {
 
 /// A point (`off`/`chOff`, attributes `x`/`y`) or size (`ext`/`chExt`, `cx`/`cy`) of an `a:xfrm`,
 /// in EMUs.
-fn xfrm_pair(xf: Option<&El>, name: &str, a: &str, b: &str) -> Option<(f64, f64)> {
-    xfrm_int_pair(xf, name, a, b).map(|(x, y)| (x as f64, y as f64))
-}
-
 fn xfrm_int_pair(xf: Option<&El>, name: &str, a: &str, b: &str) -> Option<(i64, i64)> {
     let e = xf?.child(name)?;
     Some((e.attr_i64(a).unwrap_or(0), e.attr_i64(b).unwrap_or(0)))
@@ -155,71 +150,13 @@ fn xfrm_rot(xf: Option<&El>) -> i64 {
     xf.and_then(|x| x.attr_i64("rot")).unwrap_or(0)
 }
 
-/// Whether a rotation turns an object about a quarter (45° up to 135°, or 225° up to 315°):
-/// Excel then measures it, when sizing its group, by its box swapped about its centre.
-fn quarter_turn(rot: i64) -> bool {
-    let r = rot.rem_euclid(21_600_000);
-    (2_700_000..8_100_000).contains(&r) || (13_500_000..18_900_000).contains(&r)
-}
-
-/// The map from a group's child coordinate space (EMUs) onto its on-sheet box: the child box
-/// `chOff`/`chExt` of the group's `a:xfrm` fills `rect`, each axis on its own. An axis without a
-/// usable child extent takes its scale from the group's `ext`, and failing that (a group of
-/// horizontal or vertical lines) from the enclosing space. Children are mirrored about `rect` on
-/// the axes the group or an enclosing group flips (ECMA-376 §20.1.7.5).
-struct GroupMap {
-    rect: ObjectRect,
-    origin: (f64, f64),
-    scale: (f64, f64),
-    flip: (bool, bool),
-}
-
-impl GroupMap {
-    fn new(xf: Option<&El>, place: Place) -> GroupMap {
-        let rect = place.rect;
-        let ext = xfrm_pair(xf, "ext", "cx", "cy");
-        let ch_ext = xfrm_pair(xf, "chExt", "cx", "cy");
-        let origin = xfrm_pair(xf, "chOff", "x", "y").or_else(|| xfrm_pair(xf, "off", "x", "y")).unwrap_or((0.0, 0.0));
-        let axis = |len: f64, ch: Option<f64>, ext: Option<f64>, parent: f64| match (ch, ext) {
-            (Some(c), _) if c > 0.0 && len > 0.0 => len / c,
-            (_, Some(e)) if e > 0.0 => len / e,
-            _ => parent,
-        };
-        let scale =
-            (axis(rect.w, ch_ext.map(|s| s.0), ext.map(|s| s.0), place.scale.0), axis(rect.h, ch_ext.map(|s| s.1), ext.map(|s| s.1), place.scale.1));
-        let own = xfrm_flip(xf);
-        GroupMap { rect, origin, scale, flip: (place.flip.0 != own.0, place.flip.1 != own.1) }
-    }
-
-    /// The on-sheet box of a child with transform `xf`; a child without one fills the group. A
-    /// child turned a quarter (`turned`) is placed at its turned box: its box swapped about its
-    /// centre in the child space, as Excel sizes groups by it.
-    fn child(&self, xf: Option<&El>, turned: bool) -> ObjectRect {
-        let (Some(mut off), Some(mut ext)) = (xfrm_pair(xf, "off", "x", "y"), xfrm_pair(xf, "ext", "cx", "cy")) else { return self.rect };
-        if turned {
-            off = (off.0 + (ext.0 - ext.1) / 2.0, off.1 + (ext.1 - ext.0) / 2.0);
-            ext = (ext.1, ext.0);
-        }
-        let mut r = ObjectRect {
-            x: self.rect.x + (off.0 - self.origin.0) * self.scale.0,
-            y: self.rect.y + (off.1 - self.origin.1) * self.scale.1,
-            w: ext.0.max(0.0) * self.scale.0,
-            h: ext.1.max(0.0) * self.scale.1,
-        };
-        if self.flip.0 {
-            r.x = 2.0 * self.rect.x + self.rect.w - r.x - r.w;
-        }
-        if self.flip.1 {
-            r.y = 2.0 * self.rect.y + self.rect.h - r.y - r.h;
-        }
-        r
-    }
-
-    /// The child box (offset and extent, EMUs) that the group's on-sheet box maps onto.
-    fn child_box(&self) -> ((i64, i64), (i64, i64)) {
-        let emu = |v: f64| if v.is_finite() { v.round().clamp(-1e15, 1e15) as i64 } else { 0 };
-        ((emu(self.origin.0), emu(self.origin.1)), (emu(self.rect.w / self.scale.0), emu(self.rect.h / self.scale.1)))
-    }
+fn child_transform(xf: Option<&El>) -> Option<ChildTransform> {
+    Some(ChildTransform {
+        off: xfrm_int_pair(xf, "off", "x", "y")?,
+        ext: xfrm_int_pair(xf, "ext", "cx", "cy")?,
+        rotation: xfrm_rot(xf),
+        flip: xfrm_flip(xf),
+    })
 }
 
 /// The objects among `children`, resolving markup-compatibility blocks to their first choice
@@ -281,8 +218,7 @@ pub fn read_drawing(cx: &mut Ctx<'_>, part: &str, sheet: &mut Sheet) -> Result<(
             n += 1;
             let placement = drawing_placement(&craft_a.placement);
             let anchor = placement.anchor(sheet);
-            let px = 1.0 / EMU_PER_PX;
-            let place = Place { anchor, rect: sheet.anchor_rect(&anchor), scale: (px, px), flip: (false, false) };
+            let place = Place { anchor, frame: sheet.anchor_rect(&anchor), parent: None };
             let obj_el = from_craft_el(&craft_a.object);
             for obj in drawing_objects(std::slice::from_ref(&obj_el)) {
                 if let Some(reference) = read_object(cx, (part, n), &rels, sheet, obj, place, 0)? {
@@ -418,11 +354,22 @@ fn read_object_inner(
             }
             let id = cx.next_object_id();
             let xf = obj_xfrm(obj);
-            let map = GroupMap::new(xf, place);
             let file_off = xfrm_int_pair(xf, "off", "x", "y");
             let file_ext = xfrm_int_pair(xf, "ext", "cx", "cy");
             let file_child_offset = xfrm_int_pair(xf, "chOff", "x", "y");
             let file_child_extent = xfrm_int_pair(xf, "chExt", "cx", "cy");
+            let flip = xfrm_flip(xf);
+            let rotation = xfrm_rot(xf);
+            let fallback = if place.parent.is_some() { 1.0 } else { 1.0 / EMU_PER_PX };
+            let child_box = group_child_box(
+                place.frame,
+                file_child_offset.or(file_off).unwrap_or_default(),
+                file_child_extent.unwrap_or_default(),
+                file_ext.unwrap_or_default(),
+                fallback,
+            );
+            let own = GroupProjection::new(place.frame, child_box, (flip, rotation), fallback);
+            let map = place.parent.map_or(own, |parent| parent.compose(own));
             let mut file_members = Vec::new();
             let mut file_complete = true;
             let mut member_rotations = Vec::new();
@@ -432,10 +379,13 @@ fn read_object_inner(
                     continue;
                 }
                 let cxf = obj_xfrm(child);
-                // A nested group's own rotation is kept on the group; its box isn't swapped.
-                let rot = if child.name == "grpSp" { 0 } else { xfrm_rot(cxf) };
-                let rect = map.child(cxf, quarter_turn(rot));
-                let place = Place { anchor: sheet.rect_anchor(rect, anchor.mode), rect, scale: map.scale, flip: map.flip };
+                let transform = child_transform(cxf);
+                let nested = child.name == "grpSp";
+                let rot = if nested { 0 } else { xfrm_rot(cxf) };
+                let frame = transform.map_or(child_box, ChildTransform::rect);
+                let box_in_parent = if nested { group_unturned_box(frame, xfrm_rot(cxf)) } else { transform.map_or(frame, ChildTransform::leaf_box) };
+                let rect = map.project(box_in_parent);
+                let place = Place { anchor: sheet.rect_anchor(rect, anchor.mode), frame, parent: Some(map) };
                 let Some(m) = read_object(cx, (part, n), rels, sheet, child, place, depth + 1)? else {
                     file_complete = false;
                     continue;
@@ -443,20 +393,17 @@ fn read_object_inner(
                 if rot != 0 {
                     member_rotations.push((m, rot));
                 }
-                let off = xfrm_int_pair(cxf, "off", "x", "y");
-                let ext = xfrm_int_pair(cxf, "ext", "cx", "cy");
-                file_complete &= matches!(m, DrawingRef::Group(_)) || (off.is_some() && ext.is_some());
-                file_members.push(GroupFileMember { reference: m, anchor: place.anchor, off: off.unwrap_or_default(), ext: ext.unwrap_or_default() });
+                file_complete &= nested || transform.is_some();
+                file_members.push(GroupFileMember { reference: m, anchor: place.anchor, transform });
                 members.push(m);
             }
             if members.is_empty() {
                 return Ok(None);
             }
             let name = obj.path(&["nvGrpSpPr", "cNvPr"]).and_then(|c| c.attr("name")).unwrap_or("").to_string();
-            let (child_offset, child_extent) = map.child_box();
-            let flip = xfrm_flip(xf);
-            let rotation = xfrm_rot(xf);
-            if rotates(rotation) {
+            let effective = ChildTransform::from_rect(child_box, 0, (false, false));
+            let (child_offset, child_extent) = (effective.off, effective.ext);
+            if group_quarter_turn(rotation).is_none() {
                 cx.warn("a rotated group was laid out without its rotation");
             }
             if member_rotations.iter().any(|&(_, r)| rotates(r)) {
@@ -757,7 +704,7 @@ const PLAIN_TEXT_PT: f32 = 11.0;
 
 /// An equation shape (inside the anchor): Office Math with a plain-text fallback when the source
 /// is in the subset OMML covers, else the plain-text box alone. Both carry the source.
-fn write_equation(s: &mut String, sh: &Shape, (id, name): (usize, &str), theme: &Theme, off: (i64, i64), ext: (i64, i64), rot: i64) {
+fn write_equation(s: &mut String, sh: &Shape, (id, name): (usize, &str), theme: &Theme, transform: ChildTransform) {
     // The font size the equation is drawn at (it scales with its frame), in points.
     let size_pt = sh
         .math
@@ -785,7 +732,7 @@ fn write_equation(s: &mut String, sh: &Shape, (id, name): (usize, &str), theme: 
         format!(
             "<xdr:sp macro=\"\" textlink=\"\"><xdr:nvSpPr><xdr:cNvPr id=\"{id}\" name=\"{name}\" descr=\"{}\"/><xdr:cNvSpPr txBox=\"1\"/></xdr:nvSpPr><xdr:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/></xdr:spPr>{tx}</xdr:sp>",
             esc_attr(&format!("{LATEX_DESCR}{marker}:{}", sh.text)),
-            xfrm("a:xfrm", off, ext, rot)
+            xfrm("a:xfrm", transform)
         )
     };
     // The plain text is the LaTeX source, much wider than the typeset equation: at the equation's
@@ -981,9 +928,18 @@ fn emu(v: f64) -> i64 {
 }
 
 /// An `a:xfrm`/`xdr:xfrm` with an offset and extent in EMUs and a rotation (omitted when 0).
-fn xfrm(tag: &str, off: (i64, i64), ext: (i64, i64), rot: i64) -> String {
-    let rot = if rot == 0 { String::new() } else { format!(" rot=\"{rot}\"") };
-    format!("<{tag}{rot}><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></{tag}>", off.0, off.1, ext.0.max(0), ext.1.max(0))
+fn xfrm(tag: &str, ChildTransform { off, ext, rotation, flip }: ChildTransform) -> String {
+    let mut attrs = String::new();
+    if rotation != 0 {
+        let _ = write!(attrs, " rot=\"{rotation}\"");
+    }
+    if flip.0 {
+        attrs.push_str(" flipH=\"1\"");
+    }
+    if flip.1 {
+        attrs.push_str(" flipV=\"1\"");
+    }
+    format!("<{tag}{attrs}><a:off x=\"{}\" y=\"{}\"/><a:ext cx=\"{}\" cy=\"{}\"/></{tag}>", off.0, off.1, ext.0.max(0), ext.1.max(0))
 }
 
 pub fn srgb(c: &Color, theme: &Theme) -> Option<String> {
@@ -1017,54 +973,6 @@ impl Obj<'_> {
             Obj::Shape(o) => DrawingRef::Shape(o.id),
             Obj::Slicer(o, _) => DrawingRef::Slicer(o.id),
         }
-    }
-}
-
-/// How a group's members are written: mirrored about the group's box `b` on the flipped axes,
-/// then the linear map from sheet pixels into the group's child coordinate space (EMUs).
-struct ChildSpace {
-    b: ObjectRect,
-    flip: (bool, bool),
-    origin_px: (f64, f64),
-    origin_emu: (f64, f64),
-    /// EMUs per pixel on each axis.
-    factor: (f64, f64),
-}
-
-impl ChildSpace {
-    /// The child space of group `g`, now spanning `b` and written at `off` in its parent's space,
-    /// with members mirrored on the axes in `flip` (the group's and its parents' flips). The
-    /// space the group was opened (or last moved) with is kept: its anchor box maps onto its
-    /// child box. An axis without extent gets the group's own offset at 1:1.
-    fn new(sheet: &Sheet, g: &DrawingGroup, b: ObjectRect, off: (i64, i64), flip: (bool, bool)) -> ChildSpace {
-        let r0 = drawing_rect(sheet, &g.anchor);
-        // Per axis: (sheet origin, child origin, EMUs per pixel).
-        let axis = |start: f64, len: f64, start0: f64, len0: f64, ch_off: i64, span: i64, off: i64| {
-            if len > 0.0 && len0 > 0.0 && span > 0 { (start0, ch_off as f64, span as f64 / len0) } else { (start, off as f64, EMU_PER_PX) }
-        };
-        let (x0, ex, fx) = axis(b.x, b.w, r0.x, r0.w, g.child_offset.0, g.child_extent.0, off.0);
-        let (y0, ey, fy) = axis(b.y, b.h, r0.y, r0.h, g.child_offset.1, g.child_extent.1, off.1);
-        ChildSpace { b, flip, origin_px: (x0, y0), origin_emu: (ex, ey), factor: (fx, fy) }
-    }
-
-    /// The offset and extent (EMUs) of a member with sheet box `r`. A member turned a quarter
-    /// (`turned`) is placed at its turned box: its own box is that box swapped about its centre.
-    fn place(&self, mut r: ObjectRect, turned: bool) -> ((i64, i64), (i64, i64)) {
-        if self.flip.0 {
-            r.x = 2.0 * self.b.x + self.b.w - r.x - r.w;
-        }
-        if self.flip.1 {
-            r.y = 2.0 * self.b.y + self.b.h - r.y - r.h;
-        }
-        let (mut x, mut y) =
-            (self.origin_emu.0 + (r.x - self.origin_px.0) * self.factor.0, self.origin_emu.1 + (r.y - self.origin_px.1) * self.factor.1);
-        let (mut w, mut h) = (r.w * self.factor.0, r.h * self.factor.1);
-        if turned {
-            (x, y) = (x + (w - h) / 2.0, y + (h - w) / 2.0);
-            (w, h) = (h, w);
-        }
-        let e = |v: f64| if v.is_finite() { v.round().clamp(-1e15, 1e15) as i64 } else { 0 };
-        ((e(x), e(y)), (e(w), e(h)))
     }
 }
 
@@ -1133,14 +1041,13 @@ impl DrawingOut<'_> {
         self.sheet.source_group(g)
     }
 
-    /// A `grpSp` for group `id` spanning `b`, at `off`/`ext` in its parent's space, with its
-    /// members back to front in its own child space. `flip` is the axes enclosing groups flip.
+    /// Write a group spanning `b` on the sheet, with its frame in the parent's child space.
     fn group(
         &mut self,
         g: &DrawingGroup,
         b: ObjectRect,
-        (off, ext): ((i64, i64), (i64, i64)),
-        (flip, source_parent): ((bool, bool), bool),
+        frame: ChildTransform,
+        parent: Option<(GroupProjection, bool)>,
         source: Option<&GroupFile>,
         depth: usize,
     ) {
@@ -1148,13 +1055,28 @@ impl DrawingOut<'_> {
         if depth >= MAX_GROUP_DEPTH || !self.groups_done.insert(g.id) {
             return;
         }
-        let flip = (flip.0 != g.flip.0, flip.1 != g.flip.1);
-        let exact_frame = source.is_some() && (depth == 0 || source_parent);
-        let source_b = source.as_ref().map_or(b, |f| sheet.anchor_rect(&f.anchor));
-        let space = ChildSpace::new(sheet, g, source_b, off, flip);
+        let exact_frame = source.is_some() && parent.is_none_or(|(_, exact)| exact);
+        let (off, ext) = (frame.off, frame.ext);
+        // Use the last layout frame as the reference space, not the possibly smaller box of
+        // members being written. For a nested group undo the parent's projection first.
+        let reference = drawing_rect(sheet, &g.anchor);
+        let reference = parent.map_or(reference, |(map, _)| group_unturned_box(map.unproject(reference), g.rotation));
+        let fallback = if parent.is_some() { 1.0 } else { 1.0 / EMU_PER_PX };
+        let use_frame = |origin: f64, extent: f64, off: i64, span: i64, start: f64, len: f64| {
+            if extent > 0.0 && span > 0 { (origin, extent, off as f64, span as f64) } else { (start, len, start / fallback, len / fallback) }
+        };
+        let written = if parent.is_some() { frame.rect() } else { b };
+        let (x, w, cx, cw) = use_frame(reference.x, reference.w, g.child_offset.0, g.child_extent.0, written.x, written.w);
+        let (y, h, cy, ch) = use_frame(reference.y, reference.h, g.child_offset.1, g.child_extent.1, written.y, written.h);
+        let rect = ObjectRect { x, y, w, h };
+        let own = GroupProjection::new(rect, ObjectRect { x: cx, y: cy, w: cw, h: ch }, (g.flip, g.rotation), fallback);
+        let space = parent.map_or(own, |(map, _)| map.compose(own));
         let (group_off, group_ext, ch_off, ch_ext) = source.as_ref().map_or_else(
             || {
-                let (ch_off, ch_ext) = space.place(b, false);
+                let visible =
+                    parent.map_or_else(|| group_unturned_box(b, g.rotation), |(map, _)| map.project(group_unturned_box(written, g.rotation)));
+                let ch = ChildTransform::from_rect(space.unproject(visible), 0, (false, false));
+                let (ch_off, ch_ext) = (ch.off, ch.ext);
                 // An edited top-level group from a file keeps the file's scale from its child
                 // space to the sheet: `ext` from the sheet's own pixel metrics can disagree with
                 // the child space by the file's column widths, and Excel scales members by
@@ -1212,14 +1134,21 @@ impl DrawingOut<'_> {
                 _ => None,
             };
             let nested_source = child.and_then(|ng| if source.is_some() { ng.file.as_ref() } else { self.source(ng) });
-            let (moff, mext) = source.map(|f| (f.members[i].off, f.members[i].ext)).unwrap_or_else(|| {
+            let file_member = g.file.as_ref().and_then(|f| f.members.iter().find(|f| f.reference == *m));
+            let flip = file_member.and_then(|f| f.transform).map_or((false, false), |t| t.flip);
+            let member = source.and_then(|f| f.members[i].transform).unwrap_or_else(|| {
                 let r = nested_source.map_or(r, |f| sheet.anchor_rect(&f.anchor));
-                space.place(r, quarter_turn(rot))
+                let local = space.unproject(r);
+                if let Some(child) = child {
+                    ChildTransform::from_rect(group_unturned_box(local, child.rotation), child.rotation, child.flip)
+                } else {
+                    ChildTransform::from_leaf_box(local, rot, flip)
+                }
             });
             match m {
                 DrawingRef::Group(_) => {
                     if let Some(child) = child {
-                        self.group(child, r, (moff, mext), (flip, source.is_some()), nested_source, depth + 1);
+                        self.group(child, r, member, Some((space, source.is_some())), nested_source, depth + 1);
                     }
                 }
                 leaf => {
@@ -1230,7 +1159,7 @@ impl DrawingOut<'_> {
                     }
                     let oid = self.take_id(*leaf);
                     let name = sheet.drawing_names.get(leaf).map(|(_, name)| name.as_str());
-                    write_obj(&mut self.s, self.theme, o, oid, name, (moff, mext), rot);
+                    write_obj(&mut self.s, self.theme, o, oid, name, member);
                 }
             }
         }
@@ -1289,7 +1218,18 @@ pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>]) -> String {
                 .filter(|f| f.anchor == g.anchor && source.is_some())
                 .map_or_else(|| anchor_open(sheet, &anchor), |f| source_anchor_open(&f.placement));
             out.s.push_str(&open);
-            out.group(g, b, ((emu(b.x), emu(b.y)), (emu(b.w), emu(b.h))), ((false, false), false), source, 0);
+            out.group(
+                g,
+                b,
+                ChildTransform::from_rect(
+                    ObjectRect { x: b.x * EMU_PER_PX, y: b.y * EMU_PER_PX, w: b.w * EMU_PER_PX, h: b.h * EMU_PER_PX },
+                    g.rotation,
+                    g.flip,
+                ),
+                None,
+                source,
+                0,
+            );
             out.s.push_str("<xdr:clientData/>");
             out.s.push_str(close);
         }
@@ -1312,7 +1252,9 @@ pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>]) -> String {
             Obj::Shape(sh) => (f64::from(sh.rotation.rem_euclid(360.0)) * 60000.0).round() as i64,
             _ => 0,
         };
-        write_obj(&mut out.s, theme, o, id, name, ((0, 0), (emu(a.width.max(0.0) as f64), emu(a.height.max(0.0) as f64))), rot);
+        let transform =
+            ChildTransform { off: (0, 0), ext: (emu(a.width.max(0.0) as f64), emu(a.height.max(0.0) as f64)), rotation: rot, flip: (false, false) };
+        write_obj(&mut out.s, theme, o, id, name, transform);
         out.s.push_str("<xdr:clientData/>");
         out.s.push_str(close);
     }
@@ -1320,9 +1262,8 @@ pub fn write_drawing(sheet: &Sheet, theme: &Theme, objs: &[Obj<'_>]) -> String {
     out.s
 }
 
-/// One object's element, with `cNvPr` id `id` and its transform at `off`/`ext` (EMUs), rotated
-/// by `rot`.
-fn write_obj(s: &mut String, theme: &Theme, o: &Obj<'_>, id: usize, name: Option<&str>, (off, ext): ((i64, i64), (i64, i64)), rot: i64) {
+/// One object's element, with a `cNvPr` id and a transform in DrawingML units.
+fn write_obj(s: &mut String, theme: &Theme, o: &Obj<'_>, id: usize, name: Option<&str>, transform: ChildTransform) {
     let object_name = |prefix| match name {
         Some(name) => esc_attr(name),
         None => format!("{prefix} {}", id - 1),
@@ -1334,7 +1275,7 @@ fn write_obj(s: &mut String, theme: &Theme, o: &Obj<'_>, id: usize, name: Option
                 "<xdr:pic><xdr:nvPicPr><xdr:cNvPr id=\"{id}\" name=\"{}\" descr=\"{}\"/><xdr:cNvPicPr><a:picLocks noChangeAspect=\"1\"/></xdr:cNvPicPr></xdr:nvPicPr><xdr:blipFill><a:blip r:embed=\"{rid}\"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic>",
                 object_name("Picture"),
                 esc_attr(&img.alt),
-                xfrm("a:xfrm", off, ext, rot)
+                xfrm("a:xfrm", transform)
             );
         }
         Obj::Chart(ch, rid) if crate::chartex::is_chartex(ch.kind) => {
@@ -1344,26 +1285,26 @@ fn write_obj(s: &mut String, theme: &Theme, o: &Obj<'_>, id: usize, name: Option
                 s,
                 "<mc:AlternateContent xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\"><mc:Choice xmlns:{prefix}=\"{ns}\" Requires=\"{prefix}\"><xdr:graphicFrame macro=\"\"><xdr:nvGraphicFramePr><xdr:cNvPr id=\"{id}\" name=\"{}\"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>{}<a:graphic><a:graphicData uri=\"http://schemas.microsoft.com/office/drawing/2014/chartex\"><cx:chart xmlns:cx=\"http://schemas.microsoft.com/office/drawing/2014/chartex\" r:id=\"{rid}\"/></a:graphicData></a:graphic></xdr:graphicFrame></mc:Choice><mc:Fallback><xdr:sp macro=\"\" textlink=\"\"><xdr:nvSpPr><xdr:cNvPr id=\"0\" name=\"\"/><xdr:cNvSpPr><a:spLocks noTextEdit=\"1\"/></xdr:cNvSpPr></xdr:nvSpPr><xdr:spPr>{}<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang=\"en-US\"/><a:t>This chart type can't be shown by this application.</a:t></a:r></a:p></xdr:txBody></xdr:sp></mc:Fallback></mc:AlternateContent>",
                 object_name("Chart"),
-                xfrm("xdr:xfrm", off, ext, rot),
-                xfrm("a:xfrm", off, ext, rot)
+                xfrm("xdr:xfrm", transform),
+                xfrm("a:xfrm", transform)
             );
         }
         Obj::Slicer(_, slicer_name) => {
-            s.push_str(&crate::slicer::frame_xml(id, slicer_name, name, &xfrm("xdr:xfrm", off, ext, rot), &xfrm("a:xfrm", off, ext, rot)));
+            s.push_str(&crate::slicer::frame_xml(id, slicer_name, name, &xfrm("xdr:xfrm", transform), &xfrm("a:xfrm", transform)));
         }
         Obj::Chart(_, rid) => {
             let _ = write!(
                 s,
                 "<xdr:graphicFrame macro=\"\"><xdr:nvGraphicFramePr><xdr:cNvPr id=\"{id}\" name=\"{}\"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>{}<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/chart\"><c:chart r:id=\"{rid}\"/></a:graphicData></a:graphic></xdr:graphicFrame>",
                 object_name("Chart"),
-                xfrm("xdr:xfrm", off, ext, rot)
+                xfrm("xdr:xfrm", transform)
             );
         }
         Obj::Shape(sh) if sh.kind == ShapeKind::Equation => {
-            write_equation(s, sh, (id, &object_name("Equation")), theme, off, ext, rot);
+            write_equation(s, sh, (id, &object_name("Equation")), theme, transform);
         }
         Obj::Shape(sh) => {
-            if let Some(xml) = ink::write(sh, theme, (id, name), off, ext, rot) {
+            if let Some(xml) = ink::write(sh, theme, (id, name), transform) {
                 s.push_str(&xml);
                 return;
             }
@@ -1382,7 +1323,7 @@ fn write_obj(s: &mut String, theme: &Theme, o: &Obj<'_>, id: usize, name: Option
                 "<xdr:sp macro=\"\" textlink=\"\"><xdr:nvSpPr><xdr:cNvPr id=\"{id}\" name=\"{}\"/><xdr:cNvSpPr{}/></xdr:nvSpPr><xdr:spPr>{}<a:prstGeom prst=\"{prst}\"><a:avLst/></a:prstGeom>",
                 object_name("Shape"),
                 if tx { " txBox=\"1\"" } else { "" },
-                xfrm("a:xfrm", off, ext, rot)
+                xfrm("a:xfrm", transform)
             );
             if let Some(c) = srgb(&sh.fill, theme) {
                 let _ = write!(s, "<a:solidFill>{c}</a:solidFill>");
@@ -1581,8 +1522,9 @@ mod mac_marker_tests {
         let rect = drawing_rect(&sheet, &anchor);
         assert_eq!(rect.w, sheet.col_left(5));
         assert_eq!(emu(rect.w), 3_365_500);
-        let space = ChildSpace::new(&sheet, &group, rect, (0, 0), (false, false));
-        assert_eq!(space.place(rect, false).1, group.child_extent);
+        let child = ChildTransform { ext: group.child_extent, ..ChildTransform::default() }.rect();
+        let map = GroupProjection::new(rect, child, (group.flip, group.rotation), 1.0 / EMU_PER_PX);
+        assert_eq!(ChildTransform::from_rect(map.unproject(rect), 0, (false, false)).ext, group.child_extent);
     }
 }
 

@@ -45,7 +45,7 @@ Base: Neil's `origin/integrated` at `2e8dc12384775b61675a918863c79a632773e9cc`.
 - Evidence: ECMA-376 Part 1, 20.5.2.33 `twoCellAnchor`, 20.5.2.24 `oneCellAnchor`, 20.5.2.1 `absoluteAnchor`, 20.5.3.2 `ST_EditAs` (spec-derived). Whether Excel for Mac's own open-time fit counts as a resize for `editAs="oneCell"`/`"absolute"` two-cell anchors is unmeasured; GridCraft places them from both markers.
 - Known gaps outside X24:
 - Chart `userShapes` are flattened into sheet drawings on import, so they do not retain ownership by or stay relative to the chart as it moves.
-- If an imported group starts with a collapsed axis and grows during fitting, its members cannot recover their relative geometry from the collapsed boxes alone. Recovery needs a shared XLSX transform projection, including nested flips and quarter turns.
+- Collapsed imported group member boxes are recovered from child coordinates in X38 below.
 - Stored far markers are honoured only until the first resize inside the drawing's span. After that, X18 drops the stored placement and the far corner is recomputed from pixels, so a far marker whose offset runs into a later row, or that sits on a zero-height boundary, loses its named row on a later resize. Excel's behaviour across repeated resizes is unmeasured.
 
 ## X28 — Drawing sort settle detection
@@ -55,3 +55,9 @@ Base: Neil's `origin/integrated` at `2e8dc12384775b61675a918863c79a632773e9cc`.
 - Before the row fit, sort drops a placed drawing's saved markers if they no longer describe its editable anchor on the sorted grid. An unchanged anchor alone does not make the old markers valid.
 - Which objects a sort moves, and where it puts them, are unchanged. Excel's own sort-with-shapes behaviour is unmeasured.
 - Groups straddling the sort block are unmeasured. On the base, a group followed the pre-fit line changes when all its editable anchors were unchanged. X28 skips that follow if the sort placed any member, even when the member's editable anchor is unchanged.
+
+## X38 — XLSX group projection
+
+- XLSX import, collapsed-axis recovery after line sizing, and edited-group export share a DrawingML `a:xfrm` projection (ECMA-376 Part 1 §20.1.7.5). Source child coordinates retain the information that a zero-sized sheet axis loses. Nested transforms compose in each parent group's child units.
+- Exact 90°, 180° and 270° group angles now affect member boxes even in noncollapsed groups. Other group angles keep the prior unturned geometry and import warning. This is spec-derived; Excel for Mac group layout and sizing are unmeasured. Content rotation and mirroring are not rendered by this change.
+- Untouched groups still write their original worksheet anchor fields and group/member transforms. Line resizing still applies the existing placement invalidation and anchor-mode rules; hide/unhide and chart `userShapes` ownership are unchanged.

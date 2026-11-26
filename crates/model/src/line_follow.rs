@@ -7,13 +7,16 @@
 //! their cells, "move but don't size" keeps its size and follows its top-left cell, and "don't
 //! move or size" keeps its place on the sheet.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use gridcraft_core::{MAX_COLS, MAX_ROWS};
 
 use crate::group::map_rect;
 use crate::sheet::drawing_reference;
-use crate::{Anchor, AnchorMode, DrawingPlacement, DrawingRef, LineInfo, ObjKind, ObjRef, ObjectRect, Sheet};
+use crate::{
+    Anchor, AnchorMode, ChildTransform, DrawingGroup, DrawingPlacement, DrawingRef, GroupProjection, LineInfo, MAX_GROUP_DEPTH, ObjKind, ObjRef,
+    ObjectRect, Sheet, group_child_box, group_unturned_box,
+};
 
 /// Pixels per EMU, for the half-EMU a stored marker can't resolve.
 const PX_PER_EMU: f64 = 1.0 / 9525.0;
@@ -173,6 +176,33 @@ impl Sheet {
         drawings.chain(self.controls.iter().map(|c| (Floating::Control(c.id), c.anchor))).collect()
     }
 
+    /// Reproject source coordinates instead of scaling sheet boxes that lost an axis. The
+    /// root is placed by its worksheet anchor; nested frames are in their parent's EMUs.
+    fn project_group_members(
+        &self,
+        g: &DrawingGroup,
+        frame: ObjectRect,
+        parent: Option<GroupProjection>,
+        depth: usize,
+        out: &mut HashMap<DrawingRef, ObjectRect>,
+    ) {
+        let Some(f) = g.file.as_ref().filter(|f| depth < MAX_GROUP_DEPTH && !f.edited) else { return };
+        let fallback = if parent.is_some() { 1.0 } else { PX_PER_EMU };
+        let child = group_child_box(frame, if f.fields[2] { f.child_offset } else { f.off }, f.child_extent, f.ext, fallback);
+        let own = GroupProjection::new(frame, child, (g.flip, g.rotation), fallback);
+        let map = parent.map_or(own, |p| p.compose(own));
+        for member in &f.members {
+            let frame = member.transform.map_or(child, ChildTransform::rect);
+            if let DrawingRef::Group(id) = member.reference {
+                let Some(nested) = self.drawing_group(id) else { continue };
+                out.insert(member.reference, map.project(group_unturned_box(frame, nested.rotation)));
+                self.project_group_members(nested, frame, Some(map), depth + 1, out);
+            } else {
+                out.insert(member.reference, map.project(member.transform.map_or(frame, ChildTransform::leaf_box)));
+            }
+        }
+    }
+
     /// Moves everything in group `id` from where `from` (its old anchor, measured on `old`)
     /// put it to `to`, its new anchor on this sheet, keeping each member's place in the group:
     /// members are cell-anchored on their own, so lines changing inside the group would move
@@ -181,10 +211,20 @@ impl Sheet {
     /// The anchors only: stored file placements are left for the caller to keep or drop.
     fn carry_group(&mut self, id: u32, old: &Sheet, from: &Anchor, to: Anchor) {
         let (from_rect, to_rect) = (old.anchor_rect(from), self.anchor_rect(&to));
+        let mut recovered = HashMap::new();
+        if ((from_rect.w == 0.0 && to_rect.w > 0.0) || (from_rect.h == 0.0 && to_rect.h > 0.0))
+            && let Some(g) = self.drawing_group(id)
+            && self.source_group(g).is_some()
+        {
+            self.project_group_members(g, to_rect, None, 0, &mut recovered);
+        }
+        let rotation = self.drawing_group(id).map_or(0, |g| g.rotation);
+        let old_box = group_unturned_box(from_rect, rotation);
+        let new_box = group_unturned_box(to_rect, rotation);
         let same = |a: ObjectRect, b: ObjectRect| [a.x - b.x, a.y - b.y, a.w - b.w, a.h - b.h].iter().all(|d| d.abs() <= PX_PER_EMU / 2.0);
         for m in self.group_contents(id) {
             let Some(a) = self.raw_drawing_anchor(m) else { continue };
-            let target = map_rect(from_rect, to_rect, old.anchor_rect(&a));
+            let target = recovered.get(&m).copied().unwrap_or_else(|| map_rect(old_box, new_box, old.anchor_rect(&a)));
             if same(target, self.anchor_rect(&a)) {
                 continue;
             }

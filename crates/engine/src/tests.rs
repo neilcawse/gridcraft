@@ -5416,7 +5416,11 @@ fn source_group_placement_survives_copy_and_only_safe_line_edits() {
                     flip: (false, false),
                     rotation: 0,
                     member_rotations: vec![],
-                    members: vec![GroupFileMember { reference: member, anchor, off: (0, 0), ext: extent }],
+                    members: vec![GroupFileMember {
+                        reference: member,
+                        anchor,
+                        transform: Some(gridcraft_model::ChildTransform { ext: extent, ..Default::default() }),
+                    }],
                 }),
             });
         }

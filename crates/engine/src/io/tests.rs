@@ -308,7 +308,11 @@ fn open_places_a_group_over_the_rows_it_fits() {
         let read = sh.rect_anchor(placement_box(sh, &placement), AnchorMode::MoveAndSize);
         let extent = (emu(100), emu(100));
         sh.images.push(Image { id: 1, anchor: read, data: vec![1].into(), mime: "image/png".into(), alt: String::new() });
-        let member = GroupFileMember { reference: DrawingRef::Image(1), anchor: read, off: (0, 0), ext: extent };
+        let member = GroupFileMember {
+            reference: DrawingRef::Image(1),
+            anchor: read,
+            transform: Some(gridcraft_model::ChildTransform { ext: extent, ..Default::default() }),
+        };
         let file = GroupFile {
             anchor: read,
             off: (0, 0),
@@ -348,6 +352,213 @@ fn open_places_a_group_over_the_rows_it_fits() {
         assert!(sh.source_group(group).is_some(), "{geometry:?}: the file transform still describes the group");
         assert_eq!(sh.drawing_files[&DrawingRef::Group(2)].anchor, group.anchor);
     }
+}
+
+// Synthetic DrawingML, packaged with a generated workbook rather than a captured file.
+fn group_projection_book(height: f32, attrs: &str, member_attrs: &str, nested: bool, custom: bool) -> Vec<u8> {
+    use gridcraft_model::{Anchor, Color, DrawingGroup, DrawingRef, LineInfo, Shape, ShapeKind, StyleId};
+    use std::io::{Cursor, Read, Write};
+    use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
+
+    let mut wb = Workbook::new();
+    let large = wb.styles.derive(StyleId::DEFAULT, |style| style.font.size = 36.0);
+    let sh = wb.sheet_mut(0).unwrap();
+    if height == 0.0 && !custom {
+        // The Mac profile floors a positive custom default below one point to zero and
+        // initially uses it for automatic rows. The saved row heights trigger fitting on open.
+        sh.default_row_height = 2.0 / 3.0;
+    }
+    // Keep turned members away from the sheet's top edge, where anchor offsets clamp.
+    sh.rows.insert(0, LineInfo { size: Some(120.0), custom: true, ..Default::default() });
+    for row in 1..3 {
+        sh.rows.insert(row, LineInfo { size: Some(height), custom, ..Default::default() });
+        sh.set_value(CellRef::new(row, 0), gridcraft_core::Value::text("fit"));
+        sh.set_style(CellRef::new(row, 0), large);
+    }
+    let anchor = Anchor { width: 40.0, height: 40.0, ..Anchor::default() };
+    sh.shapes.push(Shape {
+        id: 2,
+        kind: ShapeKind::Rectangle,
+        anchor,
+        fill: Color::Auto,
+        line: Color::Auto,
+        text: String::new(),
+        format: Default::default(),
+        rotation: 0.0,
+        math: Default::default(),
+    });
+    sh.groups.push(DrawingGroup {
+        id: 1,
+        name: "Frame".into(),
+        anchor,
+        child_offset: (0, 0),
+        child_extent: (381000, 381000),
+        flip: (false, false),
+        rotation: 0,
+        member_rotations: vec![],
+        members: vec![DrawingRef::Shape(2)],
+        file: None,
+    });
+    let generated = gridcraft_xlsx::write_xlsx(&wb).unwrap();
+    let leaf = |id: u32, name: &str, a: &str, (x, y, w, h): (i64, i64, i64, i64)| {
+        format!(
+            r#"<xdr:sp><xdr:nvSpPr><xdr:cNvPr id="{id}" name="{name}"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:xfrm {a}><a:off x="{x}" y="{y}"/><a:ext cx="{w}" cy="{h}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:sp>"#
+        )
+    };
+    let first = if nested {
+        format!(
+            r#"<xdr:grpSp><xdr:nvGrpSpPr><xdr:cNvPr id="4" name="Inner"/><xdr:cNvGrpSpPr/></xdr:nvGrpSpPr>
+<xdr:grpSpPr><a:xfrm flipH="1" rot="5400000"><a:off x="110" y="220"/><a:ext cx="20" cy="30"/><a:chOff x="30" y="40"/><a:chExt cx="100" cy="100"/></a:xfrm></xdr:grpSpPr>{}</xdr:grpSp>"#,
+            leaf(2, "First", "", (40, 60, 20, 30))
+        )
+    } else {
+        leaf(2, "First", member_attrs, (110, 220, 20, 30))
+    };
+    let second = leaf(3, "Second", "", (160, 270, 15, 10));
+    let drawing = format!(
+        r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<xdr:twoCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+<xdr:to><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>3</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+<xdr:grpSp><xdr:nvGrpSpPr><xdr:cNvPr id="1" name="Frame"/><xdr:cNvGrpSpPr/></xdr:nvGrpSpPr>
+<xdr:grpSpPr><a:xfrm {attrs}><a:off x="610000" y="190500"/><a:ext cx="1200000" cy="760000"/><a:chOff x="100" y="200"/><a:chExt cx="100" cy="100"/></a:xfrm></xdr:grpSpPr>{first}{second}</xdr:grpSp>
+<xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#
+    );
+    let mut src = ZipArchive::new(Cursor::new(generated)).unwrap();
+    let mut dst = ZipWriter::new(Cursor::new(Vec::new()));
+    for entry in 0..src.len() {
+        let mut part = src.by_index(entry).unwrap();
+        dst.start_file(part.name(), SimpleFileOptions::default()).unwrap();
+        if part.name() == "xl/drawings/drawing1.xml" {
+            dst.write_all(drawing.as_bytes()).unwrap();
+        } else {
+            let mut bytes = Vec::new();
+            part.read_to_end(&mut bytes).unwrap();
+            dst.write_all(&bytes).unwrap();
+        }
+    }
+    dst.finish().unwrap().into_inner()
+}
+
+fn assert_group_projection(wb: &Workbook, expected: [[f64; 4]; 2]) {
+    use gridcraft_model::ObjectRect;
+    let sh = wb.sheet(0).unwrap();
+    let frame = sh.groups.iter().find(|g| g.name == "Frame").unwrap();
+    let b = gridcraft_model::group_unturned_box(sh.anchor_rect(&frame.anchor), frame.rotation);
+    assert!(b.w > 0.0 && b.h > 0.0, "fitted group: {b:?}");
+    assert_eq!(sh.shapes.len(), 2);
+    for (s, [x, y, w, h]) in sh.shapes.iter().zip(expected) {
+        assert_box(sh.anchor_rect(&s.anchor), ObjectRect { x: b.x + x * b.w, y: b.y + y * b.h, w: w * b.w, h: h * b.h }, "projected member");
+    }
+}
+
+#[test]
+fn collapsed_group_recovers_member_boxes_on_open() {
+    let bytes = group_projection_book(0.0, "", "", false, false);
+    let (read, _) = gridcraft_xlsx::read_xlsx(&bytes).unwrap();
+    assert_eq!(read.sheet(0).unwrap().groups[0].anchor.height, 0.0);
+    let (wb, _) = open_bytes("group.xlsx", &bytes).unwrap();
+    assert_group_projection(&wb, [[0.10, 0.20, 0.20, 0.30], [0.60, 0.70, 0.15, 0.10]]);
+}
+
+#[test]
+fn collapsed_group_projects_flips_and_quarter_turns_on_open() {
+    for (group, member, first, second) in [
+        (r#"flipH="1""#, r#"flipV="1""#, [0.70, 0.20, 0.20, 0.30], [0.25, 0.70, 0.15, 0.10]),
+        (r#"flipV="1""#, r#"flipH="1""#, [0.10, 0.50, 0.20, 0.30], [0.60, 0.20, 0.15, 0.10]),
+        (r#"rot="5400000""#, r#"rot="16200000""#, [0.55, 0.05, 0.20, 0.30], [0.20, 0.60, 0.10, 0.15]),
+        (r#"rot="10800000""#, r#"rot="10800000""#, [0.70, 0.50, 0.20, 0.30], [0.25, 0.20, 0.15, 0.10]),
+        (r#"rot="16200000""#, r#"rot="5400000""#, [0.25, 0.65, 0.20, 0.30], [0.70, 0.25, 0.10, 0.15]),
+    ] {
+        let (wb, _) = open_bytes("group.xlsx", &group_projection_book(0.0, group, member, false, false)).unwrap();
+        assert_group_projection(&wb, [first, second]);
+    }
+}
+
+#[test]
+fn collapsed_group_composes_nested_member_transforms_on_open() {
+    let bytes = group_projection_book(0.0, r#"flipV="1" rot="16200000""#, "", true, false);
+    let (wb, _) = open_bytes("group.xlsx", &bytes).unwrap();
+    // Inner flip and clockwise turn in its own frame, then the outer flip and turn.
+    assert_group_projection(&wb, [[0.57, 0.71, 0.04, 0.09], [0.20, 0.25, 0.10, 0.15]]);
+}
+
+#[test]
+fn noncollapsed_group_keeps_base_geometry_on_open() {
+    let (wb, _) = open_bytes("group.xlsx", &group_projection_book(20.0, "", "", false, false)).unwrap();
+    assert_group_projection(&wb, [[0.10, 0.20, 0.20, 0.30], [0.60, 0.70, 0.15, 0.10]]);
+
+    let (wb, _) = open_bytes("group.xlsx", &group_projection_book(20.0, r#"rot="5400000""#, "", false, false)).unwrap();
+    assert_group_projection(&wb, [[0.50, 0.10, 0.30, 0.20], [0.20, 0.60, 0.10, 0.15]]);
+}
+
+fn drawing_xml(bytes: &[u8]) -> String {
+    use std::io::Read;
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut xml = String::new();
+    zip.by_name("xl/drawings/drawing1.xml").unwrap().read_to_string(&mut xml).unwrap();
+    xml
+}
+
+#[test]
+fn recovered_group_preserves_source_markers_and_transforms_on_save() {
+    let original = group_projection_book(0.0, r#"flipH="1" rot="5400000""#, r#"flipV="1" rot="16200000""#, false, false);
+    let (wb, _) = open_bytes("group.xlsx", &original).unwrap();
+    let saved = save_bytes(&wb, "group.xlsx").unwrap();
+    let xml = drawing_xml(&saved);
+    let source = drawing_xml(&original);
+    for tag in ["from", "to"] {
+        let open = format!("<xdr:{tag}>");
+        let close = format!("</xdr:{tag}>");
+        let contents = |xml: &str| xml.split_once(&open).unwrap().1.split_once(&close).unwrap().0.to_owned();
+        assert_eq!(contents(&xml), contents(&source));
+    }
+    assert!(xml.contains(r#"<a:xfrm rot="5400000" flipH="1"><a:off x="610000" y="190500"/><a:ext cx="1200000" cy="760000"/><a:chOff x="100" y="200"/><a:chExt cx="100" cy="100"/></a:xfrm>"#));
+    assert!(xml.contains(r#"<a:xfrm rot="16200000" flipV="1"><a:off x="110" y="220"/><a:ext cx="20" cy="30"/></a:xfrm>"#));
+    let (again, _) = open_bytes("group.xlsx", &saved).unwrap();
+    let expected = [[0.55, 0.65, 0.20, 0.30], [0.20, 0.25, 0.10, 0.15]];
+    assert_group_projection(&wb, expected);
+    assert_group_projection(&again, expected);
+    assert_eq!(drawing_xml(&save_bytes(&again, "group.xlsx").unwrap()), xml);
+}
+
+#[test]
+fn collapsed_group_recovers_on_row_resize_with_undo_and_redo() {
+    use crate::{DocState, Session, Trust};
+    use gridcraft_model::ObjectRect;
+    use serde_json::json;
+
+    let bytes = group_projection_book(0.0, r#"flipV="1" rot="16200000""#, "", true, true);
+    let (wb, _) = open_bytes("group.xlsx", &bytes).unwrap();
+    let mut session = Session::new();
+    session.add_document(DocState::from_saved(wb, None, "Group".to_owned(), Trust::FromFile));
+    let member_boxes = |wb: &Workbook| -> Vec<ObjectRect> {
+        let sheet = wb.sheet(0).unwrap();
+        sheet.shapes.iter().map(|s| sheet.anchor_rect(&s.anchor)).collect()
+    };
+    let collapsed = member_boxes(&session.doc().unwrap().wb);
+    assert!(collapsed.iter().all(|r| r.w == 0.0));
+    session.execute("home.rowHeight", json!({"sheet": 0, "rows": "2:3", "height": 48})).unwrap();
+    let wb = &session.doc().unwrap().wb;
+    assert_group_projection(wb, [[0.57, 0.71, 0.04, 0.09], [0.20, 0.25, 0.10, 0.15]]);
+    let grown = member_boxes(wb);
+    let (reopened, _) = open_bytes("group.xlsx", &save_bytes(wb, "group.xlsx").unwrap()).unwrap();
+    let reopened_boxes = member_boxes(&reopened);
+    assert_eq!(reopened_boxes.len(), grown.len());
+    for (actual, expected) in reopened_boxes.into_iter().zip(&grown) {
+        assert_box(actual, *expected, "resized group after save");
+    }
+    session.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(member_boxes(&session.doc().unwrap().wb), collapsed);
+    session.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(member_boxes(&session.doc().unwrap().wb), grown);
+}
+
+#[test]
+fn non_quarter_group_keeps_unturned_layout_and_warning() {
+    let (wb, warnings) = open_bytes("group.xlsx", &group_projection_book(20.0, r#"rot="3000000""#, "", false, false)).unwrap();
+    assert_group_projection(&wb, [[0.10, 0.20, 0.20, 0.30], [0.60, 0.70, 0.15, 0.10]]);
+    assert!(warnings.iter().any(|w| w.contains("a rotated group was laid out without its rotation")));
+    assert!(drawing_xml(&save_bytes(&wb, "group.xlsx").unwrap()).contains(r#"<a:xfrm rot="3000000">"#));
 }
 
 fn book(rtl: bool, cells: &[(&str, gridcraft_core::Value, gridcraft_model::HAlign)]) -> Workbook {
