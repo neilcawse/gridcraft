@@ -98,11 +98,14 @@ pub fn open_bytes_with(name: &str, bytes: &[u8], password: Option<&str>, csv_as_
 /// Fit automatic rows on open. The Mac XLSX profile recomputes automatic heights without
 /// inheriting a saved `ht`. Other formats and hosts keep the legacy grow-only fit so that
 /// a saved automatic height cannot shrink. Manual heights are left alone in both cases.
+/// Floating objects are then placed over the fitted rows: the reader placed them over the
+/// heights the file saved.
 fn fit_imported_rows(wb: &mut Workbook) {
     // The whole pass shares one budget of merge comparisons: later sheets keep their heights once it is spent.
     let mut left = crate::cmd::MERGE_FIT_WORK;
     for si in 0..wb.sheets.len() {
         let Some(sh) = wb.sheet(si) else { continue };
+        let read = sh.object_anchors().next().is_some().then(|| sh.line_geometry());
         let mut rows: Vec<u32> = sh.cells.iter().map(|(c, _)| c.row).collect();
         let mac = sh.geometry != gridcraft_model::Geometry::Legacy;
         if mac {
@@ -135,6 +138,9 @@ fn fit_imported_rows(wb: &mut Workbook) {
             }
         }
         left = sweep.left();
+        if let (Some(read), Some(sh)) = (read, wb.sheet_mut(si)) {
+            sh.place_after_open_sizing(&read);
+        }
     }
 }
 

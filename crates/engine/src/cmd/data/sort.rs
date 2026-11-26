@@ -2,6 +2,21 @@ use super::{
     Anchor, AnchorMode, Arc, Cell, CellRef, Comment, EngineError, Hyperlink, Json, LineInfo, Ordering, RangeRef, Result, Session, Sheet, Value, bad,
     bool_param, col_param, data_range, edit, guess_header, json, ok, sort_compare, split_sheet, str_param, target_sheet,
 };
+use crate::cmd::sheet::{changed_lines, drawing_placement_hits};
+use gridcraft_core::MAX_ROWS;
+use gridcraft_model::{DrawingRef, ObjKind, ObjRef, ObjectRect};
+
+enum SortGeometry {
+    /// In a group overlapping the sorted block: keeps its place on the sheet.
+    Grouped {
+        top: f64,
+    },
+    /// In a group clear of the block: left to follow the line changes by its mode.
+    Follow,
+    Refit {
+        bottom: (u32, u32, f32, f32),
+    },
+}
 
 #[derive(Clone)]
 struct SortKey {
@@ -211,9 +226,8 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
         // Row heights travel with rows.
         let heights: Vec<Option<LineInfo>> =
             if by_cols { vec![] } else { order.iter().map(|&i| sh.rows.get(&(body.start.row + i)).copied()).collect() };
-        // Floating objects anchored inside the sorted body travel with their lines, unless they
-        // are pinned absolutely ("Don't move or size with cells", `editAs="absolute"`). Reordering
-        // is the inverse of `order`: `dst_of[src] = dst`.
+        // Ungrouped floating objects anchored inside the sorted body travel with their lines,
+        // unless pinned absolutely. Reordering is the inverse of `order`: `dst_of[src] = dst`.
         let dst_of: Vec<u32> = {
             let mut v = vec![0u32; order.len()];
             for (dst_i, &src_i) in order.iter().enumerate() {
@@ -223,21 +237,40 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
             }
             v
         };
-        // The object's own geometry (its top-left anchor cell, offset and size) is read from the
-        // pre-sort `sh`; a two-cell object's bottom-right cell is derived from its size here so it
-        // can be re-fitted to the lines it spans after the sort.
-        let objs: Vec<Anchor> = sh.object_anchors().copied().collect();
-        let descs: Vec<(u32, u32, f32, f32)> = objs
-            .iter()
-            .map(|a| {
+        // Read geometry before the row heights are permuted. Ungrouped objects may be refitted
+        // to their new lines using their bottom-right corner. Groups overlapping the sorted block,
+        // and their members, keep their sheet position, not their position relative to the
+        // permuted rows; other groups follow the line changes like any drawing outside it.
+        let (x0, y0) = (sh.col_left(body.start.col), sh.row_top(body.start.row));
+        let block = ObjectRect { x: x0, y: y0, w: sh.col_left(body.end.col + 1) - x0, h: sh.row_top(body.end.row + 1) - y0 };
+        let grouped = sh.grouped_objects(block);
+        let objs: Vec<_> = sh
+            .object_refs()
+            .zip(sh.object_anchors().copied())
+            .map(|(o, a)| {
+                let top = sh.row_top(a.cell.row) + f64::from(a.dy);
+                match grouped.get(&o) {
+                    Some(true) => return (o, a, SortGeometry::Grouped { top }),
+                    Some(false) => return (o, a, SortGeometry::Follow),
+                    None => {}
+                }
                 let x2 = sh.col_left(a.cell.col) + a.dx as f64 + a.width.max(0.0) as f64;
-                let y2 = sh.row_top(a.cell.row) + a.dy as f64 + a.height.max(0.0) as f64;
+                let y2 = top + f64::from(a.height.max(0.0));
                 let tc = sh.col_at(x2);
                 let tr = sh.row_at(y2);
-                (tc, tr, (x2 - sh.col_left(tc)) as f32, (y2 - sh.row_top(tr)) as f32)
+                let bottom = (tc, tr, (x2 - sh.col_left(tc)) as f32, (y2 - sh.row_top(tr)) as f32);
+                (o, a, SortGeometry::Refit { bottom })
             })
             .collect();
-        let shm = cx.sheet_mut(sheet)?;
+        let before = (!by_cols
+            && sh.groups.iter().any(|g| {
+                grouped.get(&ObjRef::new(ObjKind::Group, g.id)) == Some(&true)
+                    && g.file.as_ref().is_some_and(|f| !f.edited)
+                    && g.anchor.mode == AnchorMode::MoveAndSize
+                    && (g.anchor.width == 0.0 || g.anchor.height == 0.0)
+            }))
+        .then(|| Arc::clone(&cx.wb.sheets[sheet]));
+        let shm = cx.wb.sheet_mut(sheet).ok_or_else(|| EngineError::Other("no such sheet".into()))?;
         for (c, cell) in &moved {
             match cell {
                 Some(x) => shm.set_cell(*c, x.clone()),
@@ -273,22 +306,55 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
                 }
             }
         }
-        // Re-anchor floating objects now that the row heights are final. `objs` was collected in
-        // `object_anchors` order, which `object_anchors_mut` repeats.
+        // Re-anchor floating objects on the sorted grid, before automatic row fitting.
         // Only objects anchored inside the sorted block move: within its lines on the sort axis
         // and within its span on the other axis (a picture beside the block stays put).
         let (b0, b1) = if by_cols { (body.start.col, body.end.col) } else { (body.start.row, body.end.row) };
         let (o0, o1) = if by_cols { (body.start.row, body.end.row) } else { (body.start.col, body.end.col) };
-        let new_anchors: Vec<Anchor> = objs
+        let new_anchors: Vec<_> = objs
             .into_iter()
-            .zip(descs)
-            .map(|(a, desc)| {
-                let other = if by_cols { a.cell.row } else { a.cell.col };
-                if other < o0 || other > o1 { a } else { sorted_anchor(shm, a, desc, by_cols, b0, b1, &dst_of) }
+            .map(|(o, a, geometry)| {
+                let anchor = match geometry {
+                    SortGeometry::Grouped { top } => Some(fixed_sort_anchor(shm, a, top)),
+                    SortGeometry::Follow => None,
+                    SortGeometry::Refit { bottom } => {
+                        let other = if by_cols { a.cell.row } else { a.cell.col };
+                        if other < o0 || other > o1 { None } else { sorted_anchor(shm, a, bottom, by_cols, b0, b1, &dst_of) }
+                    }
+                };
+                (o, anchor)
             })
             .collect();
-        for (a, n) in shm.object_anchors_mut().zip(new_anchors) {
-            *a = n;
+        for (a, (_, n)) in shm.object_anchors_mut().zip(&new_anchors) {
+            if let Some(n) = n {
+                *a = *n;
+            }
+        }
+        if let Some(before) = before {
+            let changed = changed_lines(&before.rows, &shm.rows, (before.default_row_height, shm.default_row_height), MAX_ROWS);
+            // `before` is only kept for a row sort. Rows outside the intersecting part of
+            // the run stay put; within it, the permutation must send no row out of the run.
+            let rows_stay = |start: u32, end: u32| {
+                let lo = start.max(b0);
+                let hi = end.min(b1 + 1);
+                lo >= hi || dst_of[(lo - b0) as usize..(hi - b0) as usize].iter().all(|&d| (start..end).contains(&(b0 + d)))
+            };
+            for &(o, _) in &new_anchors {
+                if o.kind == ObjKind::Group && grouped.get(&o) == Some(&true) {
+                    let r = DrawingRef::Group(o.id);
+                    let affected = before.drawing_files.get(&r).is_some_and(|file| drawing_placement_hits(&before, r, file, true, &changed));
+                    shm.keep_sorted_group_collapse(&before, o.id, affected, &rows_stay);
+                }
+            }
+        }
+        // What the sort placed is on the lines it leaves: following the sorted row heights must
+        // not move it again (though the row fit after the sort does).
+        let uid = shm.uid.get();
+        for (o, anchor) in new_anchors {
+            if let Some(anchor) = anchor {
+                shm.discard_stale_drawing_placement(o, anchor);
+                cx.placed.push((uid, o));
+            }
         }
         shm.discard_changed_drawing_files();
         for (c, _) in moved {
@@ -300,23 +366,35 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
     Ok(json!({"sorted": body.a1()}))
 }
 
-/// Re-anchor one floating object for a sort. `bottom` is the object's bottom-right line and the
-/// offset of that corner inside it, measured before the sort. `map` (via `dst_of`) translates a
-/// line index on the moving axis and is the identity outside `b0..=b1`. `sh` is the post-sort
-/// grid (row heights already reordered), so re-fitting uses the heights the object lands on.
+/// Preserve the sheet-space top of a grouped drawing over permuted row heights. Leave an
+/// unchanged row origin alone, including for a stored marker with an out-of-cell offset.
+fn fixed_sort_anchor(sh: &Sheet, mut anchor: Anchor, top: f64) -> Anchor {
+    if (sh.row_top(anchor.cell.row) + f64::from(anchor.dy) - top).abs() > 1e-6 {
+        let row = sh.row_at(top);
+        anchor.cell.row = row;
+        anchor.dy = (top - sh.row_top(row)) as f32;
+    }
+    anchor
+}
+
+/// Re-anchor one floating object for a sort; `None` when the sort leaves it where it is. `bottom`
+/// is the object's bottom-right line and the offset of that corner inside it, measured before the
+/// sort. `map` (via `dst_of`) translates a line index on the moving axis and is the identity
+/// outside `b0..=b1`. `sh` is the post-sort grid (row heights already reordered), so re-fitting
+/// uses the heights the object lands on.
 /// Objects pinned absolutely ("Don't move or size with cells") never move; "move but don't size"
 /// keeps its size; "move and size" is re-fitted when its whole extent stays inside the body, and
 /// keeps its size when the sort turns its lines around (its bottom line now sorts before its top
 /// line), since the lines then enclose nothing to stretch it between.
-fn sorted_anchor(sh: &Sheet, a: Anchor, bottom: (u32, u32, f32, f32), by_cols: bool, b0: u32, b1: u32, dst_of: &[u32]) -> Anchor {
+fn sorted_anchor(sh: &Sheet, a: Anchor, bottom: (u32, u32, f32, f32), by_cols: bool, b0: u32, b1: u32, dst_of: &[u32]) -> Option<Anchor> {
     if a.mode == AnchorMode::Absolute {
-        return a;
+        return None;
     }
     let (tc, tr, tdx, tdy) = bottom;
     let map = |v: u32| -> u32 { if v >= b0 && v <= b1 { dst_of.get((v - b0) as usize).map_or(v, |&d| b0 + d) } else { v } };
     let (axis_start, axis_end) = if by_cols { (a.cell.col, tc) } else { (a.cell.row, tr) };
     if axis_start < b0 || axis_start > b1 {
-        return a;
+        return None;
     }
     let (nr, nc) = if by_cols { (a.cell.row, map(a.cell.col)) } else { (map(a.cell.row), a.cell.col) };
     if a.mode == AnchorMode::MoveAndSize && axis_end >= b0 && axis_end <= b1 {
@@ -328,9 +406,9 @@ fn sorted_anchor(sh: &Sheet, a: Anchor, bottom: (u32, u32, f32, f32), by_cols: b
         // An extent that is not positive means the sort put the bottom-right line before the
         // top-left one on that axis: the object keeps its old size there.
         let fit = |extent: f64, old: f32| if extent > 0.0 { extent as f32 } else { old.max(0.0) };
-        Anchor { cell: CellRef::new(nr, nc), dx: a.dx, dy: a.dy, width: fit(x2 - x1, a.width), height: fit(y2 - y1, a.height), mode: a.mode }
+        Some(Anchor { cell: CellRef::new(nr, nc), dx: a.dx, dy: a.dy, width: fit(x2 - x1, a.width), height: fit(y2 - y1, a.height), mode: a.mode })
     } else {
-        Anchor { cell: CellRef::new(nr, nc), ..a }
+        Some(Anchor { cell: CellRef::new(nr, nc), ..a })
     }
 }
 

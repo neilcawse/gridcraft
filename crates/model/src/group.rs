@@ -30,8 +30,8 @@ pub enum DrawingRef {
 pub struct GroupFileMember {
     pub reference: DrawingRef,
     pub anchor: Anchor,
-    pub off: (i64, i64),
-    pub ext: (i64, i64),
+    /// A missing offset or extent means the member fills the enclosing frame.
+    pub transform: Option<crate::ChildTransform>,
 }
 
 /// The transform a group was read with, for an unedited group to be written back exactly.
@@ -50,6 +50,12 @@ pub struct GroupFile {
     pub has_transform: bool,
     /// An explicit edit invalidates reuse even if the anchor later returns to the same value.
     pub edited: bool,
+    /// Named line pairs (columns, rows) for a coincident two-cell span held in sheet space
+    /// by a sort. This is layout-only: the original worksheet markers must not be exported.
+    pub held_collapse: [Option<(u32, u32)>; 2],
+    /// A row sort moved rows out of the held span. The editable anchor's inferred far
+    /// edge must not resolve to a different coincident row and grow the rejected span.
+    pub sort_lost_collapsed_rows: bool,
     /// Every retained leaf had its own offset and extent.
     pub complete: bool,
     pub flip: (bool, bool),
@@ -67,7 +73,9 @@ pub struct DrawingGroup {
     /// The group's box on the sheet when it was laid out (opened, or last moved or sized as a
     /// whole). With `child_offset`/`child_extent` it fixes the group's child coordinate space;
     /// its current box is [`Sheet::drawing_rect`] of the group, the box around its members. A
-    /// rotated group is saved with this box, as it turns about the box's centre.
+    /// rotated group is saved with this box, as it turns about the box's centre. An outermost
+    /// group turned exactly 90° or 270° holds its members in this box swapped about its centre;
+    /// a nested group's box is already that turned box, as its parent places it.
     pub anchor: Anchor,
     /// The child box (`a:chOff`/`a:chExt`, EMUs) that `anchor`'s box maps onto.
     pub child_offset: (i64, i64),
@@ -76,8 +84,8 @@ pub struct DrawingGroup {
     /// sheet, mirrored about the group's box on these axes (their own content isn't mirrored).
     #[serde(default, skip_serializing_if = "is_default")]
     pub flip: (bool, bool),
-    /// The group's rotation (`a:xfrm rot`, 60000ths of a degree), kept for saving. Members are
-    /// laid out without it.
+    /// The group's rotation (`a:xfrm rot`, 60000ths of a degree), kept for saving. Exact
+    /// quarter turns also change member boxes, but not their rendered content.
     #[serde(default, skip_serializing_if = "is_default")]
     pub rotation: i64,
     /// The rotations (`a:xfrm rot`) of the charts, pictures and shapes in the group that have
@@ -127,7 +135,7 @@ impl ObjectRect {
 }
 
 /// The axis-aligned map taking `from` onto `to` (an axis without extent keeps its scale).
-fn map_rect(from: ObjectRect, to: ObjectRect, r: ObjectRect) -> ObjectRect {
+pub(crate) fn map_rect(from: ObjectRect, to: ObjectRect, r: ObjectRect) -> ObjectRect {
     let sx = if from.w > 0.0 { to.w / from.w } else { 1.0 };
     let sy = if from.h > 0.0 { to.h / from.h } else { 1.0 };
     ObjectRect { x: to.x + (r.x - from.x) * sx, y: to.y + (r.y - from.y) * sy, w: r.w * sx, h: r.h * sy }
@@ -142,15 +150,20 @@ impl Sheet {
     /// The anchor (top-left cell plus offset, clamped onto the sheet) for a box, with `mode`.
     pub fn rect_anchor(&self, r: ObjectRect, mode: AnchorMode) -> Anchor {
         let px = |v: f64| if v.is_finite() { v.clamp(0.0, 1e7) } else { 0.0 };
-        let (x, y) = (px(r.x), px(r.y));
+        self.layout_rect_anchor(ObjectRect { x: px(r.x), y: px(r.y), w: px(r.w), h: px(r.h) }, mode)
+    }
+
+    /// Re-anchor internal layout geometry without the input cap for object commands.
+    pub(crate) fn layout_rect_anchor(&self, r: ObjectRect, mode: AnchorMode) -> Anchor {
+        let (x, y) = (r.x.max(0.0), r.y.max(0.0));
         let col = self.col_at(x);
         let row = self.row_at(y);
         Anchor {
             cell: CellRef::new(row, col),
             dx: (x - self.col_left(col)).max(0.0) as f32,
             dy: (y - self.row_top(row)).max(0.0) as f32,
-            width: px(r.w) as f32,
-            height: px(r.h) as f32,
+            width: r.w.max(0.0) as f32,
+            height: r.h.max(0.0) as f32,
             mode,
         }
     }
@@ -180,14 +193,21 @@ impl Sheet {
 
     /// The file transform is reusable only if all dependent objects are unchanged.
     pub fn source_group<'a>(&self, g: &'a DrawingGroup) -> Option<&'a GroupFile> {
-        self.source_group_at_depth(g, 0)
+        self.source_group_at_depth(g, 0, true)
     }
 
-    fn source_group_at_depth<'a>(&self, g: &'a DrawingGroup, depth: usize) -> Option<&'a GroupFile> {
+    /// Whether the file transforms still lay the group out: nothing in it moved or was edited.
+    /// Unlike [`Sheet::source_group`] this allows members skipped on open or read without a
+    /// transform, which can't be written back from the file but still place the rest.
+    pub(crate) fn source_layout_group(&self, g: &DrawingGroup) -> bool {
+        self.source_group_at_depth(g, 0, false).is_some()
+    }
+
+    fn source_group_at_depth<'a>(&self, g: &'a DrawingGroup, depth: usize, complete: bool) -> Option<&'a GroupFile> {
         let f = g.file.as_ref()?;
         if depth >= MAX_GROUP_DEPTH
             || f.edited
-            || !f.complete
+            || (complete && (!f.complete || f.held_collapse.iter().any(Option::is_some)))
             || f.anchor != g.anchor
             || f.model_child_offset != g.child_offset
             || f.model_child_extent != g.child_extent
@@ -205,7 +225,7 @@ impl Sheet {
                 m.reference == r
                     && self.raw_drawing_anchor(r) == Some(m.anchor)
                     && match r {
-                        DrawingRef::Group(id) => self.drawing_group(id).and_then(|g| self.source_group_at_depth(g, depth + 1)).is_some(),
+                        DrawingRef::Group(id) => self.drawing_group(id).and_then(|g| self.source_group_at_depth(g, depth + 1, complete)).is_some(),
                         _ => true,
                     }
             })
@@ -263,13 +283,24 @@ impl Sheet {
         }
     }
 
+    /// A command can place an object on a changed grid without changing its editable anchor.
+    /// Keep its file placement only if the markers still describe that anchor on this grid.
+    pub fn discard_stale_drawing_placement(&mut self, o: crate::ObjRef, anchor: Anchor) {
+        if let Some(r) = crate::sheet::drawing_reference(o)
+            && let Some(file) = self.drawing_files.get(&r)
+            && (file.anchor != anchor || file.placement.anchor(self) != anchor)
+        {
+            self.invalidate_drawing_file(r);
+        }
+    }
+
     /// Forget file placement after a bulk operation changes the anchors directly.
     pub fn discard_changed_drawing_files(&mut self) {
         let mut files = std::mem::take(&mut self.drawing_files);
         files.retain(|&r, f| self.raw_drawing_anchor(r) == Some(f.anchor));
         self.drawing_files = files;
         let changed: Vec<_> =
-            self.groups.iter().filter(|g| g.file.as_ref().is_some_and(|f| !f.edited) && self.source_group(g).is_none()).map(|g| g.id).collect();
+            self.groups.iter().filter(|g| g.file.as_ref().is_some_and(|f| !f.edited) && !self.source_layout_group(g)).map(|g| g.id).collect();
         for id in changed {
             self.invalidate_drawing_file(DrawingRef::Group(id));
         }
@@ -402,7 +433,7 @@ impl Sheet {
         }
     }
 
-    fn drawing_anchor_mut(&mut self, r: DrawingRef) -> Option<&mut Anchor> {
+    pub(crate) fn drawing_anchor_mut(&mut self, r: DrawingRef) -> Option<&mut Anchor> {
         match r {
             DrawingRef::Chart(id) => self.charts.iter_mut().find(|o| o.id == id).map(|o| &mut o.anchor),
             DrawingRef::Image(id) => self.images.iter_mut().find(|o| o.id == id).map(|o| &mut o.anchor),
@@ -485,6 +516,42 @@ mod tests {
         assert_eq!(sh.shapes.iter().map(|s| s.anchor.mode).collect::<Vec<_>>(), vec![AnchorMode::MoveOnly; 3]);
         sh.delete_group(4);
         assert!(sh.shapes.is_empty() && sh.groups.is_empty());
+    }
+
+    #[test]
+    fn sort_group_overlap_requires_a_nonempty_block() {
+        let sh = sheet_with_nested_group();
+        for area in [ObjectRect { x: 160.0, y: 60.0, w: 0.0, h: 30.0 }, ObjectRect { x: 150.0, y: 80.0, w: 30.0, h: 0.0 }] {
+            let grouped = sh.grouped_objects(area);
+            assert_eq!(grouped.len(), 5);
+            assert!(grouped.values().all(|&held| !held), "collapsed sort block {area:?} has no overlap");
+        }
+    }
+
+    #[test]
+    fn sort_group_overlap_uses_outer_box_and_half_open_edges() {
+        let mut sh = sheet_with_nested_group();
+        sh.groups[1].anchor = sh.rect_anchor(ObjectRect { x: 80.0, y: 40.0, w: 140.0, h: 60.0 }, AnchorMode::MoveOnly);
+        let held = |sh: &Sheet, x| {
+            let area = ObjectRect { x, y: 40.0, w: 10.0, h: 10.0 };
+            let grouped = sh.grouped_objects(area);
+            assert_eq!(grouped.len(), 5);
+            assert!(grouped.values().all(|&hold| hold == grouped[&crate::ObjRef::new(crate::ObjKind::Group, 4)]));
+            grouped[&crate::ObjRef::new(crate::ObjKind::Group, 4)]
+        };
+        assert!(!held(&sh, 70.0)); // block ends exactly at the stored box's left edge
+        assert!(held(&sh, 75.0)); // stored box, not member bounds, overlaps
+        assert!(!held(&sh, 220.0)); // block starts exactly at the stored box's right edge
+        sh.groups[1].anchor = sh.rect_anchor(ObjectRect { x: 60.0, y: 40.0, w: 20.0, h: 10.0 }, AnchorMode::MoveOnly);
+        assert!(!held(&sh, 85.0)); // the gap between stored and member boxes doesn't overlap
+        sh.groups[0].members.push(DrawingRef::Group(4));
+        assert!(!held(&sh, 75.0)); // a cycle without an outermost group does not hold
+        sh.groups.remove(0);
+        sh.groups[0].members.clear();
+        sh.groups[0].anchor = sh.rect_anchor(ObjectRect { x: 80.0, y: 40.0, w: 0.0, h: 0.0 }, AnchorMode::MoveOnly);
+        let group = crate::ObjRef::new(crate::ObjKind::Group, 4);
+        assert!(sh.grouped_objects(ObjectRect { x: 80.0, y: 40.0, w: 10.0, h: 10.0 })[&group]);
+        assert!(!sh.grouped_objects(ObjectRect { x: 70.0, y: 40.0, w: 10.0, h: 10.0 })[&group]);
     }
 
     #[test]

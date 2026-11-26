@@ -1,0 +1,488 @@
+//! Floating objects when row heights and column widths change without a structural shift.
+//!
+//! The editable anchor keeps an object's top-left cell and offset, and its size in pixels.
+//! Use a live imported two-cell placement when available; otherwise infer the far corner from
+//! the old size. When line sizes change, the object follows its cells according to `editAs`
+//! (ECMA-376 Part 1, 20.5.3.2 `ST_EditAs`): "move and size with cells" keeps both corners on
+//! their cells, "move but don't size" keeps its size and follows its top-left cell, and "don't
+//! move or size" keeps its place on the sheet.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use gridcraft_core::{MAX_COLS, MAX_ROWS};
+
+use crate::group::map_rect;
+use crate::sheet::drawing_reference;
+use crate::{
+    Anchor, AnchorMode, ChildTransform, DrawingGroup, DrawingPlacement, DrawingRef, GroupProjection, LineInfo, MAX_GROUP_DEPTH, ObjKind, ObjRef,
+    ObjectRect, Sheet, group_child_box, group_unturned_box,
+};
+
+/// Pixels per EMU, for the half-EMU a stored marker can't resolve.
+const PX_PER_EMU: f64 = 1.0 / 9525.0;
+/// Positions this close (pixels) are the same place: the same line sizes summed in another order.
+const SAME: f64 = 1e-6;
+
+fn same_rect(a: ObjectRect, b: ObjectRect) -> bool {
+    [a.x - b.x, a.y - b.y, a.w - b.w, a.h - b.h].iter().all(|d| d.abs() <= PX_PER_EMU / 2.0)
+}
+
+/// A top-level floating object: one that isn't inside a group.
+#[derive(Clone, Copy)]
+enum Floating {
+    Drawing(DrawingRef),
+    Control(u32),
+}
+
+impl Floating {
+    fn obj_ref(self) -> ObjRef {
+        match self {
+            Floating::Drawing(r) => drawing_obj(r),
+            Floating::Control(id) => ObjRef::new(ObjKind::Control, id),
+        }
+    }
+}
+
+fn drawing_obj(r: DrawingRef) -> ObjRef {
+    match r {
+        DrawingRef::Chart(id) => ObjRef::new(ObjKind::Chart, id),
+        DrawingRef::Image(id) => ObjRef::new(ObjKind::Image, id),
+        DrawingRef::Shape(id) => ObjRef::new(ObjKind::Shape, id),
+        DrawingRef::Group(id) => ObjRef::new(ObjKind::Group, id),
+        DrawingRef::Slicer(id) => ObjRef::new(ObjKind::Slicer, id),
+    }
+}
+
+/// One axis of a sheet's grid.
+#[derive(Clone, Copy)]
+struct Axis<'a> {
+    sheet: &'a Sheet,
+    rows: bool,
+}
+
+impl Axis<'_> {
+    fn start(self, line: u32) -> f64 {
+        if self.rows { self.sheet.row_top(line) } else { self.sheet.col_left(line) }
+    }
+    fn at(self, pos: f64) -> u32 {
+        if self.rows { self.sheet.row_at(pos) } else { self.sheet.col_at(pos) }
+    }
+    fn size(self, line: u32) -> f64 {
+        f64::from(if self.rows { self.sheet.row_height(line) } else { self.sheet.col_width(line) })
+    }
+    fn limit(self) -> u32 {
+        if self.rows { MAX_ROWS } else { MAX_COLS }
+    }
+}
+
+/// The extent of an object starting `offset` into `line` and `extent` long, once its far edge
+/// keeps its place in its own line while the lines change from `old` to `new`. A far edge on a
+/// line boundary stays on that boundary.
+fn resized(old: Axis<'_>, new: Axis<'_>, line: u32, offset: f32, extent: f32) -> f64 {
+    let (offset, extent) = (f64::from(offset), f64::from(extent.max(0.0)));
+    let end = old.start(line) + offset + extent;
+    let mut far = old.at(end);
+    let mut into = end - old.start(far);
+    let tolerance = PX_PER_EMU / 2.0 + (offset.abs() + extent) * f64::from(f32::EPSILON);
+    let size = old.size(far);
+    if size > 0.0 && far + 1 < old.limit() && (into - size).abs() <= tolerance {
+        far += 1;
+        into = 0.0;
+    }
+    (new.start(far) + into - (new.start(line) + offset)).max(0.0)
+}
+
+/// Whether the place `offset` into `line` moved on the sheet: the line starts elsewhere, or it
+/// became too short to hold the offset.
+fn displaced(old: Axis<'_>, new: Axis<'_>, line: u32, offset: f32) -> bool {
+    let offset = f64::from(offset);
+    (new.start(line) - old.start(line)).abs() > SAME || (offset > 0.0 && offset >= new.size(line) && offset < old.size(line))
+}
+
+/// `a` re-measured for lines changed from `old` to `new` by its mode; `None` when it stays.
+fn follow(old: &Sheet, new: &Sheet, a: &Anchor, placement: Option<&DrawingPlacement>) -> Option<Anchor> {
+    let axes = |rows| (Axis { sheet: old, rows }, Axis { sheet: new, rows });
+    let ((old_x, new_x), (old_y, new_y)) = (axes(false), axes(true));
+    match a.mode {
+        AnchorMode::MoveOnly => None,
+        AnchorMode::MoveAndSize => {
+            let (width, height) = if let Some(placement @ DrawingPlacement::TwoCell { .. }) = placement {
+                let next = placement.anchor(new);
+                (f64::from(next.width), f64::from(next.height))
+            } else {
+                (resized(old_x, new_x, a.cell.col, a.dx, a.width), resized(old_y, new_y, a.cell.row, a.dy, a.height))
+            };
+            let keep = |new: f64, old: f32| if (new - f64::from(old.max(0.0))).abs() <= SAME { old } else { new as f32 };
+            let next = Anchor { width: keep(width, a.width), height: keep(height, a.height), ..*a };
+            (next != *a).then_some(next)
+        }
+        AnchorMode::Absolute => (displaced(old_x, new_x, a.cell.col, a.dx) || displaced(old_y, new_y, a.cell.row, a.dy))
+            .then(|| new.layout_rect_anchor(old.anchor_rect(a), AnchorMode::Absolute)),
+    }
+}
+
+/// `lines` with the visibility of each line `before` had: a line hidden or shown counts at the
+/// size it had before.
+fn keep_visibility(lines: &mut BTreeMap<u32, LineInfo>, before: &BTreeMap<u32, LineInfo>) {
+    let hidden = |m: &BTreeMap<u32, LineInfo>, k: u32| m.get(&k).is_some_and(|i| i.hidden);
+    let toggled: Vec<u32> =
+        before.iter().chain(lines.iter()).filter(|(_, i)| i.hidden).map(|(&k, _)| k).filter(|&k| hidden(before, k) != hidden(lines, k)).collect();
+    for k in toggled {
+        match before.get(&k) {
+            Some(info) => lines.insert(k, *info),
+            None => lines.remove(&k),
+        };
+    }
+}
+
+/// Where an object read with `placement` sits once the open has fitted its rows: its anchor over
+/// the final lines. For a two-cell anchor that is both markers whatever its `editAs`, which
+/// ECMA-376 `ST_EditAs` (20.5.3.2) ties to rows resized after it is placed. Whether Excel for Mac
+/// counts its own open-time row fit as such a resize for `editAs="oneCell"` (keep the read size)
+/// or `"absolute"` (keep the read box) is unmeasured; this is the one place to change if a
+/// measurement says it does (returning the read anchor there, whose stored `to` marker then no
+/// longer matches, so its placement must be dropped rather than kept current).
+fn opened_anchor(placement: &DrawingPlacement, sheet: &Sheet) -> Anchor {
+    placement.anchor(sheet)
+}
+
+impl Sheet {
+    /// A sheet holding only this one's row heights, column widths and line visibility, to
+    /// measure anchors against once the lines have changed.
+    pub fn line_geometry(&self) -> Sheet {
+        let mut lines = Sheet::new(String::new());
+        lines.geometry = self.geometry;
+        lines.default_row_height = self.default_row_height;
+        lines.default_col_width = self.default_col_width;
+        lines.rows = self.rows.clone();
+        lines.cols = self.cols.clone();
+        lines
+    }
+
+    /// Whether any row height, column width or line visibility differs from `other`'s.
+    pub fn lines_differ(&self, other: &Sheet) -> bool {
+        self.default_row_height != other.default_row_height
+            || self.default_col_width != other.default_col_width
+            || self.rows != other.rows
+            || self.cols != other.cols
+    }
+
+    /// The groups and every object they contain, named as in [`Sheet::object_refs`], each with
+    /// whether its outermost group overlaps `area`: that group's own box or the box around its
+    /// members does (a box without extent counts where it starts; an `area` without extent
+    /// overlaps nothing).
+    pub fn grouped_objects(&self, area: ObjectRect) -> HashMap<ObjRef, bool> {
+        let overlaps = |lo: f64, len: f64, a_lo: f64, a_len: f64| a_len > 0.0 && lo < a_lo + a_len && (lo >= a_lo || lo + len > a_lo);
+        let overlap = |r: ObjectRect| overlaps(r.x, r.w, area.x, area.w) && overlaps(r.y, r.h, area.y, area.h);
+        let mut out: HashMap<_, _> = self.groups.iter().flat_map(|g| g.members.iter().copied()).map(|m| (drawing_obj(m), false)).collect();
+        for g in &self.groups {
+            let group = DrawingRef::Group(g.id);
+            // A group in the member map has a parent. Cycles without a root stay false.
+            if out.contains_key(&drawing_obj(group)) {
+                continue;
+            }
+            let held = overlap(self.anchor_rect(&g.anchor)) || self.drawing_rect(group).is_some_and(overlap);
+            for m in std::iter::once(group).chain(self.group_contents(g.id)) {
+                out.insert(drawing_obj(m), held);
+            }
+        }
+        out
+    }
+
+    /// Floating objects outside any group, then each one's anchor.
+    fn floating(&self) -> Vec<(Floating, Anchor)> {
+        let grouped: HashSet<DrawingRef> = self.groups.iter().flat_map(|g| g.members.iter().copied()).collect();
+        let drawings = (self.charts.iter().map(|o| (DrawingRef::Chart(o.id), o.anchor)))
+            .chain(self.images.iter().map(|o| (DrawingRef::Image(o.id), o.anchor)))
+            .chain(self.shapes.iter().map(|o| (DrawingRef::Shape(o.id), o.anchor)))
+            .chain(self.slicers.iter().map(|o| (DrawingRef::Slicer(o.id), o.anchor)))
+            .chain(self.groups.iter().map(|g| (DrawingRef::Group(g.id), g.anchor)))
+            .filter(|(r, _)| !grouped.contains(r))
+            .map(|(r, a)| (Floating::Drawing(r), a));
+        drawings.chain(self.controls.iter().map(|c| (Floating::Control(c.id), c.anchor))).collect()
+    }
+
+    /// Reproject source coordinates instead of scaling sheet boxes that lost an axis. The
+    /// root is placed by its worksheet anchor; nested frames are in their parent's EMUs.
+    fn project_group_members(
+        &self,
+        g: &DrawingGroup,
+        frame: ObjectRect,
+        parent: Option<GroupProjection>,
+        depth: usize,
+        out: &mut HashMap<DrawingRef, ObjectRect>,
+    ) {
+        let Some(f) = g.file.as_ref().filter(|f| depth < MAX_GROUP_DEPTH && !f.edited) else { return };
+        let fallback = if parent.is_some() { 1.0 } else { PX_PER_EMU };
+        let child = group_child_box(frame, if f.fields[2] { f.child_offset } else { f.off }, f.child_extent, f.ext, fallback);
+        let own = GroupProjection::new(frame, child, (g.flip, g.rotation), fallback);
+        let map = parent.map_or(own, |p| p.compose(own));
+        for member in &f.members {
+            let frame = member.transform.map_or(child, ChildTransform::rect);
+            if let DrawingRef::Group(id) = member.reference {
+                let Some(nested) = self.drawing_group(id) else { continue };
+                out.insert(member.reference, map.project(group_unturned_box(frame, nested.rotation)));
+                self.project_group_members(nested, frame, Some(map), depth + 1, out);
+            } else {
+                out.insert(member.reference, map.project(member.transform.map_or(frame, ChildTransform::leaf_box)));
+            }
+        }
+    }
+
+    /// Moves everything in group `id` from where `from` (its old anchor, measured on `old`)
+    /// put it to `to`, its new anchor on this sheet, keeping each member's place in the group:
+    /// members are cell-anchored on their own, so lines changing inside the group would move
+    /// them even when the group's anchor stays. A member already in place (within half an EMU)
+    /// keeps its anchor.
+    /// The anchors only: stored file placements are left for the caller to keep or drop.
+    fn carry_group(&mut self, id: u32, old: &Sheet, from: &Anchor, to: Anchor) {
+        let (from_rect, to_rect) = (old.anchor_rect(from), self.anchor_rect(&to));
+        let mut recovered = HashMap::new();
+        let mut rotation = 0;
+        if let Some(g) = self.drawing_group(id) {
+            rotation = g.rotation;
+            if ((from_rect.w == 0.0 && to_rect.w > 0.0) || (from_rect.h == 0.0 && to_rect.h > 0.0)) && self.source_layout_group(g) {
+                self.project_group_members(g, to_rect, None, 0, &mut recovered);
+            }
+        }
+        let old_box = group_unturned_box(from_rect, rotation);
+        let new_box = group_unturned_box(to_rect, rotation);
+        for m in self.group_contents(id) {
+            let Some(a) = self.raw_drawing_anchor(m) else { continue };
+            let target = recovered.get(&m).copied().unwrap_or_else(|| map_rect(old_box, new_box, old.anchor_rect(&a)));
+            if same_rect(target, self.anchor_rect(&a)) {
+                continue;
+            }
+            let next = self.layout_rect_anchor(target, a.mode);
+            match m {
+                DrawingRef::Group(gid) => {
+                    if let Some(g) = self.groups.iter_mut().find(|g| g.id == gid) {
+                        g.anchor = next;
+                    }
+                }
+                leaf => {
+                    if let Some(slot) = self.drawing_anchor_mut(leaf) {
+                        *slot = next;
+                    }
+                }
+            }
+        }
+        if let Some(g) = self.groups.iter_mut().find(|g| g.id == id) {
+            g.anchor = to;
+        }
+    }
+
+    /// Keep layout recovery when a row permutation re-encodes a collapsed imported group's
+    /// anchors without moving any of its boxes. Keep only the response of coincident spans
+    /// to later line sizing, not the old worksheet placement for export. The permutation
+    /// must leave the rows in the half-open collapsed span under the group, in any order.
+    pub fn keep_sorted_group_collapse(&mut self, before: &Sheet, id: u32, placement_affected: bool, rows_stay: &dyn Fn(u32, u32) -> bool) {
+        let Some(g) = before.drawing_group(id) else { return };
+        let Some(source) = &g.file else { return };
+        let r = DrawingRef::Group(id);
+        let a = g.anchor;
+        if a.mode != AnchorMode::MoveAndSize
+            || (a.width != 0.0 && a.height != 0.0)
+            || before.parent_group(r).is_some()
+            || !before.source_layout_group(g)
+        {
+            return;
+        }
+        let mut spans = source.held_collapse;
+        let original = before.drawing_files.get(&r);
+        if let Some(file) = original.filter(|f| f.anchor == a && f.placement.anchor(before) == a)
+            && let DrawingPlacement::TwoCell { from, to, .. } = file.placement
+        {
+            let coincident = |rows, extent, start, end, from_off, to_off| {
+                let axis = Axis { sheet: before, rows };
+                let offset = |emu: i64| {
+                    let px = (emu as f64 / 9525.0).clamp(0.0, 1e7);
+                    if before.geometry == crate::Geometry::Legacy { f64::from(px as f32) } else { px }
+                };
+                (extent == 0.0
+                    && start != end
+                    && start < axis.limit()
+                    && end < axis.limit()
+                    && ((axis.start(end) + offset(to_off)) - (axis.start(start) + offset(from_off))).abs() <= SAME)
+                    .then_some((start, end))
+            };
+            spans = [
+                coincident(false, a.width, from.col, to.col, from.col_off, to.col_off),
+                coincident(true, a.height, from.row, to.row, from.row_off, to.row_off),
+            ];
+        }
+        if spans[1].is_some_and(|(start, end)| !rows_stay(start.min(end), start.max(end))) {
+            // Even equal-height rows can leave the span. Neither live markers nor an existing
+            // layout-only hold should let a later fit recover it in that case.
+            self.invalidate_drawing_file(r);
+            if let Some(file) = self.groups.iter_mut().find(|g| g.id == id).and_then(|g| g.file.as_mut()) {
+                file.held_collapse = [None; 2];
+                file.sort_lost_collapsed_rows = true;
+            }
+            return;
+        }
+        if spans.iter().all(Option::is_none) {
+            return;
+        }
+        if !placement_affected
+            && original.is_some_and(|f| f.placement.anchor(self) == a)
+            && self.drawing_group(id).is_some_and(|g| self.source_layout_group(g))
+        {
+            return;
+        }
+        let same = |o| match (before.raw_drawing_anchor(o), self.raw_drawing_anchor(o)) {
+            (Some(old), Some(new)) => same_rect(before.anchor_rect(&old), self.anchor_rect(&new)),
+            _ => false,
+        };
+        if !same(r) || !before.group_contents(id).into_iter().all(same) {
+            self.invalidate_drawing_file(r);
+            return;
+        }
+        self.refresh_group_files(id);
+        if let Some(file) = self.groups.iter_mut().find(|g| g.id == id).and_then(|g| g.file.as_mut()) {
+            file.held_collapse = spans;
+        }
+        self.drawing_files.remove(&r);
+    }
+
+    fn held_group_resize(&self, before: &Sheet, new: &Sheet, id: u32, a: Anchor) -> Option<Anchor> {
+        let g = self.drawing_group(id)?;
+        let spans = g.file.as_ref()?.held_collapse;
+        if spans.iter().all(Option::is_none) || !self.source_layout_group(g) {
+            return None;
+        }
+        let mut next = follow(before, new, &a, None).unwrap_or(a);
+        let growth = |rows, (start, end)| {
+            let span = |sheet| {
+                let axis = Axis { sheet, rows };
+                axis.start(end) - axis.start(start)
+            };
+            (span(new) - span(before)).max(0.0) as f32
+        };
+        if let Some(pair) = spans[0] {
+            next.width = growth(false, pair);
+        }
+        if let Some(pair) = spans[1] {
+            next.height = growth(true, pair);
+        }
+        Some(next)
+    }
+
+    fn live_drawing_placement(&self, r: DrawingRef, anchor: Anchor) -> Option<&DrawingPlacement> {
+        self.drawing_files.get(&r).filter(|file| file.anchor == anchor).map(|file| &file.placement)
+    }
+
+    /// Re-places floating objects after row heights or column widths changed from `before`'s
+    /// (any sheet holding the old lines), each by its anchor mode: "move and size with cells"
+    /// keeps both corners on their cells, "move but don't size" keeps its size, "don't move or
+    /// size" keeps its place. A group follows its own mode and carries its members along.
+    /// Lines hidden or shown are left out (an object keeps the size it had over them), as only
+    /// the size, not the cell, of a collapsed line is known afterwards.
+    ///
+    /// `settled` names objects to leave alone: ones the change itself already placed (every
+    /// shape as an [`ObjKind::Shape`]). A group is left alone when it or anything in it is
+    /// settled.
+    pub fn follow_line_sizes(&mut self, before: &Sheet, settled: &dyn Fn(ObjRef) -> bool) {
+        if !self.lines_differ(before) {
+            return;
+        }
+        let mut new = self.line_geometry();
+        keep_visibility(&mut new.rows, &before.rows);
+        keep_visibility(&mut new.cols, &before.cols);
+        for (object, a) in self.floating() {
+            if settled(object.obj_ref()) {
+                continue;
+            }
+            match object {
+                Floating::Drawing(DrawingRef::Group(id)) => {
+                    let contents = self.group_contents(id);
+                    if contents.iter().any(|&m| settled(drawing_obj(m))) {
+                        continue;
+                    }
+                    let held = self.held_group_resize(before, &new, id, a);
+                    let mut next = held.or_else(|| follow(before, &new, &a, self.live_drawing_placement(DrawingRef::Group(id), a))).unwrap_or(a);
+                    if a.height == 0.0 && self.drawing_group(id).and_then(|g| g.file.as_ref()).is_some_and(|f| f.sort_lost_collapsed_rows) {
+                        next.height = 0.0;
+                    }
+                    self.carry_group(id, before, &a, next);
+                    if held.is_some() && !same_rect(before.anchor_rect(&a), self.anchor_rect(&next)) {
+                        self.invalidate_drawing_file(DrawingRef::Group(id));
+                    }
+                }
+                Floating::Drawing(r) => {
+                    let next = follow(before, &new, &a, self.live_drawing_placement(r, a));
+                    if let (Some(next), Some(slot)) = (next, self.drawing_anchor_mut(r)) {
+                        *slot = next;
+                    }
+                }
+                Floating::Control(id) => {
+                    if let (Some(next), Some(c)) = (follow(before, &new, &a, None), self.controls.iter_mut().find(|c| c.id == id)) {
+                        c.anchor = next;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Places floating objects over the lines an open settled on, after sizing it does once the
+    /// file is read (automatic row heights fitted on open). `before` holds the lines as read.
+    ///
+    /// An object read with a stored placement is placed by its anchor over the final lines, as
+    /// the file describes it (ECMA-376 Part 1, 20.5.2.33 `twoCellAnchor`, 20.5.2.24
+    /// `oneCellAnchor`, 20.5.2.1 `absoluteAnchor`), and its stored placement stays current so an
+    /// unedited object saves its markers unchanged. A group's members go with it. Objects read
+    /// without one (a chart's own drawing, form controls) follow the lines by their mode.
+    pub fn place_after_open_sizing(&mut self, before: &Sheet) {
+        if !self.lines_differ(before) {
+            return;
+        }
+        let placed: Vec<(DrawingRef, Anchor)> = self
+            .floating()
+            .into_iter()
+            .filter_map(|(object, a)| match object {
+                Floating::Drawing(r) => self.drawing_files.get(&r).filter(|f| f.anchor == a).map(|f| (r, opened_anchor(&f.placement, self))),
+                Floating::Control(_) => None,
+            })
+            .collect();
+        let files: HashSet<DrawingRef> = placed.iter().map(|(r, _)| *r).collect();
+        for (r, next) in placed {
+            let Some(a) = self.raw_drawing_anchor(r) else { continue };
+            match r {
+                DrawingRef::Group(id) => {
+                    self.carry_group(id, before, &a, next);
+                    self.refresh_group_files(id);
+                }
+                leaf if next != a => {
+                    if let Some(slot) = self.drawing_anchor_mut(leaf) {
+                        *slot = next;
+                    }
+                }
+                _ => {}
+            }
+            if let Some(file) = self.drawing_files.get_mut(&r) {
+                file.anchor = next;
+            }
+        }
+        self.follow_line_sizes(before, &|o| drawing_reference(o).is_some_and(|r| files.contains(&r)));
+    }
+
+    /// Records group `id`'s current anchors, and those of the groups inside it, as their file
+    /// transforms' anchors: the transforms still describe the groups after they moved with
+    /// their placement.
+    fn refresh_group_files(&mut self, id: u32) {
+        let nested: Vec<u32> = std::iter::once(id)
+            .chain(self.group_contents(id).into_iter().filter_map(|m| if let DrawingRef::Group(g) = m { Some(g) } else { None }))
+            .collect();
+        for gid in nested {
+            let Some(i) = self.groups.iter().position(|g| g.id == gid) else { continue };
+            let Some(mut file) = self.groups[i].file.take() else { continue };
+            file.anchor = self.groups[i].anchor;
+            for member in &mut file.members {
+                if let Some(anchor) = self.raw_drawing_anchor(member.reference) {
+                    member.anchor = anchor;
+                }
+            }
+            self.groups[i].file = Some(file);
+        }
+    }
+}

@@ -289,7 +289,7 @@ fn shift_sheet_features(sh: &mut Sheet, axis: Axis, at: u32, count: u32, insert:
 
 /// Sorted changed line indices, coalesced into inclusive runs. The maps have a cheap equal
 /// path; when they differ, merge their keys rather than doing two tree lookups per key.
-fn changed_lines(
+pub(super) fn changed_lines(
     before: &std::collections::BTreeMap<u32, gridcraft_model::LineInfo>,
     after: &std::collections::BTreeMap<u32, gridcraft_model::LineInfo>,
     (default_before, default_after): (f32, f32),
@@ -322,6 +322,20 @@ fn changed_lines(
         push(next, limit - 1);
     }
     runs
+}
+
+pub(super) fn drawing_placement_hits(
+    sh: &Sheet,
+    r: gridcraft_model::DrawingRef,
+    file: &gridcraft_model::DrawingFile,
+    rows: bool,
+    changed: &[(u32, u32)],
+) -> bool {
+    if changed.is_empty() {
+        return false;
+    }
+    let (near, far) = drawing_line_dependency(sh, r, file, rows);
+    changed.get(changed.partition_point(|&(_, hi)| hi < near)).is_some_and(|&(lo, _)| lo <= far)
 }
 
 fn drawing_line_dependency(sh: &Sheet, r: gridcraft_model::DrawingRef, file: &gridcraft_model::DrawingFile, rows: bool) -> (u32, u32) {
@@ -380,11 +394,43 @@ impl ShiftedDrawingFit {
     }
 }
 
+/// Row heights and column widths an edit changed without shifting lines (sizes, sorted row
+/// heights) move what sits on them. Each object not in `placed` (the ones the edit placed
+/// itself, by sheet uid) follows by its anchor mode: "move and size with cells" keeps both
+/// corners on their cells, "move but don't size" keeps its size and "don't move or size" its
+/// place (ECMA-376 Part 1, 20.5.3.2 `ST_EditAs`). Restructured sheets re-placed theirs when the
+/// lines shifted. Runs before the edit's row fit, which `commit` follows for every object.
+pub(crate) fn follow_line_changes(
+    old: &gridcraft_model::Workbook,
+    wb: &mut gridcraft_model::Workbook,
+    restructured: &[u64],
+    placed: &[(u64, gridcraft_model::ObjRef)],
+) {
+    for si in 0..wb.sheets.len() {
+        let Some(after) = wb.sheets.get(si).filter(|sh| sh.object_anchors().next().is_some()) else { continue };
+        let uid = after.uid.get();
+        if restructured.contains(&uid) {
+            continue;
+        }
+        let Some(before) = old.sheets.get(si).filter(|sh| sh.uid.get() == uid).or_else(|| old.sheets.iter().find(|sh| sh.uid.get() == uid)) else {
+            continue;
+        };
+        if Arc::ptr_eq(before, after) || !after.lines_differ(before) {
+            continue;
+        }
+        let before = Arc::clone(before);
+        let Some(sh) = wb.sheet_mut(si) else { continue };
+        let mine: std::collections::HashSet<gridcraft_model::ObjRef> = placed.iter().filter(|(s, _)| *s == uid).map(|&(_, o)| o).collect();
+        sh.follow_line_sizes(&before, &|o| mine.contains(&o));
+    }
+}
+
 /// Row heights, column widths and line visibility that change without a structural shift
 /// (sizes, hide/unhide, filters, outlines, sorted row heights, automatic row fits) move or
-/// resize what the user sees without touching object anchors. A stored source placement over a
-/// changed line, or a fixed one after an earlier changed line, no longer describes that object,
-/// so it is dropped with its group transforms and regenerated from the editable geometry.
+/// resize what the user sees ([`follow_line_changes`] re-measures the anchors). A stored source
+/// placement over a changed line, or a fixed one after an earlier changed line, no longer
+/// describes that object's file markers, so it is dropped with its group transforms and
+/// regenerated from the editable geometry.
 /// Structurally shifted sheets have already remapped their markers, and their subsequent
 /// auto-fit is checked separately against the remapped grid. A fixed object there keeps its
 /// model cell while lines of another size move in above it, so its placement is dropped when the
@@ -418,13 +464,7 @@ pub(crate) fn discard_placement_after_line_changes(old: &gridcraft_model::Workbo
             .drawing_files
             .iter()
             .filter(|&(&r, file)| {
-                [(true, &rows), (false, &cols)].into_iter().any(|(axis, changed)| {
-                    if changed.is_empty() {
-                        return false;
-                    }
-                    let (near, far) = drawing_line_dependency(before, r, file, axis);
-                    changed.get(changed.partition_point(|&(_, hi)| hi < near)).is_some_and(|&(lo, _)| lo <= far)
-                })
+                [(true, &rows), (false, &cols)].into_iter().any(|(axis, changed)| drawing_placement_hits(before, r, file, axis, changed))
             })
             .map(|(&r, _)| r)
             .collect();

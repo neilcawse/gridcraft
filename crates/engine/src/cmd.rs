@@ -385,6 +385,10 @@ pub struct Ctx<'a> {
     pub changed_names: Vec<String>,
     /// Structural edits recorded for macro range following.
     pub edits: Vec<(String, gridcraft_formula::adjust::Edit)>,
+    /// Floating objects the command placed itself on the lines it leaves (sheet uid, object,
+    /// every shape as an `ObjKind::Shape`): following the command's own line changes leaves
+    /// them alone, but the row fit after the command still moves them.
+    pub placed: Vec<(u64, gridcraft_model::ObjRef)>,
 }
 
 pub(crate) fn edit<R>(s: &mut Session, f: impl FnOnce(&mut Ctx) -> Result<R>) -> Result<R> {
@@ -468,6 +472,7 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
         moved_names: Vec::new(),
         changed_names: Vec::new(),
         edits: Vec::new(),
+        placed: Vec::new(),
     };
     let r = f(&mut ctx)?;
     let Ctx {
@@ -480,13 +485,18 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
         moved_names,
         changed_names: rewrite_changed_names,
         edits,
+        placed,
         ..
     } = ctx;
-    let shifted: Vec<u64> = edits
+    // Sheets whose lines an insert or delete shifted: their objects were re-anchored then, so
+    // only the row fit that follows still moves lines under them.
+    let restructured: Vec<u64> = edits
         .iter()
         .filter(|(_, e)| matches!(e, gridcraft_formula::adjust::Edit::Insert { .. } | gridcraft_formula::adjust::Edit::Delete { .. }))
-        .filter_map(|(s, _)| wb.sheet_index(s).and_then(|i| wb.sheet(i)).filter(|sh| !sh.drawing_files.is_empty()).map(|sh| sh.uid.get()))
+        .filter_map(|(s, _)| wb.sheet_index(s).and_then(|i| wb.sheet(i)).map(|sh| sh.uid.get()))
         .collect();
+    let shifted: Vec<u64> =
+        restructured.iter().copied().filter(|&uid| wb.sheets.iter().any(|sh| sh.uid.get() == uid && !sh.drawing_files.is_empty())).collect();
     if let Some(log) = d.edits.as_mut() {
         log.extend(edits);
     }
@@ -528,19 +538,45 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
     if let Some(t0) = t0 {
         eprintln!("commit: + recalc {:?}", since(t0));
     }
+    // The command's own line changes (sizes, sorted row heights) move what sits on them, apart
+    // from what it placed itself; the row fit below then moves everything on its sheet.
+    sheet::follow_line_changes(&d.wb, &mut wb, &restructured, &placed);
     fit_rows.sort_unstable();
     fit_rows.dedup();
     let mut sweep: Option<(usize, MergeSweep)> = None;
     let mut shifted_fit = None::<(usize, sheet::ShiftedDrawingFit)>;
+    // The rows the fit changed on the sheet being fitted, each with its line before the fit, to
+    // re-place that sheet's objects over the fitted rows; `track` when the sheet has objects.
+    let mut fitted = (0usize, Vec::<(u32, Option<gridcraft_model::LineInfo>)>::new());
+    let mut track = false;
+    let follow_fit = |wb: &mut Workbook, (si, rows): &mut (usize, Vec<(u32, Option<gridcraft_model::LineInfo>)>)| {
+        if rows.is_empty() {
+            return;
+        }
+        if let Some(sh) = wb.sheet_mut(*si) {
+            let mut lines = sh.line_geometry();
+            for &(row, info) in rows.iter() {
+                match info {
+                    Some(info) => lines.rows.insert(row, info),
+                    None => lines.rows.remove(&row),
+                };
+            }
+            sh.follow_line_sizes(&lines, &|_| false);
+        }
+        rows.clear();
+    };
     let mut left = MERGE_FIT_WORK;
     for (si, row) in fit_rows {
         if sweep.as_ref().is_none_or(|(at, _)| *at != si) {
+            follow_fit(&mut wb, &mut fitted);
             if let Some((prev, fit)) = shifted_fit.take() {
                 fit.finish(&mut wb, prev);
             }
             if let Some(sh) = wb.sheet(si).filter(|sh| !shifted.is_empty() && shifted.contains(&sh.uid.get())) {
                 shifted_fit = Some((si, sheet::ShiftedDrawingFit::new(sh)));
             }
+            fitted.0 = si;
+            track = wb.sheet(si).is_some_and(|sh| sh.object_anchors().next().is_some());
             if let Some((_, old)) = &sweep {
                 left = old.left();
             }
@@ -548,7 +584,13 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
         }
         if let Some((_, sw)) = sweep.as_mut() {
             let before = shifted_fit.as_ref().and_then(|_| wb.sheet(si)).map(|sh| sh.row_height(row));
+            let line = if track { wb.sheet(si).map(|sh| sh.rows.get(&row).copied()) } else { None };
             fit_row_height(&mut wb, si, row, sw);
+            if let Some(line) = line
+                && wb.sheet(si).is_some_and(|sh| sh.rows.get(&row) != line.as_ref())
+            {
+                fitted.1.push((row, line));
+            }
             if let Some((_, fit)) = shifted_fit.as_mut()
                 && let (Some(before), Some(sh)) = (before, wb.sheet(si))
             {
@@ -556,6 +598,7 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
             }
         }
     }
+    follow_fit(&mut wb, &mut fitted);
     if let Some((si, fit)) = shifted_fit {
         fit.finish(&mut wb, si);
     }

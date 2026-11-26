@@ -1,6 +1,9 @@
-use gridcraft_core::{MAX_COLS, MAX_ROWS};
+use gridcraft_core::{CellRef, MAX_COLS, MAX_ROWS};
 
-use crate::{Anchor, AnchorMode, DrawingRef, Sheet};
+use crate::{Anchor, AnchorMode, DrawingRef, Geometry, Sheet};
+
+/// EMUs per sheet pixel (914,400 EMU per inch at 96 pixels per inch).
+const EMU_PER_PX: f64 = 9525.0;
 
 /// A DrawingML cell marker. Offsets are signed EMUs and need not fit inside the marked cell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,6 +20,63 @@ pub enum DrawingPlacement {
     TwoCell { from: DrawingMarker, to: DrawingMarker, edit_as: Option<String> },
     OneCell { from: DrawingMarker, ext: (i64, i64) },
     Absolute { pos: (i64, i64), ext: (i64, i64) },
+}
+
+impl DrawingPlacement {
+    /// The editable anchor this placement describes over `sheet`'s current row heights and
+    /// column widths (ECMA-376 Part 1, 20.5.2.33 `twoCellAnchor`, 20.5.2.24 `oneCellAnchor`,
+    /// 20.5.2.1 `absoluteAnchor`): a two-cell anchor spans from its `from` to its `to` marker,
+    /// a one-cell anchor starts at its `from` marker with its own extent, and an absolute
+    /// anchor sits at its sheet position. `editAs` (20.5.3.2 `ST_EditAs`) only says how the
+    /// object follows later cell edits; it becomes the anchor's mode. Negative marker offsets
+    /// clamp to the marked cell's edge.
+    pub fn anchor(&self, sheet: &Sheet) -> Anchor {
+        let px = |emu: i64| (emu as f64 / EMU_PER_PX).clamp(-1e7, 1e7);
+        // Legacy layout positions in whole f32 pixels, as the Legacy grid draws them.
+        let layout = |v: f64| if sheet.geometry == Geometry::Legacy { f64::from(v as f32) } else { v };
+        let marker =
+            |m: &DrawingMarker| (CellRef::new(m.row.min(MAX_ROWS - 1), m.col.min(MAX_COLS - 1)), px(m.col_off).max(0.0), px(m.row_off).max(0.0));
+        match self {
+            Self::TwoCell { from, to, edit_as } => {
+                let (cell, dx, dy) = marker(from);
+                let (to, tdx, tdy) = marker(to);
+                let x1 = sheet.col_left(cell.col) + layout(dx);
+                let y1 = sheet.row_top(cell.row) + layout(dy);
+                let x2 = sheet.col_left(to.col) + layout(tdx);
+                let y2 = sheet.row_top(to.row) + layout(tdy);
+                let mode = match edit_as.as_deref() {
+                    Some("absolute") => AnchorMode::Absolute,
+                    Some("oneCell") => AnchorMode::MoveOnly,
+                    _ => AnchorMode::MoveAndSize,
+                };
+                Anchor { cell, dx: dx as f32, dy: dy as f32, width: (x2 - x1).max(0.0) as f32, height: (y2 - y1).max(0.0) as f32, mode }
+            }
+            Self::OneCell { from, ext: (cx, cy) } => {
+                let (cell, dx, dy) = marker(from);
+                Anchor {
+                    cell,
+                    dx: dx as f32,
+                    dy: dy as f32,
+                    width: px(*cx).max(0.0) as f32,
+                    height: px(*cy).max(0.0) as f32,
+                    mode: AnchorMode::MoveOnly,
+                }
+            }
+            Self::Absolute { pos: (x, y), ext: (cx, cy) } => {
+                let x = layout(px(*x).max(0.0));
+                let y = layout(px(*y).max(0.0));
+                let (col, row) = (sheet.col_at(x), sheet.row_at(y));
+                Anchor {
+                    cell: CellRef::new(row, col),
+                    dx: (x - sheet.col_left(col)).max(0.0) as f32,
+                    dy: (y - sheet.row_top(row)).max(0.0) as f32,
+                    width: px(*cx).max(0.0) as f32,
+                    height: px(*cy).max(0.0) as f32,
+                    mode: AnchorMode::Absolute,
+                }
+            }
+        }
+    }
 }
 
 /// The original placement and the editable anchor it represented on import.
