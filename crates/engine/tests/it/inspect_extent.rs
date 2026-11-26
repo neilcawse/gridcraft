@@ -278,6 +278,25 @@ fn inspection_reports_excels_used_range_and_navigation_reaches_its_last_cell() {
 }
 
 #[test]
+fn a_saved_automatic_row_height_extends_inspection_even_when_it_matches_the_default() {
+    let mut s = session(|sh, _| {
+        u_base(sh);
+        // XLSX may save `ht` without `customHeight`. A height equal to the default need not
+        // become a geometry override, but the row still has a saved height, not just a bare tag.
+        row(sh, 40, LineInfo { saved_size: Some(f64::from(sh.default_row_height) * 0.75), ..Default::default() });
+    });
+    let bytes = gridcraft_xlsx::write_xlsx(&s.doc().unwrap().wb).unwrap();
+    let (wb, _) = gridcraft_xlsx::read_xlsx(&bytes).unwrap();
+    assert!(wb.sheet(0).unwrap().rows[&39].size.is_none(), "fixture must not set an effective height override");
+    s.doc_mut().unwrap().wb = Arc::new(wb);
+
+    let inspect = s.execute("document.inspect", json!({})).unwrap();
+    assert_eq!(inspect["sheets"][0]["usedRange"], "C3:E40");
+    let stats = s.execute("review.workbookStatistics", json!({})).unwrap();
+    assert_eq!(stats["sheet"]["endOfSheet"], "E40");
+}
+
+#[test]
 fn line_records_leave_the_shared_work_extent_print_and_csv_bounds_alone() {
     for &(case, build, used, _) in CASES {
         let s = session(build);
@@ -318,4 +337,38 @@ fn last_cell_steps_back_over_every_trailing_hidden_line_but_not_past_the_first()
         row(sh, 3, LineInfo { hidden: true, ..Default::default() });
     });
     assert_eq!(all_hidden.active().unwrap().wb.sheet(0).unwrap().last_cell().a1(), "C3");
+}
+
+#[test]
+fn filtering_trailing_rows_changes_last_cell_without_shrinking_inspection() {
+    let mut s = session(|_, _| {});
+    assert!(s.execute("document.inspect", json!({})).unwrap()["sheets"][0]["usedRange"].is_null());
+    assert!(s.execute("review.workbookStatistics", json!({})).unwrap()["sheet"]["endOfSheet"].is_null());
+    s.execute("selection.set", json!({"cell": "D5"})).unwrap();
+    s.execute("edit.goToSpecial", json!({"kind": "lastCell"})).unwrap();
+    assert_eq!(s.active().unwrap().selection.active, at("A1"));
+
+    s.execute("range.setValues", json!({"range": "B2", "values": [["State"], ["keep"], ["hide"], ["hide"]]})).unwrap();
+    s.execute("data.filter", json!({"range": "B2:B5"})).unwrap();
+    s.execute("data.filterBy", json!({"column": "B", "values": ["keep"]})).unwrap();
+    assert_eq!(s.execute("document.inspect", json!({})).unwrap()["sheets"][0]["usedRange"], "B2:B5");
+    assert_eq!(s.execute("review.workbookStatistics", json!({})).unwrap()["sheet"]["endOfSheet"], "B3");
+    s.execute("edit.goToSpecial", json!({"kind": "lastCell"})).unwrap();
+    assert_eq!(s.active().unwrap().selection.active, at("B3"));
+}
+
+#[test]
+fn last_cell_crosses_sparse_zero_default_gaps() {
+    let mut s = session(|sh, _| {
+        put(sh, &["B2", "XFD1048576"]);
+        sh.default_row_height = 0.0;
+        sh.default_col_width = 0.0;
+        row(sh, 3, sized(20.0));
+        row(sh, 40, LineInfo { hidden: true, ..sized(30.0) });
+        column(sh, "D", sized(60.0));
+        column(sh, "E", sized(0.0));
+    });
+    assert_eq!(s.execute("review.workbookStatistics", json!({})).unwrap()["sheet"]["endOfSheet"], "D3");
+    s.execute("edit.goToSpecial", json!({"kind": "lastCell"})).unwrap();
+    assert_eq!(s.active().unwrap().selection.active, at("D3"));
 }

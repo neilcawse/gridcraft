@@ -203,11 +203,11 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 - Workbook inspection (`document.inspect` and CLI `info`) reports Excel's UsedRange, and Ctrl+End,
   Ctrl+Shift+End, Go To Special (Last Cell) and the Workbook Statistics end-of-sheet field go to
   Excel's Last Cell (X33). The reported extent is the shared work extent (stored cells, including
-  cell formatting, and spills) grown along each axis by the row and column records Excel counts:
-  a row with a height, a row style, hidden, or an outline level or collapsed mark; a column with
-  a column style, an outline level or a collapsed mark. A width-only column and a bare XLSX row do
-  not count. Last Cell is its bottom-right corner, stepped back over trailing hidden or zero-size
-  rows and columns. See the [X33 entry](parity/INTEGRATION_NOTES.md#x33--reported-usedrange-and-last-cell)
+  cell formatting, and spills) grown along each axis by the line records Excel counts. X25
+  measured a row height, row style and column style extending the range; a width-only column
+  and a bare XLSX row did not. The remaining extent rules (including visibility and outline)
+  are inferred. Last Cell is the bottom-right corner, stepped back over trailing hidden or
+  zero-size rows and columns. See the [X33 entry](parity/INTEGRATION_NOTES.md#x33--reported-usedrange-and-last-cell)
   and [Microsoft's last-cell guidance](https://support.microsoft.com/en-us/excel/locate-and-reset-the-last-cell-on-a-worksheet).
 - The shared work extent is unchanged. It bounds default and selected-area print/PDF layout, CSV
   and range/text/HTML export, calculation, charts and pivots (including XLSX serialization ranges),
@@ -220,15 +220,16 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
   inferred cause is that Excel transfers the source outline level and marks that summary line
   collapsed; GridCraft keeps outline and collapse on the destination lines, so after a GridCraft
   `edit.paste` the reported extent stays `A1:I9` and Last Cell, with both pasted lines hidden, is
-  `H7` (rows) or `G8` (columns); Paste Special All transfers no line formatting and stays at
-  `A1:I9` / `H8`. Excel's outline getters returned no value, so this cause is unmeasured. And
+  `H7` (rows) or `G8` (columns). Excel's outline getters returned no value, so the cause is
+  unmeasured.
   Copy of a bare or absent whole row onto untouched rows grows Excel's extent to those rows
   (`A1:I11`, `A1:I12`) with no readable line change; GridCraft keeps no record for them. Pending
   probes: OutlineLevel/ShowDetail after a whole-row copy, and save/reopen of pasted bare or
   absent rows. A persisted record found there belongs in paste, not in the extent rule.
-- Whole-line Paste Special (including All), Insert Copied Cells, drag-and-drop and filtered or
-  packed paste retain their previous behavior; the X25 probes measured direct Copy/Cut, not these
-  paths. Ordinary whole-column paste now transfers inherited column styles and a cut resets the
+- At the X33 base, whole-line Paste Special All and Insert Copied Cells do not transfer incoming
+  line formatting; X32 adds that transfer, as measured by the two X25 clipboard probes. Other
+  Paste Special modes, drag-and-drop and filtered or packed paste retain their previous behavior.
+  Ordinary whole-column paste now transfers inherited column styles and a cut resets the
   source column's; Excel readbacks of blank cells confirmed both. GridCraft also resets the
   destination style when copying an unstyled source column. That Excel probe did not measure
   the destination column's aggregate style or sample a blank destination cell.

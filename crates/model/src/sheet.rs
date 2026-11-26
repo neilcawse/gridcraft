@@ -621,49 +621,65 @@ impl Sheet {
         }
         r
     }
-    /// The extent Excel reports as the worksheet's UsedRange: [`Sheet::used_range`] grown along
-    /// each axis by the line records Excel counts. A row counts with a height, a row style,
-    /// hidden, or an outline level or collapsed mark; a column with a column style, an outline
-    /// level or a collapsed mark, not with a width alone. A bare row (`saved_element` only) does
-    /// not count. A line grows only its own axis; an axis with no cells or counted lines spans
-    /// its first line.
+    /// The worksheet's reported UsedRange: the shared extent grown by measured row heights,
+    /// row styles and column styles, plus the line metadata described in parity note X33.
+    /// A row height can be saved even when it isn't an effective geometry override. A bare row
+    /// (`saved_element` alone) doesn't count. Lines grow only their own axis; an axis with no
+    /// cells or counted lines spans its first line.
     pub fn reported_used_range(&self) -> Option<RangeRef> {
-        fn span(lines: &BTreeMap<u32, LineInfo>, counts: fn(&LineInfo) -> bool) -> Option<(u32, u32)> {
-            let first = lines.iter().find(|(_, l)| counts(l))?.0;
-            let last = lines.iter().rev().find(|(_, l)| counts(l))?.0;
-            Some((*first, *last))
-        }
-        fn join(cells: Option<(u32, u32)>, lines: Option<(u32, u32)>) -> (u32, u32) {
-            match (cells, lines) {
-                (Some((a, b)), Some((c, d))) => (a.min(c), b.max(d)),
-                (Some(x), None) | (None, Some(x)) => x,
-                (None, None) => (0, 0),
+        fn span(lines: &BTreeMap<u32, LineInfo>, cells: Option<(u32, u32)>, counts: impl Fn(&LineInfo) -> bool) -> Option<(u32, u32)> {
+            if let Some((start, end)) = cells {
+                let first = lines.range(..start).find(|(_, l)| counts(l)).map_or(start, |(&i, _)| i);
+                let last =
+                    lines.range((std::ops::Bound::Excluded(end), std::ops::Bound::Unbounded)).rfind(|(_, l)| counts(l)).map_or(end, |(&i, _)| i);
+                return Some((first, last));
             }
+            let mut lines = lines.iter();
+            let (&first, _) = lines.find(|(_, l)| counts(l))?;
+            let last = lines.rfind(|(_, l)| counts(l)).map_or(first, |(&i, _)| i);
+            Some((first, last))
         }
-        let rows = span(&self.rows, |l| l.size.is_some() || l.style.is_some() || l.hidden || l.outline > 0 || l.collapsed);
-        let cols = span(&self.cols, |l| l.style.is_some() || l.outline > 0 || l.collapsed);
         let cells = self.used_range();
-        if cells.is_none() && rows.is_none() && cols.is_none() {
+        let rows = span(&self.rows, cells.map(|u| (u.start.row, u.end.row)), |l| {
+            l.size.is_some() || l.saved_size.is_some() || l.style.is_some() || l.hidden || l.outline > 0 || l.collapsed
+        });
+        let cols = span(&self.cols, cells.map(|u| (u.start.col, u.end.col)), |l| l.style.is_some() || l.outline > 0 || l.collapsed);
+        if rows.is_none() && cols.is_none() {
             return None;
         }
-        let (r0, r1) = join(cells.map(|u| (u.start.row, u.end.row)), rows);
-        let (c0, c1) = join(cells.map(|u| (u.start.col, u.end.col)), cols);
+        let (r0, r1) = rows.unwrap_or_default();
+        let (c0, c1) = cols.unwrap_or_default();
         Some(RangeRef::new(CellRef::new(r0, c0), CellRef::new(r1, c1)))
     }
     /// Excel's Last Cell (Ctrl+End, Go To Special › Last cell): the bottom-right corner of
     /// [`Sheet::reported_used_range`], stepped back over its trailing rows and columns of zero
     /// size (hidden ones included), never past its first line; A1 on an empty sheet.
     pub fn last_cell(&self) -> CellRef {
-        let Some(u) = self.reported_used_range() else { return CellRef::default() };
-        let mut row = u.end.row;
-        while row > u.start.row && self.row_height(row) <= 0.0 {
-            row -= 1;
+        self.last_cell_if_used().unwrap_or_default()
+    }
+
+    /// Last Cell for reports that distinguish an empty sheet from a used A1.
+    pub fn last_cell_if_used(&self) -> Option<CellRef> {
+        fn visible_end(lines: &BTreeMap<u32, LineInfo>, default_size: f32, start: u32, mut end: u32) -> u32 {
+            for (&line, info) in lines.range(start..=end).rev() {
+                if line < end && default_size > 0.0 {
+                    return end;
+                }
+                if !info.hidden && info.size.unwrap_or(default_size) > 0.0 {
+                    return line;
+                }
+                if line == start {
+                    return start;
+                }
+                end = line - 1;
+            }
+            if default_size > 0.0 { end } else { start }
         }
-        let mut col = u.end.col;
-        while col > u.start.col && self.col_width(col) <= 0.0 {
-            col -= 1;
-        }
-        CellRef::new(row, col)
+        let u = self.reported_used_range()?;
+        Some(CellRef::new(
+            visible_end(&self.rows, self.default_row_height, u.start.row, u.end.row),
+            visible_end(&self.cols, self.default_col_width, u.start.col, u.end.col),
+        ))
     }
     pub fn is_protected(&self) -> bool {
         self.protection.is_some()
