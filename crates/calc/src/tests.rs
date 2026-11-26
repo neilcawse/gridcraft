@@ -920,8 +920,11 @@ fn lookups_distinguish_failed_linked_caches_from_local_index_errors() {
         [t.get("B9"), t.get("B10"), t.get("B11")],
         [Value::Error(CellError::Div0), Value::Error(CellError::Name), Value::Error(CellError::Ref)]
     );
-    // For local tables and arrays, a miss takes precedence over an error index.
-    for (at, v) in [("D1", "x"), ("D2", "y"), ("E1", "1"), ("E2", "2")] {
+    // Over local tables and arrays an error index is the answer before the search, as Excel's
+    // trusted cache shows for `VLOOKUP($A31,skewtable,HLOOKUP(ROUND(I31-AO31,1),skewtable,2,
+    // FALSE),FALSE)` in Enron's larryoptmodel.xlsx (`$A31` missing, the index `#DIV/0!`). A
+    // non-error index is resolved only once the key is found: a miss is #N/A whatever the number.
+    for (at, v) in [("D1", "x"), ("D2", "y"), ("E1", "1"), ("E2", "2"), ("D3", "=1/0")] {
         t.set(at, v);
     }
     t.set("B5", "=VLOOKUP(\"y\",D1:E2,1/0,FALSE)");
