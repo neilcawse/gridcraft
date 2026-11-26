@@ -280,7 +280,16 @@ pub struct Array {
     #[serde(skip)]
     #[doc(hidden)]
     pub criteria_number_queries: std::sync::atomic::AtomicU32,
-    /// Cached error scan: 0 = unknown, 1 = no errors, 2 = has at least one `Value::Error`.
+    /// Cached positions where `compare(v, &Value::Empty) == Ordering::Equal` (`Empty`, `0.0`,
+    /// `""`, `FALSE`), built lazily on the second query for arrays of >= 64 elements.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub empty_eq_index: std::sync::OnceLock<Vec<u32>>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub empty_eq_queries: std::sync::atomic::AtomicU32,
+    /// Cached content scan bitflags: 0 = unknown, bit 0 = scanned, bit 1 = has errors,
+    /// bit 2 = has text.
     #[serde(skip)]
     #[doc(hidden)]
     pub error_state: std::sync::atomic::AtomicU8,
@@ -304,6 +313,8 @@ impl Clone for Array {
             number_queries: std::sync::atomic::AtomicU32::new(0),
             criteria_number_index: std::sync::OnceLock::new(),
             criteria_number_queries: std::sync::atomic::AtomicU32::new(0),
+            empty_eq_index: std::sync::OnceLock::new(),
+            empty_eq_queries: std::sync::atomic::AtomicU32::new(0),
             error_state: std::sync::atomic::AtomicU8::new(0),
         }
     }
@@ -326,6 +337,8 @@ impl Array {
             number_queries: std::sync::atomic::AtomicU32::new(0),
             criteria_number_index: std::sync::OnceLock::new(),
             criteria_number_queries: std::sync::atomic::AtomicU32::new(0),
+            empty_eq_index: std::sync::OnceLock::new(),
+            empty_eq_queries: std::sync::atomic::AtomicU32::new(0),
             error_state: std::sync::atomic::AtomicU8::new(0),
         }
     }
@@ -413,23 +426,70 @@ impl Array {
         }
         Some(self.criteria_number_index.get_or_init(|| CriteriaNumberIndex::build(&self.data)).positions(n))
     }
-    /// Whether any element of `data` is `Value::Error` (cached after first check).
-    pub fn has_errors(&self) -> bool {
-        match self.error_state.load(std::sync::atomic::Ordering::Relaxed) {
-            1 => false,
-            2 => true,
-            _ => {
-                let found = self.data.iter().any(Value::is_error);
-                self.error_state.store(if found { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
-                found
+    /// Positions (0-based into `data`, ascending) where `compare(v, &Value::Empty) == Equal`
+    /// (`Value::Empty`, `Value::Number(0.0)`, `Value::Text("")`, `Value::Bool(false)`), or `None`
+    /// when the array is too small to index or only queried once. Exact for `Value::Empty` and a
+    /// tight superset for `""`, `0.0`, and `FALSE`.
+    pub fn empty_eq_positions(&self) -> Option<&[u32]> {
+        if self.data.len() < 64 {
+            return None;
+        }
+        if self.empty_eq_index.get().is_none() && self.empty_eq_queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+            return None;
+        }
+        Some(
+            self.empty_eq_index
+                .get_or_init(|| {
+                    self.data
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, v)| {
+                            let is_eq = match v {
+                                Value::Empty | Value::Bool(false) => true,
+                                Value::Number(n) => *n == 0.0,
+                                Value::Text(t) => t.is_empty(),
+                                _ => false,
+                            };
+                            is_eq.then_some(i as u32)
+                        })
+                        .collect()
+                })
+                .as_slice(),
+        )
+    }
+    fn scan_flags(&self) -> u8 {
+        let flags = self.error_state.load(std::sync::atomic::Ordering::Relaxed);
+        if flags != 0 {
+            return flags;
+        }
+        let mut computed = 1u8;
+        for v in &self.data {
+            match v {
+                Value::Error(_) => computed |= 2,
+                Value::Text(_) => computed |= 4,
+                _ => {}
+            }
+            if computed == (1 | 2 | 4) {
+                break;
             }
         }
+        self.error_state.store(computed, std::sync::atomic::Ordering::Relaxed);
+        computed
     }
-    /// Whether a text or number lookup index has been built on this array.
+    /// Whether any element of `data` is `Value::Error` (cached after first check).
+    pub fn has_errors(&self) -> bool {
+        (self.scan_flags() & 2) != 0
+    }
+    /// Whether any element of `data` is `Value::Text` (cached after first check).
+    pub fn has_text(&self) -> bool {
+        (self.scan_flags() & 4) != 0
+    }
+    /// Whether a text, number, or empty-equality lookup index has been built on this array.
     pub fn has_lookup_index(&self) -> bool {
         self.text_index.get().is_some_and(|idx| idx.by_text.is_some())
             || self.number_index.get().is_some()
             || self.criteria_number_index.get().is_some()
+            || self.empty_eq_index.get().is_some_and(|v| !v.is_empty())
     }
 }
 
@@ -587,8 +647,20 @@ pub fn compare(a: &Value, b: &Value) -> Ordering {
         (Value::Empty, Value::Empty) => Ordering::Equal,
         (Value::Empty, Value::Number(n)) => compare_numbers(0.0, *n),
         (Value::Number(n), Value::Empty) => compare_numbers(*n, 0.0),
-        (Value::Empty, Value::Text(t)) => "".cmp(&t.to_lowercase() as &str),
-        (Value::Text(t), Value::Empty) => (t.to_lowercase() as String).as_str().cmp(""),
+        (Value::Empty, Value::Text(t)) => {
+            if t.is_empty() {
+                Ordering::Equal
+            } else {
+                Ordering::Less
+            }
+        }
+        (Value::Text(t), Value::Empty) => {
+            if t.is_empty() {
+                Ordering::Equal
+            } else {
+                Ordering::Greater
+            }
+        }
         (Value::Empty, Value::Bool(b)) => false.cmp(b),
         (Value::Bool(b), Value::Empty) => b.cmp(&false),
         (Value::Number(x), Value::Number(y)) => compare_numbers(*x, *y),

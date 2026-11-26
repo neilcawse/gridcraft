@@ -554,24 +554,21 @@ pub(super) fn apply_streamed_cell(
     sheet.cells.set(pos, Cell { value, formula: formula.map(Arc::new), style, py });
 }
 
-/// Whether `e` contains no `Name`, `Struct`, or named/spanned sheet selector whose identifier case
-/// is preserved by the parser, making outside-quotes ASCII case folding 100% AST-exact.
+/// Whether `e` contains no `Name`, `Struct`, or `LinkedRefError` whose identifier case is
+/// preserved by the parser, making outside-quotes ASCII case folding (with exact matching inside
+/// `"..."`, `'...'`, and unquoted sheet selectors before `!`) 100% AST-exact.
 fn is_case_safe(e: &Expr) -> bool {
     let mut safe = true;
     e.walk(&mut |x| {
-        if safe {
-            match x {
-                Expr::Name(_) | Expr::Struct(_) | Expr::LinkedRefError(_) => safe = false,
-                Expr::Ref(r) if !matches!(r.sheet, gridcraft_formula::SheetSel::Current) => safe = false,
-                _ => {}
-            }
+        if safe && matches!(x, Expr::Name(_) | Expr::Struct(_) | Expr::LinkedRefError(_)) {
+            safe = false;
         }
     });
     safe
 }
 
-/// Compares two formula strings for byte-for-byte equality inside `"..."` and `'...'` literals and
-/// ASCII case-insensitive equality outside quotes.
+/// Compares two formula strings for byte-for-byte equality inside `"..."`, `'...'`, and unquoted
+/// sheet selectors before `!`, and ASCII case-insensitive equality elsewhere.
 fn eq_formula_outside_quotes(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
@@ -587,13 +584,21 @@ fn eq_formula_outside_quotes(a: &str, b: &str) -> bool {
             if x == quote {
                 quote = 0;
             }
-        } else {
-            if x == b'"' || x == b'\'' {
-                if x != y {
-                    return false;
-                }
-                quote = x;
-            } else if !x.eq_ignore_ascii_case(&y) {
+        } else if x == b'"' || x == b'\'' {
+            if x != y {
+                return false;
+            }
+            quote = x;
+        } else if x != y {
+            if !x.eq_ignore_ascii_case(&y) {
+                return false;
+            }
+            // Preserve exact case for unquoted sheet names (`Sheet1!A1`, `Sheet1:Sheet3!A1`).
+            let mut j = i + 1;
+            while j < ab.len() && (ab[j].is_ascii_alphanumeric() || matches!(ab[j], b'_' | b'.' | b':')) {
+                j += 1;
+            }
+            if ab.get(j) == Some(&b'!') {
                 return false;
             }
         }

@@ -1,5 +1,6 @@
 use super::graph::{HashMap, HashSet, Key};
 use super::{Evaluator, Host, Workbook, reads_linked, stack_position};
+use crate::eval::PivotIndexState;
 use crate::spill_index::{Cover, SpillIndex};
 use gridcraft_core::{Array, CellError, CellRef, RangeRef, Value};
 use gridcraft_formula::Expr;
@@ -37,10 +38,13 @@ pub(super) struct PassHost<'a> {
     /// every row, so once per sheet rather than once per range read.
     used: HashMap<usize, Option<RangeRef>>,
     /// Evaluated range arrays (`(sheet, range)` → `(Arc<Array>, index_accounted)`) once every cell
-    /// in the range has finished evaluating; cleared if dynamic-array spills change.
+    /// in the range has finished evaluating; entries on a sheet are invalidated only when a
+    /// multi-cell dynamic-array spill lands on that sheet.
     range_cache: HashMap<(usize, RangeRef), (std::sync::Arc<Array>, bool)>,
     range_cache_cells: usize,
-    range_cache_spills: usize,
+    /// Bounding box of kept spills per sheet, maintained incrementally so `used_range` and
+    /// `range_sum` stay O(1) even when hundreds of spills exist on another sheet.
+    sheet_spill_bounds: HashMap<usize, RangeRef>,
     rng: &'a mut u64,
     /// Who held a spill before the calculation; unset: every formula did (reading order decides).
     pub(super) standing: Option<&'a super::Standing>,
@@ -106,6 +110,10 @@ pub(super) struct PassHost<'a> {
     /// result is laid out (an array spills from the cell, as a formula's does). Each one is in
     /// `pending` until it is laid out, so a formula that reads it first gets its new value.
     python: HashMap<Key, Value>,
+    /// Memoized lazy pivot-index build outcomes per `(sheet, pivot_idx)` for this pass so
+    /// repeated `GETPIVOTDATA` formulas against a stale/unindexable pivot do not rebuild the
+    /// pivot index on every call.
+    pivot_index_state: HashMap<(usize, usize), PivotIndexState>,
 }
 
 impl<'a> PassHost<'a> {
@@ -128,7 +136,7 @@ impl<'a> PassHost<'a> {
             used: HashMap::default(),
             range_cache: HashMap::default(),
             range_cache_cells: 0,
-            range_cache_spills: 0,
+            sheet_spill_bounds: HashMap::default(),
             rng,
             standing: None,
             now,
@@ -157,6 +165,7 @@ impl<'a> PassHost<'a> {
             out_of_stack: false,
             sums: HashMap::default(),
             python: HashMap::default(),
+            pivot_index_state: HashMap::default(),
         }
     }
 
@@ -271,8 +280,52 @@ impl PassHost<'_> {
     fn clear_range_cache(&mut self) {
         self.range_cache.clear();
         self.range_cache_cells = 0;
-        self.range_cache_spills = self.spills.len();
-        self.used.clear();
+    }
+
+    /// Invalidates cached range arrays on `sheet` only, preserving cached ranges and lookup
+    /// indexes on all other sheets.
+    fn invalidate_sheet_range_cache(&mut self, sheet: usize) {
+        let mut freed = 0usize;
+        self.range_cache.retain(|&(s, _), (arr, accounted)| {
+            if s == sheet {
+                let cost = if *accounted { arr.data.len().saturating_mul(2) } else { arr.data.len() };
+                freed = freed.saturating_add(cost);
+                false
+            } else {
+                true
+            }
+        });
+        self.range_cache_cells = self.range_cache_cells.saturating_sub(freed);
+    }
+
+    /// Records a surviving spill in per-sheet bounds and invalidates `range_cache` on `sheet`
+    /// only when the spill writes off-anchor cells (`rows > 1 || cols > 1`).
+    fn record_kept_spill(&mut self, (sheet, anchor): Key, a: &Array) {
+        if a.rows >= 1 && a.cols >= 1 {
+            let end = CellRef::new(
+                anchor.row.saturating_add((a.rows as u32).saturating_sub(1)),
+                anchor.col.saturating_add((a.cols as u32).saturating_sub(1)),
+            );
+            let r = RangeRef::new(anchor, end);
+            self.sheet_spill_bounds.entry(sheet).and_modify(|prev| *prev = prev.union(&r)).or_insert(r);
+            if a.rows > 1 || a.cols > 1 {
+                self.invalidate_sheet_range_cache(sheet);
+            }
+        }
+    }
+
+    fn rebuild_spill_bounds(&mut self) {
+        self.sheet_spill_bounds.clear();
+        for (&(sheet, anchor), a) in &self.spills {
+            if a.rows >= 1 && a.cols >= 1 {
+                let end = CellRef::new(
+                    anchor.row.saturating_add((a.rows as u32).saturating_sub(1)),
+                    anchor.col.saturating_add((a.cols as u32).saturating_sub(1)),
+                );
+                let r = RangeRef::new(anchor, end);
+                self.sheet_spill_bounds.entry(sheet).and_modify(|prev| *prev = prev.union(&r)).or_insert(r);
+            }
+        }
     }
     /// Calculates `k` (and the formulas it reads) with bounded stack: when [`Self::compute`] would
     /// go deeper than [`MAX_NESTED`], it suspends what is in progress, the formula it needed is
@@ -462,13 +515,17 @@ impl PassHost<'_> {
             v => v,
         };
         // An array that can't spill is #SPILL! for the formulas evaluated after it in this pass too.
-        let v = match self.spills.get(&k) {
-            Some(a) if spill_blocked(self, k, a) => {
+        let v = match self.spills.get(&k).cloned() {
+            Some(a) if spill_blocked(self, k, &a) => {
                 self.spills.remove(&k);
                 self.spill_index.remove(k);
                 Value::Error(CellError::Spill)
             }
-            _ => v,
+            Some(a) => {
+                self.record_kept_spill(k, &a);
+                v
+            }
+            None => v,
         };
         self.results.insert(k, v.clone());
         v
@@ -514,13 +571,17 @@ impl PassHost<'_> {
             }
             v => v,
         };
-        let v = match self.spills.get(&k) {
-            Some(a) if spill_blocked(self, k, a) => {
+        let v = match self.spills.get(&k).cloned() {
+            Some(a) if spill_blocked(self, k, &a) => {
                 self.spills.remove(&k);
                 self.spill_index.remove(k);
                 Value::Error(CellError::Spill)
             }
-            _ => v,
+            Some(a) => {
+                self.record_kept_spill(k, &a);
+                v
+            }
+            None => v,
         };
         self.results.insert(k, v.clone());
         v
@@ -569,6 +630,7 @@ impl PassHost<'_> {
                 self.spills.remove(&a);
                 self.spill_index.remove(a);
             }
+            self.rebuild_spill_bounds();
             self.clear_range_cache();
             for k in &again {
                 self.calculate(*k);
@@ -773,9 +835,6 @@ impl Host for PassHost<'_> {
     /// Evaluates `range` into a shared [`Array`], caching ranges up to [`MAX_SINGLE_CACHE_CELLS`]
     /// while no cell inside `range` is in progress or waiting and dynamic-array spills are unchanged.
     fn range_array(&mut self, sheet: usize, range: RangeRef) -> Option<std::sync::Arc<Array>> {
-        if self.spills.len() != self.range_cache_spills {
-            self.clear_range_cache();
-        }
         if !self.iterate
             && let Some((arr, accounted)) = self.range_cache.get_mut(&(sheet, range))
         {
@@ -803,9 +862,6 @@ impl Host for PassHost<'_> {
             && !self.in_progress.iter().any(|&(s, c)| s == sheet && range.contains(c))
             && !self.waiting.iter().any(|&(s, c)| s == sheet && range.contains(c))
         {
-            if self.spills.len() != self.range_cache_spills {
-                self.clear_range_cache();
-            }
             if self.range_cache_cells.saturating_add(cells) > MAX_RANGE_CACHE_CELLS {
                 self.range_cache.clear();
                 self.range_cache_cells = 0;
@@ -853,7 +909,7 @@ impl Host for PassHost<'_> {
     fn range_sum(&mut self, sheet: usize, range: RangeRef) -> Option<(f64, u64)> {
         // Constants can't change during a pass, so a block's result stays valid for it. Spills
         // found in this pass (and iteration, which tracks what a read depends on) go the long way.
-        if self.iterate || self.spills.keys().any(|a| a.0 == sheet) {
+        if self.iterate || self.sheet_spill_bounds.contains_key(&sheet) {
             return None;
         }
         let sh = self.wb.sheet(sheet)?;
@@ -897,21 +953,10 @@ impl Host for PassHost<'_> {
     fn used_range(&mut self, sheet: usize) -> Option<RangeRef> {
         let wb = self.wb;
         let base = *self.used.entry(sheet).or_insert_with(|| crate::eval::used_range_of(wb, sheet));
-        if self.spills.is_empty() {
-            return base;
+        match self.sheet_spill_bounds.get(&sheet) {
+            Some(sb) => Some(base.map_or(*sb, |prev| prev.union(sb))),
+            None => base,
         }
-        let mut u = base;
-        for (&(s, anchor), arr) in &self.spills {
-            if s == sheet && arr.rows >= 1 && arr.cols >= 1 {
-                let end = CellRef::new(
-                    anchor.row.saturating_add((arr.rows as u32).saturating_sub(1)),
-                    anchor.col.saturating_add((arr.cols as u32).saturating_sub(1)),
-                );
-                let r = RangeRef::new(anchor, end);
-                u = Some(u.map_or(r, |prev| prev.union(&r)));
-            }
-        }
-        u
     }
     fn now_serial(&self) -> f64 {
         self.now
@@ -924,6 +969,14 @@ impl Host for PassHost<'_> {
         x ^= x >> 27;
         *self.rng = x;
         (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64 / (1u64 << 53) as f64
+    }
+    fn ensure_pivot_index(&mut self, sheet: usize, pivot_idx: usize) -> PivotIndexState {
+        if let Some(&state) = self.pivot_index_state.get(&(sheet, pivot_idx)) {
+            return state;
+        }
+        let state = crate::pivotdata::build_pivot_index(self.wb, sheet, pivot_idx);
+        self.pivot_index_state.insert((sheet, pivot_idx), state);
+        state
     }
 }
 

@@ -346,26 +346,31 @@ impl<'h> Evaluator<'h> {
             }
             pairs.push((col_arr, key));
         }
-        let mut best: Option<(usize, Vec<u32>)> = None;
+        let mut best: Option<(usize, &[u32], bool)> = None;
         for (idx, (col_arr, key)) in pairs.iter().enumerate() {
-            let pos_opt = match key {
-                Value::Text(t) if !t.is_empty() => col_arr.text_positions(t),
-                Value::Number(n) if *n != 0.0 && n.is_finite() => col_arr.criteria_number_positions(*n),
-                _ => None,
+            let (pos_opt, needs_verify) = match key {
+                Value::Text(t) if !t.is_empty() => (col_arr.text_positions(t), false),
+                Value::Number(n) if *n != 0.0 && n.is_finite() => (col_arr.criteria_number_positions(*n), true),
+                Value::Empty => (col_arr.empty_eq_positions(), false),
+                Value::Text(_) | Value::Number(_) | Value::Bool(false) => (col_arr.empty_eq_positions(), true),
+                _ => (None, false),
             };
             if let Some(pos) = pos_opt
-                && best.as_ref().is_none_or(|(_, prev)| pos.len() < prev.len())
+                && best.as_ref().is_none_or(|(_, prev, _)| pos.len() < prev.len())
             {
-                best = Some((idx, pos.to_vec()));
+                best = Some((idx, pos, needs_verify));
+                if pos.is_empty() {
+                    break;
+                }
             }
         }
-        let Some((best_idx, candidates)) = best else {
+        let Some((best_idx, candidates, best_needs_verify)) = best else {
             return self.builtin_with_pre("FILTER", args, vec![(0, Ev::V(v0))]);
         };
         let mut matched_rows: Vec<usize> = Vec::with_capacity(candidates.len().min(64));
-        'cand: for pos in candidates {
+        'cand: for &pos in candidates {
             let r = pos as usize;
-            if matches!(pairs[best_idx].1, Value::Number(_)) {
+            if best_needs_verify {
                 let v = pairs[best_idx].0.data.get(r).unwrap_or(&Value::Empty);
                 if gridcraft_core::compare(v, &pairs[best_idx].1) != std::cmp::Ordering::Equal {
                     continue 'cand;

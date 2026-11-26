@@ -2507,3 +2507,100 @@ fn shared_formula_export_skips_members_shifting_off_grid_to_ref() {
     assert_eq!(sh.cell(at("B2")).unwrap().formula.as_ref().unwrap().text(), "A1+1");
     assert_eq!(sh.cell(at("B71")).unwrap().formula.as_ref().unwrap().text(), "A70+1");
 }
+
+#[test]
+fn shared_formula_export_assigns_monotonic_deterministic_si_and_skips_struct_spill() {
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+    use std::collections::HashSet;
+
+    let mut wb = Workbook::new();
+    let base_b1 = std::sync::Arc::new(gridcraft_formula::parse("A1+1").unwrap());
+    let base_c = std::sync::Arc::new(gridcraft_formula::parse("A1*2").unwrap());
+    let base_d = std::sync::Arc::new(gridcraft_formula::parse("A1+10").unwrap());
+    let base_b2 = std::sync::Arc::new(gridcraft_formula::parse("A1*3").unwrap());
+    let base_struct = std::sync::Arc::new(gridcraft_formula::parse("Table1[Qty]+1").unwrap());
+    let base_spill = std::sync::Arc::new(gridcraft_formula::parse("SUM(A1#)").unwrap());
+    {
+        let sh = wb.sheet_mut(0).unwrap();
+        // Staggered overlapping vertical runs (>= 64 rows each) designed so end-row flush order
+        // (C ends at row 80, D at 100, B1 at 120, B2 at 200) differs from start-row master order
+        // (D starts at row 2, B1 at 5, C at 10, B2 at 130).
+        for r in 5..=120u32 {
+            sh.cells.set(CellRef::new(r, 1), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_b1), r as i32, 0)));
+        }
+        for r in 10..=80u32 {
+            sh.cells.set(CellRef::new(r, 2), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_c), r as i32, 0)));
+        }
+        for r in 2..=100u32 {
+            sh.cells.set(CellRef::new(r, 3), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_d), r as i32, 0)));
+        }
+        for r in 130..=200u32 {
+            sh.cells.set(CellRef::new(r, 1), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_b2), r as i32, 0)));
+        }
+        // Structured table refs and spill `#` refs must never be emitted as `<f t="shared">`.
+        for r in 1..=70u32 {
+            sh.cells.set(CellRef::new(r, 4), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_struct), r as i32, 0)));
+            sh.cells.set(CellRef::new(r, 5), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_spill), r as i32, 0)));
+        }
+    }
+
+    let saved1 = write_xlsx(&wb).unwrap();
+    let saved2 = write_xlsx(&wb).unwrap();
+    let (xml1, _) = sheet1_xml(&saved1);
+    let (xml2, _) = sheet1_xml(&saved2);
+    assert_eq!(xml1, xml2, "repeated write_xlsx must produce deterministic shared-formula XML");
+
+    let mut reader = Reader::from_str(&xml1);
+    let mut masters: Vec<(u32, String)> = Vec::new();
+    let mut seen_masters: HashSet<u32> = HashSet::new();
+    let mut follower_count = 0usize;
+    loop {
+        match reader.read_event().unwrap() {
+            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == b"f" => {
+                let mut t = None;
+                let mut r = None;
+                let mut si = None;
+                for attr in e.attributes().flatten() {
+                    let val = std::str::from_utf8(&attr.value).unwrap().to_string();
+                    match attr.key.as_ref() {
+                        b"t" => t = Some(val),
+                        b"ref" => r = Some(val),
+                        b"si" => si = Some(val.parse::<u32>().unwrap()),
+                        _ => {}
+                    }
+                }
+                if t.as_deref() == Some("shared") {
+                    let id = si.expect("shared formula must have si");
+                    if let Some(ref_attr) = r {
+                        assert!(seen_masters.insert(id), "duplicate shared master si={id}");
+                        masters.push((id, ref_attr));
+                    } else {
+                        assert!(seen_masters.contains(&id), "follower si={id} appeared before its master in document order");
+                        follower_count += 1;
+                    }
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+
+    assert_eq!(
+        masters,
+        vec![(0, "D3:D101".to_string()), (1, "B6:B121".to_string()), (2, "C11:C81".to_string()), (3, "B131:B201".to_string()),],
+        "shared formula masters must be strictly monotonic si=0..N in <sheetData> row-major order and exclude struct/spill refs"
+    );
+    assert_eq!(follower_count, (120 - 5) + (80 - 10) + (100 - 2) + (200 - 130));
+
+    let (reopened, _) = read_xlsx(&saved1).unwrap();
+    let sh = reopened.sheet(0).unwrap();
+    assert_eq!(sh.cell(at("D3")).unwrap().formula.as_ref().unwrap().text(), "A3+10");
+    assert_eq!(sh.cell(at("D101")).unwrap().formula.as_ref().unwrap().text(), "A101+10");
+    assert_eq!(sh.cell(at("B6")).unwrap().formula.as_ref().unwrap().text(), "A6+1");
+    assert_eq!(sh.cell(at("B121")).unwrap().formula.as_ref().unwrap().text(), "A121+1");
+    assert_eq!(sh.cell(at("C11")).unwrap().formula.as_ref().unwrap().text(), "A11*2");
+    assert_eq!(sh.cell(at("C81")).unwrap().formula.as_ref().unwrap().text(), "A81*2");
+    assert_eq!(sh.cell(at("B131")).unwrap().formula.as_ref().unwrap().text(), "A131*3");
+    assert_eq!(sh.cell(at("B201")).unwrap().formula.as_ref().unwrap().text(), "A201*3");
+}

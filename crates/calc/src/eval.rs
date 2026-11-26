@@ -18,6 +18,7 @@ mod lambda;
 mod pivot_fn;
 mod reference_fns;
 mod special;
+mod sumproduct;
 
 use array::map_unary;
 pub use array::{binary_values, zip2};
@@ -113,6 +114,17 @@ pub(crate) fn stack_position() -> usize {
     std::hint::black_box(&marker) as *const u8 as usize
 }
 
+/// Outcome of lazily ensuring a PivotTable's `GETPIVOTDATA` index during evaluation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PivotIndexState {
+    /// `PivotTable::data_index` holds cells and is ready for hash lookup.
+    Ready,
+    /// The stored report no longer matches its source (`#REF!` until refresh).
+    Stale,
+    /// No indexer is registered or building failed for another reason (use sheet-scan fallback).
+    Fallback,
+}
+
 /// What the evaluator needs from its surroundings.
 pub trait Host {
     fn workbook(&self) -> &Workbook;
@@ -174,6 +186,12 @@ pub trait Host {
     /// Whether `(sheet, c)` is currently being evaluated or waiting on a precedent in this pass.
     fn is_cell_active(&self, _sheet: usize, _c: CellRef) -> bool {
         false
+    }
+    /// Ensures the PivotTable at `(sheet, pivot_idx)` has its `data_index` populated if possible.
+    /// Hosts whose workbook is immutable during a pass can memoize failures per
+    /// `(sheet, pivot_idx)` without mutating the shared `PivotLookup`.
+    fn ensure_pivot_index(&mut self, sheet: usize, pivot_idx: usize) -> PivotIndexState {
+        crate::pivotdata::build_pivot_index(self.workbook(), sheet, pivot_idx)
     }
 }
 

@@ -674,13 +674,16 @@ struct SharedRun {
 }
 
 /// Valid `(min_dr, max_dr, min_dc, max_dc)` relative-shift bounds for `e` such that no
-/// `Expr::Ref` shifts outside `0..MAX_ROWS` × `0..MAX_COLS` (producing `#REF!`).
-fn shift_in_bounds_range(e: &gridcraft_formula::Expr) -> (i64, i64, i64, i64) {
-    use gridcraft_formula::{Expr, RefKind};
+/// `Expr::Ref` shifts outside `0..MAX_ROWS` × `0..MAX_COLS` (producing `#REF!`), or `None` when
+/// `e` contains constructs Excel rejects or mis-rewrites inside `<f t="shared">` (structured table
+/// references, spill `#` references, or trim-range references).
+fn shared_run_bounds(e: &gridcraft_formula::Expr) -> Option<(i64, i64, i64, i64)> {
+    use gridcraft_formula::{Expr, RefKind, UnOp};
     let mut min_dr = i64::MIN;
     let mut max_dr = i64::MAX;
     let mut min_dc = i64::MIN;
     let mut max_dc = i64::MAX;
+    let mut supported = true;
     let clamp_row = |r: u32, abs: bool, min_dr: &mut i64, max_dr: &mut i64| {
         if !abs {
             *min_dr = (*min_dr).max(-(r as i64));
@@ -693,35 +696,37 @@ fn shift_in_bounds_range(e: &gridcraft_formula::Expr) -> (i64, i64, i64, i64) {
             *max_dc = (*max_dc).min((gridcraft_core::MAX_COLS - 1) as i64 - c as i64);
         }
     };
-    e.walk(&mut |x| {
-        if let Expr::Ref(r) = x {
-            match r.kind {
-                RefKind::Cell(a) => {
-                    clamp_row(a.row, a.row_abs, &mut min_dr, &mut max_dr);
-                    clamp_col(a.col, a.col_abs, &mut min_dc, &mut max_dc);
-                }
-                RefKind::Range(a, b) => {
-                    clamp_row(a.row, a.row_abs, &mut min_dr, &mut max_dr);
-                    clamp_col(a.col, a.col_abs, &mut min_dc, &mut max_dc);
-                    clamp_row(b.row, b.row_abs, &mut min_dr, &mut max_dr);
-                    clamp_col(b.col, b.col_abs, &mut min_dc, &mut max_dc);
-                }
-                RefKind::Rows(r0, a0, r1, a1) => {
-                    clamp_row(r0, a0, &mut min_dr, &mut max_dr);
-                    clamp_row(r1, a1, &mut min_dr, &mut max_dr);
-                }
-                RefKind::Cols(c0, a0, c1, a1) => {
-                    clamp_col(c0, a0, &mut min_dc, &mut max_dc);
-                    clamp_col(c1, a1, &mut min_dc, &mut max_dc);
-                }
+    e.walk(&mut |x| match x {
+        Expr::Struct(_) | Expr::Unary(UnOp::Spill | UnOp::Trim(_), _) => supported = false,
+        Expr::Ref(r) => match r.kind {
+            RefKind::Cell(a) => {
+                clamp_row(a.row, a.row_abs, &mut min_dr, &mut max_dr);
+                clamp_col(a.col, a.col_abs, &mut min_dc, &mut max_dc);
             }
-        }
+            RefKind::Range(a, b) => {
+                clamp_row(a.row, a.row_abs, &mut min_dr, &mut max_dr);
+                clamp_col(a.col, a.col_abs, &mut min_dc, &mut max_dc);
+                clamp_row(b.row, b.row_abs, &mut min_dr, &mut max_dr);
+                clamp_col(b.col, b.col_abs, &mut min_dc, &mut max_dc);
+            }
+            RefKind::Rows(r0, a0, r1, a1) => {
+                clamp_row(r0, a0, &mut min_dr, &mut max_dr);
+                clamp_row(r1, a1, &mut min_dr, &mut max_dr);
+            }
+            RefKind::Cols(c0, a0, c1, a1) => {
+                clamp_col(c0, a0, &mut min_dc, &mut max_dc);
+                clamp_col(c1, a1, &mut min_dc, &mut max_dc);
+            }
+        },
+        _ => {}
     });
-    (min_dr, max_dr, min_dc, max_dc)
+    supported.then_some((min_dr, max_dr, min_dc, max_dc))
 }
 
-/// Finds contiguous vertical shared-formula runs of length >= 2 that can be emitted as
-/// `<f t="shared" ref="..." si="..."/>` without changing any formula's exported spelling or metadata.
+/// Finds contiguous vertical shared-formula runs of length >= 64 that can be emitted as
+/// `<f t="shared" ref="..." si="..."/>` without changing any formula's exported spelling or
+/// metadata. Assigns `si = 0, 1, 2, ...` strictly monotonically in `(start_row, col)` order so
+/// every master appears in ascending `si` document order in `<sheetData>` (required by Excel).
 fn collect_shared_runs(data: &SheetCellData<'_>, out: &mut Out) -> HashMap<u32, Vec<SharedRun>> {
     let SheetCellData { workbook, index, sheet, overrides, dynamic, .. } = data;
     if !sheet.cells.iter().any(|(_, c)| c.formula.as_ref().is_some_and(|f| f.is_shared())) {
@@ -735,14 +740,11 @@ fn collect_shared_runs(data: &SheetCellData<'_>, out: &mut Out) -> HashMap<u32, 
         end_row: u32,
     }
     let mut open: HashMap<u32, OpenRun> = HashMap::new();
-    let mut runs_by_col: HashMap<u32, Vec<SharedRun>> = HashMap::new();
-    let mut bounds_cache: HashMap<usize, (i64, i64, i64, i64)> = HashMap::new();
-    let mut next_si = 0u32;
-    let flush = |col: u32, run: OpenRun, runs_by_col: &mut HashMap<u32, Vec<SharedRun>>, next_si: &mut u32| {
+    let mut finished: Vec<(u32, u32, u32)> = Vec::new();
+    let mut bounds_cache: HashMap<usize, Option<(i64, i64, i64, i64)>> = HashMap::new();
+    let flush = |col: u32, run: OpenRun, finished: &mut Vec<(u32, u32, u32)>| {
         if run.end_row.saturating_sub(run.start_row) + 1 >= 64 {
-            let si = *next_si;
-            *next_si += 1;
-            runs_by_col.entry(col).or_default().push(SharedRun { start_row: run.start_row, end_row: run.end_row, si });
+            finished.push((col, run.start_row, run.end_row));
         }
     };
 
@@ -757,15 +759,18 @@ fn collect_shared_runs(data: &SheetCellData<'_>, out: &mut Out) -> HashMap<u32, 
             && let Some((base, dr, dc)) = f.expr_shifted()
         {
             let base_key = Arc::as_ptr(base) as usize;
-            let (min_dr, max_dr, min_dc, max_dc) = *bounds_cache.entry(base_key).or_insert_with(|| shift_in_bounds_range(base));
-            if !(min_dr..=max_dr).contains(&i64::from(dr)) || !(min_dc..=max_dc).contains(&i64::from(dc)) {
-                None
-            } else {
+            let bounds = *bounds_cache.entry(base_key).or_insert_with(|| shared_run_bounds(base));
+            if let Some((min_dr, max_dr, min_dc, max_dc)) = bounds
+                && (min_dr..=max_dr).contains(&i64::from(dr))
+                && (min_dc..=max_dc).contains(&i64::from(dc))
+            {
                 match crate::array_formula::export(workbook, *index, pos, f, out.functions, &mut out.names) {
                     crate::array_formula::Export::Unchanged => Some((base_key, dr, dc)),
                     crate::array_formula::Export::LegacyShared(b) => Some((Arc::as_ptr(&b) as usize, dr, dc)),
                     crate::array_formula::Export::Dynamic | crate::array_formula::Export::Legacy(_) => None,
                 }
+            } else {
+                None
             }
         } else {
             None
@@ -783,14 +788,19 @@ fn collect_shared_runs(data: &SheetCellData<'_>, out: &mut Out) -> HashMap<u32, 
                 continue;
             }
             if let Some(prev) = open.insert(pos.col, OpenRun { base_ptr, dc, dr_minus_row, start_row: pos.row, end_row: pos.row }) {
-                flush(pos.col, prev, &mut runs_by_col, &mut next_si);
+                flush(pos.col, prev, &mut finished);
             }
         } else if let Some(prev) = open.remove(&pos.col) {
-            flush(pos.col, prev, &mut runs_by_col, &mut next_si);
+            flush(pos.col, prev, &mut finished);
         }
     }
     for (col, run) in open {
-        flush(col, run, &mut runs_by_col, &mut next_si);
+        flush(col, run, &mut finished);
+    }
+    finished.sort_unstable_by_key(|&(col, start_row, _)| (start_row, col));
+    let mut runs_by_col: HashMap<u32, Vec<SharedRun>> = HashMap::new();
+    for (idx, (col, start_row, end_row)) in finished.into_iter().enumerate() {
+        runs_by_col.entry(col).or_default().push(SharedRun { start_row, end_row, si: idx as u32 });
     }
     runs_by_col
 }

@@ -4214,3 +4214,236 @@ fn shared_if_family_shifted_off_grid_ref_returns_ref_error() {
         assert_eq!(t.get(at), Value::Error(CellError::Ref), "{at}: {text}");
     }
 }
+
+#[test]
+fn getpivotdata_memoizes_failed_pivot_indexer_per_pass_and_invalidates_across_passes() {
+    use gridcraft_model::{PIVOT_INDEXER, PivotDataCell, PivotField, PivotIndexError, PivotItemRef, PivotTable, PivotValue};
+    use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    // 0 = Stale, 1 = Ok, 2 = Other
+    static MODE: AtomicU8 = AtomicU8::new(0);
+
+    fn test_indexer(_wb: &Workbook, _sheet: usize, pt: &PivotTable) -> Result<Vec<PivotDataCell>, PivotIndexError> {
+        if pt.name != "__w5_memoize_pivot__" {
+            return Err(PivotIndexError::Other("unmatched test pivot".into()));
+        }
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        match MODE.load(Ordering::SeqCst) {
+            0 => Err(PivotIndexError::Stale),
+            1 => Ok(vec![PivotDataCell {
+                row: 1,
+                col: 1,
+                data_field: "Sales".into(),
+                source_col: "Sales".into(),
+                items: vec![PivotItemRef { field: "Region".into(), label: "West".into(), value: Value::text("West") }],
+            }]),
+            _ => Err(PivotIndexError::Other("broken source".into())),
+        }
+    }
+
+    let _ = PIVOT_INDEXER.set(test_indexer);
+    let mut t = T::new();
+    {
+        let sh = t.wb.sheet_mut(0).unwrap();
+        sh.set_value(c("A1"), Value::text("Region"));
+        sh.set_value(c("B1"), Value::text("Sales"));
+        sh.set_value(c("A2"), Value::text("West"));
+        sh.set_value(c("B2"), Value::Number(250.0));
+        let pt = PivotTable {
+            id: 1,
+            name: "__w5_memoize_pivot__".into(),
+            anchor: c("A1"),
+            last_range: Some(gridcraft_core::RangeRef::new(c("A1"), c("B2"))),
+            rows: vec![PivotField { source_col: "Region".into(), ..Default::default() }],
+            values: vec![PivotValue { name: "Sales".into(), source_col: "Sales".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        sh.pivots.push(pt);
+        for r in 0..40u32 {
+            sh.cells.set(CellRef::new(r, 4), Cell::formula(Formula::new(r#"GETPIVOTDATA("Sales",$A$1,"Region","West")"#)));
+        }
+    }
+
+    // Pass 1: Stale error must be memoized across all 40 formulas (1 indexer call, not 40),
+    // leaving `pt.data_index` unpolluted (`None`).
+    MODE.store(0, Ordering::SeqCst);
+    CALLS.store(0, Ordering::SeqCst);
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!(CALLS.load(Ordering::SeqCst), 1, "stale pivot indexer must run at most once per pass");
+    assert!(t.wb.sheet(0).unwrap().pivots[0].data_index.cells().is_none(), "stale failure must not pollute PivotLookup");
+    for r in 0..40u32 {
+        assert_eq!(t.wb.sheet(0).unwrap().value(CellRef::new(r, 4)), Value::Error(CellError::Ref));
+    }
+
+    // Pass 2: Other error must also be memoized once per pass and use sheet-scan fallback.
+    MODE.store(2, Ordering::SeqCst);
+    CALLS.store(0, Ordering::SeqCst);
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!(CALLS.load(Ordering::SeqCst), 1, "Other pivot indexer error must run at most once per pass");
+    assert!(t.wb.sheet(0).unwrap().pivots[0].data_index.cells().is_none());
+    for r in 0..40u32 {
+        assert_eq!(t.wb.sheet(0).unwrap().value(CellRef::new(r, 4)), Value::Number(250.0));
+    }
+
+    // Pass 3: After source/report is fixed, the new pass retries cleanly, populates `data_index`,
+    // and subsequent passes need 0 indexer calls.
+    MODE.store(1, Ordering::SeqCst);
+    CALLS.store(0, Ordering::SeqCst);
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+    assert!(t.wb.sheet(0).unwrap().pivots[0].data_index.cells().is_some());
+    for r in 0..40u32 {
+        assert_eq!(t.wb.sheet(0).unwrap().value(CellRef::new(r, 4)), Value::Number(250.0));
+    }
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!(CALLS.load(Ordering::SeqCst), 1, "populated data_index must skip indexer on later passes");
+}
+
+struct SpFixture {
+    t: T,
+    alice_qty: f64,
+    alice_2026: f64,
+    alice_count_2026: f64,
+    blank_a_qty: f64,
+    zero_a_qty: f64,
+    alice_zero_f: f64,
+    a_eq_zero_rows: f64,
+}
+
+fn build_sp_fixture() -> SpFixture {
+    let mut t = T::new();
+    t.set("A1", "Rep");
+    t.set("B1", "Qty");
+    t.set("C1", "Year1");
+    t.set("D1", "Year2");
+    t.set("E1", "Status");
+    // Anchor used_range to row 120 so rows 101..=120 are trailing empty rows inside A:A / B:B.
+    t.set("M120", "end");
+
+    let mut fx = SpFixture {
+        t,
+        alice_qty: 0.0,
+        alice_2026: 0.0,
+        alice_count_2026: 0.0,
+        blank_a_qty: 0.0,
+        zero_a_qty: 0.0,
+        alice_zero_f: 0.0,
+        a_eq_zero_rows: 20.0, // rows 101..=120 have empty A (equals "" and 0)
+    };
+    for r in 2..=100u32 {
+        let rep = match r % 5 {
+            0 => "Alice",
+            1 => "Bob",
+            2 => "",
+            3 => "0",
+            _ => "Carol",
+        };
+        if !rep.is_empty() {
+            fx.t.set(&format!("A{r}"), rep);
+        }
+        let qty = (r * 3) as f64;
+        fx.t.set(&format!("B{r}"), &qty.to_string());
+        let odd_f = if r % 2 == 1 {
+            fx.t.set(&format!("F{r}"), &qty.to_string());
+            qty
+        } else {
+            0.0
+        };
+        let y1 = if r % 3 == 0 { 2026 } else { 2025 };
+        let y2 = if r % 4 == 0 { 2026 } else { 2024 };
+        fx.t.set(&format!("C{r}"), &y1.to_string());
+        fx.t.set(&format!("D{r}"), &y2.to_string());
+        fx.t.set(&format!("E{r}"), if r % 7 == 0 { "Omitted" } else { "Active" });
+        let yr_weight = f64::from(u8::from(y1 == 2026) + u8::from(y2 == 2026));
+        match rep {
+            "Alice" => {
+                fx.alice_qty += odd_f;
+                fx.alice_2026 += qty * yr_weight;
+                fx.alice_count_2026 += yr_weight;
+                fx.alice_zero_f += f64::from(u8::from(r % 2 == 0));
+            }
+            "" => {
+                fx.blank_a_qty += odd_f;
+                fx.zero_a_qty += odd_f;
+                fx.a_eq_zero_rows += 1.0;
+            }
+            "0" => {
+                fx.zero_a_qty += odd_f;
+                fx.a_eq_zero_rows += 1.0;
+            }
+            _ => {}
+        }
+    }
+    fx
+}
+
+#[test]
+fn sumproduct_full_column_fast_path_preserves_excel_semantics() {
+    let mut fx = build_sp_fixture();
+    let t = &mut fx.t;
+    // Repeat queries so 2nd+ calls build and use TextIndex / CriteriaNumberIndex / empty_eq_index.
+    t.set("H1", r#"=SUMPRODUCT((A:A="Alice")*(F:F))"#);
+    t.set("H2", r#"=SUMPRODUCT((A:A="Alice")*(F:F))"#);
+    t.set("H3", r#"=SUMPRODUCT((A:A="Bob")*(F:F))"#);
+    // Text header in B1 inside `*` must produce #VALUE! even when A1="Rep" != "Alice".
+    t.set("H4", r#"=SUMPRODUCT((A:A="Alice")*(B:B))"#);
+    // Comma-separated value column B:B with text header "Qty" in B1 ignores text as 0 (no #VALUE!).
+    t.set("H5", r#"=SUMPRODUCT(B:B,(A:A="Alice")*((C:C=2026)+(D:D=2026)))"#);
+    t.set("H6", r#"=SUMPRODUCT((A:A="Alice")*((C:C=2026)+(D:D=2026)))"#);
+    // Blank = "" and Blank = 0 must include empty cells (and trailing empty rows for *5!).
+    t.set("H7", r#"=SUMPRODUCT((A:A="")*(F:F))"#);
+    t.set("H8", r#"=SUMPRODUCT((A:A=0)*(F:F))"#);
+    t.set("H9", r#"=SUMPRODUCT((A:A="Alice")*(F:F=0))"#);
+    t.set("H10", r#"=SUMPRODUCT((A:A=0)*5)"#);
+    // Error propagation & mismatched shapes.
+    t.set("H11", r#"=SUMPRODUCT((F:F)*(1/0))"#);
+    t.set("H12", r#"=SUMPRODUCT(A1:A100,B1:B101)"#);
+    // Unary -- coercion.
+    t.set("H13", r#"=SUMPRODUCT(--(A:A="Alice"),F:F)"#);
+
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!(t.num("H1"), fx.alice_qty);
+    assert_eq!(t.num("H2"), fx.alice_qty);
+    assert_eq!(t.get("H4"), Value::Error(CellError::Value));
+    assert_eq!(t.num("H5"), fx.alice_2026);
+    assert_eq!(t.num("H6"), fx.alice_count_2026);
+    assert_eq!(t.num("H7"), fx.blank_a_qty);
+    assert_eq!(t.num("H8"), fx.zero_a_qty);
+    assert_eq!(t.num("H9"), fx.alice_zero_f);
+    assert_eq!(t.num("H10"), fx.a_eq_zero_rows * 5.0);
+    assert_eq!(t.get("H11"), Value::Error(CellError::Div0));
+    assert_eq!(t.get("H12"), Value::Error(CellError::Value));
+    assert_eq!(t.num("H13"), fx.alice_qty);
+
+    // Error cell on a non-matching row (row 3 has A3="0" != "Alice") must still propagate #N/A!
+    t.set("F3", "=NA()");
+    assert_eq!(t.get("H1"), Value::Error(CellError::NA));
+    assert_eq!(t.get("H2"), Value::Error(CellError::NA));
+}
+
+#[test]
+fn filter_full_column_empty_key_fast_path_preserves_excel_semantics() {
+    let mut fx = build_sp_fixture();
+    let t = &mut fx.t;
+    t.set("J1", "ID");
+    t.set("K1", "Flag");
+    t.set("L1", "Out");
+    for r in 2..=120u32 {
+        t.set(&format!("J{r}"), &format!("id{r}"));
+        t.set(&format!("K{r}"), if r % 2 == 0 { "good" } else { "bad" });
+        t.set(&format!("L{r}"), &r.to_string());
+    }
+    // J:J has no empty cells -> FILTER with empty key Z1/Z2 returns #CALC! via empty_eq_positions.
+    t.set("H14", r#"=IFERROR(INDEX(FILTER(L:L,(J:J=Z1)*(K:K="good")),1),"none")"#);
+    t.set("H15", r#"=IFERROR(INDEX(FILTER(L:L,(J:J=Z2)*(K:K="good")),1),"none")"#);
+    // A:A DOES have empty cells (row 2 has A2 empty and E2="Active") -> returns row 2's B2 (6).
+    t.set("H16", r#"=INDEX(FILTER(B:B,(A:A=Z1)*(E:E="Active")),1)"#);
+    t.set("H17", r#"=INDEX(FILTER(B:B,(A:A=Z2)*(E:E="Active")),1)"#);
+
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!(t.get("H14"), Value::text("none"));
+    assert_eq!(t.get("H15"), Value::text("none"));
+    assert_eq!(t.num("H16"), 6.0);
+    assert_eq!(t.num("H17"), 6.0);
+}

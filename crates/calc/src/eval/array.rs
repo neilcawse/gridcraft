@@ -194,7 +194,7 @@ fn concat_arrays(x: &Value, y: &Value, sys: gridcraft_core::DateSystem, budget: 
     .unwrap_or(Value::Error(CellError::Num))
 }
 
-fn binary_scalar(op: BinOp, a: &Value, b: &Value, sys: gridcraft_core::DateSystem) -> Value {
+pub(super) fn binary_scalar(op: BinOp, a: &Value, b: &Value, sys: gridcraft_core::DateSystem) -> Value {
     let num = |f: fn(f64, f64) -> Value| match a.to_number_in(sys) {
         Err(e) => Value::Error(e),
         Ok(x) => match b.to_number_in(sys) {

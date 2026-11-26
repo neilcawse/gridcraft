@@ -6,10 +6,32 @@
 
 use gridcraft_core::{CellError, CellRef, Value};
 use gridcraft_formula::Expr;
-use gridcraft_model::{PIVOT_INDEXER, PivotDataCell, PivotIndexError, PivotItemRef, PivotLookup, PivotTable};
+use gridcraft_model::{PIVOT_INDEXER, PivotDataCell, PivotIndexError, PivotItemRef, PivotLookup, PivotTable, Workbook};
 
-use crate::eval::{Ev, Evaluator};
+use crate::eval::{Ev, Evaluator, PivotIndexState};
 
+/// Builds `pt.data_index` once via `PIVOT_INDEXER`, returning whether the index is ready,
+/// stale, or requires sheet-scan fallback. Failures leave `pt.data_index` unset so shared
+/// `PivotLookup` instances stay unpolluted across undo, edits, and serialization.
+pub(crate) fn build_pivot_index(wb: &Workbook, sheet: usize, pivot_idx: usize) -> PivotIndexState {
+    let Some(pt) = wb.sheet(sheet).and_then(|s| s.pivots.get(pivot_idx)) else {
+        return PivotIndexState::Fallback;
+    };
+    if pt.data_index.cells().is_some() {
+        return PivotIndexState::Ready;
+    }
+    let Some(build) = PIVOT_INDEXER.get() else {
+        return PivotIndexState::Fallback;
+    };
+    match build(wb, sheet, pt) {
+        Ok(cells) => {
+            pt.data_index.set_cells(cells);
+            PivotIndexState::Ready
+        }
+        Err(PivotIndexError::Stale) => PivotIndexState::Stale,
+        Err(PivotIndexError::Other(_)) => PivotIndexState::Fallback,
+    }
+}
 /// Excel allows 126 field/item pairs.
 const MAX_PAIRS: usize = 126;
 
@@ -125,7 +147,9 @@ impl Evaluator<'_> {
         }
         let wb = self.host.workbook();
         let sheet = wb.sheet(area.sheet).ok_or(CellError::Ref)?;
-        let Some(pt) = sheet.pivots.iter().find(|p| p.last_range.is_some_and(|r| r.intersects(&area.range)) || p.anchor == area.range.start) else {
+        let Some((pivot_idx, pt)) =
+            sheet.pivots.iter().enumerate().find(|(_, p)| p.last_range.is_some_and(|r| r.intersects(&area.range)) || p.anchor == area.range.start)
+        else {
             return match self.getpivotdata_fallback(args) {
                 Ev::V(Value::Error(e)) => Err(e),
                 Ev::V(v) => Ok(v),
@@ -168,27 +192,21 @@ impl Evaluator<'_> {
         // refresh — never an index cached from a failed build, because the shared lookup keeps
         // the first one set and undo or reopen could then never rebuild it.
         if pt.data_index.cells().is_none() {
-            let Some(build) = PIVOT_INDEXER.get() else {
-                return match self.getpivotdata_fallback(args) {
-                    Ev::V(Value::Error(e)) => Err(e),
-                    Ev::V(v) => Ok(v),
-                    _ => Err(CellError::Ref),
-                };
-            };
-            match build(wb, area.sheet, pt) {
-                Ok(cells) => {
-                    pt.data_index.set_cells(cells);
-                }
-                Err(PivotIndexError::Other(_)) => {
+            match self.host.ensure_pivot_index(area.sheet, pivot_idx) {
+                PivotIndexState::Ready => {}
+                PivotIndexState::Stale => return Err(CellError::Ref),
+                PivotIndexState::Fallback => {
                     return match self.getpivotdata_fallback(args) {
                         Ev::V(Value::Error(e)) => Err(e),
                         Ev::V(v) => Ok(v),
                         _ => Err(CellError::Ref),
                     };
                 }
-                Err(PivotIndexError::Stale) => {}
             }
         }
+        let wb = self.host.workbook();
+        let sheet = wb.sheet(area.sheet).ok_or(CellError::Ref)?;
+        let pt = sheet.pivots.get(pivot_idx).ok_or(CellError::Ref)?;
         let cell = find(&pt.data_index, &data_field, &axis_pairs)
             .or_else(|| {
                 let mut mapped = false;

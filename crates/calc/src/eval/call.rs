@@ -70,6 +70,7 @@ impl<'h> Evaluator<'h> {
             "INDIRECT" => self.indirect(args),
             "INDEX" => self.index(args),
             "FILTER" => self.filter_call(args),
+            "SUMPRODUCT" => self.sumproduct_call(args),
             "XLOOKUP" => self.xlookup(args),
             "VLOOKUP" | "HLOOKUP" => self.vh_lookup(name == "VLOOKUP", args),
             "LOOKUP" => self.lookup_call(args),
