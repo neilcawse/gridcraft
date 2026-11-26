@@ -3046,7 +3046,8 @@ fn sheet_operations_keep_names_on_their_sheets() {
     // Moving Data (index 1) to the end: its names go with it.
     s.execute("sheet.move", json!({"sheet": "Data", "to": 2})).unwrap();
     assert_eq!(names(&s), [named("Rate", Some("Data"), "Data!$A$1"), named("Rate", Some("Notes"), "Notes!$B$1"), named("Total", None, "Data!$C$1")]);
-    // Copying Data to the front copies its sheet-level names, referring to the copy.
+    // Copying Data to the front copies its sheet-level names, referring to the copy, and gives
+    // the copy a sheet-level copy of the workbook name that refers to Data (X35).
     s.execute("sheet.move", json!({"sheet": "Data", "to": 0, "copy": true})).unwrap();
     assert_eq!(s.doc().unwrap().wb.sheets[0].name, "Data (2)");
     assert_eq!(
@@ -3055,21 +3056,30 @@ fn sheet_operations_keep_names_on_their_sheets() {
             named("Rate", Some("Data"), "Data!$A$1"),
             named("Rate", Some("Data (2)"), "'Data (2)'!$A$1"),
             named("Rate", Some("Notes"), "Notes!$B$1"),
-            named("Total", None, "Data!$C$1")
+            named("Total", None, "Data!$C$1"),
+            named("Total", Some("Data (2)"), "'Data (2)'!$C$1")
         ]
     );
     // Deleting Data removes its names; names referring to it become #REF!.
     s.execute("home.deleteSheet", json!({"sheet": "Data"})).unwrap();
     assert_eq!(
         names(&s),
-        [named("Rate", Some("Data (2)"), "'Data (2)'!$A$1"), named("Rate", Some("Notes"), "Notes!$B$1"), named("Total", None, "#REF!")]
+        [
+            named("Rate", Some("Data (2)"), "'Data (2)'!$A$1"),
+            named("Rate", Some("Notes"), "Notes!$B$1"),
+            named("Total", None, "#REF!"),
+            named("Total", Some("Data (2)"), "'Data (2)'!$C$1")
+        ]
     );
     // Deleting a name in one scope keeps the others.
     s.execute("formulas.deleteName", json!({"name": "rate", "scope": "Notes"})).unwrap();
-    assert_eq!(names(&s), [named("Rate", Some("Data (2)"), "'Data (2)'!$A$1"), named("Total", None, "#REF!")]);
+    assert_eq!(
+        names(&s),
+        [named("Rate", Some("Data (2)"), "'Data (2)'!$A$1"), named("Total", None, "#REF!"), named("Total", Some("Data (2)"), "'Data (2)'!$C$1")]
+    );
     assert!(s.execute("formulas.deleteName", json!({"name": "Total", "scope": "Notes"})).is_err());
     s.execute("formulas.deleteName", json!({"name": "Total", "scope": "Workbook"})).unwrap();
-    assert_eq!(names(&s).len(), 1);
+    assert_eq!(names(&s).len(), 2);
 }
 
 #[test]
