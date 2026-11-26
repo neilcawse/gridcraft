@@ -140,6 +140,7 @@ pub(super) fn paste_internal(s: &mut Session, p: &Json, transfer_lines: bool) ->
                 }
                 axis.replace(cx, dest_sheet, dest..=dest_last, incoming, &mut map_style, true)?;
             }
+            axis.mark_collapsed_summary(cx, dest_sheet, dest, dest_last)?;
             if moving && clip.sheet != dest_sheet {
                 protected_source = live.filter(|sh| sh.is_protected());
             }
@@ -515,6 +516,8 @@ impl LineAxis {
 
     /// Replaces the line formatting of `first..=last` on `sheet` with `incoming` (ascending
     /// `(index, line)` pairs inside that span; a missing index resets to the default line).
+    /// `paste` also moves visibility, the outline level and the collapsed-summary marker, as
+    /// Excel's whole-line Copy/Cut does (X25, X33/X44); AutoFill leaves them on their own lines.
     pub(super) fn replace(
         self,
         cx: &mut Ctx,
@@ -522,7 +525,7 @@ impl LineAxis {
         span: std::ops::RangeInclusive<u32>,
         incoming: impl Iterator<Item = (u32, LineInfo)>,
         map_style: &mut impl FnMut(StyleId, &mut Workbook) -> StyleId,
-        copy_hidden: bool,
+        paste: bool,
     ) -> Result<()> {
         let target = cx.wb.sheets.get(sheet).ok_or(EngineError::NoDocument)?;
         let lines = self.lines(target);
@@ -533,15 +536,15 @@ impl LineAxis {
         while let Some(i) = existing.peek().map(|x| x.0).into_iter().chain(incoming.peek().map(|x| x.0)).min() {
             let old = existing.next_if(|x| x.0 == i).map(|x| x.1).unwrap_or_default();
             let new = incoming.next_if(|x| x.0 == i).map(|x| x.1).unwrap_or_default();
-            // Outline, collapse, boundary edges and bare-row markers stay on their own lines.
+            // Boundary edges and bare-row markers stay on their own lines.
+            let kept = if paste { LineInfo { hidden: new.hidden, outline: new.outline, collapsed: new.collapsed, ..old } } else { old };
             let info = LineInfo {
                 size: new.size,
-                hidden: if copy_hidden { new.hidden } else { old.hidden },
                 custom: new.custom,
                 saved_size: new.saved_size,
                 saved_col_flags: new.saved_col_flags,
                 style: new.style,
-                ..old
+                ..kept
             };
             if info != old || info.style.is_some() {
                 changes.push((i, old, info));
@@ -554,16 +557,7 @@ impl LineAxis {
         if changes.is_empty() {
             return Ok(());
         }
-        if let Some(protection) = cx.wb.sheet(sheet).and_then(|sh| sh.protection.as_ref()) {
-            let denied = match self {
-                Self::Rows if !protection.format_rows => Some("Formatting rows"),
-                Self::Columns if !protection.format_columns => Some("Formatting columns"),
-                _ => None,
-            };
-            if let Some(what) = denied {
-                return Err(EngineError::Other(format!("{what} isn't allowed on this protected sheet (Review › Unprotect Sheet).")));
-            }
-        }
+        self.refuse_unless_formatting_allowed(cx, sheet)?;
         if matches!(self, Self::Rows) {
             cx.recalc_all |= changes.iter().any(|(_, old, info)| old.hidden != info.hidden);
         }
@@ -577,6 +571,47 @@ impl LineAxis {
                 lines.remove(&i);
             } else {
                 lines.insert(i, info);
+            }
+        }
+        Ok(())
+    }
+
+    /// Excel marks the summary line just past a whole-line paste collapsed (ShowDetail false)
+    /// when the pasted lines leave a group ending at the paste's last line (or, with summaries
+    /// before their detail, starting at its first) with every detail line hidden (X44).
+    pub(super) fn mark_collapsed_summary(self, cx: &mut Ctx, sheet: usize, first: u32, last: u32) -> Result<()> {
+        let target = cx.wb.sheets.get(sheet).ok_or(EngineError::NoDocument)?;
+        let (rows, end) = match self {
+            Self::Rows => (true, gridcraft_core::MAX_ROWS),
+            Self::Columns => (false, gridcraft_core::MAX_COLS),
+        };
+        let before = crate::outline::summary_before(target, rows);
+        let lines = self.lines(target);
+        let summary = crate::outline::groups_with(lines, before)
+            .into_iter()
+            .find(|g| g.collapsed && g.has_summary() && if before { g.start == first } else { g.end == last })
+            .map(|g| g.summary())
+            .filter(|&i| i < end && !lines.get(&i).is_some_and(|l| l.collapsed));
+        let Some(i) = summary else { return Ok(()) };
+        self.refuse_unless_formatting_allowed(cx, sheet)?;
+        let target = cx.sheet_mut(sheet)?;
+        let lines = match self {
+            Self::Rows => &mut target.rows,
+            Self::Columns => &mut target.cols,
+        };
+        lines.entry(i).or_default().collapsed = true;
+        Ok(())
+    }
+
+    fn refuse_unless_formatting_allowed(self, cx: &Ctx, sheet: usize) -> Result<()> {
+        if let Some(protection) = cx.wb.sheet(sheet).and_then(|sh| sh.protection.as_ref()) {
+            let denied = match self {
+                Self::Rows if !protection.format_rows => Some("Formatting rows"),
+                Self::Columns if !protection.format_columns => Some("Formatting columns"),
+                _ => None,
+            };
+            if let Some(what) = denied {
+                return Err(EngineError::Other(format!("{what} isn't allowed on this protected sheet (Review › Unprotect Sheet).")));
             }
         }
         Ok(())

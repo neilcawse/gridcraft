@@ -186,11 +186,12 @@ change inherited Locked or formula-Hidden flags, including on blank cells. A ref
 leaves the workbook unchanged. This guard compares final effective protection, including where
 a cell's explicit style masks a line style; it does not change protection on other paste paths.
 
-Zero size demonstrates effective geometry; the probes did not recover `Hidden`, `OutlineLevel`
-or `ShowDetail` values, nor did they save XML. Outline/collapse, thickness and bare markers stay
-on their existing lines. The system clipboard, drag-and-drop, filtered and packed copies, and
-tiled pastes remain unmeasured and retain their previous behavior. See X32 for Paste Special All
-and Insert Copied Cells.
+Zero size demonstrates effective geometry. These probes did not save XML; their Batch 5 re-runs
+did return `Hidden`, `OutlineLevel` and `ShowDetail`, and since
+[X44](#x44--whole-line-paste-carries-outline-levels) the outline level and collapsed-summary
+marker transfer with the line. Thickness and bare markers stay on their existing lines. The
+system clipboard, drag-and-drop, filtered and packed copies, and tiled pastes remain unmeasured
+and retain their previous behavior. See X32 for Paste Special All and Insert Copied Cells.
 
 ## X29 — Cut source sheet identity
 
@@ -273,10 +274,11 @@ UsedRange and Last Cell are unchanged by this lane.
 
 **Inferred or unmeasured:** Column C's whole-column Bold readback changed from `false` to `true`
 after Paste Special All; GridCraft tests C8/C9's inherited bold as an inference, not as a sampled
-Excel cell result. The whole-column readback stayed `false` after Insert. Excel did not return
-hidden, outline or a named style for row 9, and did not save XML. GridCraft follows ordinary
-Paste: visibility transfers and an unstyled source line clears the destination's line style,
-but outline/collapse, boundary edges and bare-row markers stay on their own lines.
+Excel result. The whole-column readback stayed `false` after Insert. Batch 4 returned no hidden,
+outline or named style for row 9, and no XML was saved. GridCraft follows ordinary Paste:
+visibility transfers and an unstyled source line clears the destination's line style. Boundary
+edges and bare-row markers stay on their own lines; since X44 the outline level and
+collapsed-summary marker transfer, as the Batch 5 readbacks of both clipboard cases show.
 Whole columns use the same rule as rows; the clipboard cases only exercised rows. Protection,
 undo/redo, Insert Cut Cells and the system clipboard were not compared in these probes.
 Insert Copied and Insert Cut Cells check row/column formatting protection against the sheet as
@@ -318,11 +320,12 @@ blanks included, and spills) grown along each axis by the line records Excel cou
   (`ht` without `customHeight`). A visibility-only row counts and a visibility-only column does
   not, following the measured difference between a row height and a column width. This does not
   override a column style: a hidden styled column still counts in UsedRange. Visibility alone
-  was not isolated in a probe. An outline level or a collapsed mark counts on either axis;
-  this could explain the extra line after a pasted hidden group (row 10, column J), whose readbacks
-  show only default geometry. A line above or left of the cells extends the top or left bound too.
-  With no cells and lines on only one axis, the other axis spans its first line. Thick-edge flags
-  do not count.
+  was not isolated in a probe. An outline level or a collapsed mark counts on either axis. After
+  a pasted hidden group, Excel's extent includes the next line (row 10, column J), and Batch 5
+  read `ShowDetail` false there; X44 sets the collapsed mark on that line, which reproduces the
+  extent. Whether the mark is what Excel counts stays inferred. A line above or left of the
+  cells extends the top or left bound too. With no cells and lines on only one axis, the other
+  axis spans its first line. Thick-edge flags do not count.
 - `saved_element` (a bare `<row>` kept for save and custom-default fitting) does not count, per
   `x25-used-bare-row`. The sizing probe that saw a trailing bare row in UsedRange used a switched
   custom-default sheet, where that row fits to a non-default height; GridCraft gives the fitted
@@ -354,17 +357,61 @@ regression also checks Ctrl+End and Ctrl+Shift+End with formatting-only bounds. 
 revealed offset the vertical scrollbar can still move up, but a further wheel, drag or click
 down over it no longer snaps the view back to the legacy limit.
 
-**Residual differences** (paste payload, documented in `docs/gaps.md` §25). After GridCraft's own
-whole-row/column Copy or Cut the destination keeps its outline level and has no collapsed summary
-line, so it reports `A1:I9` where Excel reports `A1:I10` / `A1:J9`. At the X33 base, Paste Special
-All and Insert Copied Cells do not transfer the incoming line formatting; X32 adds that transfer
-but does not resolve the outline/collapse difference. A copied bare or absent row leaves no GridCraft
-record, so `x25-bare-row-over-untouched` and `x25-absent-row-over-untouched` still report `A1:I9`.
-Pending Excel probes: OutlineLevel/ShowDetail after whole-row copy, and save/reopen of pasted bare
-or absent rows.
+**Residual differences** (paste payload, documented in `docs/gaps.md` §25). The outline residual
+is resolved by [X44](#x44--whole-line-paste-carries-outline-levels): whole-row/column Copy, Cut,
+Paste Special All and Insert Copied Cells now report Excel's `A1:I10` / `H10`, `A1:J9` / `J8`
+and `A1:I11` / `H10`. Still open: a copied bare or absent row leaves no GridCraft record, so
+`x25-bare-row-over-untouched` and `x25-absent-row-over-untouched` still report `A1:I9`. Their
+Batch 5 readbacks show no change in level, visibility, height or `ShowDetail` on rows 11/12, so
+outline is not the cause. Pending Excel probe: save/reopen of pasted bare or absent rows.
 
-Tests (`crates/engine/tests/it/inspect_extent.rs`) build each measured final state in code; the
-outlined-group states carry the inferred outline level and collapsed summary line.
+Tests (`crates/engine/tests/it/inspect_extent.rs`) build each measured final state in code;
+`crates/engine/tests/it/row_paste_outline.rs` reaches the outlined-group states through paste.
+
+## X44 — Whole-line paste carries outline levels
+
+Measured in Excel for Mac 16.115.2 (Batch 5, `Range.Copy`/`Range.Cut Destination:=`, no save).
+Fixture of `x33-copy-rows-to-flat`, `x33-copy-rows-to-group`, `x33-cut-rows-to-flat` and
+`x33-cut-rows-to-group`: rows 3:5 at OutlineLevel 2, hidden, under summary row 6
+(`ShowDetail` false); rows 20:23 ungrouped; rows 30:33 at level 2, expanded, under row 34.
+Whole rows 3:6 are copied or cut to 20:23 or 30:33.
+
+| Readback after | Rows 20:22 / 30:32 | Row 23 / 33 | Row 34 | Source rows 3:6 after Cut |
+|---|---|---|---|---|
+| OutlineLevel | 2 (flat: 1 → 2; group: stays 2) | 1 (group: 2 → 1) | 1 | 1 |
+| Hidden, height | true, 0 | false, 15 | false, 15 | false, 15 |
+| ShowDetail | true | false | true | true (row 6: false → true) |
+| UsedRange / Last Cell | Copy `A3:A34` / `A34`; Cut `A20:A34` / `A34` | | | |
+
+The Batch 5 re-runs of the X25 cases read the same fields on rows and columns. Copying S rows
+3:4 (level 1 hidden, level 2 hidden) to T row 8 turns T rows 8/9 from level 3/1 to 1/2, and
+row 10, outside the paste, reads `ShowDetail` false; columns C:D to H do the same to H/I/J
+(`x25-copy-rows-*`, `x25-copy-cols-*`, `x25-cut-*`, `x25-paste-special-all-rows`). A cut source
+returns to level 1, visible and default size. A summary line outside the cut keeps
+`ShowDetail` false: row 5, column E. A default source line resets the destination's level 3 to 1
+(`x25-default-row-over-custom`, `x25-default-col-over-custom`). Insert Copied Cells gives new
+rows 8/9 levels 1/2; its row 11 keeps `ShowDetail` true, because group 9:10 is not all hidden.
+
+GridCraft now matches these readbacks. Whole-line `edit.paste`, Paste Special All and Insert
+Copied Cells move each source line's outline level and collapsed-summary marker with its size,
+visibility and style. A missing source line resets them, and a same-workbook Cut resets them on
+the source. After the transfer, if every detail line is hidden in a group that ends at the
+paste's last line, its summary line just past the paste gets the collapsed marker. With summary
+lines before their detail, the group must start at the paste's first line. This is the `ShowDetail`
+false on row 10 / column J, and it reproduces Excel's `A1:I10` / `A1:J9` extent (X33 residual).
+GridCraft stores and saves `ShowDetail` false as the summary line's `collapsed` marker. Excel's
+`ShowDetail` reads that marker rather than recomputing it: after `x25-cut-rows-to-s-a8`, row 5
+summarizes nothing and still reads false, while cut row 6 in the x33 cases turns true. Undo
+restores the lines and save/reopen keeps them. The marker is a row (column) formatting change,
+so a protected sheet must allow formatting rows (columns), as for the other line changes.
+
+Inferred or unmeasured: the saved XML (`collapsed`, `outlineLevelRow`) was not read; the
+marker past the paste was only measured with summaries below/right; nothing is cleared on a
+summary line past the paste; and nested hidden groups were not probed. AutoFill keeps
+visibility and outline on the destination, as X31 documents. Batch 5's
+`x25-autofill-hidden-*` readbacks concern AutoFill visibility, not outline, and are outside this
+lane. Paste Special modes other than All, transposed, linked, filtered, tiled and drag-and-drop
+pastes keep their previous behavior: they transfer no line formats.
 
 ## X23 — Sheet copy keeps tables
 
