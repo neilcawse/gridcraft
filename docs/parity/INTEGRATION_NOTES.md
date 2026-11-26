@@ -172,6 +172,11 @@ Paste: visibility transfers and an unstyled source line clears the destination's
 but outline/collapse, boundary edges and bare-row markers stay on their own lines.
 Whole columns use the same rule as rows; the clipboard cases only exercised rows. Protection,
 undo/redo, Insert Cut Cells and the system clipboard were not compared in these probes.
+Insert Copied and Insert Cut Cells check row/column formatting protection against the sheet as
+the insertion left it, so a new line that inherited the format of the line before it and is
+then given a different source format counts as a formatting change and is refused when the
+sheet does not allow formatting rows (or columns). That is GridCraft's choice; Excel was not
+measured on protected sheets here.
 
 Other Paste Special modes (including Values, Formulas, Formats and All Except Borders), arithmetic
 operations, Skip Blanks, Transpose, Paste Link and partial-range paste retain their previous

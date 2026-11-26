@@ -7865,6 +7865,17 @@ fn x32_paste_special_partial_and_non_all_modes_keep_line_formatting() {
         assert_eq!(v(&s, "A8"), Value::from(if what == "formats" { "D-A8" } else { "S-A3" }));
         assert_eq!(s.doc().unwrap().wb.active().unwrap().rows, before, "{range}, {what}");
     }
+    // Paste All with a modifier stays a cell-only paste too.
+    for modifier in [json!({"skipBlanks": true}), json!({"operation": "add"}), json!({"link": true})] {
+        let mut s = s();
+        whole_row_clipboard_fixture(&mut s);
+        let before = s.doc().unwrap().wb.active().unwrap().rows.clone();
+        s.execute("edit.copy", json!({"range": "3:4"})).unwrap();
+        let mut params = json!({"what": "all", "at": "A8"});
+        params.as_object_mut().unwrap().extend(modifier.as_object().unwrap().clone());
+        s.execute("edit.pasteSpecial", params).unwrap();
+        assert_eq!(s.doc().unwrap().wb.active().unwrap().rows, before, "{modifier}");
+    }
 }
 
 #[test]
@@ -7883,6 +7894,61 @@ fn x32_whole_row_special_paste_and_insert_obey_protection() {
         s.execute("edit.copy", json!({"range": "3:3"})).unwrap();
         assert_line_edit_refused(&mut s, command, params, "Formatting rows");
         assert!(s.clipboard.is_some(), "the copy must remain pending");
+    }
+}
+
+/// Insert Copied and Insert Cut Cells move each line's size with its cells, whichever side of
+/// the insertion point the source lies on, for rows and columns. Line `i` holds `Li` and, when
+/// `i` is even, a custom size of `100 + i`; every line keeps that pairing after the insert.
+#[test]
+fn x32_insert_copied_and_cut_lines_follow_their_cells() {
+    use gridcraft_model::LineInfo;
+
+    let line = |rows: bool, i: u32| if rows { CellRef::new(i, 0) } else { CellRef::new(0, i) };
+    let dump = |s: &Session, rows: bool| -> Vec<(Value, Option<f32>)> {
+        let sh = s.doc().unwrap().wb.active().unwrap();
+        let lines = if rows { &sh.rows } else { &sh.cols };
+        (0..12).map(|i| (sh.value(line(rows, i)), lines.get(&i).and_then(|l| l.size))).collect()
+    };
+    // (cut, source lines, first line of the insertion point, the labels expected in lines 0..12)
+    let cases = [
+        (false, (7, 8), 2, [0, 1, 7, 8, 2, 3, 4, 5, 6, 7, 8, 9]),
+        (false, (2, 3), 3, [0, 1, 2, 2, 3, 3, 4, 5, 6, 7, 8, 9]),
+        (false, (2, 3), 7, [0, 1, 2, 3, 4, 5, 6, 2, 3, 7, 8, 9]),
+        (true, (7, 7), 2, [0, 1, 7, 2, 3, 4, 5, 6, 8, 9, -1, -1]),
+        (true, (2, 2), 7, [0, 1, 3, 4, 5, 6, 2, 7, 8, 9, -1, -1]),
+        // Inserting at the cut lines themselves, or just after them, leaves them in place.
+        (true, (2, 3), 2, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, -1, -1]),
+        (true, (2, 3), 4, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, -1, -1]),
+    ];
+    for rows in [true, false] {
+        for (cut, (first, last), at, labels) in cases {
+            let mut s = s();
+            let sh = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+            for i in 0..10 {
+                sh.set_cell(line(rows, i), gridcraft_model::Cell { value: Value::from(format!("L{i}")), ..Default::default() });
+                if i % 2 == 0 {
+                    let lines = if rows { &mut sh.rows } else { &mut sh.cols };
+                    lines.insert(i, LineInfo { size: Some(100. + i as f32), custom: true, ..Default::default() });
+                }
+            }
+            let source = if rows { gridcraft_core::RangeRef::rows(first, last) } else { gridcraft_core::RangeRef::cols(first, last) };
+            s.execute(if cut { "edit.cut" } else { "edit.copy" }, json!({"range": source.a1()})).unwrap();
+            let before = dump(&s, rows);
+            s.execute("home.insertCopiedCells", json!({"at": line(rows, at).a1()})).unwrap();
+            let expected: Vec<(Value, Option<f32>)> = labels
+                .iter()
+                .map(|&k| match u32::try_from(k) {
+                    Ok(k) => (Value::from(format!("L{k}")), (k % 2 == 0).then_some(100. + k as f32)),
+                    Err(_) => (Value::Empty, None),
+                })
+                .collect();
+            assert_eq!(dump(&s, rows), expected, "rows {rows}, cut {cut}, {}, at {at}", source.a1());
+            s.execute("edit.undo", json!({})).unwrap();
+            assert_eq!(dump(&s, rows), before, "undo: rows {rows}, cut {cut}, {}, at {at}", source.a1());
+            s.execute("edit.redo", json!({})).unwrap();
+            assert_eq!(dump(&s, rows), expected, "redo: rows {rows}, cut {cut}, {}, at {at}", source.a1());
+        }
     }
 }
 
