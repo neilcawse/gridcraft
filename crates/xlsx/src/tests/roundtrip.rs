@@ -1715,6 +1715,56 @@ fn builtin_call_spelling_survives_xlsx_import() {
     assert_eq!(sh.cell(at("B1")).unwrap().formula.as_ref().unwrap().text, "ISREF(A1)");
 }
 
+/// Batch 5 `x30-lambda-collisions`: in formula XML an unprefixed call of a newer function that a
+/// workbook LAMBDA shares is the LAMBDA (`_xludf.` in the model and in the saved file), and an
+/// `_xlfn.` call the built-in. Unmeasured, kept: an older function (ISREF) and a name that holds
+/// no LAMBDA (`Sequence`) leave the unprefixed call with the built-in; literals don't change.
+/// These legacy formulas read with Excel's implicit `@` where a built-in can return an array.
+#[test]
+fn future_function_calls_keep_their_binding_through_xlsx() {
+    let names = r#"<definedNames><definedName name="TrimRange">_xlfn.LAMBDA(_xlpm.x,"lam")</definedName><definedName name="VStack">_xlfn.LAMBDA(_xlpm.x,"lam")</definedName><definedName name="IsRef">_xlfn.LAMBDA(_xlpm.x,FALSE)</definedName><definedName name="Sequence">Data!$B$1</definedName></definedNames>"#;
+    let formulas = [
+        ("TRIMRANGE(1)", "_xludf.TrimRange(1)", "_xludf.TrimRange(1)"),
+        ("_xlfn.TRIMRANGE(1)", "@TRIMRANGE(1)", "_xlfn.TRIMRANGE(1)"),
+        ("IF(TRUE,vstack(1),\"VSTACK(\")", "IF(TRUE,_xludf.VStack(1),\"VSTACK(\")", "IF(TRUE,_xludf.VStack(1),\"VSTACK(\")"),
+        ("_xlfn.VSTACK(1)", "@VSTACK(1)", "_xlfn.VSTACK(1)"),
+        ("_xludf.VSTACK(1)", "_xludf.VStack(1)", "_xludf.VStack(1)"),
+        (
+            "_xlfn.LET(_xlpm.vstack,_xlfn.LAMBDA(_xlpm.x,5),_xlpm.vstack(1))",
+            "@LET(vstack,LAMBDA(x,5),VSTACK(1))",
+            "_xlfn.LET(_xlpm.vstack,_xlfn.LAMBDA(_xlpm.x,5),_xlpm.VSTACK(1))",
+        ),
+        ("ISREF(A1)", "ISREF(A1)", "ISREF(A1)"),
+        ("SEQUENCE(2)", "@SEQUENCE(2)", "_xlfn.SEQUENCE(2)"),
+    ];
+    let rows: String = formulas.iter().enumerate().map(|(i, (f, _, _))| format!(r#"<row r="{0}"><c r="A{0}"><f>{f}</f></c></row>"#, i + 1)).collect();
+    let bytes = super::minimal(&format!("<sheetData>{rows}</sheetData>"), &[], "", names);
+    let (wb, _) = read_xlsx(&bytes).unwrap();
+    let text = |wb: &Workbook, row: usize| wb.sheet(0).unwrap().cell(at(&format!("A{row}"))).unwrap().formula.as_ref().unwrap().text.clone();
+    let saved = write_xlsx(&wb).unwrap();
+    let (xml, _) = sheet1_xml(&saved);
+    let (reopened, _) = read_xlsx(&saved).unwrap();
+    let written_as = |w: &str| xml.contains(&format!("<f>{}</f>", w.replace('"', "&quot;"))) || xml.contains(&format!("<f>{w}</f>"));
+    let wrong: Vec<_> = formulas
+        .iter()
+        .enumerate()
+        .filter(|(i, (_, model, written))| text(&wb, i + 1) != *model || !written_as(written) || text(&reopened, i + 1) != *model)
+        .map(|(i, (file, _, _))| (*file, text(&wb, i + 1), text(&reopened, i + 1)))
+        .collect();
+    assert!(wrong.is_empty(), "{wrong:?}\n{xml}");
+}
+
+#[test]
+fn name_call_binding_marks_only_unprefixed_calls() {
+    let names = ["VStack".to_string()];
+    let bind = |text: &str| crate::fmla::bind_name_calls(text, &names);
+    assert_eq!(bind("VSTACK(1)+vstack(2)").as_deref(), Some("_xludf.VSTACK(1)+_xludf.vstack(2)"));
+    for unchanged in ["_xlfn.VSTACK(1)", "_xludf.VSTACK(1)", "_xlpm.vstack(1)", "\"VSTACK(\"&VStacks(1)", "VStack+1", "SUM(1)"] {
+        assert_eq!(bind(unchanged), None, "{unchanged}");
+    }
+    assert_eq!(crate::fmla::bind_name_calls("VSTACK(1)", &[]), None);
+}
+
 /// A line break in a table column name (and its header cell) survives; a
 /// leading backslash in a table name is legal and kept.
 #[test]

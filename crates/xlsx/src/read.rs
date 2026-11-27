@@ -66,6 +66,10 @@ pub struct Ctx<'a> {
     /// Whether GridCraft calculates a function, when the caller says: cell formulas wrapped by
     /// Google Sheets' export are then read as the formula inside (see [`crate::read_xlsx_with`]).
     pub known_function: Option<&'a dyn Fn(&str) -> bool>,
+    /// The workbook's LAMBDA names visible from the sheet being read that are also names of
+    /// newer (`_xlfn.`) functions: an unprefixed call of one calls the name (see
+    /// [`crate::fmla::bind_name_calls`]).
+    pub name_calls: Vec<String>,
     /// The code of the workbook's Python cells, from its Python part.
     pub python: crate::python_part::ScriptsIn,
     /// Table file id → (model table id, column file id → header), for resolving slicers.
@@ -356,6 +360,22 @@ pub(crate) fn is_special_defined_name(lower: &str) -> bool {
     matches!(lower, "_xlnm._filterdatabase" | "_xlnm.print_area" | "_xlnm.print_titles") || lower.starts_with("_xlchart.")
 }
 
+/// The workbook's LAMBDA names that are also names of newer functions, each with the file index
+/// of its sheet when it is sheet-level (`localSheetId`).
+fn future_lambda_names(wb_xml: &El) -> Vec<(Option<usize>, String)> {
+    let lambda = |text: &str| crate::fmla::from_file(text.trim()).get(..7).is_some_and(|p| p.eq_ignore_ascii_case("LAMBDA("));
+    wb_xml
+        .child("definedNames")
+        .into_iter()
+        .flat_map(|dn| dn.kids("definedName"))
+        .filter_map(|d| {
+            let name = d.attr("name")?;
+            gridcraft_formula::file_prefix(name)?;
+            lambda(&d.text).then(|| (d.attr_u32("localSheetId").map(|i| i as usize), name.to_string()))
+        })
+        .collect()
+}
+
 fn read_defined_names(wb: &mut Workbook, wb_xml: &El, file_to_model: &[Option<usize>]) -> Vec<(String, String)> {
     // Chartex parts refer to their data through hidden `_xlchart.*` names.
     let mut chart_names: Vec<(String, String)> = vec![];
@@ -443,6 +463,7 @@ pub fn read_xlsx<'a>(
         legacy_formulas: vec![],
         shared_formula_bytes: 0,
         known_function,
+        name_calls: vec![],
         python: Default::default(),
         file_tables: Default::default(),
         cells: 0,
@@ -494,6 +515,9 @@ pub fn read_xlsx<'a>(
         };
     }
 
+    // Excel reads an unprefixed call of a newer function as a call of a same-named workbook
+    // LAMBDA (Batch 5, `x30-lambda-collisions`).
+    let future_lambdas = future_lambda_names(&wb_xml);
     // Sheets. `file_to_model[i]` maps the i-th <sheet> to a model sheet index.
     let mut file_to_model: Vec<Option<usize>> = vec![];
     // Legacy formula cells per model sheet, rewritten once names and tables are known.
@@ -538,6 +562,7 @@ pub fn read_xlsx<'a>(
         cx.drawing_kept = Default::default();
         cx.pivot_parts.clear();
         cx.value_meta.clear();
+        cx.name_calls = future_lambdas.iter().filter(|(scope, _)| scope.is_none_or(|s| s == i)).map(|(_, n)| n.clone()).collect();
         let (mut sheet, read_controls) = match crate::sheet_read::read_sheet(&mut cx, &rel.target, &name) {
             Ok(s) => s,
             Err(IoError::TooLarge(m)) => return Err(IoError::TooLarge(m)),

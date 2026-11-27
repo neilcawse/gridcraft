@@ -175,9 +175,9 @@ fn spell_lambda_calls(mut e: &mut Expr, lambdas: &[String], env: &mut Vec<String
         }
         Expr::Call(name, args) => {
             if !env.iter().any(|local| same_name(local, name))
-                && let Some(defined) = lambdas.iter().find(|l| l.eq_ignore_ascii_case(name))
+                && let Some(defined) = crate::workbook::lambda_call_spelling(name, lambdas)
             {
-                name.clone_from(defined);
+                *name = defined;
             }
             args.iter_mut().for_each(|a| spell_lambda_calls(a, lambdas, env));
         }

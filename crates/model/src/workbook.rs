@@ -829,10 +829,10 @@ impl Workbook {
             }
         }
     }
-    /// Defined LAMBDA names eligible for call respelling. Built-ins keep the parser's spelling.
+    /// Names of the defined names holding a LAMBDA (callable like functions), as they are spelled.
     pub(crate) fn lambda_names(&self) -> Vec<String> {
         let is_lambda = |f: &str| f.trim_start_matches('=').trim_start().get(..7).is_some_and(|p| p.eq_ignore_ascii_case("LAMBDA("));
-        self.names.iter().filter(|n| is_lambda(&n.formula) && !gridcraft_functions::is_known_function(&n.name)).map(|n| n.name.clone()).collect()
+        self.names.iter().filter(|n| is_lambda(&n.formula)).map(|n| n.name.clone()).collect()
     }
     /// Table by name across sheets: (sheet index, table index).
     pub fn table(&self, name: &str) -> Option<(usize, usize)> {
@@ -1080,12 +1080,27 @@ fn spell_calls(e: Expr, lambdas: &[String]) -> Expr {
         return e;
     }
     e.map(&mut |x| match x {
-        Expr::Call(n, args) => match lambdas.iter().find(|l| l.eq_ignore_ascii_case(&n)) {
-            Some(l) => Expr::Call(l.clone(), args),
+        Expr::Call(n, args) => match lambda_call_spelling(&n, lambdas) {
+            Some(l) => Expr::Call(l, args),
             None => Expr::Call(n, args),
         },
         other => other,
     })
+}
+
+/// The new spelling of a call of one of the workbook's LAMBDA names (`lambdas`, as they are
+/// spelled), when it changes: `DOUBLE` → `Double`, and `_xludf.VSTACK` → `_xludf.VStack`, which
+/// calls the name `VStack`, not the built-in. An unprefixed call of a built-in keeps the parser's
+/// spelling: the built-in, not a same-named LAMBDA, is what it calls.
+pub(crate) fn lambda_call_spelling(call: &str, lambdas: &[String]) -> Option<String> {
+    match gridcraft_formula::user_defined_name(call) {
+        Some(bare) => lambdas.iter().find(|l| l.eq_ignore_ascii_case(bare)).filter(|l| l.as_str() != bare).map(|l| format!("_xludf.{l}")),
+        None => lambdas
+            .iter()
+            .find(|l| l.eq_ignore_ascii_case(call))
+            .filter(|l| l.as_str() != call && !gridcraft_functions::is_known_function(l))
+            .cloned(),
+    }
 }
 
 #[cfg(test)]

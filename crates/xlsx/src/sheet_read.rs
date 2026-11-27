@@ -935,7 +935,10 @@ fn read_craft_formula_text(
     dynamic: bool,
     unwrapped: &mut bool,
 ) -> Option<Formula> {
-    let mut model = from_file(f.text.trim());
+    // An unprefixed call of a newer function that shares a workbook LAMBDA's name calls the name.
+    let bound = crate::fmla::bind_name_calls(f.text.trim(), &cx.name_calls);
+    let file_text = bound.as_deref().unwrap_or(f.text.trim());
+    let mut model = from_file(file_text);
     if let Some(known) = cx.known_function
         && let Some(u) = unwrap_google_sheets(&model, known)
     {
@@ -945,8 +948,8 @@ fn read_craft_formula_text(
     let text = model.as_str();
     let formula = || {
         let mut formula = Formula::new(text);
-        if !*unwrapped && formula.expr.is_some() && formula.text != f.text.trim() {
-            formula.display_text = formula_bar_text(f.text.trim(), &formula.text).map(Box::new);
+        if !*unwrapped && formula.expr.is_some() && formula.text != file_text {
+            formula.display_text = formula_bar_text(file_text, &formula.text).map(Box::new);
         }
         formula
     };
@@ -1210,6 +1213,7 @@ mod tests {
             rich_errors: vec![],
             cf_ext_ids: vec![],
             known_function: None,
+            name_calls: vec![],
             python: Default::default(),
             cells: 0,
             shared_formula_bytes: 0,

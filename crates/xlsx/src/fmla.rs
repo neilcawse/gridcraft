@@ -161,6 +161,36 @@ pub fn from_file(text: &str) -> String {
     }
 }
 
+/// `text` (a formula as a file spells it) with each unprefixed call of one of `names` marked
+/// `_xludf.`, or `None` when there is none. `names` are workbook LAMBDA names that newer
+/// functions share: files spell those functions `_xlfn.TRIMRANGE`, and Excel reads
+/// `TRIMRANGE(1)` as a call of the workbook's `TrimRange` (Batch 5, `x30-lambda-collisions`
+/// A1, A3). The model's `_xludf.` call keeps that binding through editing and saving.
+pub(crate) fn bind_name_calls(text: &str, names: &[String]) -> Option<String> {
+    use gridcraft_formula::lexer::{Tok, tokenize};
+    let mentioned = |n: &String| !n.is_empty() && text.as_bytes().windows(n.len()).any(|w| w.eq_ignore_ascii_case(n.as_bytes()));
+    if !names.iter().any(mentioned) {
+        return None;
+    }
+    let tokens = tokenize(text).ok()?;
+    let mut bound = String::new();
+    let mut pos = 0;
+    for t in &tokens {
+        if let Tok::Func(spelling) = &t.tok
+            && names.iter().any(|n| n.eq_ignore_ascii_case(spelling))
+        {
+            bound.push_str(text.get(pos..t.start)?);
+            bound.push_str("_xludf.");
+            pos = t.start;
+        }
+    }
+    if pos == 0 && bound.is_empty() {
+        return None;
+    }
+    bound.push_str(text.get(pos..)?);
+    Some(bound)
+}
+
 /// Excel stores some formula-bar operators and names as compatibility functions. Preserve the
 /// surrounding source layout, but only change actual tokens, not literals or sheet names. A
 /// formula holding a file-only spelling the formula bar shows otherwise (`[#This Row]`,
