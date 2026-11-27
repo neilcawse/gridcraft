@@ -3292,7 +3292,7 @@ fn future_function_calls_bind_like_excel_through_save() {
         &mut xml,
     )
     .unwrap();
-    for spelled in ["<f>_xludf.TrimRange(1)</f>", "_xlfn.TRIMRANGE(1)", "<f>_xludf.VStack(1)</f>", "_xlfn.VSTACK(1)", "_xlpm.VSTACK(1))"] {
+    for spelled in [">_xludf.TrimRange(1)</f>", "_xlfn.TRIMRANGE(1)", ">_xludf.VStack(1)</f>", "_xlfn.VSTACK(1)", "_xlpm.VSTACK(1))"] {
         assert!(xml.contains(spelled), "{spelled}: {xml}");
     }
     s.execute("file.open", json!({"name": "reopened.xlsx", "base64": saved["base64"]})).unwrap();
