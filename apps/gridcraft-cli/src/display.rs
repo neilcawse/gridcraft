@@ -4,7 +4,8 @@ use gridcraft_engine::cf::{CfCache, CfLook};
 use gridcraft_engine::core::{CellRef, MAX_COLS, MAX_ROWS, RangeRef, Value, col_to_letters};
 use gridcraft_engine::display::{CellLook, cell_look};
 use gridcraft_engine::model::{
-    Alignment, Anchor, AnchorMode, BorderLine, BorderStyle, Color, Font, HAlign, LineIndex, Sheet, StyleId, Theme, Underline, Workbook,
+    Alignment, Anchor, AnchorMode, BorderLine, BorderStyle, Color, DrawingPlacement, DrawingRef, Font, HAlign, LineIndex, Sheet, StyleId, Theme,
+    Underline, Workbook,
 };
 use gridcraft_ui_egui::grid::display::{DisplayText, SheetText, TextContext};
 use serde::Serialize;
@@ -382,7 +383,7 @@ fn drawings(out: &mut impl Write, sh: &Sheet, selection: Option<RangeRef>) -> io
     let bounds = selection.map(|r| (box_of(r.start), box_of(CellRef::new(r.end.row + 1, r.end.col + 1))));
     write!(out, "[")?;
     let mut first = true;
-    let mut emit = |kind, id, title, a: Anchor| {
+    let mut emit = |kind, id, title, a: Anchor, cell: CellRef| {
         let (x, y) = box_of(a.cell);
         let x = x + f64::from(a.dx);
         let y = y + f64::from(a.dy);
@@ -390,7 +391,7 @@ fn drawings(out: &mut impl Write, sh: &Sheet, selection: Option<RangeRef>) -> io
             return Ok(());
         }
         let anchor = AnchorRecord {
-            cell: a.cell.a1(),
+            cell: cell.a1(),
             dx_pt: dimension(f64::from(a.dx), PT),
             dy_pt: dimension(f64::from(a.dy), PT),
             width_pt: dimension(f64::from(a.width), PT),
@@ -401,23 +402,47 @@ fn drawings(out: &mut impl Write, sh: &Sheet, selection: Option<RangeRef>) -> io
         serde_json::to_writer(&mut *out, &Drawing { kind, id, title, anchor }).map_err(io::Error::from)
     };
     for obj in &sh.charts {
-        emit("chart", Some(obj.id), obj.title.as_deref(), obj.anchor)?;
+        emit("chart", Some(obj.id), obj.title.as_deref(), obj.anchor, obj.anchor.cell)?;
     }
     for obj in &sh.images {
-        emit("image", Some(obj.id), Some(obj.alt.as_str()), obj.anchor)?;
+        emit("image", Some(obj.id), Some(obj.alt.as_str()), obj.anchor, obj.anchor.cell)?;
     }
     for obj in &sh.shapes {
-        emit("shape", Some(obj.id), Some(obj.text.as_str()), obj.anchor)?;
+        emit("shape", Some(obj.id), Some(obj.text.as_str()), obj.anchor, obj.anchor.cell)?;
     }
     for obj in &sh.slicers {
-        emit("slicer", Some(obj.id), Some(obj.caption.as_str()), obj.anchor)?;
+        emit("slicer", Some(obj.id), Some(obj.caption.as_str()), obj.anchor, obj.anchor.cell)?;
     }
     for obj in &sh.controls {
-        emit("control", Some(obj.id), None, obj.anchor)?;
+        emit("control", Some(obj.id), None, obj.anchor, obj.anchor.cell)?;
     }
     for obj in &sh.groups {
         if let Some(a) = sh.group_anchor(obj.id) {
-            emit("group", Some(obj.id), None, a)?;
+            let mut cell = a.cell;
+            if let Some(file) = sh.drawing_files.get(&DrawingRef::Group(obj.id)).filter(|f| f.anchor == obj.anchor)
+                && matches!(file.placement, DrawingPlacement::TwoCell { .. } | DrawingPlacement::OneCell { .. })
+            {
+                // Several cells can share the same pixel edge. Keep the worksheet marker's
+                // identity on a collapsed axis, without moving the member bounds or changing offsets.
+                let start = file.anchor;
+                if start.cell.col != cell.col
+                    && start.dx == 0.0
+                    && a.dx == 0.0
+                    && sh.col_width(start.cell.col) == 0.0
+                    && cols.start(start.cell.col) == cols.start(cell.col)
+                {
+                    cell.col = start.cell.col;
+                }
+                if start.cell.row != cell.row
+                    && start.dy == 0.0
+                    && a.dy == 0.0
+                    && sh.row_height(start.cell.row) == 0.0
+                    && rows.start(start.cell.row) == rows.start(cell.row)
+                {
+                    cell.row = start.cell.row;
+                }
+            }
+            emit("group", Some(obj.id), None, a, cell)?;
         }
     }
     write!(out, "]")
@@ -581,6 +606,94 @@ mod tests {
         assert_eq!(sh["standard_dimensions"]["width_chars"], 10.0);
         assert_eq!(sh["drawings"][0]["anchor"]["cell"], "A1");
         assert_eq!(sh["drawings"][0]["anchor"]["width_pt"], 75.0);
+    }
+
+    // Synthetic model fixture: root DrawingML placement plus its separately projected member.
+    fn placed_group(sh: &mut Sheet, placement: gridcraft_engine::model::DrawingPlacement, rotation: i64, inset: f64) {
+        use gridcraft_engine::model::{DrawingFile, DrawingGroup, DrawingRef, Shape, ShapeKind};
+
+        let anchor = placement.anchor(sh);
+        let mut bounds = sh.anchor_rect(&anchor);
+        bounds.x += inset;
+        bounds.w -= inset;
+        sh.shapes.push(Shape {
+            id: 2,
+            kind: ShapeKind::Rectangle,
+            anchor: sh.rect_anchor(bounds, anchor.mode),
+            fill: Color::Auto,
+            line: Color::Auto,
+            text: String::new(),
+            format: Default::default(),
+            rotation: 0.0,
+            math: Default::default(),
+        });
+        sh.groups.push(DrawingGroup {
+            id: 1,
+            name: "Group".into(),
+            anchor,
+            child_offset: (0, 0),
+            child_extent: (381_000, 381_000),
+            flip: (false, false),
+            rotation,
+            member_rotations: vec![],
+            file: None,
+            members: vec![DrawingRef::Shape(2)],
+        });
+        sh.drawing_files.insert(DrawingRef::Group(1), DrawingFile { anchor, placement });
+    }
+
+    #[test]
+    fn display_group_keeps_its_collapsed_start_row() {
+        use gridcraft_engine::model::{DrawingMarker, DrawingPlacement};
+
+        // Batch 5 x38-collapsed-sort-stays: F7 and F9 have the same top, but Excel reads F7.
+        let mut wb = Workbook::new();
+        let sh = Arc::make_mut(&mut wb.sheets[0]);
+        sh.default_row_height = 20.0;
+        sh.default_col_width = 64.0;
+        for row in 6..8 {
+            sh.rows.insert(row, LineInfo { size: Some(0.0), custom: true, ..LineInfo::default() });
+        }
+        let from = DrawingMarker { col: 5, row: 6, col_off: 0, row_off: 0 };
+        let to = DrawingMarker { col: 8, row: 8, ..from };
+        placed_group(sh, DrawingPlacement::TwoCell { from, to, edit_as: None }, 0, 0.0);
+
+        let result = render(&wb, None);
+        let drawings = &result["sheets"][0]["drawings"];
+        assert_eq!(drawings[0]["anchor"]["cell"], "F9", "projected members have no worksheet marker");
+        assert_eq!(drawings[1]["anchor"], json!({"cell":"F7", "dx_pt":0.0, "dy_pt":0.0, "width_pt":144.0, "height_pt":0.0, "mode":"MoveAndSize"}));
+    }
+
+    #[test]
+    fn display_group_uses_a_coincident_zero_width_marker_only_when_present() {
+        use gridcraft_engine::model::{DrawingMarker, DrawingPlacement};
+
+        // Inferred, not measured in Excel: column symmetry, one-cell vs absolute placement,
+        // and a quarter-turned group's worksheet marker in the turned box (not the frame).
+        let from = DrawingMarker { col: 1, row: 1, col_off: 0, row_off: 0 };
+        let ext = (40 * 9525, 24 * 9525);
+        for (placement, inset, cell, dx) in [
+            (DrawingPlacement::Absolute { pos: (64 * 9525, 20 * 9525), ext }, 0.0, "D2", 0.0),
+            (DrawingPlacement::OneCell { from, ext }, 4.0, "D2", 3.0),
+            (DrawingPlacement::OneCell { from: DrawingMarker { col_off: 4 * 9525, ..from }, ext }, 0.0, "D2", 3.0),
+            (DrawingPlacement::OneCell { from, ext }, 0.0, "B2", 0.0),
+        ] {
+            let mut wb = Workbook::new();
+            let sh = Arc::make_mut(&mut wb.sheets[0]);
+            sh.default_row_height = 20.0;
+            sh.default_col_width = 64.0;
+            for col in 1..3 {
+                sh.cols.insert(col, LineInfo { hidden: true, ..LineInfo::default() });
+            }
+            placed_group(sh, placement, 5_400_000, inset);
+
+            let result = render(&wb, Some("D2"));
+            let group = &result["sheets"][0]["drawings"][1]["anchor"];
+            assert_eq!(group["cell"], cell);
+            assert_eq!(group["dx_pt"], dx);
+            assert_eq!(group["width_pt"], (40.0 - inset) * PT);
+            assert_eq!(group["height_pt"], 24.0 * PT);
+        }
     }
 
     #[test]
