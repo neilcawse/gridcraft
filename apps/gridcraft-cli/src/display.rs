@@ -744,8 +744,9 @@ mod tests {
             bounds.h -= shift.1;
             sh.shapes[0].anchor = sh.rect_anchor(bounds, sh.shapes[0].anchor.mode);
             if stale {
-                // Resizing a row within the span updates the group's editable height while
-                // leaving the old file anchor in the table. The start edge still coincides.
+                // Following a row resize within the span updates the group's editable height but
+                // not its file anchor (commands then drop that placement; the display must not
+                // rely on that). The start edge still coincides.
                 let before = sh.line_geometry();
                 sh.rows.insert(9, LineInfo { size: Some(40.0), custom: true, ..LineInfo::default() });
                 sh.follow_line_sizes(&before, &|_| false);
