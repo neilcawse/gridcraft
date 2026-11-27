@@ -482,7 +482,7 @@ The same trial passed all 10 engine tests selected by `table_rename` and the mod
 **GridCraft entry routes (route-specific behavior was not measured in Excel):**
 - `cell.set`, including `array: true`: the formula bar and in-cell editor commit through it (Enter, Tab, Ctrl+Shift+Enter, and a Ctrl+' draft once confirmed).
 - `range.setValues`, with or without `parse`: one refused cell refuses the whole write.
-- `range.fill`: Ctrl+Enter in the editor. Any destination outside every table refuses the whole fill, including destinations in a table. Excel was not measured filling across a table boundary; the rule follows from each outside cell being refused on its own.
+- `range.fill`: Ctrl+Enter in the editor. GridCraft choice, unmeasured in Excel: any destination outside every table refuses the whole fill, including destinations in a table (Excel was not measured filling across a table boundary; the choice follows from each outside cell being refused on its own).
 - `formulas.autoSum`: generated formulas use the same validation when written to one or several cells; a refusal leaves every destination unchanged.
 
 The CLI (`gridcraft-cli run --cmd`/`--script`), MCP, control protocol and recorded scripts run these same engine commands, so the refusal applies there. `formulas.evaluate` stores nothing and is unchanged.
