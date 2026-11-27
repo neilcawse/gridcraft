@@ -969,25 +969,29 @@ fn lookup_argument_order_matches_batch5() {
         (9, r#""x""#, invalid_mode),
     ];
     let mut mismatches = Vec::new();
-    for (func, d2, e1) in [("VLOOKUP", "2", "10"), ("HLOOKUP", "10", "2")] {
+    for (func, d2, e1, array) in [("VLOOKUP", "2", "10", "{1,10;2,20}"), ("HLOOKUP", "10", "2", "{1,2;10,20}")] {
         let mut t = T::new();
         for (at, input) in [("D1", "1"), ("D2", d2), ("E1", e1), ("E2", "20"), ("G1", "abc"), ("G2", "'0.9"), ("G3", "=1/0"), ("G4", "=NA()")] {
             t.set(at, input);
         }
         assert_eq!(t.get("G2"), Value::text("0.9"));
-        let formulas = cases.into_iter().flat_map(|(key, mode, expected)| {
-            indexes
-                .into_iter()
-                .zip(expected)
-                .map(move |(index, error)| (format!("={func}({key},$D$1:$E$2,{index},{mode})"), error.map_or(Value::Number(20.0), Value::Error)))
-        });
-        let array_control = (func == "VLOOKUP").then(|| ("=VLOOKUP(9,{1,2;3,4},#NAME?,FALSE)".to_owned(), Value::Error(Name)));
-        for (i, (formula, expected)) in formulas.chain(array_control).enumerate() {
-            let at = format!("A{}", i + 1);
-            t.set(&at, &formula);
-            let got = t.get(&at);
-            if got != expected {
-                mismatches.push(format!("{at} {formula}: expected {expected:?}, got {got:?}"));
+        // The measured reference table (column A), then the same table as an array constant
+        // (column B), which takes the evaluated-table path rather than the reference one.
+        for (col, table) in [("A", "$D$1:$E$2"), ("B", array)] {
+            let formulas = cases.into_iter().flat_map(|(key, mode, expected)| {
+                indexes
+                    .into_iter()
+                    .zip(expected)
+                    .map(move |(index, error)| (format!("={func}({key},{table},{index},{mode})"), error.map_or(Value::Number(20.0), Value::Error)))
+            });
+            let array_control = (func == "VLOOKUP" && col == "A").then(|| ("=VLOOKUP(9,{1,2;3,4},#NAME?,FALSE)".to_owned(), Value::Error(Name)));
+            for (i, (formula, expected)) in formulas.chain(array_control).enumerate() {
+                let at = format!("{col}{}", i + 1);
+                t.set(&at, &formula);
+                let got = t.get(&at);
+                if got != expected {
+                    mismatches.push(format!("{at} {formula}: expected {expected:?}, got {got:?}"));
+                }
             }
         }
     }

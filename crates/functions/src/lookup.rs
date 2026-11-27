@@ -227,7 +227,8 @@ fn range_lookup_arg(v: &Value, from_ref: bool) -> R<bool> {
 
 /// The 0-based column (VLOOKUP) or row (HLOOKUP) in a local table of width or height `len`.
 /// Resolve a cell-read index and check the bounds only after a hit. An error read from a cell
-/// returns `#REF!`; a numeric index below 1 returns `#VALUE!`, and one past the table `#REF!`.
+/// returns `#REF!`, as does text read from a cell unless it parses as a whole number or a number
+/// in [0, 1); a numeric index below 1 returns `#VALUE!`, and one past the table `#REF!`.
 fn lookup_index(v: &Value, from_ref: bool, len: usize) -> R<usize> {
     let idx = lookup_index_number(v, from_ref, false)?;
     if idx >= len { Err(CellError::Ref) } else { Ok(idx) }
@@ -816,7 +817,8 @@ mod tests {
         is_err(ev("VLOOKUP", vec![n(0.5), rf(table()), e(CellError::Div0), b(false)]), CellError::Div0);
         is_err(ev("HLOOKUP", vec![n(0.5), rf(table()), e(CellError::Div0), b(false)]), CellError::Div0);
         is_err(ev("VLOOKUP", vec![n(0.5), rf(table()), rf(Value::Error(CellError::Div0)), b(false)]), CellError::NA);
-        for idx in [rf(Value::Error(CellError::Div0)), rf(Value::Error(CellError::NA)), rf(tv("abc")), rf(tv("29.9e-1"))] {
+        // Fractional text of 1 or more and negative text stay #REF!; only [0, 1) is below one.
+        for idx in [rf(Value::Error(CellError::Div0)), rf(Value::Error(CellError::NA)), rf(tv("abc")), rf(tv("29.9e-1")), rf(tv("-0.5"))] {
             is_err(ev("VLOOKUP", vec![n(3.0), rf(table()), idx, b(false)]), CellError::Ref);
         }
         is_err(ev("VLOOKUP", vec![n(3.0), rf(table()), rf(tv("0.9")), b(false)]), CellError::Value);
