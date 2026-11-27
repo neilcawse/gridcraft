@@ -1,40 +1,45 @@
 use super::editor::popup_dismissed;
 use super::geo::Geo;
 use super::tables::filter_table;
-use super::{Arc, CellRef, Drag, FillTag, RangeRef, Rect, Sense, Sheet, SheetApp, Stroke, Tokens, col_to_letters, json, pos2, vec2};
+use super::{
+    Arc, CellRef, Drag, FillTag, FilterMenu, Pos2, RangeRef, Rect, Sense, Sheet, SheetApp, Stroke, Tokens, col_to_letters, json, pos2, vec2,
+};
+
+fn forget_filter_menu(ctx: &egui::Context, col: u32) {
+    ctx.data_mut(|d| {
+        d.remove::<Vec<(String, bool)>>(egui::Id::unique(("filter_sel", col)));
+        d.remove::<String>(egui::Id::unique(("filter_search", col)));
+        d.remove::<Vec<egui::Id>>(egui::Id::unique(("filter_buttons", col)));
+    });
+}
+
+pub(crate) fn open_filter_menu(app: &mut SheetApp, ctx: &egui::Context, sh: &Sheet, header: CellRef, at: Pos2) {
+    let Some(d) = app.session.active() else { return };
+    let menu = FilterMenu { header, at, home: (d.uid, sh.uid.get()) };
+    if app.grid.filter_menu != Some(menu) {
+        if let Some(previous) = app.grid.filter_menu.filter(|p| p.header.col != header.col) {
+            forget_filter_menu(ctx, previous.header.col);
+        }
+        forget_filter_menu(ctx, header.col);
+        app.grid.filter_menu = Some(menu);
+    }
+}
 
 /// Draws the filter-header popup: sort, search/select-all, apply/clear, a lazily installed table autofilter, new-open search focus and dismissal.
 pub(super) fn filter_menu(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_open: bool) {
-    let Some((col, row, at)) = app.grid.filter_menu else {
-        app.grid.filter_menu_sheet = None;
-        return;
-    };
-    let key = egui::Id::unique(("filter_sel", col));
-    let search_key = egui::Id::unique(("filter_search", col));
-    let buttons_key = egui::Id::unique(("filter_buttons", col));
-    let forget = |ctx: &egui::Context| {
-        ctx.data_mut(|d| {
-            d.remove::<Vec<(String, bool)>>(key);
-            d.remove::<String>(search_key);
-            d.remove::<Vec<egui::Id>>(buttons_key);
-        });
-    };
+    let Some(FilterMenu { header, at, home }) = app.grid.filter_menu else { return };
+    let CellRef { col, row } = header;
     let Some(d) = app.session.active() else { return };
     let wb = d.wb.clone();
     let si = wb.active_sheet();
     let Some(sh) = wb.sheet(si) else { return };
-    // The popup belongs to the sheet it opened on. A sheet switch, insert or window change made
-    // while it is open by anything but a click (which dismisses it), such as a control client,
-    // closes it instead of letting it sort or filter the sheet now shown.
-    let home = (d.uid, sh.uid.get());
-    if *app.grid.filter_menu_sheet.get_or_insert(home) != home {
-        forget(ui.ctx());
+    // The active sheet can change before the first draw, e.g. in a batched keyboard input.
+    if home != (d.uid, sh.uid.get()) {
+        forget_filter_menu(ui.ctx(), col);
         app.grid.filter_menu = None;
-        app.grid.filter_menu_sheet = None;
         return;
     }
     let _ = geo;
-    let header = CellRef::new(row, col);
     let table = filter_table(sh, header);
     let sort_range = match table {
         Some(table) => table.autofilter_range(),
@@ -50,6 +55,9 @@ pub(super) fn filter_menu(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_
     }
     let wb = app.session.active().map(|d| d.wb.clone()).unwrap_or(wb);
     let values = gridcraft_engine::cmd::data::filter_values(&wb, si, col);
+    let key = egui::Id::unique(("filter_sel", col));
+    let search_key = egui::Id::unique(("filter_search", col));
+    let buttons_key = egui::Id::unique(("filter_buttons", col));
     // Enter is the menu's OK, as in Excel: taken before the search box (which would only drop its
     // focus) and the value checkboxes (which would toggle) see it. A focused button keeps it as its click.
     let buttons: Vec<egui::Id> = ui.ctx().data_mut(|d| d.get_temp(buttons_key)).unwrap_or_default();
@@ -128,9 +136,8 @@ pub(super) fn filter_menu(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_
         });
     });
     if close || popup_dismissed(&response.response, was_open) {
-        forget(ui.ctx());
+        forget_filter_menu(ui.ctx(), col);
         app.grid.filter_menu = None;
-        app.grid.filter_menu_sheet = None;
     }
 }
 

@@ -1,7 +1,7 @@
 //! Real filter-button and menu clicks over in-memory workbooks. No fixture files.
 
 use crate::common::{self, Harness};
-use egui::{Event, Modifiers, PointerButton, Pos2, vec2};
+use egui::{Event, Key, Modifiers, PointerButton, Pos2, vec2};
 use egui_kittest::kittest::Queryable;
 use gridcraft_engine::Session;
 use gridcraft_engine::core::{CellRef, RangeRef};
@@ -134,8 +134,7 @@ fn click_ascending_if_shown(h: &mut Harness) {
     }
 }
 
-#[test]
-fn popup_left_open_across_a_sheet_switch_sorts_neither_sheet() -> TestResult {
+fn filter_on_two_sheets() -> TestResult<Harness> {
     let mut s = Session::new();
     s.new_workbook();
     s.execute("range.setValues", json!({"range":"A1", "values":[["N"], ["c"], ["a"], ["b"]]}))?;
@@ -144,8 +143,17 @@ fn popup_left_open_across_a_sheet_switch_sorts_neither_sheet() -> TestResult {
     s.execute("range.setValues", json!({"range":"A1", "values":[["M"], ["z"], ["x"], ["y"]]}))?;
     s.execute("data.filter", json!({"range":"A1:A4"}))?;
     s.execute("sheet.activate", json!({"sheet": 0}))?;
-    let mut h = harness(s);
+    Ok(harness(s))
+}
+
+#[test]
+fn popup_left_open_across_a_sheet_switch_sorts_neither_sheet() -> TestResult {
+    let mut h = filter_on_two_sheets()?;
     open_menu(&mut h, CellRef::new(0, 0))?;
+    h.input_mut().events.push(Event::Text("a".into()));
+    h.run_steps(2);
+    let value = h.get_by_label("a").rect().center();
+    click(&mut h, value);
     // Not a click (that would dismiss the popup): a control client switches sheets.
     h.state_mut().run("sheet.activate", json!({"sheet": 1}))?;
     h.run_steps(2);
@@ -153,6 +161,27 @@ fn popup_left_open_across_a_sheet_switch_sorts_neither_sheet() -> TestResult {
     assert!(h.state().grid.filter_menu.is_none(), "the popup closes with the sheet it opened on");
     assert_eq!(column_of(&h, 0, 0, 4)?, ["N", "c", "a", "b"]);
     assert_eq!(column_of(&h, 1, 0, 4)?, ["M", "z", "x", "y"], "the newly shown sheet's filter is not sorted");
+    open_menu(&mut h, CellRef::new(0, 0))?;
+    assert!(h.query_by_label("(Select All)").is_some(), "the new popup has an empty search");
+    assert!(h.query_by_label("x").is_some(), "the new popup lists values from its own sheet");
+    Ok(())
+}
+
+#[test]
+fn keyboard_popup_cannot_bind_to_a_sheet_activated_in_the_same_frame() -> TestResult {
+    let mut h = filter_on_two_sheets()?;
+    h.state_mut().run("selection.set", json!({"range":"A1"}))?;
+    for (key, modifiers) in [(Key::ArrowDown, Modifiers::ALT), (Key::PageDown, Modifiers::COMMAND)] {
+        for pressed in [true, false] {
+            h.input_mut().events.push(Event::Key { key, physical_key: Some(key), pressed, repeat: false, modifiers });
+        }
+    }
+    h.run_steps(2);
+    let doc = h.state().session.active().ok_or("active document")?;
+    assert_eq!(doc.wb.active_sheet(), 1, "the keyboard switched sheets before the popup drew");
+    click_ascending_if_shown(&mut h);
+    assert_eq!(column_of(&h, 1, 0, 4)?, ["M", "z", "x", "y"], "the popup must not sort the newly activated sheet");
+    assert!(h.state().grid.filter_menu.is_none());
     Ok(())
 }
 

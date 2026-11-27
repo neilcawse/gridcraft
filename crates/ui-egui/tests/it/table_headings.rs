@@ -154,7 +154,7 @@ fn the_button_in_a_replaced_heading_opens_that_columns_filter_menu() {
     assert_eq!(amount.col, 3);
 
     click(&mut h, amount.button.unwrap().center());
-    let menu = h.state().grid.filter_menu.map(|(c, r, _)| (c, r));
+    let menu = h.state().grid.filter_menu.map(|menu| (menu.header.col, menu.header.row));
     assert_eq!(menu, Some((3, 2)), "the menu of column D, keyed by the table's header row");
     assert_eq!(h.state().session.active().unwrap().selection.active.a1(), "C20", "the button doesn't select");
 

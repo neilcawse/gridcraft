@@ -358,7 +358,7 @@ fn handle_column_header_press(app: &mut SheetApp, input: &InteractionInput<'_>, 
         let c = geo.col_at(sh, p.x);
         // A Table heading's filter button, while the header names stand in for the letters.
         if let Some(h) = table_headings(geo, sh, sel.active).into_iter().find(|h| h.col == c && h.button.is_some_and(|b| b.contains(p))) {
-            app.grid.filter_menu = Some((c, h.header_row, geo.mirror_pos(p)));
+            super::open_filter_menu(app, &input.context, sh, CellRef::new(h.header_row, c), geo.mirror_pos(p));
             return;
         }
         if point_header(app, wb, sh, RangeRef::cols(c, c), mods.shift, mods.command) {
@@ -456,7 +456,7 @@ fn handle_press(app: &mut SheetApp, input: &InteractionInput<'_>) {
     }
     // Filter dropdown buttons.
     if is_filter_button(sh, geo, p) {
-        app.grid.filter_menu = Some((c.col, c.row, geo.mirror_pos(p)));
+        super::open_filter_menu(app, &input.context, sh, c, geo.mirror_pos(p));
         return;
     }
     // A dialog's formula box in point mode (New Formatting Rule) takes the reference; the
