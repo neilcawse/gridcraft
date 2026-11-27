@@ -2657,6 +2657,30 @@ fn x46_multicell_autosum_validates_the_generated_formula_at_each_destination() {
     assert_eq!(v(&s, "D3"), Value::Number(25.0));
 }
 
+/// Integration X51 (X42 × X46): typed entry applies both rules to one formula. A `_xludf.`
+/// call takes the casing of the name visible from the cell's sheet, a sheet-level name before
+/// the workbook one (X42); its short structured reference binds to the table it is typed in,
+/// and outside every table the formula is refused (X46).
+#[test]
+fn typed_name_call_with_a_bare_structured_ref_binds_or_is_refused() {
+    let mut s = structured_ref_session();
+    s.execute("formulas.defineName", json!({"name": "VStack", "refersTo": "=LAMBDA(x,SUM(x)*10)"})).unwrap();
+    s.execute("formulas.defineName", json!({"name": "vSTACK", "scope": "Data", "refersTo": "=LAMBDA(x,SUM(x)*100)"})).unwrap();
+    let undo = s.doc().unwrap().undo.len();
+    let err = s.execute("cell.set", json!({"cell": "H2", "input": "=_xludf.vstack([Qty])"})).unwrap_err();
+    assert!(err.to_string().contains("[Qty] has no table name"), "{err}");
+    assert_eq!(s.doc().unwrap().undo.len(), undo);
+
+    s.execute("cell.set", json!({"cell": "H2", "input": "=_xludf.vstack(Sales[Qty])"})).unwrap();
+    s.execute("cell.set", json!({"cell": "C2", "input": "=_xludf.vstack([@Qty])"})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    let text = |a: &str| sh.cell(CellRef::parse(a).unwrap()).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone());
+    assert_eq!(text("H2").as_deref(), Some("_xludf.vSTACK(Sales[Qty])"));
+    assert_eq!(text("C2").as_deref(), Some("_xludf.vSTACK(Sales[@Qty])"));
+    assert_eq!(v(&s, "H2"), Value::Number(1800.0));
+    assert_eq!(v(&s, "C2"), Value::Number(300.0));
+}
+
 #[test]
 fn x46_only_table_less_structured_references_trigger_the_table_name_error() {
     let mut s = structured_ref_session();
@@ -10130,6 +10154,33 @@ fn protected_line_format_default_width_requires_format_columns() -> crate::Resul
     s.execute("review.protectSheet", json!({"formatColumns": true}))?;
     s.execute("home.defaultWidth", json!({"width": 100}))?;
     assert_eq!(s.doc()?.wb.active().map(|sh| sh.default_col_width), Some(100.));
+    Ok(())
+}
+
+/// Integration X51 (X44 × X47): with only Format Rows allowed, a direct fill of a whole row is
+/// refused (X47, measured), while a whole-row paste still carries the source row's line style
+/// and outline level (X25/X44 transfer, which X47 leaves outside its direct-setter rule).
+#[test]
+fn protected_format_rows_refuses_direct_row_fill_but_whole_row_paste_carries_line_format() -> crate::Result<()> {
+    use gridcraft_model::{Color, Fill};
+
+    let mut s = s();
+    for rows in ["2:2", "5:5"] {
+        s.execute("home.lockCell", json!({"range": rows, "on": false}))?;
+    }
+    s.execute("home.fillColor", json!({"range": "2:2", "color": "#FFFF00"}))?;
+    std::sync::Arc::make_mut(&mut s.doc_mut()?.wb).sheet_mut(0).ok_or(crate::EngineError::NoDocument)?.rows.entry(1).or_default().outline = 1;
+    s.execute("review.protectSheet", json!({"formatRows": true}))?;
+    assert_line_edit_refused(&mut s, "home.fillColor", json!({"range": "5:5", "color": "#FFFF00"}), "protected sheet");
+
+    s.execute("edit.copy", json!({"range": "2:2"}))?;
+    s.execute("edit.paste", json!({"at": "A5"}))?;
+    let d = s.doc()?;
+    let sh = d.wb.active().ok_or(crate::EngineError::NoDocument)?;
+    assert_eq!(sh.rows.get(&4).map(|l| l.outline), Some(1));
+    let style = d.wb.styles.get(sh.style_id(CellRef::new(4, 3)));
+    assert_eq!(style.fill, Fill::solid(Color::Rgb(0xFFFF00)));
+    assert!(!style.protection.locked);
     Ok(())
 }
 

@@ -2354,6 +2354,41 @@ fn future_function_names_bind_xludf_calls_and_let_variables() {
     assert_eq!(t.num("B4"), 1.0);
 }
 
+/// Integration X51 (X41 × X42): an index computed by a `_xludf.` name call is an index
+/// expression, like the unprefixed call of the same LAMBDA. Its error beats a missed key and
+/// invalid mode text (X41), and a valid index is resolved only on a hit.
+#[test]
+fn name_bound_lookup_index_takes_the_x41_expression_order() {
+    let mut t = T::new();
+    for (name, formula) in [("Bad", "LAMBDA(1/0)"), ("Two", "LAMBDA(2)")] {
+        t.wb.names.push(gridcraft_model::DefinedName {
+            name: name.into(),
+            scope: None,
+            formula: formula.into(),
+            comment: String::new(),
+            hidden: false,
+            uid: Default::default(),
+        });
+    }
+    for (at, input) in [("D1", "1"), ("D2", "2"), ("E1", "10"), ("E2", "20")] {
+        t.set(at, input);
+    }
+    let cases = [
+        ("9", "Bad", "FALSE", Value::Error(CellError::Div0)),
+        ("2", "Bad", r#""x""#, Value::Error(CellError::Div0)),
+        ("2", "Two", "FALSE", Value::Number(20.0)),
+        ("9", "Two", "FALSE", Value::Error(CellError::NA)),
+    ];
+    for (row, (key, name, mode, expected)) in cases.into_iter().enumerate() {
+        for (col, call) in [("A", format!("_xludf.{name}()")), ("B", format!("{name}()"))] {
+            let at = format!("{col}{}", row + 1);
+            let formula = format!("=VLOOKUP({key},D1:E2,{call},{mode})");
+            t.set(&at, &formula);
+            assert_eq!(t.get(&at), expected, "{at} {formula}");
+        }
+    }
+}
+
 /// `text` parsed, with its outer call spelled `name`, as a stored tree may still spell it.
 fn respelled_call(text: &str, name: &str) -> Formula {
     let Ok(gridcraft_formula::Expr::Call(_, args)) = gridcraft_formula::parse(text) else { panic!("{text} is not a call") };
