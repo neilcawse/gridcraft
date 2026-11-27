@@ -118,11 +118,14 @@ worksheet anchor is the on-screen box. Its unturned frame swaps width and height
 same centre and can start above or left of the sheet. GridCraft uses the on-screen box for
 line sizing and placement, including sort, and uses the frame for child projection and for
 the transform when recomputing the group's drawing. This convention matches Excel for Mac
-16.115.2 at open and after a row height edit. Column width edits, moves, sorts and nested
-groups follow the same rule but were not measured, and neither were Excel-written anchors and
-transforms. A recomputed group transform keeps the file's `ext`/`chExt` scale, so its `ext`
-need not match the frame after a resize. GridCraft places a root group from its anchor, as
-Excel did in the measured fixtures, whose root `off`/`ext` disagreed with the anchor.
+16.115.2 at open and after a row height edit. GridCraft uses the same on-screen box for
+column width edits, moves, and sorts, but Excel was not measured for those edits or for nested
+variants. Nested groups still use their local transforms. In the B3:F7 fixtures, Excel read
+back a frame of `(109, -26, 100, 212)` pt, matching the anchor-derived frame rather than the
+root `off` of `(0, 0)` and `ext` of `200 × 100` pt. The probes did not save the workbooks.
+GridCraft retains its existing export rule: a recomputed imported root transform keeps the
+file's `ext`/`chExt` scale, so `ext` need not match the resized frame. Excel's save behavior is
+unmeasured.
 Rotation stored as any equivalent angle (for example `-5400000` or `27000000` for 270° and
 90°) is treated the same way. The turned content itself is still drawn unturned and reported
 on import. Other group angles retain the prior layout and warnings. An untouched group writes

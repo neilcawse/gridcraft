@@ -588,8 +588,8 @@ fn assert_excel_turned_group(rotation: i64, to: (u32, u32), frames: [[f64; 4]; 2
     assert!(xml.contains(&from) && xml.contains(&to), "changed worksheet markers: {xml}");
     let [x, y, _, _] = frames[1];
     let emu = |pt: f64| (pt * 12700.0).round() as i64;
-    // The frame origin follows the resized anchor; `ext` keeps the file's scale over the
-    // unchanged child box (see docs/file-format-parity.md).
+    // The frame origin follows the resized anchor. The `ext`/`chExt` scale is inherited
+    // GridCraft export behavior, not an Excel readback: the probe did not save the workbook.
     let frame = format!(
         r#"<a:xfrm rot="{rotation}"><a:off x="{}" y="{}"/><a:ext cx="2540000" cy="1270000"/><a:chOff x="0" y="0"/><a:chExt cx="2540000" cy="1270000"/></a:xfrm>"#,
         emu(x),
