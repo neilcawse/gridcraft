@@ -479,12 +479,13 @@ The same trial passed all 10 engine tests selected by `table_rename` and the mod
 
 **GridCraft rule.** Typing a formula with a structured reference without a table name (`[Qty]`, `[@Qty]`, `[[#Headers],[Qty]]`) into a cell with no table to bind it to is refused like any other formula that can't be entered. Only `=SUM([Qty])` was measured; the other short forms follow the same grammar rule (a table name may be left out only inside its table). The error starts with "There's a problem with this formula:" and names the reference; the cell, the rest of the command's cells and the undo stack are left unchanged. The editor keeps the draft open with the message, as it does for other refused formulas. In a table, X36's binding to the containing table is unchanged. A cell whose table is not found by its own name (duplicate table names in a damaged file) has no table to bind to either, so it refuses the formula too.
 
-Routes (all in `crates/engine/src/cmd/edit/cell.rs`):
+**GridCraft entry routes (route-specific behavior was not measured in Excel):**
 - `cell.set`, including `array: true`: the formula bar and in-cell editor commit through it (Enter, Tab, Ctrl+Shift+Enter, and a Ctrl+' draft once confirmed).
 - `range.setValues`, with or without `parse`: one refused cell refuses the whole write.
 - `range.fill`: Ctrl+Enter in the editor. Any destination outside every table refuses the whole fill, including destinations in a table. Excel was not measured filling across a table boundary; the rule follows from each outside cell being refused on its own.
+- `formulas.autoSum`: generated formulas use the same validation when written to one or several cells; a refusal leaves every destination unchanged.
 
-The CLI (`gridcraft-cli run --cmd`/`--script`), MCP and control protocol run these same engine commands, so the refusal applies there. `formulas.evaluate` stores nothing and is unchanged.
+The CLI (`gridcraft-cli run --cmd`/`--script`), MCP, control protocol and recorded scripts run these same engine commands, so the refusal applies there. `formulas.evaluate` stores nothing and is unchanged.
 
 **Kept, unmeasured.** These keep entering or reading the formula as written: file import of such formulas, read as stored and saved back unchanged (tested for XLSX); pasted text, Replace, Text to Columns and scenarios (`input_to_cell`); copy/paste and fill of cells that produce them; defined names; and conditional-formatting and data-validation formulas.
 

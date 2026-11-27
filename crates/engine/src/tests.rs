@@ -2577,6 +2577,11 @@ fn x36_range_fill_binds_each_destination_and_follows_table_rename() {
 fn x46_typed_bare_structured_ref_is_refused_outside_every_table() {
     let mut s = structured_ref_session();
     s.execute("cell.set", json!({"cell": "H2", "input": "7"})).unwrap();
+    // Use a clean document and retain its workbook identity so a leaked style, cell,
+    // or recalculation write cannot hide behind equality of the four sampled cells.
+    let doc = s.doc_mut().unwrap();
+    doc.saved = doc.wb.clone();
+    let (revision, recalc) = (doc.revision, doc.calc.last_recalc_cells);
     let stored = |s: &Session, a: &str| s.doc().unwrap().wb.sheet(0).unwrap().cell(CellRef::parse(a).unwrap()).cloned();
     let before = |s: &Session| (stored(s, "H2"), stored(s, "F2"), stored(s, "C2"), stored(s, "D2"));
     let (cells, undo) = (before(&s), s.doc().unwrap().undo.len());
@@ -2596,11 +2601,17 @@ fn x46_typed_bare_structured_ref_is_refused_outside_every_table() {
             refused(&mut s, "range.setValues", json!({"range": "H2", "values": [[input]], "parse": false}));
         }
         refused(&mut s, "range.fill", json!({"range": "H2:H3", "input": input}));
-        // A fill reaching out of the table refuses the cells inside it too.
+        // GridCraft choice, unmeasured in Excel: a fill crossing the table boundary
+        // refuses the cells inside it too.
         refused(&mut s, "range.fill", json!({"range": "C2:D2", "input": input}));
     }
     // A multi-cell write refuses all of it, not just the cell outside the table.
     refused(&mut s, "range.setValues", json!({"range": "C2", "values": [["=[@Qty]*2", "=SUM([Qty])"]]}));
+    refused(&mut s, "range.setValues", json!({"range": "F2", "values": [["1/2/2026", "=SUM([Qty])"]], "parse": true}));
+    let doc = s.doc().unwrap();
+    assert!(!doc.is_dirty(), "refusal must not publish any workbook or style changes");
+    assert_eq!(doc.revision, revision, "refusal must not advance the workbook revision");
+    assert_eq!(doc.calc.last_recalc_cells, recalc, "refusal must not run recalculation");
     assert!(before(&s) == cells, "a refused formula leaves every cell as it was");
     assert_eq!(s.doc().unwrap().undo.len(), undo, "a refused formula leaves no undo step");
 
@@ -2615,10 +2626,67 @@ fn x46_typed_bare_structured_ref_is_refused_outside_every_table() {
     // Named, the table can be used from anywhere.
     s.execute("cell.set", json!({"cell": "F2", "input": "=SUM(Sales[Qty])"})).unwrap();
     assert_eq!(v(&s, "F2"), Value::Number(18.0));
+    let shown = s.execute("cell.get", json!({"cell": "F2"})).unwrap()["formula"].clone();
+    assert_eq!(shown, "=SUM(Sales[Qty])");
+    s.execute("cell.set", json!({"cell": "F2", "input": shown})).unwrap();
+    assert_eq!(v(&s, "F2"), Value::Number(18.0));
 
     // Unmeasured routes keep entering it as written: pasted text.
     s.execute("edit.paste", json!({"at": "H4", "text": "=SUM([Qty])"})).unwrap();
     assert_eq!(stored(&s, "H4").and_then(|c| c.formula).map(|f| f.text.clone()).as_deref(), Some("SUM([Qty])"));
+}
+
+#[test]
+fn x46_multicell_autosum_validates_the_generated_formula_at_each_destination() {
+    let mut s = structured_ref_session();
+    // The total lands at B4, inside Sales.
+    s.execute("formulas.autoSum", json!({"range": "B2:B3", "function": "SUM([#Headers])+SUM"})).unwrap();
+    assert_eq!(s.execute("cell.get", json!({"cell": "B4"})).unwrap()["formula"], "=SUM([#Headers])+SUM(B2:B3)");
+    assert_eq!(v(&s, "B4"), Value::Number(7.0));
+
+    let mut s = structured_ref_session();
+    s.execute("cell.set", json!({"cell": "D2", "input": "7"})).unwrap();
+    let before = s.doc().unwrap().wb.clone();
+    let undo = s.doc().unwrap().undo.len();
+    // The first total is C3 (inside) and the second is D3 (outside).
+    let err = s.execute("formulas.autoSum", json!({"range": "C2:D3", "function": "COUNT([#Headers])+SUM"})).unwrap_err();
+    assert!(err.to_string().contains("[#Headers] has no table name"), "{err}");
+    assert!(std::sync::Arc::ptr_eq(&before, &s.doc().unwrap().wb));
+    assert_eq!(s.doc().unwrap().undo.len(), undo);
+    s.execute("formulas.autoSum", json!({"range": "C2:D3", "function": "SUM(Sales[Qty])+SUM"})).unwrap();
+    assert_eq!(v(&s, "D3"), Value::Number(25.0));
+}
+
+#[test]
+fn x46_only_table_less_structured_references_trigger_the_table_name_error() {
+    let mut s = structured_ref_session();
+    for input in ["=IF(TRUE,SUM([Qty]),0)", "=[#This Row]", "=[@[Qty]]", "=[A']B]", "=SUM([Qty]:[Price])"] {
+        let err = s.execute("cell.set", json!({"cell": "F2", "input": input})).unwrap_err();
+        assert!(err.to_string().contains("has no table name"), "{input}: {err}");
+    }
+    // Cell entry is A1-only; these forms remain subject to the existing parser and link rules.
+    for input in ["={[Qty]}", "=[Book1]Sheet1!A1", "='Data[old]'!A1", "=R[1]C[1]"] {
+        let err = s.execute("cell.set", json!({"cell": "F2", "input": input})).unwrap_err();
+        assert!(!err.to_string().contains("has no table name"), "{input}: {err}");
+    }
+    std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).external_books = vec![gridcraft_model::ExternalBook::default()].into();
+    for input in ["=[1]Sheet1!A1", "=\"[Qty]\"", "={\"[Qty]\"}", "=Sales[Qty]"] {
+        s.execute("cell.set", json!({"cell": "F2", "input": input})).unwrap();
+        assert_eq!(s.execute("cell.get", json!({"cell": "F2"})).unwrap()["formula"], input);
+    }
+}
+
+#[test]
+fn x46_damaged_duplicate_table_names_do_not_bind_to_the_wrong_table() {
+    let mut s = structured_ref_session();
+    s.execute("range.setValues", json!({"range": "E1", "values": [["Qty", "Double"], [10], [20]]})).unwrap();
+    s.execute("insert.table", json!({"range": "E1:F3", "hasHeaders": true})).unwrap();
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    wb.sheet_mut(0).unwrap().tables[1].name = "Sales".into();
+    let err = s.execute("cell.set", json!({"cell": "F2", "input": "=[@Qty]*2"})).unwrap_err();
+    assert!(err.to_string().contains("has no table name"), "{err}");
+    s.execute("cell.set", json!({"cell": "C2", "input": "=[@Qty]*2"})).unwrap();
+    assert_eq!(v(&s, "C2"), Value::Number(6.0));
 }
 
 /// Opening a file is not typing: a table-less structured reference saved outside every table
@@ -2633,6 +2701,10 @@ fn x46_imported_bare_structured_ref_outside_a_table_is_kept() {
     s.execute("file.open", json!({"name": "bare.xlsx", "base64": crate::io::base64_encode(&bytes)})).unwrap();
     let sh = s.doc().unwrap().wb.sheet(0).unwrap();
     assert_eq!(sh.cell(CellRef::parse("H2").unwrap()).and_then(|c| c.formula.as_ref()).map(|f| f.text.as_str()), Some("SUM([Qty])"));
+    assert_eq!(v(&s, "H2"), Value::Error(gridcraft_core::CellError::Ref));
+    s.execute("cell.set", json!({"cell": "H3", "input": "=40+2"})).unwrap();
+    assert_eq!(v(&s, "H3"), Value::Number(42.0));
+    assert_eq!(v(&s, "H2"), Value::Error(gridcraft_core::CellError::Ref));
     let bytes = gridcraft_xlsx::write_xlsx(&s.doc().unwrap().wb).unwrap();
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
     let mut xml = String::new();

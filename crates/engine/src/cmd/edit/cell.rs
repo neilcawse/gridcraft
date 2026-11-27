@@ -28,10 +28,10 @@ pub(crate) fn input_to_cell(input: &str, sheet: usize, at: CellRef, wb: &mut gri
     input_to_cell_impl(input, sheet, at, wb, BareTableRefs::Bind)
 }
 
-/// [`input_to_cell`] for formula text typed into a cell (the editor, `cell.set`,
-/// `range.setValues`): a structured reference without a table name outside every table is
+/// [`input_to_cell`] for direct formula entry (`cell.set`, `range.setValues`, and generated
+/// AutoSum formulas): a structured reference without a table name outside every table is
 /// refused, as Excel refuses `=SUM([Qty])` there.
-fn typed_input_to_cell(input: &str, sheet: usize, at: CellRef, wb: &mut gridcraft_model::Workbook) -> Result<Option<Cell>> {
+pub(crate) fn typed_input_to_cell(input: &str, sheet: usize, at: CellRef, wb: &mut gridcraft_model::Workbook) -> Result<Option<Cell>> {
     input_to_cell_impl(input, sheet, at, wb, BareTableRefs::BindOrRefuse)
 }
 
