@@ -476,6 +476,94 @@ fn changing_the_summary_direction_moves_collapsed_marks() {
     assert_eq!(row_state(&s, 0..=3), [(true, false), (true, false), (true, false), (false, false)]);
 }
 
+/// Sorting rows leaves a hidden row where it is, with its cells, note, link, format and height
+/// ("Sort data in a range or table": hidden rows are not moved when you sort rows); the rows
+/// showing are sorted among the positions they hold, formulas following their rows. Undo puts
+/// the sheet back exactly.
+#[test]
+fn row_sort_leaves_hidden_rows_in_place() {
+    let mut s = Session::new();
+    s.new_workbook();
+    let rows = json!([["Key", "Twice"], [4, "=A2*2"], [1, "=A3*2"], [5, "=A4*2"], [3, "=A5*2"], [2, "=A6*2"]]);
+    s.execute("range.setValues", json!({"range": "A1", "values": rows})).unwrap();
+    s.execute("review.newNote", json!({"cell": "A4", "text": "hidden", "author": "Example"})).unwrap();
+    s.execute("insert.link", json!({"cell": "B4", "target": "https://example.org/hidden"})).unwrap();
+    s.execute("home.bold", json!({"range": "A4:B4", "on": true})).unwrap();
+    s.execute("home.rowHeight", json!({"rows": "4:4", "height": 40})).unwrap();
+    s.execute("home.rowHeight", json!({"rows": "6:6", "height": 30})).unwrap();
+    s.execute("home.hideRows", json!({"rows": "4:4"})).unwrap();
+    let before = s.doc().unwrap().wb.sheets[0].clone();
+
+    s.execute("data.sort", json!({"range": "A1:B6", "header": true, "keys": [{"column": "A"}]})).unwrap();
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    let keys = [1.0, 2.0, 5.0, 3.0, 4.0];
+    for (row, key) in (1..6).zip(keys) {
+        assert_eq!(sh.value(CellRef::new(row, 0)), Value::Number(key), "row {}", row + 1);
+        assert_eq!(sh.value(CellRef::new(row, 1)), Value::Number(2.0 * key), "row {}", row + 1);
+    }
+    let hidden = |c: CellRef| (sh.cell(c).cloned(), sh.comments.get(&c).cloned(), sh.hyperlinks.get(&c).cloned());
+    let was = |c: CellRef| (before.cell(c).cloned(), before.comments.get(&c).cloned(), before.hyperlinks.get(&c).cloned());
+    for col in 0..2 {
+        assert_eq!(hidden(CellRef::new(3, col)), was(CellRef::new(3, col)), "the hidden row keeps its cells");
+    }
+    assert_eq!(sh.rows.get(&3), before.rows.get(&3), "the hidden row keeps its height and stays hidden");
+    assert_eq!(sh.comments.len(), 1);
+    assert_eq!(sh.hyperlinks.len(), 1);
+    // Key 2 came from row 6 with its height; row 2's key 4 went to row 6 with the default.
+    assert!(before.rows.get(&5).and_then(|l| l.size).is_some());
+    assert_eq!(sh.rows.get(&2).and_then(|l| l.size), before.rows.get(&5).and_then(|l| l.size));
+    assert_eq!(sh.rows.get(&5).and_then(|l| l.size), None);
+
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.doc().unwrap().wb.sheets[0], before, "undo restores the sheet");
+}
+
+/// Sorting left to right leaves hidden columns where they are, a column shown with no width
+/// included, the way the row sort treats rows. Derived from Microsoft's "Sort data in a range or
+/// table" ("hidden columns are not moved when you sort columns"); not measured in Excel.
+#[test]
+fn column_sort_leaves_hidden_columns_in_place() {
+    let mut s = Session::new();
+    s.new_workbook();
+    s.execute("range.setValues", json!({"range": "A1", "values": [[3, 1, 5, 2, 4], [30, 10, 50, 20, 40]]})).unwrap();
+    s.execute("home.hideColumns", json!({"cols": "C:C"})).unwrap();
+    {
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        wb.sheet_mut(0).unwrap().cols.insert(4, gridcraft_model::LineInfo { size: Some(0.0), ..Default::default() });
+    }
+    let before = s.doc().unwrap().wb.sheets[0].clone();
+
+    s.execute("data.sort", json!({"range": "A1:E2", "header": false, "orientation": "columns", "keys": [{"row": 1}]})).unwrap();
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    for (col, key) in (0..5).zip([1.0, 2.0, 5.0, 3.0, 4.0]) {
+        assert_eq!(sh.value(CellRef::new(0, col)), Value::Number(key), "column {col}");
+        assert_eq!(sh.value(CellRef::new(1, col)), Value::Number(10.0 * key), "column {col}");
+    }
+    assert_eq!(sh.cols, before.cols);
+
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.doc().unwrap().wb.sheets[0], before, "undo restores the sheet");
+}
+
+/// Rows an AutoFilter hides are hidden rows too: sorting the filtered range (the filter menu's
+/// sort runs the same command) sorts only the rows the filter shows. Follows the documented rule
+/// for hidden rows; sorting a filtered range is not measured in Excel.
+#[test]
+fn sorting_a_filtered_range_leaves_filtered_out_rows_in_place() {
+    let mut s = Session::new();
+    s.new_workbook();
+    let rows = json!([["Name", "Status"], ["d", "Active"], ["x", "Inactive"], ["b", "Active"], ["a", "Inactive"], ["c", "Active"]]);
+    s.execute("range.setValues", json!({"range": "A1", "values": rows})).unwrap();
+    s.execute("selection.set", json!({"cell": "A1"})).unwrap();
+    s.execute("data.filter", json!({})).unwrap();
+    s.execute("data.filterBy", json!({"column": "B", "values": ["Active"]})).unwrap();
+    s.execute("data.sort", json!({"range": "A1:B6", "header": true, "keys": [{"column": "A"}]})).unwrap();
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    let names: Vec<Value> = (1..6).map(|r| sh.value(CellRef::new(r, 0))).collect();
+    assert_eq!(names, ["b", "x", "c", "a", "d"].map(Value::from));
+    assert_eq!((1..6).map(|r| sh.is_row_hidden(r)).collect::<Vec<_>>(), [false, true, false, true, false]);
+}
+
 #[test]
 fn column_sort_rejects_row_key_zero_without_panicking() {
     let mut s = Session::new();

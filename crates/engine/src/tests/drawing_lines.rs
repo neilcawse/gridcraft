@@ -456,9 +456,10 @@ fn a_sort_fit_discards_file_markers_for_a_group_beside_the_block() {
     assert!(!sh.drawing_files.contains_key(&group));
 }
 
-/// Only groups overlapping the sorted block keep their place on the sheet. A group beside it, or
-/// below it once a hidden row inside it takes another height, follows its moved rows like the
-/// ungrouped picture next to it.
+/// Only groups overlapping the sorted block keep their place on the sheet. A group beside it
+/// follows its moved rows like the ungrouped picture next to it. A row sort leaves hidden rows in
+/// place and only reorders the heights of the rows showing, so the block keeps its height and a
+/// group below it, like the picture there, stays where it was.
 #[test]
 fn a_sort_leaves_groups_clear_of_the_block_to_follow_their_rows() {
     let mut s = s();
@@ -490,14 +491,17 @@ fn a_sort_leaves_groups_clear_of_the_block_to_follow_their_rows() {
         let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
         let sh = wb.sheet_mut(0).unwrap();
         sh.rows.insert(5, gridcraft_model::LineInfo { size: Some(20.0), hidden: true, ..Default::default() });
-        sh.rows.insert(8, gridcraft_model::LineInfo { size: Some(60.0), custom: true, ..Default::default() });
+        // Row 10 (key 1) sorts to row 5, taking its height above the pictures in row 10.
+        sh.rows.insert(9, gridcraft_model::LineInfo { size: Some(60.0), custom: true, ..Default::default() });
     }
     let before = s.doc().unwrap().wb.sheets[0].clone();
     s.execute("data.sort", json!({"range": "A5:A10", "header": false, "keys": [{"column": "A"}]})).unwrap();
     let sh = s.doc().unwrap().wb.sheet(0).unwrap();
-    for [a, b, lone] in [beside, below] {
+    assert_eq!(sh.rows.get(&5), before.rows.get(&5), "the hidden row stays");
+    assert_eq!(sh.row_top(10), before.row_top(10), "the block keeps its height");
+    for ([a, b, lone], moved) in [(beside, true), (below, false)] {
         let (was, now) = (before.drawing_rect(lone).unwrap(), sh.drawing_rect(lone).unwrap());
-        assert!((was.y - now.y).abs() > 20.0, "the picture's rows moved: {was:?} -> {now:?}");
+        assert_eq!((was.y - now.y).abs() > 20.0, moved, "the picture's rows moved: {was:?} -> {now:?}");
         for member in [a, b] {
             let (old, got) = (before.drawing_rect(member).unwrap(), sh.drawing_rect(member).unwrap());
             assert_rect(got, ObjectRect { y: now.y, h: now.h, ..old }, "grouped picture follows its rows");

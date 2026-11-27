@@ -575,6 +575,11 @@ fn collapsed_group_recovers_on_row_resize_with_undo_and_redo() {
     assert_eq!(member_boxes(&session.doc().unwrap().wb), grown);
 }
 
+/// A sort leaves the zero-height rows a collapsed group spans where they are (Batch 5
+/// `x38-collapsed-sort-moves`). When the shown rows it moves change height under the group's
+/// markers, it holds the group by its coincident row pair, and a later fit of the collapsed rows
+/// recovers the group as it would have without the sort. A second sort among the shown rows
+/// keeps the hold.
 #[test]
 fn collapsed_group_recovers_during_sort_row_fit() {
     use crate::{DocState, Session, Trust};
@@ -586,8 +591,7 @@ fn collapsed_group_recovers_during_sort_row_fit() {
     let sh = wb.sheet_mut(0).unwrap();
     sh.rows.insert(3, LineInfo { size: Some(60.0), custom: true, ..Default::default() });
     sh.rows.insert(5, LineInfo { size: Some(0.0), custom: true, ..Default::default() });
-    let keys = [1.0, 3.0, 2.0, 5.0, 4.0, 6.0];
-    for (row, key) in keys.into_iter().enumerate() {
+    for (row, key) in [1.0, 3.0, 2.0, 5.0, 4.0, 6.0].into_iter().enumerate() {
         // Keep the large font in the original zero-height rows.
         sh.set_value(CellRef::new(row as u32, 0), gridcraft_core::Value::Number(key));
     }
@@ -606,87 +610,196 @@ fn collapsed_group_recovers_during_sort_row_fit() {
     let sort = |wb| run(wb, "data.sort", json!({"range": "A1:D6", "header": false, "keys": [{"column": "A"}]}));
     let held = sort(wb.clone());
     let held_sheet = held.sheet(0).unwrap();
-    for (row, key) in [1.0, 2.0, 3.0, 4.0, 5.0, 6.0].into_iter().enumerate() {
+    // Only rows 1, 4 and 5 show: their keys 1, 5 and 4 sort among them. Rows 2, 3 and 6 keep theirs.
+    for (row, key) in [1.0, 3.0, 2.0, 4.0, 5.0, 6.0].into_iter().enumerate() {
         assert_eq!(held_sheet.value(CellRef::new(row as u32, 0)), gridcraft_core::Value::Number(key));
     }
+    let original = wb.sheet(0).unwrap();
+    for row in [0, 1, 2, 5] {
+        assert_eq!(held_sheet.rows.get(&row), original.rows.get(&row), "row {} stays", row + 1);
+    }
+    assert_eq!((held_sheet.row_height(3), held_sheet.row_height(4)), (original.row_height(4), original.row_height(3)));
     for (actual, expected) in boxes(&held).into_iter().zip(boxes(&wb)) {
         assert_box(actual, expected, "held group box before fitting");
     }
 
-    assert!(!held_sheet.drawing_files.contains_key(&root), "row heights changed between the named marks and the members");
+    assert!(!held_sheet.drawing_files.contains_key(&root), "row heights changed under the named marks");
     assert!(held_sheet.source_group(held_sheet.drawing_group(1).unwrap()).is_none(), "the held source is layout-only");
 
     let control = run(wb.clone(), "home.autofitRowHeight", json!({"rows": "2:2"}));
-    wb.sheet_mut(0).unwrap().rows.get_mut(&1).unwrap().custom = false;
-    let sorted = sort(wb);
     let fit = |wb| run(wb, "home.autofitRowHeight", json!({"rows": "2:2"}));
     let fitted_later = fit((*held).clone());
 
-    // A second sort can reorder the held run again without losing recovery.
+    // A second sort among the shown rows keeps the hold.
     let mut reordered = (*held).clone();
     let sh = reordered.sheet_mut(0).unwrap();
-    sh.set_value(CellRef::new(1, 0), gridcraft_core::Value::Number(3.0));
-    sh.set_value(CellRef::new(2, 0), gridcraft_core::Value::Number(2.0));
-    let fitted_after_second_sort = fit((*sort(reordered)).clone());
+    sh.set_value(CellRef::new(3, 0), gridcraft_core::Value::Number(5.0));
+    sh.set_value(CellRef::new(4, 0), gridcraft_core::Value::Number(4.0));
+    let resorted = sort(reordered);
+    assert_eq!(resorted.sheet(0).unwrap().row_height(3), original.row_height(3), "the second sort moved the shown rows back");
+    let fitted_after_second_sort = fit((*resorted).clone());
 
-    // A second sort that exchanges equally sized rows across the boundary must drop the hold
-    // even though no line height changes during that sort.
-    let mut exchanged = (*held).clone();
-    let sh = exchanged.sheet_mut(0).unwrap();
-    sh.set_value(CellRef::new(2, 0), gridcraft_core::Value::Number(6.0));
-    sh.set_value(CellRef::new(5, 0), gridcraft_core::Value::Number(3.0));
-    let exchanged = sort(exchanged);
-    let exchanged_sheet = exchanged.sheet(0).unwrap();
-    assert!((0..=6).all(|row| held_sheet.row_top(row) == exchanged_sheet.row_top(row)));
-    let fitted = fit((*exchanged).clone());
-    assert!(fitted.sheet(0).unwrap().row_top(2) > held_sheet.row_top(2));
-    assert_eq!(boxes(&fitted)[0].h, 0.0);
     let expected = boxes(&control);
     assert!(expected[0].h > 0.0 && expected[1..].iter().all(|r| r.w > 0.0), "control: {expected:?}");
-    for actual in [&sorted, &fitted_later, &fitted_after_second_sort] {
+    for actual in [&fitted_later, &fitted_after_second_sort] {
         for (actual, expected) in boxes(actual).into_iter().zip(&expected) {
             assert_box(actual, *expected, "collapsed group box after sort and fit");
         }
     }
 }
 
+/// Hidden and zero-height rows never move in a sort, so a collapsed group's coincident span
+/// loses a row only when the span holds a row that shows. That takes a marker offset past its
+/// cell: here the group's `from` marker sits 20 px into row 2, which is 20 px tall, and its `to`
+/// marker at the top of row 4, with row 3 at zero height between them. Once a sort moves row 2
+/// out, even between rows of equal height, the group stays collapsed when row 3, still in its
+/// span, is given a height (X38 decision c); without that sort row 3 grows it back.
 #[test]
 fn held_collapsed_group_ignores_rows_it_no_longer_spans_after_sort() {
     use crate::{DocState, Session, Trust};
     use gridcraft_model::{DrawingRef, LineInfo};
     use serde_json::json;
 
-    let bytes = group_projection_book(0.0, r#"flipV="1" rot="16200000""#, "", true, true);
-    let (mut wb, _) = open_bytes("group.xlsx", &bytes).unwrap();
+    let book = group_projection_book(0.0, r#"flipV="1" rot="16200000""#, "", true, true);
+    let past_cell = "<xdr:row>1</xdr:row><xdr:rowOff>190500</xdr:rowOff>";
+    let drawing = drawing_xml(&book).replacen("<xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff>", past_cell, 1);
+    assert!(drawing.contains(past_cell));
+    let (mut wb, _) = open_bytes("group.xlsx", &book).unwrap();
     let sh = wb.sheet_mut(0).unwrap();
-    sh.rows.insert(3, LineInfo { size: Some(60.0), custom: true, ..Default::default() });
-    for (row, key) in [2.0, 3.0, 4.0, 1.0].into_iter().enumerate() {
+    sh.rows.insert(1, LineInfo { size: Some(20.0), custom: true, ..Default::default() });
+    for (row, key) in [1.0, 6.0, 2.0, 3.0, 4.0, 5.0].into_iter().enumerate() {
         sh.set_value(CellRef::new(row as u32, 0), gridcraft_core::Value::Number(key));
     }
+    let (wb, _) = open_bytes("group.xlsx", &with_drawing_xml(gridcraft_xlsx::write_xlsx(&wb).unwrap(), &drawing)).unwrap();
     let session = |wb| {
         let mut session = Session::new();
         session.add_document(DocState::from_saved(wb, None, "Group".to_owned(), Trust::FromFile));
         session
     };
-    let mut sorting = session(wb);
-    sorting.execute("data.sort", json!({"range": "A1:D4", "header": false, "keys": [{"column": "A"}]})).unwrap();
-    let sorted = sorting.doc().unwrap().wb.clone();
-    let root = |wb: &Workbook| {
-        let sh = wb.sheet(0).unwrap();
+    let root = |s: &Session| {
+        let sh = s.doc().unwrap().wb.sheet(0).unwrap();
         sh.anchor_rect(&sh.raw_drawing_anchor(DrawingRef::Group(1)).unwrap())
     };
-    let held = root(&sorted);
-    assert_eq!(held.h, 0.0, "{held:?}");
-    let resized = |rows: &str, height: f64| {
-        let mut s = session((*sorted).clone());
+    let resized = |s: &Session, rows: &str, height: f64| {
+        let mut s = session((*s.doc().unwrap().wb).clone());
         s.execute("home.rowHeight", json!({"sheet": 0, "rows": rows, "height": height})).unwrap();
-        s.doc().unwrap().wb.clone()
+        root(&s)
     };
-    // The held box stays inside row 2, but its original zero-height rows moved to rows 3–4.
-    // Neither set of rows can grow a group whose collapsed span no longer sits under it.
-    for (rows, height) in [("2:2", 150.0), ("3:4", 30.0)] {
-        let after = root(&resized(rows, height));
+    let mut s = session(wb);
+    let collapsed = root(&s);
+    let top = s.doc().unwrap().wb.sheet(0).unwrap().row_top(3);
+    assert_eq!((collapsed.y, collapsed.h), (top, 0.0), "{collapsed:?}");
+    let grown = resized(&s, "3:3", 150.0);
+    assert!(grown.h > 0.0, "without a sort, row 3 grows the group back: {grown:?}");
+
+    // Shown rows 1, 2, 4, 5 and 6 sort; row 2 (key 6) goes to row 6. Zero-height row 3 stays.
+    s.execute("data.sort", json!({"range": "A1:D6", "header": false, "keys": [{"column": "A"}]})).unwrap();
+    let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+    let keys: Vec<_> = (0..6).map(|row| sh.value(CellRef::new(row, 0))).collect();
+    assert_eq!(keys, [1.0, 3.0, 2.0, 4.0, 5.0, 6.0].map(gridcraft_core::Value::Number));
+    assert_eq!(sh.row_top(3), top, "the rows above the group keep their heights");
+    let file = sh.drawing_group(1).unwrap().file.as_ref().unwrap();
+    assert!(file.sort_lost_collapsed_rows && file.held_collapse == [None; 2], "the sort ended the hold");
+    let held = root(&s);
+    assert_eq!((held.y, held.h), (collapsed.y, 0.0), "{held:?}");
+    for (rows, height) in [("3:3", 150.0), ("6:6", 30.0)] {
+        let after = resized(&s, rows, height);
         assert_eq!((after.y, after.h), (held.y, 0.0), "resizing {rows}: {after:?}");
+    }
+}
+
+/// Synthetic version of the Batch 5 `x38-collapsed-sort-*` fixtures: keys in A5:A10 (B:D hold
+/// the key times 10 plus 1..3), rows 7:8 saved as `ht="0" customHeight="1"` with no `hidden`
+/// flag, and a move-and-size group of two shapes anchored F7 to I9 with zero-offset markers, so
+/// its frame sits collapsed over rows 7:8.
+fn collapsed_sort_book(keys: [f64; 6]) -> Vec<u8> {
+    use gridcraft_model::{Anchor, Color, LineInfo, Shape, ShapeKind};
+
+    let mut wb = Workbook::new();
+    let sh = wb.sheet_mut(0).unwrap();
+    for (row, key) in (4..10).zip(keys) {
+        for col in 0..4 {
+            sh.set_value(CellRef::new(row, col), gridcraft_core::Value::Number(key * if col == 0 { 1.0 } else { 10.0 } + f64::from(col)));
+        }
+    }
+    for row in [6, 7] {
+        sh.rows.insert(row, LineInfo { size: Some(0.0), custom: true, ..Default::default() });
+    }
+    // A placeholder drawing for the generated package; its part is replaced below.
+    sh.shapes.push(Shape {
+        id: 2,
+        kind: ShapeKind::Rectangle,
+        anchor: Anchor { width: 40.0, height: 40.0, ..Anchor::default() },
+        fill: Color::Auto,
+        line: Color::Auto,
+        text: String::new(),
+        format: Default::default(),
+        rotation: 0.0,
+        math: Default::default(),
+    });
+    let generated = gridcraft_xlsx::write_xlsx(&wb).unwrap();
+    let (cx, cy) = (3 * 609600, 2 * 190500);
+    let leaf = |id: u32, name: &str, y: i64| {
+        format!(
+            r#"<xdr:sp><xdr:nvSpPr><xdr:cNvPr id="{id}" name="{name}"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:xfrm><a:off x="3048000" y="{}"/><a:ext cx="{cx}" cy="{}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:sp>"#,
+            1143000 + y,
+            cy / 2
+        )
+    };
+    let drawing = format!(
+        r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<xdr:twoCellAnchor><xdr:from><xdr:col>5</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>6</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+<xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>8</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+<xdr:grpSp><xdr:nvGrpSpPr><xdr:cNvPr id="1" name="Collapsed group"/><xdr:cNvGrpSpPr/></xdr:nvGrpSpPr>
+<xdr:grpSpPr><a:xfrm><a:off x="3048000" y="1143000"/><a:ext cx="{cx}" cy="{cy}"/><a:chOff x="3048000" y="1143000"/><a:chExt cx="{cx}" cy="{cy}"/></a:xfrm></xdr:grpSpPr>{}{}</xdr:grpSp>
+<xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#,
+        leaf(2, "Collapsed top", 0),
+        leaf(3, "Collapsed bottom", cy / 2)
+    );
+    with_drawing_xml(generated, &drawing)
+}
+
+/// Excel for Mac 16.115.2, action probes `x38-collapsed-sort-moves` and `-stays` (Batch 5):
+/// sorting A5:D10 by column A permutes only the visible rows 5, 6, 9 and 10 among themselves.
+/// The zero-height rows 7:8 keep their keys, cells and height, as Microsoft's "Sort data in a
+/// range or table" says of hidden rows; the collapsed group stays at F7 with no height and
+/// grows back to 30 pt once rows 7 and 8 are set to 15 pt. Undo restores the sheet exactly.
+#[test]
+fn sort_leaves_zero_height_rows_and_their_collapsed_group_in_place() {
+    use crate::{DocState, Session, Trust};
+    use gridcraft_model::DrawingRef;
+    use serde_json::json;
+
+    for (keys, sorted) in
+        [([3.0, 4.0, 6.0, 5.0, 1.0, 2.0], [1.0, 2.0, 6.0, 5.0, 3.0, 4.0]), ([2.0, 1.0, 3.0, 4.0, 6.0, 5.0], [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])]
+    {
+        let (wb, _) = open_bytes("collapsed.xlsx", &collapsed_sort_book(keys)).unwrap();
+        let mut s = Session::new();
+        s.add_document(DocState::from_saved(wb, None, "Collapsed".to_owned(), Trust::FromFile));
+        let sheet = |s: &Session| s.doc().unwrap().wb.sheets[0].clone();
+        let group = |sh: &gridcraft_model::Sheet| sh.anchor_rect(&sh.raw_drawing_anchor(DrawingRef::Group(1)).unwrap());
+        let before = sheet(&s);
+        let frame = group(&before);
+        assert_eq!((frame.y, frame.h), (before.row_top(6), 0.0), "{keys:?}: collapsed over rows 7:8");
+
+        s.execute("data.sort", json!({"range": "A5:D10", "header": false, "keys": [{"column": "A"}]})).unwrap();
+        let after = sheet(&s);
+        for (row, key) in (4..10).zip(sorted) {
+            for col in 0..4 {
+                let want = key * if col == 0 { 1.0 } else { 10.0 } + f64::from(col);
+                assert_eq!(after.value(CellRef::new(row, col)), gridcraft_core::Value::Number(want), "{keys:?}: row {}", row + 1);
+            }
+        }
+        assert_eq!(after.rows, before.rows, "{keys:?}: every row keeps its height");
+        assert_box(group(&after), frame, "group after the sort");
+
+        s.execute("home.rowHeight", json!({"sheet": 0, "rows": "7:8", "points": 15})).unwrap();
+        let grown = sheet(&s);
+        assert_box(group(&grown), gridcraft_model::ObjectRect { h: 40.0, ..frame }, "group after rows 7:8 take 15 pt");
+
+        s.execute("edit.undo", json!({})).unwrap();
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(sheet(&s), before, "{keys:?}: undo restores the sheet");
     }
 }
 

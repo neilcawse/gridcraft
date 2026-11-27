@@ -145,12 +145,19 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
             };
             (v, color)
         };
-        let mut order: Vec<u32> = (0..n).collect();
-        let keyed: Vec<Vec<(Value, u32)>> = (0..n).map(|i| keys.iter().map(|k| key_val(i, k)).collect()).collect();
-        order.sort_by(|&a, &b| {
+        // Hidden lines on the sort axis keep their place: only the lines showing are sorted, among
+        // the positions they occupy ("Sort data in a range or table": hidden rows are not moved
+        // when you sort rows, nor hidden columns when you sort columns). A line shown with no
+        // size counts as hidden: Excel for Mac left rows saved as `ht="0"` without `hidden` in
+        // place (Batch 5 probe `x38-collapsed-sort-moves`).
+        let shown: Vec<u32> =
+            (0..n).filter(|&i| if by_cols { sh.col_width(body.start.col + i) > 0.0 } else { sh.row_height(body.start.row + i) > 0.0 }).collect();
+        let keyed: Vec<Vec<(Value, u32)>> = shown.iter().map(|&i| keys.iter().map(|k| key_val(i, k)).collect()).collect();
+        let mut ranked: Vec<usize> = (0..shown.len()).collect();
+        ranked.sort_by(|&a, &b| {
             for (ki, k) in keys.iter().enumerate() {
-                let (va, ca) = &keyed[a as usize][ki];
-                let (vb, cb) = &keyed[b as usize][ki];
+                let (va, ca) = &keyed[a][ki];
+                let (vb, cb) = &keyed[b][ki];
                 let plain = || {
                     if case && va.is_text() && vb.is_text() {
                         sort_compare(va, vb).then_with(|| case_order(va.as_text().unwrap_or(""), vb.as_text().unwrap_or("")))
@@ -183,7 +190,16 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
             }
             Ordering::Equal
         });
-        if order.iter().enumerate().all(|(i, &o)| i as u32 == o) {
+        // `order[dst] = src`: each shown position takes the shown line ranked for it.
+        let mut order: Vec<u32> = (0..n).collect();
+        for (&dst, &rank) in shown.iter().zip(&ranked) {
+            if let (Some(slot), Some(&src)) = (order.get_mut(dst as usize), shown.get(rank)) {
+                *slot = src;
+            }
+        }
+        // The lines that move, as (destination, source); the rest are left untouched.
+        let moves: Vec<(u32, u32)> = order.iter().enumerate().map(|(dst, &src)| (dst as u32, src)).filter(|&(dst, src)| dst != src).collect();
+        if moves.is_empty() {
             return Ok(Json::Null);
         }
         // Move whole lines (cells with formulas adjusted for relative references).
@@ -191,24 +207,22 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
         // Notes and hyperlinks hang off a cell, not a row, so they travel with the row they
         // describe — the way cell pictures and row heights do. Collect them before inserting,
         // so a swap can't resurrect one from a destination that is also a source.
-        let side: Vec<(CellRef, Comment)> = order
+        let side: Vec<(CellRef, Comment)> = moves
             .iter()
-            .enumerate()
-            .flat_map(|(dst_i, &src_i)| lanes.iter().map(move |&k| (src_i, dst_i as u32, k)))
+            .flat_map(|&(dst_i, src_i)| lanes.iter().map(move |&k| (src_i, dst_i, k)))
             .filter_map(|(src_i, dst_i, k)| sh.comments.get(&line(src_i, k)).map(|cm| (line(dst_i, k), cm.clone())))
             .collect();
-        let links: Vec<(CellRef, Hyperlink)> = order
+        let links: Vec<(CellRef, Hyperlink)> = moves
             .iter()
-            .enumerate()
-            .flat_map(|(dst_i, &src_i)| lanes.iter().map(move |&k| (src_i, dst_i as u32, k)))
+            .flat_map(|&(dst_i, src_i)| lanes.iter().map(move |&k| (src_i, dst_i, k)))
             .filter_map(|(src_i, dst_i, k)| sh.hyperlinks.get(&line(src_i, k)).map(|h| (line(dst_i, k), h.clone())))
             .collect();
-        let mut moved: Vec<(CellRef, Option<Cell>)> = Vec::with_capacity(body.count() as usize);
+        let mut moved: Vec<(CellRef, Option<Cell>)> = Vec::with_capacity(moves.len().saturating_mul(lanes.len()));
         let mut pictures = Vec::new();
-        for (dst_i, &src_i) in order.iter().enumerate() {
+        for &(dst_i, src_i) in &moves {
             for &k in &lanes {
                 let src = line(src_i, k);
-                let dst = line(dst_i as u32, k);
+                let dst = line(dst_i, k);
                 let mut cell = sh.cell(src).cloned();
                 if let Some(c) = cell.as_mut()
                     && let Some(f) = &c.formula
@@ -223,9 +237,13 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
                 moved.push((dst, cell));
             }
         }
-        // Row heights travel with rows.
-        let heights: Vec<Option<LineInfo>> =
-            if by_cols { vec![] } else { order.iter().map(|&i| sh.rows.get(&(body.start.row + i)).copied()).collect() };
+        // Row heights travel with rows. Both ends of a move are shown rows, so the moved
+        // line's settings, visibility included, replace the destination's.
+        let heights: Vec<(u32, Option<LineInfo>)> = if by_cols {
+            vec![]
+        } else {
+            moves.iter().map(|&(dst, src)| (body.start.row + dst, sh.rows.get(&(body.start.row + src)).copied())).collect()
+        };
         // Ungrouped floating objects anchored inside the sorted body travel with their lines,
         // unless pinned absolutely. Reordering is the inverse of `order`: `dst_of[src] = dst`.
         let dst_of: Vec<u32> = {
@@ -279,11 +297,14 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
                 }
             }
         }
-        // Every cell of the body is the destination of exactly one source cell, so clearing the
-        // body and inserting the permuted entries is the same permutation the cells went through.
-        for c in body.iter() {
-            shm.comments.remove(&c);
-            shm.hyperlinks.remove(&c);
+        // Every cell of a moved line is the destination of exactly one source cell, so clearing
+        // those lines and inserting the permuted entries is the same permutation the cells went
+        // through.
+        for &(dst_i, _) in &moves {
+            for &k in &lanes {
+                shm.comments.remove(&line(dst_i, k));
+                shm.hyperlinks.remove(&line(dst_i, k));
+            }
         }
         for (at, cm) in side {
             shm.comments.insert(at, cm);
@@ -292,11 +313,10 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
             shm.hyperlinks.insert(at, h);
         }
         shm.cell_pictures.extend(pictures);
-        for (i, h) in heights.into_iter().enumerate() {
-            let row = body.start.row + i as u32;
+        for (row, h) in heights {
             match h {
                 Some(info) => {
-                    shm.rows.insert(row, LineInfo { hidden: shm.rows.get(&row).is_some_and(|x| x.hidden), ..info });
+                    shm.rows.insert(row, info);
                 }
                 None => {
                     if let Some(e) = shm.rows.get_mut(&row) {
@@ -334,6 +354,8 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
             let changed = changed_lines(&before.rows, &shm.rows, (before.default_row_height, shm.default_row_height), MAX_ROWS);
             // `before` is only kept for a row sort. Rows outside the intersecting part of
             // the run stay put; within it, the permutation must send no row out of the run.
+            // Hidden and zero-height rows never move, so a run can lose a row only when it
+            // shows one, which takes a marker offset past its cell.
             let rows_stay = |start: u32, end: u32| {
                 let lo = start.max(b0);
                 let hi = end.min(b1 + 1);
