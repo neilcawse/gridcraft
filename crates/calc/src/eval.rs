@@ -629,9 +629,15 @@ impl<'h> Evaluator<'h> {
     }
 
     fn name(&mut self, n: &str) -> Ev {
-        if let Some((_, v)) = self.env.iter().rev().find(|(k, _)| gridcraft_formula::same_name(k, n)) {
-            return v.clone();
-        }
+        self.local_name(n).unwrap_or_else(|| self.defined_name(n))
+    }
+
+    fn local_name(&self, n: &str) -> Option<Ev> {
+        self.env.iter().rev().find(|(k, _)| gridcraft_formula::same_name(k, n)).map(|(_, v)| v.clone())
+    }
+
+    /// A workbook name, an external one, or a table, past any LET or LAMBDA variable.
+    fn defined_name(&mut self, n: &str) -> Ev {
         if let Some((book, sheet, bare)) = external_name(n) {
             return self.external_name(book, sheet, bare);
         }

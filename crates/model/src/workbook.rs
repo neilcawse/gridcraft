@@ -351,6 +351,12 @@ pub struct DefinedName {
     pub uid: DefinitionUid,
 }
 
+/// Whether canonical formula text starts with a direct `LAMBDA(` call. This is a prefix
+/// check, not a parse or a test of what the formula evaluates to.
+pub fn starts_with_lambda(formula: &str) -> bool {
+    formula.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("LAMBDA("))
+}
+
 /// The identity of a defined name or table while the app runs, so that what was bound to it (a
 /// PivotTable's source) can tell it from another one with the same text. Editing the definition
 /// keeps it; a definition deleted and made again gets a new one (they are never reused), and
@@ -789,8 +795,8 @@ impl Workbook {
     }
     /// Spells calls of LAMBDA names the way the names are defined (`Double(4)`, where the
     /// parser gives `DOUBLE(4)`: it upper-cases function names, as built-in ones are shown).
-    pub fn name_call_case(&self, e: Expr) -> Expr {
-        spell_calls(e, &self.lambda_names())
+    pub fn name_call_case(&self, e: Expr, sheet: usize) -> Expr {
+        spell_calls(e, &self.lambda_names(), &self.names, Some(sheet))
     }
     /// [`Workbook::name_call_case`] for every cell formula and defined name (after reading a
     /// file).
@@ -799,14 +805,14 @@ impl Workbook {
         if lambdas.is_empty() {
             return;
         }
-        for sheet in self.sheets.iter_mut() {
+        for (si, sheet) in self.sheets.iter_mut().enumerate() {
             let fixed: Vec<_> = sheet
                 .cells
                 .iter()
                 .filter_map(|(c, cell)| {
                     let f = cell.formula.as_ref()?;
                     let e = f.expr()?;
-                    let ne = spell_calls(e.clone(), &lambdas);
+                    let ne = spell_calls(e.clone(), &lambdas, &self.names, Some(si));
                     (ne != e).then(|| (c, Formula { array: f.array, ..f.rewritten(ne) }))
                 })
                 .collect();
@@ -820,19 +826,23 @@ impl Workbook {
                 }
             }
         }
-        for n in self.names.iter_mut() {
-            if let Ok(e) = gridcraft_formula::parse_name(&n.formula) {
-                let ne = spell_calls(e.clone(), &lambdas);
-                if ne != e {
-                    n.formula = gridcraft_formula::print(&ne);
-                }
-            }
+        let fixed: Vec<_> = self
+            .names
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| {
+                let e = gridcraft_formula::parse_name(&n.formula).ok()?;
+                let ne = spell_calls(e.clone(), &lambdas, &self.names, n.scope);
+                (ne != e).then(|| (i, gridcraft_formula::print(&ne)))
+            })
+            .collect();
+        for (i, text) in fixed {
+            self.names[i].formula = text;
         }
     }
-    /// Defined LAMBDA names eligible for call respelling. Built-ins keep the parser's spelling.
+    /// Names of the defined names holding a LAMBDA (callable like functions), as they are spelled.
     pub(crate) fn lambda_names(&self) -> Vec<String> {
-        let is_lambda = |f: &str| f.trim_start_matches('=').trim_start().get(..7).is_some_and(|p| p.eq_ignore_ascii_case("LAMBDA("));
-        self.names.iter().filter(|n| is_lambda(&n.formula) && !gridcraft_functions::is_known_function(&n.name)).map(|n| n.name.clone()).collect()
+        self.names.iter().filter(|n| starts_with_lambda(n.formula.trim_start_matches('=').trim_start())).map(|n| n.name.clone()).collect()
     }
     /// Table by name across sheets: (sheet index, table index).
     pub fn table(&self, name: &str) -> Option<(usize, usize)> {
@@ -1075,17 +1085,38 @@ pub fn reserved_name(name: &str) -> bool {
 }
 
 /// Calls of the names in `lambdas` spelled as the names are.
-fn spell_calls(e: Expr, lambdas: &[String]) -> Expr {
+fn spell_calls(e: Expr, lambdas: &[String], names: &[DefinedName], sheet: Option<usize>) -> Expr {
     if lambdas.is_empty() {
         return e;
     }
     e.map(&mut |x| match x {
-        Expr::Call(n, args) => match lambdas.iter().find(|l| l.eq_ignore_ascii_case(&n)) {
-            Some(l) => Expr::Call(l.clone(), args),
+        Expr::Call(n, args) => match lambda_call_spelling(&n, lambdas, names, sheet) {
+            Some(l) => Expr::Call(l, args),
             None => Expr::Call(n, args),
         },
         other => other,
     })
+}
+
+/// The new spelling of a call of one of the workbook's LAMBDA names (`lambdas`, as they are
+/// spelled), when it changes: `DOUBLE` → `Double`, and `_xludf.VSTACK` → `_xludf.VStack`, which
+/// calls the name `VStack`, not the built-in. An unprefixed call of a built-in keeps the parser's
+/// spelling: the built-in, not a same-named LAMBDA, is what it calls.
+pub(crate) fn lambda_call_spelling(call: &str, lambdas: &[String], names: &[DefinedName], sheet: Option<usize>) -> Option<String> {
+    match gridcraft_formula::user_defined_name(call) {
+        Some(bare) => {
+            let matching = |n: &&DefinedName| n.name.eq_ignore_ascii_case(bare);
+            let found = sheet
+                .and_then(|s| names.iter().filter(matching).find(|n| n.scope == Some(s)))
+                .or_else(|| names.iter().filter(matching).find(|n| n.scope.is_none()))?;
+            (found.name != bare).then(|| format!("_xludf.{}", found.name))
+        }
+        None => lambdas
+            .iter()
+            .find(|l| l.eq_ignore_ascii_case(call))
+            .filter(|l| l.as_str() != call && !gridcraft_functions::is_known_function(l) && gridcraft_formula::file_prefix(l).is_none())
+            .cloned(),
+    }
 }
 
 #[cfg(test)]

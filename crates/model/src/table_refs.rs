@@ -92,9 +92,9 @@ impl TableRefRewrite for TableRename<'_> {
         Some((source, found.rebound.is_none().then_some(self.new)))
     }
 
-    fn respell(&self, mut expr: Expr) -> Expr {
+    fn respell(&self, mut expr: Expr, sheet: usize) -> Expr {
         if !self.lambdas.is_empty() {
-            spell_lambda_calls(&mut expr, &self.lambdas, &mut Vec::new());
+            spell_lambda_calls(&mut expr, &self.lambdas, self.wb, (sheet != usize::MAX).then_some(sheet), &mut Vec::new());
         }
         expr
     }
@@ -130,7 +130,7 @@ pub trait TableRefRewrite {
     /// Spell user function calls in a changed expression. The parser upper-cases them
     /// (`DOUBLE(…)` for `Double(…)`), in formula text and in a cell tree read from a native file.
     /// File repair leaves that to the reader's later pass over every formula.
-    fn respell(&self, expr: Expr) -> Expr {
+    fn respell(&self, expr: Expr, _sheet: usize) -> Expr {
         expr
     }
 }
@@ -138,16 +138,16 @@ pub trait TableRefRewrite {
 pub fn expression(rewrite: &impl TableRefRewrite, expr: &mut Expr, sheet: usize, owner: Option<TablePosition>) -> bool {
     let changed = rewrite_table_tokens(expr, &|name, structured, env| rewrite.replacement(name, structured, sheet, owner, env));
     if changed {
-        *expr = rewrite.respell(std::mem::replace(expr, Expr::Missing));
+        *expr = rewrite.respell(std::mem::replace(expr, Expr::Missing), sheet);
     }
     changed
 }
 
 /// Spells calls of the workbook's LAMBDA names as the names are defined. A call of a LET or
 /// LAMBDA binder in scope is not a call of the workbook's name and keeps its spelling.
-fn spell_lambda_calls(mut e: &mut Expr, lambdas: &[String], env: &mut Vec<String>) {
+fn spell_lambda_calls(mut e: &mut Expr, lambdas: &[String], wb: &Workbook, sheet: Option<usize>, env: &mut Vec<String>) {
     while let Expr::Binary(_, a, b) = e {
-        spell_lambda_calls(b, lambdas, env);
+        spell_lambda_calls(b, lambdas, wb, sheet, env);
         e = a;
     }
     let before = env.len();
@@ -155,12 +155,12 @@ fn spell_lambda_calls(mut e: &mut Expr, lambdas: &[String], env: &mut Vec<String
         Expr::Call(name, args) if name == "LET" && args.len() >= 3 && args.len() % 2 != 0 => {
             if let Some((body, pairs)) = args.split_last_mut() {
                 for [binder, value] in pairs.as_chunks_mut::<2>().0 {
-                    spell_lambda_calls(value, lambdas, env);
+                    spell_lambda_calls(value, lambdas, wb, sheet, env);
                     if let Expr::Name(n) = binder {
                         env.push(n.clone());
                     }
                 }
-                spell_lambda_calls(body, lambdas, env);
+                spell_lambda_calls(body, lambdas, wb, sheet, env);
             }
         }
         Expr::Call(name, args) if name == "LAMBDA" => {
@@ -170,23 +170,23 @@ fn spell_lambda_calls(mut e: &mut Expr, lambdas: &[String], env: &mut Vec<String
                         env.push(n.trim_start_matches('[').trim_end_matches(']').into());
                     }
                 }
-                spell_lambda_calls(body, lambdas, env);
+                spell_lambda_calls(body, lambdas, wb, sheet, env);
             }
         }
         Expr::Call(name, args) => {
             if !env.iter().any(|local| same_name(local, name))
-                && let Some(defined) = lambdas.iter().find(|l| l.eq_ignore_ascii_case(name))
+                && let Some(defined) = crate::workbook::lambda_call_spelling(name, lambdas, &wb.names, sheet)
             {
-                name.clone_from(defined);
+                *name = defined;
             }
-            args.iter_mut().for_each(|a| spell_lambda_calls(a, lambdas, env));
+            args.iter_mut().for_each(|a| spell_lambda_calls(a, lambdas, wb, sheet, env));
         }
         Expr::Invoke(callee, args) => {
-            spell_lambda_calls(callee, lambdas, env);
-            args.iter_mut().for_each(|a| spell_lambda_calls(a, lambdas, env));
+            spell_lambda_calls(callee, lambdas, wb, sheet, env);
+            args.iter_mut().for_each(|a| spell_lambda_calls(a, lambdas, wb, sheet, env));
         }
-        Expr::Array(rows) => rows.iter_mut().flatten().for_each(|x| spell_lambda_calls(x, lambdas, env)),
-        Expr::Unary(_, x) | Expr::Paren(x) => spell_lambda_calls(x, lambdas, env),
+        Expr::Array(rows) => rows.iter_mut().flatten().for_each(|x| spell_lambda_calls(x, lambdas, wb, sheet, env)),
+        Expr::Unary(_, x) | Expr::Paren(x) => spell_lambda_calls(x, lambdas, wb, sheet, env),
         _ => {}
     }
     env.truncate(before);

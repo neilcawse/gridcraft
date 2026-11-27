@@ -161,6 +161,42 @@ pub fn from_file(text: &str) -> String {
     }
 }
 
+/// `text` (a formula as a file spells it) with each unprefixed call of one of `names` marked
+/// `_xludf.`, or `None` when there is none. `names` are workbook LAMBDA names that newer
+/// functions share: files spell those functions `_xlfn.TRIMRANGE`, and Excel reads
+/// `TRIMRANGE(1)` as a call of the workbook's `TrimRange` (Batch 5, `x30-lambda-collisions`
+/// A1, A3). The model's `_xludf.` call keeps that binding through editing and saving.
+pub(crate) fn bind_name_calls(text: &str, names: &std::collections::HashSet<String>) -> Option<String> {
+    use gridcraft_formula::{
+        MAX_FORMULA_LEN,
+        lexer::{Tok, tokenize},
+    };
+    if names.is_empty() || !text.contains('(') || text.len() > MAX_FORMULA_LEN && text.chars().count() > MAX_FORMULA_LEN {
+        return None;
+    }
+    // The future-function catalog is bounded; lookup needs no per-token heap allocation.
+    let mut upper = [0; 32];
+    let tokens = tokenize(text).ok()?;
+    let mut bound = String::new();
+    let mut pos = 0;
+    for t in &tokens {
+        let Tok::Func(spelling) = &t.tok else { continue };
+        let Some(key) = upper.get_mut(..spelling.len()) else { continue };
+        key.copy_from_slice(spelling.as_bytes());
+        key.make_ascii_uppercase();
+        if std::str::from_utf8(key).is_ok_and(|n| names.contains(n)) {
+            bound.push_str(text.get(pos..t.start)?);
+            bound.push_str("_xludf.");
+            pos = t.start;
+        }
+    }
+    if pos == 0 && bound.is_empty() {
+        return None;
+    }
+    bound.push_str(text.get(pos..)?);
+    Some(bound)
+}
+
 /// Excel stores some formula-bar operators and names as compatibility functions. Preserve the
 /// surrounding source layout, but only change actual tokens, not literals or sheet names. A
 /// formula holding a file-only spelling the formula bar shows otherwise (`[#This Row]`,

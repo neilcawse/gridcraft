@@ -381,8 +381,10 @@ fn collect_dynamic_reads(wb: &Workbook, sheet: usize, e: &Expr, out: &mut Dynami
         {
             known = false;
         }
-        // A function defined by a name (a LAMBDA).
-        Expr::Call(n, _) if !is_known_function(n) => known &= name(out, n),
+        // A function defined by a name (a LAMBDA), also called as `_xludf.Name`.
+        Expr::Call(n, _) if !is_known_function(n) && gridcraft_formula::file_prefix(n).is_none() => {
+            known &= name(out, gridcraft_formula::user_defined_name(n).unwrap_or(n));
+        }
         _ => {}
     });
     known

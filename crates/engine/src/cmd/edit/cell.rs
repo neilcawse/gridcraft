@@ -41,7 +41,7 @@ fn input_to_cell_impl(input: &str, sheet: usize, at: CellRef, wb: &mut gridcraft
     }
     if is_formula {
         let body = input.strip_prefix('=').unwrap_or(input);
-        let mut expr = wb.name_call_case(parse_typed_formula(body, wb, sheet)?);
+        let mut expr = wb.name_call_case(parse_typed_formula(body, wb, sheet)?, sheet);
         if bind_tables && body.contains('[') && has_bare_table_refs(&expr) {
             expr = bind_local_tables(expr, wb, sheet, at);
         }

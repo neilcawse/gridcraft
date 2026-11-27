@@ -390,14 +390,14 @@ fn define_name(s: &mut Session, p: &Json) -> Result<Json> {
                 None | Some("Workbook") => None,
                 Some(sh) => Some(d.wb.sheet_index(sh).ok_or_else(|| bad("formulas.defineName", "no such sheet"))?),
             };
-            if !d.wb.names.iter().any(|n| n.name.eq_ignore_ascii_case(old_name) && n.scope == old_scope) {
+            let Some(previous) = d.wb.name_in_scope(old_name, old_scope) else {
                 return Err(bad("formulas.defineName", "no such name to edit"));
-            }
+            };
             let same = old_name.eq_ignore_ascii_case(&name) && old_scope == scope;
             if !same && d.wb.names.iter().any(|n| n.name.eq_ignore_ascii_case(&name) && n.scope == scope) {
                 return Err(EngineError::Other("The name entered already exists. Enter a unique name.".into()));
             }
-            Some((old_name.to_string(), old_scope))
+            Some((previous.name.clone(), old_scope))
         }
         None => None,
     };
@@ -409,7 +409,7 @@ fn define_name(s: &mut Session, p: &Json) -> Result<Json> {
         if let Some((old_name, old_scope)) = &old {
             uid = cx.wb.names.iter().find(|n| same(n, old_name, *old_scope)).map(|n| n.uid);
             cx.wb.names.retain(|n| !same(n, old_name, *old_scope));
-            if !old_name.eq_ignore_ascii_case(&name) {
+            if old_name != &name {
                 rename_name_in_formulas(&mut cx.wb, old_name, *old_scope, &name);
             }
         }
@@ -439,9 +439,13 @@ fn rename_name_in_formulas(wb: &mut gridcraft_model::Workbook, old: &str, old_sc
     let rename = |e: gridcraft_formula::Expr| {
         let mut hit = false;
         let out = e.map(&mut |x| match x {
-            gridcraft_formula::Expr::Name(n) if n.eq_ignore_ascii_case(old) => {
+            gridcraft_formula::Expr::Name(n) if !old.eq_ignore_ascii_case(new) && n.eq_ignore_ascii_case(old) => {
                 hit = true;
                 gridcraft_formula::Expr::Name(new.to_string())
+            }
+            gridcraft_formula::Expr::Call(n, args) if gridcraft_formula::user_defined_name(&n).is_some_and(|bare| bare.eq_ignore_ascii_case(old)) => {
+                hit = true;
+                gridcraft_formula::Expr::Call(format!("_xludf.{new}"), args)
             }
             o => o,
         });
@@ -463,6 +467,8 @@ fn rename_name_in_formulas(wb: &mut gridcraft_model::Workbook, old: &str, old_sc
             }
         }
     }
+    // A workbook-scoped body is rewritten even if the old name could resolve to a
+    // sheet-local definition for some callers. Calls and plain names share this rule.
     for n in wb.names.iter_mut() {
         if n.scope.is_none_or(applies)
             && let Some(e) = gridcraft_formula::parse_name(&n.formula).ok().and_then(rename)

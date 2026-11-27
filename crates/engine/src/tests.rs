@@ -3209,6 +3209,288 @@ fn builtin_call_spelling_after_name_import() {
     assert_builtin_and_lambda_entry(&mut opened);
 }
 
+/// Batch 5 `x30-lambda-collisions`: workbook names `TrimRange` and `VStack` hold
+/// `LAMBDA(x,"lam")`, and the cells call TRIMRANGE and VSTACK as Excel's formula XML spells
+/// them. Excel: an unprefixed call is the LAMBDA, `_xlfn.` the built-in, `_xludf.` the LAMBDA, and
+/// a LET variable its own LAMBDA.
+fn lambda_collision_workbook(names: &str, cells: &str) -> Vec<u8> {
+    use std::io::{Cursor, Write};
+    const NS_REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    let types = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#.to_string();
+    let rels = format!(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{NS_REL}/officeDocument" Target="xl/workbook.xml"/></Relationships>"#
+    );
+    let book = format!(
+        r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="{NS_REL}"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets><definedNames>{names}</definedNames><calcPr fullCalcOnLoad="1"/></workbook>"#
+    );
+    let book_rels = format!(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{NS_REL}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#
+    );
+    let sheet = format!(r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{cells}</sheetData></worksheet>"#);
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    for (name, data) in [
+        ("[Content_Types].xml", types),
+        ("_rels/.rels", rels),
+        ("xl/workbook.xml", book),
+        ("xl/_rels/workbook.xml.rels", book_rels),
+        ("xl/worksheets/sheet1.xml", sheet),
+    ] {
+        zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(data.as_bytes()).unwrap();
+    }
+    zip.finish().unwrap().into_inner()
+}
+
+fn batch_five_lambda_collision_workbook() -> Vec<u8> {
+    let names = r#"<definedName name="TrimRange">_xlfn.LAMBDA(_xlpm.x,"lam")</definedName><definedName name="VStack">_xlfn.LAMBDA(_xlpm.x,"lam")</definedName>"#;
+    let cells: String = [
+        "TRIMRANGE(1)",
+        "_xlfn.TRIMRANGE(1)",
+        "VSTACK(1)",
+        "_xlfn.VSTACK(1)",
+        "_xludf.VSTACK(1)",
+        "_xlfn.LET(_xlpm.vstack,_xlfn.LAMBDA(_xlpm.x,5),_xlpm.vstack(1))",
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, f)| format!(r#"<row r="{0}"><c r="A{0}"><f>{f}</f><v>424242.5</v></c></row>"#, i + 1))
+    .collect();
+    lambda_collision_workbook(names, &cells)
+}
+
+/// The six Excel results, and each call's binding as the model stores it. A legacy formula
+/// (no dynamic-array metadata) of a built-in that can return an array reads with Excel's implicit
+/// `@`, as Excel's `Formula2` shows it.
+fn assert_lambda_collision_bindings(s: &Session) {
+    let lam = Value::from("lam");
+    let expected = [
+        ("A1", "@_xludf.TrimRange(1)", lam.clone()),
+        ("A2", "@TRIMRANGE(1)", Value::Number(1.0)),
+        ("A3", "@_xludf.VStack(1)", lam.clone()),
+        ("A4", "@VSTACK(1)", Value::Number(1.0)),
+        ("A5", "@_xludf.VStack(1)", lam),
+        ("A6", "@LET(vstack,LAMBDA(x,5),VSTACK(1))", Value::Number(5.0)),
+    ];
+    let actual: Vec<_> = expected.iter().map(|(cell, _, _)| (*cell, formula_at(s, cell).unwrap_or_default(), v(s, cell))).collect();
+    let expected: Vec<_> = expected.into_iter().map(|(cell, formula, value)| (cell, formula.to_string(), value)).collect();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn future_function_calls_bind_like_excel_through_save() {
+    let mut s = s();
+    s.execute(
+        "file.open",
+        json!({"name": "x30-lambda-collisions.xlsx", "base64": crate::io::base64_encode(&batch_five_lambda_collision_workbook())}),
+    )
+    .unwrap();
+    assert_lambda_collision_bindings(&s);
+    // Editing: another cell changes, and each call confirmed as it reads back keeps its binding.
+    s.execute("cell.set", json!({"cell": "B1", "input": "2"})).unwrap();
+    for cell in ["A1", "A2", "A3", "A4", "A5", "A6"] {
+        let read = s.execute("cell.get", json!({"cell": cell})).unwrap();
+        let input = read["formula"].as_str().unwrap().to_string();
+        s.execute("cell.set", json!({"cell": cell, "input": input})).unwrap();
+    }
+    assert_lambda_collision_bindings(&s);
+    let saved = s.execute("file.saveBytes", json!({"format": "xlsx"})).unwrap();
+    let bytes = crate::io::base64_decode(saved["base64"].as_str().unwrap()).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(
+        &mut zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap().by_name("xl/worksheets/sheet1.xml").unwrap(),
+        &mut xml,
+    )
+    .unwrap();
+    for spelled in [">_xludf.TrimRange(1)</f>", "_xlfn.TRIMRANGE(1)", ">_xludf.VStack(1)</f>", "_xlfn.VSTACK(1)", "_xlpm.VSTACK(1))"] {
+        assert!(xml.contains(spelled), "{spelled}: {xml}");
+    }
+    s.execute("file.open", json!({"name": "reopened.xlsx", "base64": saved["base64"]})).unwrap();
+    assert_lambda_collision_bindings(&s);
+}
+
+#[test]
+fn explicit_lambda_calls_follow_scoped_name_renames() {
+    let mut s = s();
+    s.execute("file.open", json!({"name": "collisions.xlsx", "base64": crate::io::base64_encode(&batch_five_lambda_collision_workbook())})).unwrap();
+    s.execute("home.insertSheet", json!({"name": "Local"})).unwrap();
+    s.execute("formulas.defineName", json!({"name": "vStack", "scope": "Local", "refersTo": "=LAMBDA(x,7)"})).unwrap();
+    s.execute("cell.set", json!({"cell": "A5", "input": "=@_xludf.VSTACK(1)"})).unwrap();
+    s.execute("cell.set", json!({"cell": "A4", "input": "=@_xlfn.VSTACK(1)"})).unwrap();
+
+    let check = |s: &mut Session, local: &str, global: &str| {
+        for (sheet, name, value) in [("Local", local, Value::Number(7.0)), ("Data", global, Value::from("lam"))] {
+            s.execute("sheet.activate", json!({"sheet": sheet})).unwrap();
+            assert_eq!(v(s, "A5"), value, "{sheet}");
+            assert_eq!(formula_at(s, "A5").unwrap(), format!("@_xludf.{name}(1)"), "{sheet}");
+            assert_eq!(v(s, "A4"), Value::Number(1.0), "{sheet}");
+            assert_eq!(formula_at(s, "A4").unwrap(), "@VSTACK(1)", "{sheet}");
+        }
+    };
+    check(&mut s, "vStack", "VStack");
+    s.execute(
+        "formulas.defineName",
+        json!({"name": "VSTack", "oldName": "VSTack", "oldScope": "Local", "scope": "Local", "refersTo": "=LAMBDA(x,7)"}),
+    )
+    .unwrap();
+    check(&mut s, "VSTack", "VStack");
+    s.execute("formulas.defineName", json!({"name": "GlobalFn", "oldName": "VStack", "refersTo": "=LAMBDA(x,\"lam\")"})).unwrap();
+    check(&mut s, "VSTack", "GlobalFn");
+    s.execute(
+        "formulas.defineName",
+        json!({"name": "LocalFn", "oldName": "vStack", "oldScope": "Local", "scope": "Local", "refersTo": "=LAMBDA(x,7)"}),
+    )
+    .unwrap();
+    check(&mut s, "LocalFn", "GlobalFn");
+    s.execute("edit.undo", json!({})).unwrap();
+    check(&mut s, "VSTack", "GlobalFn");
+    s.execute("edit.redo", json!({})).unwrap();
+    check(&mut s, "LocalFn", "GlobalFn");
+    let saved = s.execute("file.saveBytes", json!({"format": "xlsx"})).unwrap();
+    s.execute("file.open", json!({"name": "reopened.xlsx", "base64": saved["base64"]})).unwrap();
+    check(&mut s, "LocalFn", "GlobalFn");
+}
+
+#[test]
+fn known_limit_workbook_name_rename_rewrites_mixed_binding_body() {
+    let mut s = s();
+    s.execute("sheet.rename", json!({"name": "Data"})).unwrap();
+    s.execute("home.insertSheet", json!({"name": "Local"})).unwrap();
+    for (name, scope, refers_to) in
+        [("VStack", "Workbook", "=LAMBDA(x,3)"), ("VStack", "Local", "=LAMBDA(x,7)"), ("Caller", "Workbook", "=_xludf.VStack(1)")]
+    {
+        s.execute("formulas.defineName", json!({"name": name, "scope": scope, "refersTo": refers_to})).unwrap();
+    }
+    for sheet in ["Data", "Local"] {
+        s.execute("sheet.activate", json!({"sheet": sheet})).unwrap();
+        s.execute("cell.set", json!({"cell": "A1", "input": "=Caller"})).unwrap();
+    }
+    let check = |s: &mut Session, local, callee| {
+        let body = &s.doc().unwrap().wb.name_in_scope("Caller", None).unwrap().formula;
+        assert!(body.eq_ignore_ascii_case(callee), "{body}");
+        for (sheet, value) in [("Data", 3.0), ("Local", local)] {
+            s.execute("sheet.activate", json!({"sheet": sheet})).unwrap();
+            assert_eq!(v(s, "A1"), Value::Number(value), "{sheet}");
+        }
+    };
+    check(&mut s, 7.0, "_xludf.VStack(1)");
+    s.execute("formulas.defineName", json!({"name": "GlobalFn", "oldName": "VStack", "refersTo": "=LAMBDA(x,3)"})).unwrap();
+    check(&mut s, 3.0, "_xludf.GlobalFn(1)");
+    s.execute("edit.undo", json!({})).unwrap();
+    check(&mut s, 7.0, "_xludf.VStack(1)");
+    s.execute("edit.redo", json!({})).unwrap();
+    let saved = s.execute("file.saveBytes", json!({"format": "xlsx"})).unwrap();
+    s.execute("file.open", json!({"name": "reopened.xlsx", "base64": saved["base64"]})).unwrap();
+    check(&mut s, 3.0, "_xludf.GlobalFn(1)");
+}
+
+/// Cells calling a newer function follow the colliding LAMBDA as it is added, redefined,
+/// renamed and deleted: an explicit `_xludf.` call recalculates with the name, while the
+/// unsupported built-in and its typed spelling never call it. A LET variable still comes first.
+#[test]
+fn colliding_lambda_edits_recalculate_name_calls_only() {
+    let mut s = s();
+    for (cell, input) in [
+        ("A1", "=_xludf.Translate(1)"),
+        ("A2", "=_xlfn.TRANSLATE(1)"),
+        ("A3", "=translate(1)"),
+        ("A4", "=LET(translate,LAMBDA(x,8),translate(1))"),
+        ("A5", "=_xludf.VStack(1)"),
+        ("A6", "=VSTACK(1)"),
+    ] {
+        s.execute("cell.set", json!({"cell": cell, "input": input})).unwrap();
+    }
+    let check = |s: &Session, step: &str, translate: Value, vstack: Value| {
+        let name = Value::Error(gridcraft_core::CellError::Name);
+        let expected =
+            [("A1", translate), ("A2", name.clone()), ("A3", name), ("A4", Value::Number(8.0)), ("A5", vstack), ("A6", Value::Number(1.0))];
+        let actual: Vec<_> = expected.iter().map(|(c, _)| (*c, v(s, c))).collect();
+        assert_eq!(actual, expected, "{step}");
+    };
+    let name = || Value::Error(gridcraft_core::CellError::Name);
+    check(&s, "no names", name(), name());
+    s.execute("formulas.defineName", json!({"name": "Translate", "refersTo": "=LAMBDA(x,x+1)"})).unwrap();
+    s.execute("formulas.defineName", json!({"name": "VStack", "refersTo": "=LAMBDA(x,x+2)"})).unwrap();
+    check(&s, "added", Value::Number(2.0), Value::Number(3.0));
+    s.execute("formulas.defineName", json!({"name": "Translate", "oldName": "Translate", "refersTo": "=LAMBDA(x,x+4)"})).unwrap();
+    check(&s, "redefined", Value::Number(5.0), Value::Number(3.0));
+    s.execute("formulas.defineName", json!({"name": "Other", "oldName": "VStack", "refersTo": "=LAMBDA(x,x+2)"})).unwrap();
+    assert_eq!(formula_at(&s, "A5").unwrap(), "_xludf.Other(1)");
+    check(&s, "renamed", Value::Number(5.0), Value::Number(3.0));
+    s.execute("formulas.deleteName", json!({"name": "Translate"})).unwrap();
+    check(&s, "deleted", name(), Value::Number(3.0));
+    s.execute("edit.undo", json!({})).unwrap();
+    check(&s, "undone", Value::Number(5.0), Value::Number(3.0));
+}
+
+#[test]
+fn legacy_array_lambda_intersects_while_dynamic_call_spills() {
+    let names = r#"<definedName name="VStack">_xlfn.LAMBDA(_xlpm.x,_xlfn.SEQUENCE(2))</definedName>"#;
+    let cells = r#"<row r="1"><c r="A1"><f>VSTACK(1)</f></c><c r="B1"><f>_xludf.VStack(1)</f></c><c r="C1" cm="1"><f t="array" ref="C1:C2">_xludf.VStack(1)</f></c></row>"#;
+    let mut s = s();
+    let bytes = lambda_collision_workbook(names, cells);
+    s.execute("file.open", json!({"name": "legacy.xlsx", "base64": crate::io::base64_encode(&bytes)})).unwrap();
+    let check = |s: &Session| {
+        for cell in ["A1", "B1", "C1"] {
+            assert_eq!(v(s, cell), Value::Number(1.0), "{cell}");
+        }
+        for cell in ["A2", "B2"] {
+            assert_eq!(v(s, cell), Value::Empty, "{cell}");
+        }
+        assert_eq!(v(s, "C2"), Value::Number(2.0));
+    };
+    check(&s);
+    let saved = s.execute("file.saveBytes", json!({"format": "xlsx"})).unwrap();
+    s.execute("file.open", json!({"name": "reopened.xlsx", "base64": saved["base64"]})).unwrap();
+    check(&s);
+}
+
+#[test]
+fn unsupported_future_calls_do_not_fall_back_to_workbook_names() {
+    let rows = r#"<row r="1"><c r="A1"><f>_xlfn.TRANSLATE(1)</f></c><c r="B1"><f>TRANSLATE(1)</f></c></row><row r="2"><c r="A2"><f>_xlfn.STOCKHISTORY(1)</f></c></row>"#;
+    let open = |s: &mut Session, names| {
+        let bytes = lambda_collision_workbook(names, rows);
+        s.execute("file.open", json!({"name": "unsupported.xlsx", "base64": crate::io::base64_encode(&bytes)})).unwrap();
+    };
+    let mut s = s();
+    open(&mut s, "");
+    let unsupported = [v(&s, "A1"), v(&s, "A2")];
+    let names: String = ["Translate", "StockHistory", "MyFn"]
+        .iter()
+        .map(|name| format!(r#"<definedName name="{name}">_xlfn.LAMBDA(_xlpm.x,7)</definedName>"#))
+        .collect();
+    open(&mut s, &names);
+    for (cell, input) in [("A3", "=translate(1)"), ("B2", "=MyFn(1)"), ("B3", "=LET(translate,LAMBDA(x,8),translate(1))")] {
+        s.execute("cell.set", json!({"cell": cell, "input": input})).unwrap();
+    }
+    let check = |s: &Session| {
+        assert_eq!([v(s, "A1"), v(s, "A2"), v(s, "A3")], [unsupported[0].clone(), unsupported[1].clone(), unsupported[0].clone()]);
+        assert_eq!([v(s, "B1"), v(s, "B2"), v(s, "B3")], [Value::Number(7.0), Value::Number(7.0), Value::Number(8.0)]);
+    };
+    check(&s);
+    let saved = s.execute("file.saveBytes", json!({"format": "xlsx"})).unwrap();
+    let bytes = crate::io::base64_decode(saved["base64"].as_str().unwrap()).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(
+        &mut zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap().by_name("xl/worksheets/sheet1.xml").unwrap(),
+        &mut xml,
+    )
+    .unwrap();
+    assert!(xml.contains(">_xlfn.TRANSLATE(1)</f>"), "{xml}");
+    s.execute("file.open", json!({"name": "reopened.xlsx", "base64": saved["base64"]})).unwrap();
+    check(&s);
+}
+
+#[test]
+fn known_gap_file_builtin_prefix_is_lost_inside_matching_let() {
+    // Unmeasured in Excel: both file spellings normalize to the same call in GridCraft.
+    let formula = "_xlfn.LET(_xlpm.vstack,_xlfn.LAMBDA(_xlpm.x,5),_xlfn.VSTACK(1))";
+    let mut s = s();
+    let rows = format!(r#"<row r="1"><c r="A1"><f>{formula}</f></c></row>"#);
+    let bytes = lambda_collision_workbook("", &rows);
+    s.execute("file.open", json!({"name": "lexical.xlsx", "base64": crate::io::base64_encode(&bytes)})).unwrap();
+    assert_eq!(v(&s, "A1"), Value::Number(5.0));
+}
+
 #[test]
 fn sheets() {
     let mut s = s();

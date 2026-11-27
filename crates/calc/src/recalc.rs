@@ -39,8 +39,10 @@ fn reads_linked_expr(wb: &Workbook, sheet: usize, expr: &Expr, seen: &mut Vec<(O
         Expr::LinkedRefError(_) => linked = true,
         Expr::Name(n) if n.starts_with('[') => linked = true,
         Expr::Name(n) => names.push(n.as_str()),
-        // A defined name that holds a LAMBDA, called like a function.
-        Expr::Call(n, _) if !gridcraft_functions::is_known_function(n) => names.push(n.as_str()),
+        // A defined name that holds a LAMBDA, called like a function (also as `_xludf.Name`).
+        Expr::Call(n, _) if !gridcraft_functions::is_known_function(n) && gridcraft_formula::file_prefix(n).is_none() => {
+            names.push(gridcraft_formula::user_defined_name(n).unwrap_or(n));
+        }
         _ => {}
     });
     linked || names.into_iter().any(|n| reads_linked_name(wb, sheet, n, seen))

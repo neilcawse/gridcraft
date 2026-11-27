@@ -12,6 +12,15 @@ impl<'h> Evaluator<'h> {
         } else {
             name
         };
+        // A LET or LAMBDA variable holding a LAMBDA comes before a newer (`_xlfn.`) function of
+        // its name: Excel gives 5 for `LET(vstack,LAMBDA(x,5),vstack(1))` (Batch 5,
+        // `x30-lambda-collisions` A6). Older functions keep the built-in (unmeasured).
+        if let Some((_, Ev::L(l))) = self.env.iter().rev().find(|(k, _)| gridcraft_formula::same_name(k, name))
+            && gridcraft_formula::file_prefix(name).is_some()
+        {
+            let l = Arc::clone(l);
+            return self.apply_lambda(&l, args);
+        }
         match name {
             "IF" => self.if_call(args),
             "IFS" => {
@@ -307,10 +316,17 @@ impl<'h> Evaluator<'h> {
 
     pub(super) fn builtin_with_pre(&mut self, name: &str, args: &[Expr], mut pre: Vec<(usize, Ev)>) -> Ev {
         let Some(spec) = gridcraft_functions::lookup(name) else {
-            // A defined name holding a LAMBDA, or a LET-bound lambda.
-            return match self.name(name) {
-                Ev::L(l) => self.apply_lambda(&l, args),
-                Ev::V(Value::Error(x)) => err(x),
+            // A defined name holding a LAMBDA, or a LET-bound lambda. `_xludf.` names a workbook
+            // name, never a variable or a built-in.
+            let callee = match gridcraft_formula::user_defined_name(name) {
+                Some(defined) => Some(self.defined_name(defined)),
+                // Future built-ins without an implementation cannot call defined names.
+                None if gridcraft_formula::file_prefix(name).is_some() => self.local_name(name),
+                None => Some(self.name(name)),
+            };
+            return match callee {
+                Some(Ev::L(l)) => self.apply_lambda(&l, args),
+                Some(Ev::V(Value::Error(x))) => err(x),
                 _ => err(CellError::Name),
             };
         };

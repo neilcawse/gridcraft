@@ -2326,6 +2326,34 @@ fn builtin_call_spelling_does_not_change_dispatch() {
     assert_eq!(t.get("B1"), Value::Bool(true));
 }
 
+/// Batch 5 `x30-lambda-collisions`: `_xludf.` calls the workbook name, never the built-in, and
+/// follows what the name reads; a LET variable holding a LAMBDA comes before a newer function
+/// of its name. An unprefixed call in the model is the built-in, and so is a LET-bound call of
+/// an older function (unmeasured).
+#[test]
+fn future_function_names_bind_xludf_calls_and_let_variables() {
+    let mut t = T::new();
+    t.wb.names.push(gridcraft_model::DefinedName {
+        name: "VStack".into(),
+        scope: None,
+        formula: "LAMBDA(x,$D$1+x)".into(),
+        comment: String::new(),
+        hidden: false,
+        uid: Default::default(),
+    });
+    t.set("D1", "10");
+    t.set("B1", "=_xludf.VStack(1)");
+    assert_eq!(t.num("B1"), 11.0);
+    t.set("D1", "20");
+    assert_eq!(t.num("B1"), 21.0);
+    t.set("B2", "=VSTACK(1)");
+    assert_eq!(t.num("B2"), 1.0);
+    t.set("B3", "=LET(vstack,LAMBDA(x,5),vstack(1))");
+    assert_eq!(t.num("B3"), 5.0);
+    t.set("B4", "=LET(sum,LAMBDA(x,5),sum(1))");
+    assert_eq!(t.num("B4"), 1.0);
+}
+
 /// `text` parsed, with its outer call spelled `name`, as a stored tree may still spell it.
 fn respelled_call(text: &str, name: &str) -> Formula {
     let Ok(gridcraft_formula::Expr::Call(_, args)) = gridcraft_formula::parse(text) else { panic!("{text} is not a call") };
