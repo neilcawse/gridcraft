@@ -324,17 +324,13 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
         }
         shm.cell_pictures.extend(pictures);
         for (row, h) in heights {
+            // A source row without a record is the default line: it replaces the destination's
+            // settings too, so its outline level and collapsed-summary marker (X44) don't stay
+            // behind while the row they belonged to moves.
             match h {
-                Some(info) => {
-                    shm.rows.insert(row, info);
-                }
-                None => {
-                    if let Some(e) = shm.rows.get_mut(&row) {
-                        e.size = None;
-                        e.saved_size = None;
-                    }
-                }
-            }
+                Some(info) => shm.rows.insert(row, info),
+                None => shm.rows.remove(&row),
+            };
         }
         // Re-anchor floating objects on the sorted grid, before automatic row fitting.
         // Only objects anchored inside the sorted block move: within its lines on the sort axis

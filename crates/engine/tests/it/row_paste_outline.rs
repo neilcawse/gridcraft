@@ -511,6 +511,29 @@ fn whole_line_paste_marks_a_summary_only_for_a_hidden_group_at_its_boundary() {
     }
 }
 
+/// Integration X51 (X44 × X48): after a whole-row paste of a hidden group marks the summary
+/// row below it (X44), a sort over the pasted rows leaves the hidden detail rows and their
+/// outline levels in place (X48) and moves the summary row's line, marker included, with its
+/// key. The row that takes the summary's place takes its source's (default) line, so the
+/// marker does not also stay behind. Neither lane sorts by outline (X48 "Not handled"), so the
+/// marker leaves the group.
+#[test]
+fn sort_after_whole_row_paste_keeps_hidden_detail_and_moves_the_summary_line() {
+    let mut s = x25_fixture();
+    s.execute("edit.copy", json!({"sheet": "S", "range": "3:4"})).unwrap();
+    s.execute("sheet.activate", json!({"sheet": "T"})).unwrap();
+    s.execute("edit.paste", json!({"at": "A8"})).unwrap();
+    assert_eq!(rows_8_to_10(sheet(&s, "T")), PASTED_GROUP);
+    s.execute("range.setValues", json!({"range": "C8", "values": [[5], [4], [3], [1], [2]]})).unwrap();
+    s.execute("data.sort", json!({"range": "C8:C12", "header": false, "keys": [{"column": "C"}]})).unwrap();
+    let sh = sheet(&s, "T");
+    let keys: Vec<Value> = (8..=12).map(|r| sh.value(at(&format!("C{r}")))).collect();
+    assert_eq!(keys, [5., 4., 1., 2., 3.].map(Value::Number));
+    assert_eq!(rows_8_to_10(sh)[..2], PASTED_GROUP[..2]);
+    assert_eq!(row_readback(sh, 10), (1, false, 15., true));
+    assert_eq!(row_readback(sh, 12), (1, false, 15., false));
+}
+
 /// `x25-paste-all-hidden-{both,dest,source}`: rows 3:4 (30 pt, 38 pt) pasted over rows 8:9
 /// (22 pt, 45 pt), with row 4 and/or row 9 hidden. Excel's UsedRange stays `A3:B9`; its Last
 /// Cell skips a hidden row 9, so it moves with the row 9 visibility the paste leaves.
