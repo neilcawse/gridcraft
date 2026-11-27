@@ -548,9 +548,11 @@ the range shape. The new tests pin that distinction and the two Locked refusals.
 The column rule is documentation-derived, not live-measured: [Microsoft's protection options for
 Mac](https://support.microsoft.com/en-us/excel/protect-a-worksheet-in-mac) distinguish column
 width/visibility and row height/visibility from cell formatting. Microsoft lists [Default
-Width](https://support.microsoft.com/en-us/excel/change-column-width-and-row-height#change-the-default-width-for-all-columns-on-a-worksheet-or-workbook)
+Width](https://support.microsoft.com/en-us/excel/change-the-column-width-and-row-height#change-the-default-width-for-all-columns-on-a-worksheet-or-workbook)
 as a column-sizing command on the same Home › Cells › Format menu. `home.defaultWidth` used to
-bypass protection; it now requires Format Columns, like `home.columnWidth`.
+bypass protection; it now requires Format Columns, like `home.columnWidth`, and refuses before
+editing with the same message. The Standard Width dialog and its `HOD` key tip dispatch that
+command, so they share the gate; undo and redo restore workbook snapshots without replaying it.
 
 Batch 5 did not measure formatting locked versus unlocked cells with Format Cells enabled;
 direct changes to Locked or Formula Hidden still refuse with that permission enabled. Data
