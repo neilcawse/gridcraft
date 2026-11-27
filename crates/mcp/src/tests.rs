@@ -319,6 +319,45 @@ fn filter_refuses_range_with_a_target_before_changing_selection() {
     }
 }
 
+/// Records every backend call and answers each with `{}`.
+struct Recorder(std::rc::Rc<std::cell::RefCell<Vec<(String, Value)>>>);
+
+impl Backend for Recorder {
+    fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        self.0.borrow_mut().push((method.to_string(), params));
+        Ok(json!({}))
+    }
+    fn has_ui(&self) -> bool {
+        false
+    }
+    fn describe(&self) -> String {
+        "recorder".into()
+    }
+}
+
+#[test]
+fn filter_forwards_table_exactly_through_json_rpc() {
+    let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut s = Server::new(Box::new(Recorder(calls.clone())));
+    // Null and blank strings mean the same to the engine, so only the forwarded params can tell them apart.
+    for table in [None, Some(Value::Null), Some(json!("")), Some(json!(" \t")), Some(json!("Flags"))] {
+        calls.borrow_mut().clear();
+        let mut args = json!({"column": "A", "values": ["keep"]});
+        let mut expected = args.clone();
+        if let Some(t) = table {
+            args["table"] = t.clone();
+            expected["table"] = t;
+        }
+        ok(&mut s, "filter", args);
+        assert_eq!(*calls.borrow(), [("engine.execute".to_string(), json!({"command": "data.filterBy", "params": expected}))]);
+    }
+    for table in [Value::Null, json!(""), json!("Flags")] {
+        calls.borrow_mut().clear();
+        fails(&mut s, "filter", json!({"range": "A1:A3", "column": "A", "table": table, "values": ["keep"]}));
+        assert!(calls.borrow().is_empty(), "{:?}", calls.borrow());
+    }
+}
+
 #[test]
 fn save_and_open_roundtrip() {
     let mut s = server();
