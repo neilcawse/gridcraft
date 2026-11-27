@@ -290,6 +290,7 @@ fn apply_sheet_root_xml(cx: &mut Ctx<'_>, root: &El, rels: &[Rel], name: &str, s
                 max: c.attr_u32("max").unwrap_or(0),
                 width: c.attr_f64("width"),
                 custom_width: c.flag("customWidth", false),
+                best_fit: c.flag("bestFit", false),
                 hidden: c.flag("hidden", false),
                 outline_level: c.attr_u32("outlineLevel").unwrap_or(0).min(7) as u8,
                 collapsed: c.flag("collapsed", false),
@@ -829,6 +830,7 @@ struct RawCol {
     max: u32,
     width: Option<f64>,
     custom_width: bool,
+    best_fit: bool,
     hidden: bool,
     outline_level: u8,
     collapsed: bool,
@@ -844,6 +846,9 @@ fn apply_col_entry(cx: &Ctx<'_>, c: RawCol, remaining: &mut u64, sheet: &mut She
     let mut info = LineInfo::default();
     if let Some(w) = c.width {
         let px = col_width_to_px(w);
+        // Excel writes customWidth for every width it stores, and bestFit as well for one that
+        // AutoFit or a number format sized: only customWidth without bestFit was set by hand.
+        info.custom = c.custom_width && !c.best_fit;
         if c.custom_width || px != sheet.default_col_width {
             info.size = Some(px);
         }
@@ -1057,6 +1062,7 @@ pub fn parse_sqref(s: Option<&str>) -> Vec<RangeRef> {
 /// Worksheet extensions: x14 data validations and sparklines.
 fn read_ext(cx: &mut Ctx<'_>, e: &El, sheet: &mut Sheet, cf_kept_ranges: &mut usize) {
     for ext in e.kids("ext") {
+        crate::extlist::read_sheet_ext(cx, ext);
         for c in &ext.children {
             match c.name.as_str() {
                 "dataValidations" => {
@@ -1183,8 +1189,11 @@ mod tests {
             num_fmts: Default::default(),
             cell_pictures: vec![],
             cf_ext_ids: vec![],
+            sheet_exts: vec![],
+            sheet_exts_dropped: vec![],
             known_function: None,
             python: Default::default(),
+            chart_parts: vec![],
             cells: 0,
             shared_formula_bytes: 0,
             legacy_formulas: vec![],

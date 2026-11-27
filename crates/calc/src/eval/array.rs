@@ -221,13 +221,7 @@ pub(super) fn binary_scalar(op: BinOp, a: &Value, b: &Value, sys: gridcraft_core
             Err(e) => Value::Error(e),
             Ok(x) => match b.to_text() {
                 Err(e) => Value::Error(e),
-                Ok(y) => {
-                    if x.len() + y.len() > 32767 * 4 {
-                        Value::Error(CellError::Value)
-                    } else {
-                        Value::text(x + &y)
-                    }
-                }
+                Ok(y) => Value::text(gridcraft_core::cap_text(x + &y)),
             },
         },
         BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {

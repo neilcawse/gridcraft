@@ -3,10 +3,10 @@ use gridcraft_model::{PivotDataCell, PivotItemRef, pivot_key};
 use std::sync::Arc;
 
 use super::{
-    CUSTOM_SUBTOTALS, CellRef, Ctx, DateSystem, EXT_X14_FIELD, EXT_X14_TABLE, EXT_XPDL_TABLE, El, HashMap, IoError, MAX_FIELDS, PivotCalcField,
-    PivotColRole, PivotCustomStyle, PivotDateGroup, PivotField, PivotFilter, PivotFunc, PivotLayout, PivotRowRole, PivotScopeItem, PivotShowAs,
-    PivotSort, PivotStyleElement, PivotStyleGrid, PivotStyleLayout, PivotStyleOptions, PivotTable, PivotValue, RangeRef, VALUES_FIELD, abs_range,
-    func_caption, func_from, number_to_text, quote_sheet, same, serial_from_iso_ymd,
+    CUSTOM_SUBTOTALS, CellRef, Ctx, DateSystem, EXT_GC_DATA_FIELD, EXT_X14_FIELD, EXT_X14_TABLE, EXT_XPDL_TABLE, El, HashMap, IoError, MAX_FIELDS,
+    PivotCalcField, PivotColRole, PivotCustomStyle, PivotDateGroup, PivotField, PivotFilter, PivotFunc, PivotLayout, PivotRowRole, PivotScopeItem,
+    PivotShowAs, PivotSort, PivotStyleElement, PivotStyleGrid, PivotStyleLayout, PivotStyleOptions, PivotTable, PivotValue, RangeRef, VALUES_FIELD,
+    abs_range, func_caption, func_from, number_to_text, quote_sheet, same, serial_from_iso_ymd,
 };
 
 /// Cap on custom `<tableStyle>` definitions and elements read from `styles.xml`.
@@ -60,6 +60,8 @@ struct CacheIn {
     fields: Vec<FieldIn>,
     /// `x14:pivotCacheDefinition pivotCacheId`: how slicer caches name the cache.
     slicer_id: Option<u32>,
+    /// Set when the PivotTables on this cache are kept as they are, not modelled.
+    kept: Option<KeptSource>,
 }
 
 /// Source parts of a PivotTable read from an XLSX sheet, used to preserve raw pivot XML
@@ -72,6 +74,45 @@ pub struct ReadPivotSource {
     pub external_source: bool,
 }
 
+/// Where the data of a PivotTable GridCraft keeps unchanged (doesn't model) comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeptSource {
+    /// A range or name in another workbook.
+    OtherWorkbook,
+    /// A data connection of the workbook (`xl/connections.xml`) other than its Data Model.
+    Connection,
+    /// The workbook's Data Model (Power Pivot), through its model connection.
+    DataModel,
+}
+
+impl KeptSource {
+    pub(crate) fn describe(self) -> &'static str {
+        match self {
+            KeptSource::OtherWorkbook => "another workbook",
+            KeptSource::Connection => "a data connection",
+            KeptSource::DataModel => "the workbook's Data Model",
+        }
+    }
+}
+
+/// A PivotTable GridCraft doesn't model (its data is in another workbook, a data connection or
+/// the Data Model), kept unchanged for saving.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExternalPivot {
+    /// The id of the sheet's relationship to the PivotTable part.
+    pub rel_id: String,
+    /// The pivot cache definition part it uses.
+    pub cache_part: String,
+    pub source: KeptSource,
+}
+
+/// The PivotTables of a sheet: those modelled, and those kept as they are.
+#[derive(Debug, Default)]
+pub struct SheetPivots {
+    pub tables: Vec<PivotTable>,
+    pub external: Vec<ExternalPivot>,
+}
+
 /// Workbook-level pivot cache lookup, filled from `<pivotCaches>`; caches are parsed once.
 #[derive(Default)]
 pub struct CachesIn {
@@ -81,6 +122,8 @@ pub struct CachesIn {
     next_cache_id: u32,
     styles_part: Option<String>,
     table_styles: Option<HashMap<String, Arc<Vec<PivotStyleElement>>>>,
+    /// The workbook's data connections (`connectionId` → whether it is the Data Model's).
+    connections: HashMap<u32, bool>,
 }
 
 impl CachesIn {
@@ -96,7 +139,22 @@ impl CachesIn {
             }
         }
         let styles_part = wb_rels.iter().find(|r| r.kind == "styles" && !r.external).map(|r| r.target.clone());
-        CachesIn { by_id, parsed: HashMap::new(), next_id: 1, next_cache_id: 1, styles_part, table_styles: None }
+        CachesIn { by_id, parsed: HashMap::new(), next_id: 1, next_cache_id: 1, styles_part, table_styles: None, connections: HashMap::new() }
+    }
+
+    /// Reads the ids of the workbook's data connections (`xl/connections.xml`), which caches on a
+    /// connection or the Data Model name by `connectionId`.
+    pub fn read_connections(&mut self, cx: &mut Ctx<'_>, wb_rels: &[crate::package::Rel]) {
+        let Some(r) = wb_rels.iter().find(|r| r.kind == "connections" && !r.external) else { return };
+        let Ok(Some(x)) = cx.optional_xml(&r.target) else { return };
+        for c in x.kids("connection").take(MAX_CONNECTIONS) {
+            let Some(id) = c.attr_u32("id") else { continue };
+            // The model connection: `<x15:connection model="1">` in its extension list (Excel
+            // also gives it `<dbPr command="Model">`).
+            let x15_model = c.child("extLst").is_some_and(|l| l.kids("ext").filter_map(|e| e.child("connection")).any(|x| x.flag("model", false)));
+            let dbpr_model = c.attr("type") == Some("5") && c.child("dbPr").and_then(|d| d.attr("command")) == Some("Model");
+            self.connections.insert(id, x15_model || dbpr_model);
+        }
     }
 
     /// Lazily reads custom `<tableStyle>` definitions from `styles.xml` using `cx.dxfs`.
@@ -155,6 +213,9 @@ impl CachesIn {
     }
 }
 
+/// Most data connections read from `xl/connections.xml`.
+const MAX_CONNECTIONS: usize = 100_000;
+
 /// A slicer cache's source field that is not a source column of its pivot cache.
 pub enum NonSourceField<'a> {
     /// A coarser date level, which Excel keeps in a field of its own when a date is grouped at
@@ -189,7 +250,7 @@ fn item_label_val_el(e: &El, sys: DateSystem) -> (String, Value) {
     }
 }
 
-fn read_cache(cx: &mut Ctx<'_>, part: &str, sheet_name: &str) -> Option<CacheIn> {
+fn read_cache(cx: &mut Ctx<'_>, part: &str, sheet_name: &str, connections: &HashMap<u32, bool>) -> Option<CacheIn> {
     // A cache that can't be read loses its PivotTable: say so instead of dropping it silently.
     // An oversized cache is refused before it inflates, so warning and opening the rest is safe.
     let x = match cx.optional_xml(part) {
@@ -213,14 +274,30 @@ fn read_cache(cx: &mut Ctx<'_>, part: &str, sheet_name: &str) -> Option<CacheIn>
     }
     let src = x.child("cacheSource");
     let ty = src.and_then(|s| s.attr("type")).unwrap_or("worksheet");
+    // A data connection or the Data Model (OLAP): kept as it is when the workbook has that
+    // connection.
+    if ty == "external" {
+        let model = src.and_then(|s| s.attr_u32("connectionId")).and_then(|id| connections.get(&id).copied());
+        let Some(model) = model else {
+            cx.warn("a PivotTable's data connection is not in the workbook; kept as plain cells");
+            return None;
+        };
+        let kept = if model { KeptSource::DataModel } else { KeptSource::Connection };
+        return Some(CacheIn { kept: Some(kept), ..Default::default() });
+    }
     if ty != "worksheet" {
-        cx.warn(format!("PivotTables with a {ty} data source are not supported; kept as plain cells"));
+        cx.warn(format!("PivotTables with a data source of type \"{ty}\" are not supported; kept as plain cells"));
         return None;
     }
     let ws = src.and_then(|s| s.child("worksheetSource"));
-    let external_source = ws.is_some_and(|w| w.attr("id").is_some());
-    if external_source {
-        cx.warn("a PivotTable's source is in another workbook; its source reference may not resolve");
+    // A source in another workbook: `r:id` names the cache's link to that workbook's path.
+    if let Some(rid) = ws.and_then(|w| w.attr("id")) {
+        let linked = cx.pkg.rels(part).ok().is_some_and(|rels| rels.iter().any(|r| r.id == rid && r.external && r.kind == "externalLinkPath"));
+        if !linked {
+            cx.warn("a PivotTable's source is in another workbook that its cache doesn't name; kept as plain cells");
+            return None;
+        }
+        return Some(CacheIn { kept: Some(KeptSource::OtherWorkbook), ..Default::default() });
     }
     let source = match ws {
         Some(w) if w.attr("name").is_some_and(|n| !n.trim().is_empty()) => w.attr("name").unwrap_or("").trim().to_string(),
@@ -277,19 +354,21 @@ fn read_cache(cx: &mut Ctx<'_>, part: &str, sheet_name: &str) -> Option<CacheIn>
     }
     let slicer_id =
         x.child("extLst").and_then(|l| l.kids("ext").find_map(|e| e.child("pivotCacheDefinition"))).and_then(|d| d.attr_u32("pivotCacheId"));
-    Some(CacheIn { id: 0, source, external_source, fields, slicer_id })
+    Some(CacheIn { id: 0, source, external_source: false, fields, slicer_id, kept: None })
 }
 
-/// Reads the PivotTables related to a worksheet part.
+/// Reads the PivotTables related to a worksheet part. Those whose source is in another workbook,
+/// a data connection or the Data Model are listed in [`SheetPivots::external`] (with a warning),
+/// not modelled.
 pub fn read_pivots(
     cx: &mut Ctx<'_>,
     caches: &mut CachesIn,
     sheet_part: &str,
     sheet_name: &str,
     sources: &mut Vec<ReadPivotSource>,
-) -> Result<Vec<PivotTable>, IoError> {
+) -> Result<SheetPivots, IoError> {
     let rels = cx.pkg.rels(sheet_part)?;
-    let mut out = Vec::new();
+    let mut out = SheetPivots::default();
     for rel in rels.iter().filter(|r| r.kind == "pivotTable" && !r.external) {
         let Some(x) = cx.optional_xml(&rel.target)? else { continue };
         if x.name != "pivotTableDefinition" {
@@ -310,7 +389,7 @@ pub fn read_pivots(
         let cache = match caches.parsed.get(&cache_part) {
             Some(c) => c.clone(),
             None => {
-                let c = read_cache(cx, &cache_part, sheet_name).map(|mut c| {
+                let c = read_cache(cx, &cache_part, sheet_name, &caches.connections).map(|mut c| {
                     let cid = caches.next_cache_id;
                     caches.next_cache_id = caches.next_cache_id.saturating_add(1);
                     c.id = cid;
@@ -321,6 +400,15 @@ pub fn read_pivots(
             }
         };
         let Some(cache) = cache else { continue };
+        if let Some(source) = cache.kept {
+            let name = x.attr("name").unwrap_or("");
+            let from = source.describe();
+            cx.warn(format!(
+                "PivotTable \"{name}\" on sheet \"{sheet_name}\" gets its data from {from}: it is kept for saving as it is, but can't be edited or refreshed here"
+            ));
+            out.external.push(ExternalPivot { rel_id: rel.id.clone(), cache_part, source });
+            continue;
+        }
         if let Some(mut pt) = read_table(cx, &x, &cache, caches.next_id) {
             if !pt.style.is_empty() {
                 pt.custom_style = PivotCustomStyle(caches.custom_style(cx, &pt.style));
@@ -332,7 +420,7 @@ pub fn read_pivots(
                 external_source: cache.external_source,
             });
             caches.next_id = caches.next_id.saturating_add(1);
-            out.push(pt);
+            out.tables.push(pt);
         }
     }
     Ok(out)
@@ -411,6 +499,39 @@ fn field_ref(cx: &mut Ctx<'_>, cache: &CacheIn, i: usize) -> Option<(String, Piv
     }
 }
 
+fn read_table_options(x: &El, first_axis: Option<&El>, pt: &mut PivotTable) {
+    let (compact, outline) = match first_axis {
+        Some(f) => (f.flag("compact", true), f.flag("outline", true)),
+        None => (x.flag("compact", true), x.flag("outline", false)),
+    };
+    pt.layout = if compact {
+        PivotLayout::Compact
+    } else if outline {
+        PivotLayout::Outline
+    } else {
+        PivotLayout::Tabular
+    };
+    if let Some(f) = first_axis {
+        pt.subtotals = x14_ext(x, EXT_XPDL_TABLE)
+            .and_then(|e| e.attr("EnabledSubtotalsDefault"))
+            .map_or_else(|| field_subtotals(f), |v| v == "1" || v.eq_ignore_ascii_case("true"));
+        pt.subtotals_top = f.flag("subtotalTop", true);
+    }
+    pt.grand_totals_rows = x.flag("colGrandTotals", true);
+    pt.grand_totals_cols = x.flag("rowGrandTotals", true);
+    pt.show_headers = x.flag("showHeaders", true);
+    pt.enable_show_details = x.flag("enableDrill", true);
+    read_style_info(x, pt);
+    let caption = |a: &str| x.attr(a).filter(|c| !c.is_empty()).map(str::to_string);
+    pt.row_header_caption = caption("rowHeaderCaption");
+    pt.col_header_caption = caption("colHeaderCaption");
+    pt.data_caption = caption("dataCaption").filter(|c| c != "Values");
+    pt.grand_total_caption = caption("grandTotalCaption");
+    pt.empty_caption = caption("missingCaption").filter(|_| x.flag("showMissing", true));
+    pt.show_values_row = !x14_ext(x, EXT_X14_TABLE).is_some_and(|e| e.flag("hideValuesRow", false));
+    pt.classic_layout = x.flag("gridDropZones", false);
+}
+
 fn read_table(cx: &mut Ctx<'_>, x: &El, cache: &CacheIn, id: u32) -> Option<PivotTable> {
     let mut pt = PivotTable { id, cache_id: gridcraft_model::PivotCacheId(Some(cache.id)), ..PivotTable::default() };
     if let Some(n) = x.attr("name").filter(|n| !n.trim().is_empty()) {
@@ -445,36 +566,7 @@ fn read_table(cx: &mut Ctx<'_>, x: &El, cache: &CacheIn, id: u32) -> Option<Pivo
 
     // Layout from the first axis field (pivotField defaults: compact and outline on).
     let first_axis = row_x.iter().chain(col_x.iter()).find(|i| **i >= 0).and_then(|i| pf(*i as usize));
-    let (compact, outline) = match first_axis {
-        Some(f) => (f.flag("compact", true), f.flag("outline", true)),
-        None => (x.flag("compact", true), x.flag("outline", false)),
-    };
-    pt.layout = if compact {
-        PivotLayout::Compact
-    } else if outline {
-        PivotLayout::Outline
-    } else {
-        PivotLayout::Tabular
-    };
-    if let Some(f) = first_axis {
-        pt.subtotals = x14_ext(x, EXT_XPDL_TABLE)
-            .and_then(|e| e.attr("EnabledSubtotalsDefault"))
-            .map_or_else(|| field_subtotals(f), |v| v == "1" || v.eq_ignore_ascii_case("true"));
-        pt.subtotals_top = f.flag("subtotalTop", true);
-    }
-    pt.grand_totals_rows = x.flag("colGrandTotals", true);
-    pt.grand_totals_cols = x.flag("rowGrandTotals", true);
-    pt.show_headers = x.flag("showHeaders", true);
-    pt.enable_show_details = x.flag("enableDrill", true);
-    read_style_info(x, &mut pt);
-    let caption = |a: &str| x.attr(a).filter(|c| !c.is_empty()).map(str::to_string);
-    pt.row_header_caption = caption("rowHeaderCaption");
-    pt.col_header_caption = caption("colHeaderCaption");
-    pt.data_caption = caption("dataCaption").filter(|c| c != "Values");
-    pt.grand_total_caption = caption("grandTotalCaption");
-    pt.empty_caption = caption("missingCaption").filter(|_| x.flag("showMissing", true));
-    pt.show_values_row = !x14_ext(x, EXT_X14_TABLE).is_some_and(|e| e.flag("hideValuesRow", false));
-    pt.classic_layout = x.flag("gridDropZones", false);
+    read_table_options(x, first_axis, &mut pt);
     if x.child("calculatedItems").is_some() || x.path(&["filters", "filter"]).is_some() {
         cx.warn(format!("PivotTable \"{}\": calculated items and label/value filters are not supported", pt.name));
     }
@@ -611,12 +703,15 @@ fn read_table(cx: &mut Ctx<'_>, x: &El, cache: &CacheIn, id: u32) -> Option<Pivo
                     PivotFunc::Sum
                 }),
             };
-            let ext = d
-                .child("extLst")
-                .into_iter()
-                .flat_map(|l| l.kids("ext"))
-                .filter_map(|e| e.child("dataField"))
-                .find_map(|e| e.attr("pivotShowAs").map(str::to_string));
+            let exts = || d.child("extLst").into_iter().flat_map(|l| l.kids("ext"));
+            // GridCraft's marker for a Distinct Count written as Count; ignored when the subtotal
+            // was changed to something else since.
+            let distinct = exts()
+                .filter(|e| e.attr("uri") == Some(EXT_GC_DATA_FIELD))
+                .filter_map(|e| e.child("summary"))
+                .any(|e| e.attr("func") == Some("distinctCount"));
+            let func = if distinct && func == PivotFunc::Count { PivotFunc::DistinctCount } else { func };
+            let ext = exts().filter_map(|e| e.child("dataField")).find_map(|e| e.attr("pivotShowAs").map(str::to_string));
             let show_as = match (ext.as_deref(), d.attr("showDataAs")) {
                 (Some("rankDescending"), _) => PivotShowAs::Rank,
                 (Some(other), _) => {

@@ -12,6 +12,13 @@ pub struct KeptOut {
     vml_blocks: u32,
     /// Package-root relationships (type, target, external), added when `_rels/.rels` is written.
     root: Vec<(String, String, bool)>,
+    /// Names of the workbook's kept parts, which sheets' kept parts can refer to (the cache of a
+    /// kept PivotTable).
+    pub(super) wb_names: NameMap,
+    /// The `cacheId`s of the workbook's kept pivot caches: a kept PivotTable that names its cache
+    /// only by id is written only when its cache is among them.
+    pub(super) cache_ids: HashSet<u32>,
+    patches: StylePatches,
 }
 
 impl KeptOut {
@@ -60,6 +67,79 @@ impl KeptOut {
     }
 }
 
+/// Rewrites the values of `dxfId` and `numFmtId` attributes through the maps (ids not in a map
+/// are kept). `None` when the XML is damaged.
+fn map_style_ids(data: &[u8], dxfs: &HashMap<u32, u32>, fmts: &HashMap<u32, u32>) -> Option<Vec<u8>> {
+    let text = xml::to_utf8(data);
+    let mut reader = Reader::from_reader(text.as_ref());
+    let mut writer = Writer::new(Vec::with_capacity(data.len()));
+    let mut buf = vec![];
+    let map = |e: &BytesStart<'_>| -> Option<BytesStart<'static>> {
+        let name = String::from_utf8(e.name().as_ref().to_vec()).ok()?;
+        let mut out = BytesStart::new(name);
+        for a in e.attributes().with_checks(false) {
+            let a = a.ok()?;
+            let k = a.key.local_name();
+            let table = match k.as_ref() {
+                b"dxfId" => Some(dxfs),
+                b"numFmtId" => Some(fmts),
+                _ => None,
+            };
+            let new = table.and_then(|t| std::str::from_utf8(&a.value).ok()?.trim().parse::<u32>().ok().and_then(|id| t.get(&id)));
+            match new {
+                Some(n) => out.push_attribute(Attribute { key: a.key, value: Cow::Owned(n.to_string().into_bytes()) }),
+                None => out.push_attribute(Attribute { key: a.key, value: Cow::Owned(a.value.to_vec()) }),
+            }
+        }
+        Some(out)
+    };
+    loop {
+        match reader.read_event_into(&mut buf).ok()? {
+            Event::Eof => break,
+            Event::Start(e) => writer.write_event(Event::Start(map(&e)?)).ok()?,
+            Event::Empty(e) => writer.write_event(Event::Empty(map(&e)?)).ok()?,
+            ev => writer.write_event(ev).ok()?,
+        }
+        buf.clear();
+    }
+    Some(writer.into_inner())
+}
+
+/// Kept parts whose style ids are renumbered once the styles part is written.
+#[derive(Default)]
+pub struct StylePatches {
+    /// (written part name, source bytes, dxf id map, source number format id → code).
+    pub(super) list: Vec<StylePatch>,
+}
+
+pub(super) type StylePatch = (String, Arc<[u8]>, HashMap<u32, u32>, Vec<(u32, String)>);
+
+impl KeptOut {
+    /// Number format codes kept parts refer to (to be registered in the styles part).
+    pub fn num_fmt_codes(&self) -> Vec<String> {
+        let mut v: Vec<String> = vec![];
+        for (_, _, _, fmts) in &self.patches.list {
+            for (_, code) in fmts {
+                if !v.contains(code) {
+                    v.push(code.clone());
+                }
+            }
+        }
+        v
+    }
+}
+
+/// Renumbers the `dxfId` and `numFmtId` attributes of kept PivotTables and pivot caches to the
+/// written styles part. `fmt_id` maps a number format code to its id there.
+pub fn finish_style_ids(out: &mut Out, fmt_id: &dyn Fn(&str) -> Option<u32>) {
+    for (name, data, dxfs, fmts) in std::mem::take(&mut out.kept.patches.list) {
+        let fmts: HashMap<u32, u32> = fmts.iter().filter_map(|(old, code)| Some((*old, fmt_id(code)?))).collect();
+        if let Some(x) = map_style_ids(&data, &dxfs, &fmts) {
+            out.replace(&name, x);
+        }
+    }
+}
+
 /// Original part name (normalized) → written part name.
 pub(super) type NameMap = HashMap<String, String>;
 
@@ -86,17 +166,29 @@ pub(super) fn part_rels_xml(rels: &[PreservedRel], names: &NameMap) -> String {
 }
 
 pub(super) fn write_parts(out: &mut Out, parts: &[PreservedPart]) -> NameMap {
-    let mut names = NameMap::new();
+    write_parts_named(out, parts, NameMap::new())
+}
+
+/// [`write_parts`] with some parts' new names already chosen in `names`.
+fn write_parts_named(out: &mut Out, parts: &[PreservedPart], mut names: NameMap) -> NameMap {
     for p in parts {
         names.entry(normalize(&p.name)).or_insert_with(|| out.kept.claim(&p.name));
+    }
+    let own: HashSet<String> = names.values().cloned().collect();
+    for (k, v) in &out.kept.wb_names {
+        names.entry(k.clone()).or_insert_with(|| v.clone());
     }
     let mut written = HashSet::new();
     for p in parts {
         let Some(new) = names.get(&normalize(&p.name)).cloned() else { continue };
-        if !written.insert(new.clone()) {
+        if !own.contains(&new) || !written.insert(new.clone()) {
             continue;
         }
         out.part(&new, Some(&p.content_type), p.data.to_vec());
+        if !p.dxfs.is_empty() || !p.num_fmts.is_empty() {
+            let dxfs = p.dxfs.iter().map(|(old, s)| (*old, crate::styles::dxf_id(&mut out.dxfs, s))).collect();
+            out.kept.patches.list.push((new.clone(), p.data.clone(), dxfs, p.num_fmts.clone()));
+        }
         if !p.rels.is_empty() {
             out.part(&rels_part_name(&new), None, part_rels_xml(&p.rels, &names).into_bytes());
         }
@@ -162,9 +254,25 @@ pub struct WorkbookKept {
     /// Workbook XML elements that go right after `<sheets>` (`<externalReferences>`).
     pub elements: String,
     sheets: Vec<KeptSheet>,
+    /// Kept pivot caches: (`cacheId`, new relationship id).
+    pivot_caches: Vec<(u32, String)>,
 }
 
 impl WorkbookKept {
+    /// The `cacheId`s of the kept pivot caches (written PivotTables must not reuse them).
+    pub fn pivot_cache_ids(&self) -> Vec<u32> {
+        self.pivot_caches.iter().map(|(id, _)| *id).collect()
+    }
+
+    /// The `<pivotCache>` entries of the kept pivot caches.
+    pub fn pivot_cache_entries(&self) -> String {
+        let mut x = String::new();
+        for (id, rid) in &self.pivot_caches {
+            let _ = write!(x, "<pivotCache cacheId=\"{id}\" r:id=\"{}\"/>", esc_attr(rid));
+        }
+        x
+    }
+
     /// Where the model's sheet `i` is in the file's sheet list: chart sheets come between worksheets.
     pub fn file_index(&self, i: usize) -> usize {
         i + self.sheets.iter().filter(|s| s.before <= i).count()
@@ -202,6 +310,23 @@ fn reachable(p: &Preserved, root: &PreservedRel) -> HashSet<String> {
         }
     }
     seen
+}
+
+/// The sheet names the formulas of a kept chart-kind part refer to; `None` when its XML doesn't
+/// parse. Parts without formulas (styles, colours) give none.
+fn plotted_sheets(q: &PreservedPart) -> Option<Vec<String>> {
+    if !q.content_type.contains("chart") {
+        return Some(vec![]);
+    }
+    let x = xml::parse(&q.data).ok()?;
+    let mut formulas = vec![];
+    chart_formulas(&x, &mut formulas);
+    Some(formulas.iter().flat_map(|f| sheet_names_in(f)).collect())
+}
+
+/// Sheet names as Excel compares them: the first 31 characters, ignoring ASCII case.
+fn same_sheet(a: &str, b: &str) -> bool {
+    a.chars().take(31).collect::<String>().eq_ignore_ascii_case(&b.chars().take(31).collect::<String>())
 }
 
 /// Every formula (`<c:f>`) of a chart part, depth first.
@@ -283,6 +408,32 @@ fn chart_sheet_usable(wb: &Workbook, p: &Preserved, s: &PreservedSheet, usable: 
     })
 }
 
+/// The kept original of the embedded chart `ch` of `sheet`, when it can be written in place of
+/// GridCraft's chart part: the chart is unchanged since it was read (moving or resizing it only
+/// changes the drawing, which GridCraft writes), every sheet the kept formulas name still exists
+/// under the same name (a rename or delete would leave them pointing at nothing), and the kept
+/// XML still parses. `None` means: write the chart from the model.
+pub fn kept_chart<'a>(wb: &Workbook, sheet: &'a Sheet, ch: &Chart) -> Option<&'a PreservedChart> {
+    let p = sheet.preserved.as_deref()?;
+    let k = p.charts.iter().find(|k| k.id == ch.id)?;
+    if unplaced(ch) != k.chart || !k.parts.iter().any(|q| normalize(&q.name) == normalize(&k.part)) {
+        return None;
+    }
+    if !user_shapes_unmodified(sheet, p, ch.id) {
+        return None;
+    }
+    let names: Vec<Vec<String>> = k.parts.iter().map(plotted_sheets).collect::<Option<_>>()?;
+    names.iter().flatten().all(|n| wb.sheets.iter().any(|w| same_sheet(&w.name, n))).then_some(k)
+}
+
+/// Writes a kept chart (see [`kept_chart`]): the chart part as `name` (the name GridCraft's writer
+/// gives that chart), the parts behind it under fresh names. Returns the id of the drawing's new
+/// relationship to it.
+pub fn write_kept_chart(k: &PreservedChart, name: &str, drawing_rels: &mut Rels, out: &mut Out) -> String {
+    write_parts_named(out, &k.parts, NameMap::from([(normalize(&k.part), name.to_string())]));
+    drawing_rels.add("chart", &format!("/{name}"))
+}
+
 /// Writes the workbook's kept parts and relationships. Chart sheets that can't be written back
 /// (see [`chart_sheet_usable`]) are left out with the parts only they reach.
 pub fn write_workbook(wb: &Workbook, wb_rels: &mut Rels, out: &mut Out) -> WorkbookKept {
@@ -292,9 +443,37 @@ pub fn write_workbook(wb: &Workbook, wb_rels: &mut Rels, out: &mut Out) -> Workb
         p.sheets.iter().partition(|s| chart_sheet_usable(wb, p, s, &mut refs))
     };
     let root_of = |s: &PreservedSheet| p.rels.iter().find(|r| r.id == s.rel_id);
-    let dropped_ids: HashSet<&str> = dropped.iter().map(|s| s.rel_id.as_str()).collect();
-    // Parts reached only by dropped chart sheets go with them.
-    let mut gone: HashSet<String> = dropped.iter().filter_map(|s| root_of(s)).flat_map(|r| reachable(p, r)).collect();
+    // Pivot caches no kept PivotTable of a sheet uses any more (their sheets were deleted).
+    let sheet_parts = || wb.sheets.iter().filter_map(|s| s.preserved.as_deref()).flat_map(|q| q.parts.iter());
+    let mut used_caches: HashSet<String> = sheet_parts()
+        .flat_map(|part| part.rels.iter())
+        .filter(|r| !r.external && is_kind(r, &["pivotCacheDefinition"]))
+        .map(|r| normalize(&r.target))
+        .collect();
+    // A PivotTable can name its cache only by the workbook's `cacheId`.
+    let cache_of_id: HashMap<u32, String> = p
+        .elements
+        .iter()
+        .filter(|e| e.slot == "pivotCache")
+        .filter_map(|e| {
+            let x = xml::parse(e.xml.as_bytes()).ok()?;
+            let rel = p.rels.iter().find(|r| Some(r.id.as_str()) == x.attr("id"))?;
+            Some((x.attr_u32("cacheId")?, normalize(&rel.target)))
+        })
+        .collect();
+    used_caches.extend(
+        sheet_parts()
+            .filter(|part| part.content_type == CT_PIVOT_TABLE)
+            .filter_map(|part| xml::parse(&part.data).ok()?.attr_u32("cacheId"))
+            .filter_map(|id| cache_of_id.get(&id).cloned()),
+    );
+    let unused_caches: Vec<&PreservedRel> =
+        p.rels.iter().filter(|r| !r.external && is_kind(r, &["pivotCacheDefinition"]) && !used_caches.contains(&normalize(&r.target))).collect();
+    let mut dropped_ids: HashSet<&str> = dropped.iter().map(|s| s.rel_id.as_str()).collect();
+    dropped_ids.extend(unused_caches.iter().map(|r| r.id.as_str()));
+    // Parts reached only by dropped chart sheets and pivot caches go with them.
+    let mut gone: HashSet<String> =
+        dropped.iter().filter_map(|s| root_of(s)).chain(unused_caches.iter().copied()).flat_map(|r| reachable(p, r)).collect();
     if !gone.is_empty() {
         let others = p.rels.iter().filter(|r| !dropped_ids.contains(r.id.as_str())).flat_map(|r| reachable(p, r));
         for n in others {
@@ -310,7 +489,19 @@ pub fn write_workbook(wb: &Workbook, wb_rels: &mut Rels, out: &mut Out) -> Workb
             out.kept.root.push((r.rel_type.clone(), target, r.external));
         }
     }
+    let pivot_caches: Vec<(u32, String)> = p
+        .elements
+        .iter()
+        .filter(|e| e.slot == "pivotCache")
+        .filter_map(|e| {
+            let x = xml::parse(e.xml.as_bytes()).ok()?;
+            Some((x.attr_u32("cacheId")?, ids.get(x.attr("id")?)?.clone()))
+        })
+        .collect();
+    out.kept.wb_names = names;
+    out.kept.cache_ids = pivot_caches.iter().map(|(id, _)| *id).collect();
     WorkbookKept {
+        pivot_caches,
         elements: p.elements.iter().filter(|e| e.slot == "externalReferences").filter_map(|e| remap(&e.xml, &ids)).collect(),
         sheets: live
             .iter()
@@ -523,6 +714,18 @@ fn parse_svg_blip_meta(xml: &str) -> Option<(u32, &str)> {
     Some((id.parse::<u32>().ok()?, target))
 }
 
+fn user_shapes_unmodified(sheet: &Sheet, p: &Preserved, chart_id: u32) -> bool {
+    p.elements
+        .iter()
+        .filter(|e| e.slot == SLOT_CHART_USER_SHAPES)
+        .filter_map(|e| parse_user_shapes_meta(&e.xml))
+        .filter(|m| m.chart_id == chart_id)
+        .all(|m| {
+            m.mirrored_images.iter().all(|&(id, fp)| sheet.images.iter().find(|i| i.id == id).is_some_and(|i| fingerprint_image(i) == fp))
+                && m.mirrored_shapes.iter().all(|&(id, fp)| sheet.shapes.iter().find(|s| s.id == id).is_some_and(|s| fingerprint_shape(s) == fp))
+        })
+}
+
 fn active_user_shapes<'a>(sheet: &Sheet, p: &'a Preserved) -> Vec<UserShapesMeta<'a>> {
     p.elements
         .iter()
@@ -530,7 +733,11 @@ fn active_user_shapes<'a>(sheet: &Sheet, p: &'a Preserved) -> Vec<UserShapesMeta
         .filter_map(|e| parse_user_shapes_meta(&e.xml))
         .filter(|m| {
             let key = normalize(m.target);
-            sheet.charts.iter().any(|c| c.id == m.chart_id && !crate::chartex::is_chartex(c.kind))
+            let Some(ch) = sheet.charts.iter().find(|c| c.id == m.chart_id && !crate::chartex::is_chartex(c.kind)) else {
+                return false;
+            };
+            let chart_kept_ok = p.charts.iter().find(|k| k.id == m.chart_id).is_none_or(|k| unplaced(ch) == k.chart);
+            chart_kept_ok
                 && p.parts.iter().any(|q| normalize(&q.name) == key)
                 && m.mirrored_images.iter().all(|&(id, fp)| sheet.images.iter().find(|i| i.id == id).is_some_and(|i| fingerprint_image(i) == fp))
                 && m.mirrored_shapes.iter().all(|&(id, fp)| sheet.shapes.iter().find(|s| s.id == id).is_some_and(|s| fingerprint_shape(s) == fp))
@@ -650,14 +857,9 @@ fn attach_svg_blips(sheet: &Sheet, p: &Preserved, drawing_num: u32, omitted_imgs
     let mut rel_items = out.part_mut(&drels_part).map(|b| parse_rels_bytes(b)).unwrap_or_default();
     let mut next_rid = next_rid_num(&rel_items);
     let mut rels_changed = false;
-    let mut omitted_rids: HashSet<String> = HashSet::new();
     let mut svg_patches: Vec<(String, String)> = Vec::new();
-    for (idx, img) in sheet.images.iter().filter(|i| !i.data.is_empty()).enumerate() {
+    for (idx, img) in sheet.images.iter().filter(|i| !i.data.is_empty() && !omitted_imgs.contains(&i.id)).enumerate() {
         let img_rid = format!("rId{}", idx + 1);
-        if omitted_imgs.contains(&img.id) {
-            omitted_rids.insert(img_rid);
-            continue;
-        }
         let Some(&target) = svg_map.get(&img.id) else { continue };
         let key = normalize(target);
         let Some(svg_part) = p.parts.iter().find(|q| normalize(&q.name) == key) else { continue };
@@ -667,10 +869,6 @@ fn attach_svg_blips(sheet: &Sheet, p: &Preserved, drawing_num: u32, omitted_imgs
         next_rid = next_rid.saturating_add(1);
         rel_items.push((svg_rid.clone(), format!("{NS_REL}/image"), format!("../media/{file}"), false));
         svg_patches.push((img_rid, svg_rid));
-        rels_changed = true;
-    }
-    if !omitted_rids.is_empty() {
-        rel_items.retain(|(id, _, _, _)| !omitted_rids.contains(id));
         rels_changed = true;
     }
     if rels_changed {
@@ -700,6 +898,9 @@ fn attach_svg_blips(sheet: &Sheet, p: &Preserved, drawing_num: u32, omitted_imgs
 
 fn attach_chart_user_shapes(sheet: &Sheet, p: &Preserved, user_shapes: &[UserShapesMeta<'_>], chart_before: u32, out: &mut Out) {
     for meta in user_shapes {
+        if p.charts.iter().any(|k| k.id == meta.chart_id) {
+            continue;
+        }
         let Some(chart_idx) = sheet.charts.iter().position(|c| c.id == meta.chart_id) else { continue };
         let chart_num = chart_before + chart_idx as u32 + 1;
         let chart_part = format!("xl/charts/chart{chart_num}.xml");

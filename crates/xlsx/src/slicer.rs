@@ -285,9 +285,15 @@ pub fn resolve(
             sh.slicers.push(slicer);
         }
     }
-    for ((_, name, _), u) in found.frames.iter().zip(used) {
+    for ((sheet_name, name, anchor), u) in found.frames.iter().zip(used) {
         if !u {
-            cx.warn(format!("slicer \"{name}\" was skipped (only PivotTable slicers are supported)"));
+            let handled_as_table = wb
+                .sheet_index(sheet_name)
+                .and_then(|si| wb.sheet(si))
+                .is_some_and(|sh| sh.slicers.iter().any(|s| matches!(s.source, SlicerSource::Table { .. }) && s.anchor == *anchor));
+            if !handled_as_table {
+                cx.warn(format!("slicer \"{name}\" was skipped (only PivotTable slicers are supported)"));
+            }
         }
     }
 }

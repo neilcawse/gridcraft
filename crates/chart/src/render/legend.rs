@@ -1,8 +1,8 @@
 use super::frame::Bx;
 use super::trend::supports_trendline;
 use super::{
-    Chart, ChartData, ChartKind, Ctx, DOWN, HAlign, LABEL_SIZE, MAX_CATS, MAX_SERIES, MAX_TRENDLINES, Prim, Rgba, SeriesData, TEXT, Theme, UP,
-    VAlign, auto_name, series_color,
+    Chart, ChartData, ChartKind, Ctx, DOWN, HAlign, LABEL_SIZE, MAX_CATS, MAX_SERIES, MAX_TRENDLINES, Prim, Rgba, TEXT, Theme, UP, VAlign, auto_name,
+    series_color,
 };
 use gridcraft_model::LegendPos;
 
@@ -13,12 +13,6 @@ pub enum Swatch {
     Line,
     LineMarker,
     Marker,
-}
-
-/// The kind series `i` is drawn as (per-series kinds only apply to combo charts); the same rule
-/// as `series_plot_kind`, applied to the already resolved series kind.
-pub(super) fn plot_kind(chart: &Chart, s: &SeriesData, i: usize) -> ChartKind {
-    crate::resolve::plot_kind(chart.kind, Some(s.kind), i)
 }
 
 /// Category palette colour of point `j` (ignoring any series' `<c:dPt>` overrides).
@@ -70,13 +64,13 @@ pub(super) type StyledEntry = (String, Rgba, Option<Rgba>, Swatch);
 /// Whether a single-series bar/column chart colours its points individually (via `<c:dPt>` fills
 /// or `<c:varyColors val="1"/>`), so Excel shows one legend entry per category rather than one
 /// series swatch.
-fn single_series_varied_points(chart: &Chart, data: &ChartData) -> bool {
+fn single_series_varied_points(data: &ChartData) -> bool {
     if data.series.len() != 1 {
         return false;
     }
     let Some(s) = data.series.first() else { return false };
     if !matches!(
-        plot_kind(chart, s, 0),
+        s.kind,
         ChartKind::ColumnClustered
             | ChartKind::ColumnStacked
             | ChartKind::ColumnStacked100
@@ -124,7 +118,7 @@ pub(super) fn legend_entries_styled(chart: &Chart, data: &ChartData) -> Vec<Styl
             let total = data.series.first().map(|s| s.color).unwrap_or(TEXT);
             vec![("Increase".into(), UP, None, Swatch::Box), ("Decrease".into(), DOWN, None, Swatch::Box), ("Total".into(), total, None, Swatch::Box)]
         }
-        _ if single_series_varied_points(chart, data) => {
+        _ if single_series_varied_points(data) => {
             let n = first_len(data).min(MAX_CATS);
             (0..n).map(|j| (cat_label(data, j), point_color(data, j), point_swatch_stroke(data, j), Swatch::Box)).collect()
         }
@@ -132,11 +126,12 @@ pub(super) fn legend_entries_styled(chart: &Chart, data: &ChartData) -> Vec<Styl
             let series = data.series.iter().take(MAX_SERIES);
             let mut out: Vec<StyledEntry> = series
                 .clone()
-                .enumerate()
-                .map(|(i, s)| {
-                    let sw = match plot_kind(chart, s, i) {
-                        ChartKind::Line | ChartKind::LineStacked | ChartKind::Radar | ChartKind::ScatterLines => Swatch::Line,
-                        ChartKind::LineMarkers => Swatch::LineMarker,
+                .map(|s| {
+                    let sw = match s.kind {
+                        ChartKind::Line | ChartKind::LineStacked | ChartKind::LineStacked100 | ChartKind::Radar | ChartKind::ScatterLines => {
+                            Swatch::Line
+                        }
+                        ChartKind::LineMarkers | ChartKind::LineStacked100Markers => Swatch::LineMarker,
                         ChartKind::Scatter | ChartKind::Bubble => Swatch::Marker,
                         _ => Swatch::Box,
                     };
@@ -145,7 +140,7 @@ pub(super) fn legend_entries_styled(chart: &Chart, data: &ChartData) -> Vec<Styl
                 })
                 .collect();
             // Trendlines follow the series, named "Linear (Sales)" unless given a name.
-            for (_, s) in series.enumerate().filter(|(i, s)| supports_trendline(plot_kind(chart, s, *i))) {
+            for s in series.filter(|s| supports_trendline(s.kind)) {
                 for t in s.trendlines.iter().take(MAX_TRENDLINES) {
                     out.push((t.spec.name.clone().unwrap_or_else(|| auto_name(t.spec.kind, &s.name)), t.color, None, Swatch::Line));
                 }

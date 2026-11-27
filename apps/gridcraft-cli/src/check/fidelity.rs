@@ -79,6 +79,13 @@ fn cond_format_list(s: &Sheet) -> Vec<String> {
     cfs.iter().map(|c| format!("{:?} {:?} stopIfTrue={}", c.ranges, c.rule, c.stop_if_true)).collect()
 }
 
+/// The sheet's PivotTables: those modelled, and those kept unchanged for saving (their source is
+/// in another workbook, a data connection or the Data Model).
+fn pivot_count(s: &Sheet) -> usize {
+    let kept = s.preserved.as_deref().map_or(0, |p| p.rels.iter().filter(|r| !r.external && r.rel_type.ends_with("/pivotTable")).count());
+    s.pivots.len() + kept
+}
+
 fn diff_count(d: &mut Diffs, sheet: &str, a: usize, b: usize) {
     if a != b {
         d.push(|| format!("{sheet}: {a} → {b}"));
@@ -162,7 +169,7 @@ impl WorkbookSnap {
             let charts = sheet_chart_list(&sh);
             let comments = sh.comments.len();
             let hyperlinks = sh.hyperlinks.len();
-            let pivots = sh.pivots.len();
+            let pivots = pivot_count(&sh);
             let raw_name = sh.name.clone();
             let mut cells = Vec::with_capacity(sh.cells.len());
             for (c, cell) in sh.cells.iter() {
@@ -283,7 +290,7 @@ fn diff_snap_with_workbook(a: WorkbookSnap, mut b: Workbook, opts: &Options) -> 
         }
         diff_count(&mut comments, &name, sa.comments, sb.comments.len());
         diff_count(&mut hyperlinks, &name, sa.hyperlinks, sb.hyperlinks.len());
-        diff_count(&mut pivots, &name, sa.pivots, sb.pivots.len());
+        diff_count(&mut pivots, &name, sa.pivots, pivot_count(&sb));
     }
     vec![
         sheets.done(),

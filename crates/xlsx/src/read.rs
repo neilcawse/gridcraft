@@ -53,6 +53,10 @@ pub struct Ctx<'a> {
     pub chart_budget: crate::chart::ChartReadBudget,
     /// PivotTable slicer pieces collected from sheets, joined once sheets are read.
     pub slicers: crate::slicer::SlicersIn,
+    /// Kept extensions of the current sheet's `<extLst>` (URI, rebuilt XML), until attached.
+    pub sheet_exts: Vec<(String, String)>,
+    /// URIs of the current sheet's extensions that were dropped.
+    pub sheet_exts_dropped: Vec<String>,
     /// Cells of the worksheet being read whose formulas lack dynamic-array metadata (legacy
     /// formulas, evaluated with implicit intersection), collected per sheet.
     pub legacy_formulas: Vec<gridcraft_core::CellRef>,
@@ -74,6 +78,9 @@ pub struct Ctx<'a> {
     pub sheet_slicer_frames: Vec<(String, gridcraft_model::Anchor)>,
     /// Slicers to attach after all sheets and tables are read: (sheet index, cache name, caption, anchor, columns).
     pub pending_slicers: Vec<(usize, String, String, gridcraft_model::Anchor, u32)>,
+    /// The current sheet's charts read from chart parts: (model chart id, chart part name). Their
+    /// original XML is kept for saving (see `passthrough`).
+    pub chart_parts: Vec<(u32, String)>,
     /// Cell elements read so far, across every sheet (capped by `sheet_read::MAX_CELLS`).
     pub cells: u64,
     /// Current sheet's picture SVG companions (`asvg:svgBlip`): `(image_id, target_part, bytes)`.
@@ -323,6 +330,14 @@ fn read_workbook_properties(cx: &mut Ctx<'_>, wb: &mut Workbook, xml: &El) {
         wb.protected_structure = p.flag("lockStructure", false);
         wb.structure_password = if wb.protected_structure { crate::sheet_read::read_password(p, "workbook") } else { None };
     }
+    if let Some(f) = xml.child("fileSharing") {
+        // The iterated hash has bare attribute names; the legacy one is `reservationPassword`.
+        wb.write_reservation = Some(gridcraft_model::WriteReservation {
+            user_name: f.attr("userName").unwrap_or("").to_string(),
+            read_only_recommended: f.flag("readOnlyRecommended", false),
+            password: crate::sheet_read::read_password(f, "").or_else(|| crate::sheet_read::read_password(f, "reservation")),
+        });
+    }
 }
 
 /// The single window modelled by GridCraft: prefer the first visible window,
@@ -354,6 +369,8 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
         pivot_charts: vec![],
         chart_budget: crate::chart::ChartReadBudget::new(),
         slicers: Default::default(),
+        sheet_exts: vec![],
+        sheet_exts_dropped: vec![],
         legacy_formulas: vec![],
         shared_formula_bytes: 0,
         known_function,
@@ -363,6 +380,7 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
         sheet_slicer_defs: Default::default(),
         sheet_slicer_frames: Default::default(),
         pending_slicers: Default::default(),
+        chart_parts: vec![],
         cells: 0,
         sheet_svg_blips: vec![],
         sheet_chart_user_shapes: vec![],
@@ -419,6 +437,7 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
     let mut legacy_formulas: Vec<(usize, Vec<gridcraft_core::CellRef>)> = vec![];
     let mut pivot_caches = crate::pivot::CachesIn::new(&wb_xml, &wb_rels);
     let mut pending_pivot_sources: Vec<(usize, crate::pivot::ReadPivotSource)> = vec![];
+    pivot_caches.read_connections(&mut cx, &wb_rels);
     let sheet_els: Vec<&El> = wb_xml.child("sheets").map(|s| s.kids("sheet").collect()).unwrap_or_default();
     if sheet_els.len() > MAX_SHEETS {
         return Err(IoError::TooLarge(format!("the workbook has more than {MAX_SHEETS} sheets")));
@@ -462,19 +481,23 @@ pub fn read_xlsx<'a>(bytes: &'a [u8], opts: crate::ReadOptions<'a>) -> Result<(W
                 (Sheet::new(name.clone()), Default::default())
             }
         };
+        let mut external_pivots = vec![];
         legacy_formulas.push((wb.sheets.len(), std::mem::take(&mut cx.legacy_formulas)));
         let mut sheet_pivot_sources = vec![];
         match crate::pivot::read_pivots(&mut cx, &mut pivot_caches, &rel.target, &name, &mut sheet_pivot_sources) {
             Ok(p) => {
-                sheet.pivots = p;
+                sheet.pivots = p.tables;
+                external_pivots = p.external;
                 let si = wb.sheets.len();
                 pending_pivot_sources.extend(sheet_pivot_sources.into_iter().map(|s| (si, s)));
             }
             Err(IoError::TooLarge(m)) => return Err(IoError::TooLarge(m)),
             Err(e) => cx.warn(format!("PivotTables on sheet \"{name}\" could not be read: {e}")),
         }
-        sheet.preserved = kept.sheet(&mut cx, &rel.target, &name, &read_controls);
+        sheet.preserved = kept.sheet(&mut cx, &rel.target, &name, &external_pivots, &read_controls);
+        sheet.preserved = crate::extlist::keep_sheet(&mut cx, &name, sheet.preserved.take(), kept.keeps());
         sheet.file_id = se.attr_u32("sheetId").unwrap_or(0);
+        kept.charts(&mut cx, &mut sheet);
         sheet.visibility = match se.attr("state") {
             Some("hidden") => Visibility::Hidden,
             Some("veryHidden") => Visibility::VeryHidden,

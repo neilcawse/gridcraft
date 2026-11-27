@@ -233,7 +233,7 @@ fn unzip(bytes: &[u8]) -> HashMap<String, Vec<u8>> {
         let mut f = z.by_index(i).unwrap();
         let mut b = Vec::new();
         f.read_to_end(&mut b).unwrap();
-        m.insert(f.name().to_string(), b);
+        m.insert(f.name().unwrap().to_string(), b);
     }
     m
 }
@@ -814,7 +814,7 @@ fn slicer_workbook() -> Workbook {
     let pi = report.pivots.iter().position(|p| p.name == "Sales by Region").unwrap();
     report.pivots[pi].filters.push(PivotFilter {
         source_col: "Product".into(),
-        selected: Some(vec!["A".into(), "C".into()]),
+        selected: Some(vec!["C".into(), "A".into()]),
         ..PivotFilter::default()
     });
     report.slicers.push(Slicer {
@@ -1911,31 +1911,41 @@ fn external_and_unresolved_worksheet_source_pivots_are_preserved_on_round_trip()
     let mut bytes = buf.into_inner();
     for pass in 0..2 {
         let (read_wb, _) = read_xlsx(&bytes).unwrap();
-        assert_eq!(read_wb.sheet(1).unwrap().pivots.len(), 3, "pass {pass}: all 3 pivots must be read");
+        assert_eq!(read_wb.sheet(1).unwrap().pivots.len(), 2, "pass {pass}: modelled + unresolved local pivots must be read");
         bytes = write_xlsx(&read_wb).unwrap();
         let saved = unzip(&bytes);
         assert_relationship_targets_exist(&saved);
         let ids = assert_workbook_cache_relationships(&saved);
         assert_eq!(ids.len(), 3, "pass {pass}: all 3 pivot caches must be registered");
-        for table_number in 1..=3 {
-            let table = xml::parse(saved.get(&format!("xl/pivotTables/pivotTable{table_number}.xml")).unwrap()).unwrap();
-            assert!(ids.contains(table.attr("cacheId").unwrap()), "pass {pass}: table {table_number} cacheId missing");
-            let table_rels = xml::parse(saved.get(&format!("xl/pivotTables/_rels/pivotTable{table_number}.xml.rels")).unwrap()).unwrap();
+        let table_parts: Vec<String> = saved.keys().filter(|k| k.starts_with("xl/pivotTables/") && k.ends_with(".xml")).cloned().collect();
+        assert_eq!(table_parts.len(), 3, "pass {pass}: all 3 pivot tables must be written: {table_parts:?}");
+        for table_part in &table_parts {
+            let table = xml::parse(saved.get(table_part).unwrap()).unwrap();
+            assert!(ids.contains(table.attr("cacheId").unwrap()), "pass {pass}: {table_part} cacheId missing");
+            let rels_path = table_part.replace("xl/pivotTables/", "xl/pivotTables/_rels/") + ".rels";
+            let table_rels = xml::parse(saved.get(&rels_path).unwrap()).unwrap();
             let cache_path = crate::package::resolve("xl/pivotTables", table_rels.kids("Relationship").next().unwrap().attr("Target").unwrap());
             let cache = xml::parse(saved.get(&cache_path).unwrap()).unwrap();
             assert_pivot_table_fields_match_cache(&table, &cache);
         }
         assert_sheet_pivot_relationships(&saved);
 
-        let cache2 = String::from_utf8(saved["xl/pivotCache/pivotCacheDefinition2.xml"].clone()).unwrap();
-        assert!(cache2.contains(r#"<worksheetSource ref="A1:C10" sheet="Ext" r:id="rId2"/>"#), "pass {pass}: {cache2}");
-        let cache2_rels = String::from_utf8(saved["xl/pivotCache/_rels/pivotCacheDefinition2.xml.rels"].clone()).unwrap();
-        assert!(cache2_rels.contains("externalLinkPath") && cache2_rels.contains("BookExt.xlsx"), "pass {pass}: {cache2_rels}");
-        assert!(saved.contains_key("xl/pivotCache/pivotCacheRecords2.xml"), "pass {pass}");
-
-        let cache3 = String::from_utf8(saved["xl/pivotCache/pivotCacheDefinition3.xml"].clone()).unwrap();
-        assert!(cache3.contains(r#"<worksheetSource name="missing_table"/>"#), "pass {pass}: {cache3}");
-        assert!(saved.contains_key("xl/pivotCache/pivotCacheRecords3.xml"), "pass {pass}");
+        let cache_parts: Vec<(&String, String)> = saved
+            .iter()
+            .filter(|(k, _)| k.starts_with("xl/pivotCache/") && k.ends_with(".xml") && !k.contains("Records"))
+            .map(|(k, v)| (k, String::from_utf8(v.clone()).unwrap()))
+            .collect();
+        let (ext_cache_part, _) = cache_parts
+            .iter()
+            .find(|(_, xml)| xml.contains(r#"<worksheetSource ref="A1:C10" sheet="Ext" r:id="rId2"/>"#))
+            .unwrap_or_else(|| panic!("pass {pass}: external workbook cache missing: {cache_parts:?}"));
+        let ext_rels_part = ext_cache_part.replace("xl/pivotCache/", "xl/pivotCache/_rels/") + ".rels";
+        let ext_rels = String::from_utf8(saved[&ext_rels_part].clone()).unwrap();
+        assert!(ext_rels.contains("externalLinkPath") && ext_rels.contains("BookExt.xlsx"), "pass {pass}: {ext_rels}");
+        assert!(
+            cache_parts.iter().any(|(_, xml)| xml.contains(r#"<worksheetSource name="missing_table"/>"#)),
+            "pass {pass}: unresolved worksheetSource cache missing: {cache_parts:?}"
+        );
     }
 }
 
@@ -1948,8 +1958,8 @@ fn preserved_external_pivot_reflects_rename_and_shifted_location_on_save() {
 
     let ext_cache_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId1" recordCount="1">
-<cacheSource type="worksheet"><worksheetSource ref="A1:C10" sheet="Ext" r:id="rId2"/></cacheSource>
-<cacheFields count="2"><cacheField name="Region"><sharedItems count="1"><s v="North"/></sharedItems></cacheField><cacheField name="Sales"><sharedItems containsSemiMixedTypes="0" containsString="0" containsNumber="1" minValue="10" maxValue="10"/></sharedItems></cacheField></cacheFields>
+<cacheSource type="worksheet"><worksheetSource name="missing_table"/></cacheSource>
+<cacheFields count="2"><cacheField name="Region"><sharedItems count="1"><s v="North"/></sharedItems></cacheField><cacheField name="Sales"><sharedItems containsSemiMixedTypes="0" containsString="0" containsNumber="1" minValue="10" maxValue="10"/></cacheField></cacheFields>
 </pivotCacheDefinition>"#;
     // Include two pivotCacheRecords relationships (malformed input) to verify dedup prevents duplicate ZIP entries.
     let ext_cache_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -2032,7 +2042,7 @@ fn preserved_external_pivot_reflects_rename_and_shifted_location_on_save() {
         let mut za = zip::ZipArchive::new(std::io::Cursor::new(&saved_bytes)).unwrap();
         let mut names = std::collections::HashSet::new();
         for i in 0..za.len() {
-            let name = za.by_index(i).unwrap().name().to_string();
+            let name = za.by_index(i).unwrap().name().unwrap().into_owned();
             assert!(names.insert(name.clone()), "duplicate ZIP entry emitted: {name}");
         }
     }
@@ -2061,4 +2071,78 @@ fn preserved_external_pivot_reflects_rename_and_shifted_location_on_save() {
     let pt2 = reloaded.sheet(1).unwrap().pivots.iter().find(|p| p.name == r#"Sales & "Ext" Pivot"#).expect("renamed external pivot reloaded");
     assert_eq!(pt2.anchor, at("A20"));
     assert_eq!(pt2.last_range, Some(rr("A20:B22")));
+}
+
+/// The "Trend" pivot of [`workbook`] with `values` as its value fields, written; returns the file
+/// and its PivotTable and cache parts.
+fn trend_with(values: impl FnOnce(&PivotValue) -> Vec<PivotValue>) -> (Vec<u8>, String, String) {
+    let mut wb = workbook();
+    let pivot = wb.sheet_mut(1).unwrap().pivots.iter_mut().find(|p| p.name == "Trend").unwrap();
+    pivot.values = values(&pivot.values[0]);
+    let bytes = write_xlsx(&wb).unwrap();
+    let parts = unzip(&bytes);
+    let (path, table) = parts
+        .iter()
+        .filter(|(path, _)| path.starts_with("xl/pivotTables/pivotTable"))
+        .map(|(path, xml)| (path.clone(), String::from_utf8_lossy(xml).into_owned()))
+        .find(|(_, xml)| xml.contains("name=\"Trend\""))
+        .unwrap();
+    let n = path.trim_start_matches("xl/pivotTables/pivotTable").trim_end_matches(".xml");
+    let cache_part = format!("xl/pivotCache/pivotCacheDefinition{n}.xml");
+    let rels = String::from_utf8_lossy(&parts[&format!("xl/pivotTables/_rels/pivotTable{n}.xml.rels")]).into_owned();
+    assert!(rels.contains(&format!("../pivotCache/pivotCacheDefinition{n}.xml")), "{rels}");
+    let cache = String::from_utf8_lossy(&parts[&cache_part]).into_owned();
+    (bytes, table, cache)
+}
+
+fn trend_values(bytes: &[u8]) -> Vec<PivotValue> {
+    let (back, report) = read_xlsx(bytes).unwrap();
+    assert!(report.warnings.iter().all(|w| !w.to_lowercase().contains("pivot")), "{:?}", report.warnings);
+    back.sheet(1).unwrap().pivots.iter().find(|p| p.name == "Trend").unwrap().values.clone()
+}
+
+const GC_DISTINCT: &str = "<ext uri=\"{80B1AD42-0C9F-45FF-B109-D57FB0F4F0B4}\" xmlns:gc=\"https://github.com/storytold/gridcraft/ns/pivot/2026\"><gc:summary func=\"distinctCount\"/></ext>";
+
+#[test]
+fn distinct_count_round_trips_through_a_gridcraft_extension() {
+    // The file format's subtotal list has no distinct count: the field is written as Count, which
+    // other readers use, with a GridCraft marker that brings Distinct Count back on open.
+    let (bytes, table, cache) =
+        trend_with(|v| vec![PivotValue { func: PivotFunc::DistinctCount, name: "Distinct Count of Sales".into(), ..v.clone() }]);
+    assert!(table.contains("<dataField name=\"Distinct Count of Sales\" fld=\"4\" subtotal=\"count\""), "{table}");
+    assert!(table.contains(&format!("<extLst>{GC_DISTINCT}</extLst></dataField>")), "{table}");
+    // A refresh on open would recompute it as Count in Excel, over the values on the sheet.
+    assert!(!cache.contains("refreshOnLoad"), "{cache}");
+    let values = trend_values(&bytes);
+    assert_eq!((values[0].func, values[0].name.as_str()), (PivotFunc::DistinctCount, "Distinct Count of Sales"));
+}
+
+#[test]
+fn rank_and_distinct_count_write_one_extension_each() {
+    let (bytes, table, _) = trend_with(|v| {
+        vec![PivotValue { func: PivotFunc::DistinctCount, show_as: PivotShowAs::Rank, name: "Rank of Distinct Sales".into(), ..v.clone() }]
+    });
+    let rank = "<ext uri=\"{E15A36E0-9728-4e99-A89B-3F7291B0FE68}\" xmlns:x14=\"http://schemas.microsoft.com/office/spreadsheetml/2009/9/main\"><x14:dataField pivotShowAs=\"rankDescending\"/></ext>";
+    assert!(table.contains(&format!("<extLst>{rank}{GC_DISTINCT}</extLst></dataField>")), "{table}");
+    let values = trend_values(&bytes);
+    assert_eq!((values[0].func, values[0].show_as), (PivotFunc::DistinctCount, PivotShowAs::Rank));
+}
+
+#[test]
+fn count_without_the_gridcraft_extension_reads_as_count() {
+    // Plain `subtotal="count"`, as Excel writes it, stays Count; so does a stale marker on a field
+    // whose function was changed to something else.
+    let (bytes, table, cache) = trend_with(|v| vec![PivotValue { func: PivotFunc::Count, name: "Count of Sales".into(), ..v.clone() }]);
+    assert!(!table.contains("extLst"), "{table}");
+    assert!(cache.contains("refreshOnLoad=\"1\""), "{cache}");
+    assert_eq!(trend_values(&bytes)[0].func, PivotFunc::Count);
+    let marked = |subtotal: &str| {
+        format!(
+            r#"<pivotTableDefinition name="P" cacheId="1"><location ref="C1:D4"/><pivotFields><pivotField/><pivotField dataField="1"/></pivotFields><dataFields><dataField name="V" fld="1"{subtotal}><extLst>{GC_DISTINCT}</extLst></dataField></dataFields></pivotTableDefinition>"#
+        )
+    };
+    let func = |table: &str| read_xlsx(&with_pivot(table, Some(GOOD_CACHE))).unwrap().0.sheet(0).unwrap().pivots[0].values[0].func;
+    assert_eq!(func(&marked(" subtotal=\"count\"")), PivotFunc::DistinctCount);
+    assert_eq!(func(&marked("")), PivotFunc::Sum);
+    assert_eq!(func(&marked(" subtotal=\"max\"")), PivotFunc::Max);
 }

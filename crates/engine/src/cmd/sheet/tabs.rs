@@ -54,48 +54,35 @@ pub(super) fn delete_sheet(s: &mut Session, p: &Json) -> Result<Json> {
     edit_doc(d, |cx| {
         cx.wb.sheets.remove(i);
         let new_order: Vec<String> = cx.wb.sheets.iter().map(|s| s.name.clone()).collect();
-        for si in 0..cx.wb.sheets.len() {
-            let keys: Vec<(CellRef, Arc<gridcraft_model::Formula>)> =
-                cx.wb.sheets.get(si).map(|s| s.cells.iter().filter_map(|(c, x)| x.formula.clone().map(|f| (c, f))).collect()).unwrap_or_default();
-            let Some(sh) = cx.wb.sheet_mut(si) else { continue };
-            for (c, f) in keys {
-                // Only formulas whose tree or 3-D span changes are rewritten or forgotten; the
-                // others keep their text.
-                let changed = f.with_expr(|e| {
+        let mut forgotten = Vec::new();
+        for (si, sh) in cx.wb.sheets.iter().enumerate() {
+            for (c, cell) in sh.cells.iter() {
+                let Some(f) = cell.formula.as_ref() else { continue };
+                // Only formulas whose tree or 3-D span changes are forgotten.
+                let reads_changed = f.with_expr(|e| {
                     let ne = gridcraft_formula::adjust::delete_sheet(e.clone(), &name, &order);
-                    let diff = ne != *e;
-                    (diff, diff || spans_changed(e, &order, &new_order), ne)
+                    ne != *e || spans_changed(e, &order, &new_order)
                 });
-                if let Some((tree_changed, reads_changed, ne)) = changed
-                    && (tree_changed || reads_changed)
-                    && let Some(cell) = sh.cells.get_mut(c)
-                {
-                    if reads_changed {
-                        super::edit::forget_value(cell);
-                        cx.changed.push((si, c));
-                    }
-                    if tree_changed {
-                        cell.formula = Some(Arc::new(f.rewritten(ne)));
-                    }
+                if reads_changed == Some(true) {
+                    forgotten.push((si, c));
                 }
             }
         }
-        crate::cmd::edit::rewrite_python_refs(&mut cx.wb, &|_, e| gridcraft_formula::adjust::delete_sheet(e, &name, &order))?;
-        // Chart series into the deleted sheet become #REF!, like formulas.
-        crate::cmd::edit::rewrite_cell_links(&mut cx.wb, |_, e| gridcraft_formula::adjust::delete_sheet(e, &name, &order));
         cx.wb.names.retain(|n| n.scope != Some(i));
+        // Every reference into the deleted sheet becomes #REF!.
+        cx.wb.rewrite_references(&|_, e| gridcraft_formula::adjust::delete_sheet(e, &name, &order));
+        crate::cmd::edit::rewrite_python_refs(&mut cx.wb, &|_, e| gridcraft_formula::adjust::delete_sheet(e, &name, &order))?;
+        for &(si, c) in &forgotten {
+            if let Some(cell) = cx.wb.sheet_mut(si).and_then(|sh| sh.cells.get_mut(c)) {
+                super::edit::forget_value(cell);
+            }
+        }
+        cx.changed.extend(forgotten);
         for n in cx.wb.names.iter_mut() {
             if let Some(sc) = n.scope.as_mut()
                 && *sc > i
             {
                 *sc -= 1;
-            }
-            // Names referring to the sheet become #REF!.
-            if let Ok(e) = gridcraft_formula::parse_name(&n.formula) {
-                let ne = gridcraft_formula::adjust::delete_sheet(e.clone(), &name, &order);
-                if ne != e {
-                    n.formula = gridcraft_formula::print(&ne);
-                }
             }
         }
         mark_changed_name_spans(cx, &order, &new_order);
@@ -122,21 +109,17 @@ pub(super) fn rename_sheet(s: &mut Session, p: &Json) -> Result<Json> {
     edit(s, |cx| {
         let old = cx.wb.sheet(i).map(|s| s.name.clone()).unwrap_or_default();
         cx.sheet_mut(i)?.name = name.clone();
+        // Every reference the workbook holds follows the sheet.
+        cx.wb.rewrite_references(&|_, e| gridcraft_formula::adjust::rename_sheet(e, &old, &name));
+        // A PivotChart follows its PivotTable's sheet. Only a sheet holding such a chart is
+        // copied, so the others stay shared with undo snapshots.
+        let on_old = |link: Option<&str>| link.and_then(crate::pivot::parse_chart_link).is_some_and(|(sheet, _)| sheet.eq_ignore_ascii_case(&old));
         for si in 0..cx.wb.sheets.len() {
-            let keys: Vec<(CellRef, Arc<gridcraft_model::Formula>)> =
-                cx.wb.sheets.get(si).map(|s| s.cells.iter().filter_map(|(c, x)| x.formula.clone().map(|f| (c, f))).collect()).unwrap_or_default();
-            let Some(sh) = cx.wb.sheet_mut(si) else { continue };
-            for (c, f) in keys {
-                // Compares trees, so unchanged formulas are not printed; they keep their text.
-                let changed = f.with_expr(|e| Some(gridcraft_formula::adjust::rename_sheet(e.clone(), &old, &name)).filter(|ne| ne != e));
-                if let Some(Some(ne)) = changed
-                    && let Some(cell) = sh.cells.get_mut(c)
-                {
-                    cell.formula = Some(Arc::new(f.rewritten(ne)));
-                }
+            if !cx.wb.sheets.get(si).is_some_and(|sh| sh.charts.iter().any(|ch| on_old(ch.pivot.as_deref()))) {
+                continue;
             }
+            let Some(sh) = cx.wb.sheet_mut(si) else { continue };
             for ch in sh.charts.iter_mut() {
-                // A PivotChart follows its PivotTable's sheet.
                 if let Some((sheet, pivot)) = ch.pivot.as_deref().and_then(crate::pivot::parse_chart_link)
                     && sheet.eq_ignore_ascii_case(&old)
                 {
@@ -152,12 +135,10 @@ pub(super) fn rename_sheet(s: &mut Session, p: &Json) -> Result<Json> {
                 }
             }
         }
-        crate::cmd::edit::rewrite_cell_links(&mut cx.wb, |_, e| gridcraft_formula::adjust::rename_sheet(e, &old, &name));
-        for n in cx.wb.names.iter_mut() {
-            if let Ok(e) = gridcraft_formula::parse_name(&n.formula) {
+        for n in &cx.wb.names {
+            if gridcraft_formula::parse_name(&n.formula).is_ok() {
                 // The same cells, under the sheet's new name.
                 cx.moved_names.push(n.name.to_lowercase());
-                n.formula = gridcraft_formula::print(&gridcraft_formula::adjust::rename_sheet(e, &old, &name));
             }
         }
         crate::cmd::edit::rewrite_python_refs(&mut cx.wb, &|_, e| gridcraft_formula::adjust::rename_sheet(e, &old, &name))?;
@@ -192,6 +173,29 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
                 .find(|nm| cx.wb.sheet_index(nm).is_none())
                 .unwrap_or(base.clone());
             sh.name = name;
+            // A copied sheet's charts plot the copy's own data, as Excel's do (its formulas keep
+            // what they name).
+            // Text that names no other sheet is kept as written (a leading `=` included).
+            let copy = sh.name.clone();
+            let fix = |t: &mut String| {
+                let Ok(e) = gridcraft_formula::parse(t.trim_start_matches('=')) else { return };
+                let before = gridcraft_formula::print(&e);
+                let after = gridcraft_formula::print(&gridcraft_formula::adjust::rename_sheet(e, &base, &copy));
+                if after != before {
+                    *t = if t.starts_with('=') { format!("={after}") } else { after };
+                }
+            };
+            for ch in &mut sh.charts {
+                for se in &mut ch.series {
+                    fix(&mut se.values);
+                    for t in [&mut se.categories, &mut se.name, &mut se.bubble_sizes].into_iter().flatten() {
+                        fix(t);
+                    }
+                }
+                if let Some(t) = ch.source.as_mut() {
+                    fix(t);
+                }
+            }
             sh.tables.clear(); // table names must be unique
             sh.preserved = None; // kept file content (form controls, OLE objects…) stays with the original
             // Object ids are unique across the workbook (selection and the `{kind, id}` commands
