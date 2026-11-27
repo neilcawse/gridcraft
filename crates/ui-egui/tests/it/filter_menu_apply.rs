@@ -277,3 +277,154 @@ fn popup_whose_table_was_replaced_by_another_applies_nothing() -> TestResult {
     assert_eq!(hidden(&h)?, Vec::<u32>::new());
     Ok(())
 }
+
+#[test]
+fn context_filter_by_value_targets_the_table_not_the_worksheet() -> TestResult {
+    let mut h = sheet_filter_and_table()?;
+    let sh = sheet(&h)?;
+    let geo = grid::Geo::new(sh, h.state().grid.rect.ok_or("grid rect")?, h.state().view().scroll);
+    let pos = geo.cell_rect(sh, CellRef::new(8, 0)).center();
+    let depth = undo_depth(&h)?;
+    h.input_mut().events.push(Event::PointerMoved(pos));
+    for pressed in [true, false] {
+        h.input_mut().events.push(Event::PointerButton { pos, button: PointerButton::Secondary, pressed, modifiers: Modifiers::NONE });
+    }
+    h.run_steps(4);
+    assert!(h.state().grid.context_menu.is_some(), "right-click opens the real cell menu");
+    press(&mut h, "Filter by Selected Cell's Value")?;
+    assert_eq!(sheet_criteria(&h)?, Some(vec![]), "the context action leaves the worksheet filter alone");
+    assert_eq!(table_criteria(&h, "People")?, [(0, values(&["Dan"]))]);
+    assert_eq!(hidden(&h)?, [10, 11]);
+    assert_eq!(undo_depth(&h)?, depth + 1);
+    Ok(())
+}
+
+#[test]
+fn popup_closes_when_the_worksheet_filter_range_grows() -> TestResult {
+    let mut h = sheet_filter_and_table()?;
+    open_menu(&mut h, CellRef::new(0, 0))?;
+    press(&mut h, "Ben")?;
+    h.state_mut().run("cell.set", json!({"cell":"A5", "input":"Gil"}))?;
+    h.run_steps(2);
+    assert_eq!(sheet(&h)?.autofilter.as_ref().ok_or("worksheet filter")?.range.a1(), "A1:B5");
+    if h.query_by_label("Apply").is_some() {
+        press(&mut h, "Apply")?;
+    }
+    assert_eq!(sheet_criteria(&h)?, Some(vec![]), "stale checkboxes must not filter the enlarged range");
+    assert!(h.state().grid.filter_menu.is_none());
+    Ok(())
+}
+
+#[test]
+fn resized_worksheet_filter_rejects_pending_sort_clear_and_enter() -> TestResult {
+    for action in ["↓  Sort Descending", "Clear Filter", "Enter"] {
+        let mut h = sheet_filter_and_table()?;
+        h.state_mut().run("data.filterBy", json!({"column":"A", "values":["Ann", "Cat"]}))?;
+        h.run_steps(2);
+        open_menu(&mut h, CellRef::new(0, 0))?;
+        press(&mut h, "Ann")?;
+        h.state_mut().run("cell.set", json!({"cell":"A5", "input":"Gil"}))?;
+        let before = sheet(&h)?.autofilter.clone();
+        let depth = undo_depth(&h)?;
+        if action == "Enter" {
+            h.input_mut().events.push(Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+            h.run_steps(2);
+        } else {
+            h.run_steps(2);
+            if h.query_by_label(action).is_some() {
+                press(&mut h, action)?;
+            }
+        }
+        assert!(h.state().grid.filter_menu.is_none(), "{action}: range change closes the popup");
+        assert_eq!(undo_depth(&h)?, depth, "{action}: no command acted");
+        assert_eq!(sheet(&h)?.autofilter, before, "{action}: criteria are unchanged");
+    }
+    Ok(())
+}
+
+#[test]
+fn worksheet_filter_recreated_at_the_same_range_between_frames_is_the_same_target() -> TestResult {
+    // GridCraft choice: worksheet filters have no identity apart from sheet and exact range.
+    let mut h = sheet_filter_and_table()?;
+    open_menu(&mut h, CellRef::new(0, 0))?;
+    press(&mut h, "Ben")?;
+    h.state_mut().run("data.filter", json!({"range":"A1:B4"}))?;
+    assert_eq!(sheet_criteria(&h)?, None);
+    h.state_mut().run("data.filter", json!({"range":"A1:B4"}))?;
+    h.run_steps(2);
+    press(&mut h, "Apply")?;
+    assert_eq!(sheet_criteria(&h)?, Some(vec![(0, values(&["Ann", "Cat"]))]));
+    assert_eq!(hidden(&h)?, [3]);
+    Ok(())
+}
+
+#[test]
+fn popup_keeps_its_table_after_rename_but_closes_when_the_header_moves() -> TestResult {
+    let mut h = sheet_filter_and_table()?;
+    open_menu(&mut h, CellRef::new(7, 0))?;
+    press(&mut h, "Eve")?;
+    h.state_mut().run("table.rename", json!({"table":"People", "name":"Staff"}))?;
+    h.run_steps(2);
+    press(&mut h, "Apply")?;
+    assert_eq!(table_criteria(&h, "Staff")?, [(0, values(&["Dan", "Fay"]))]);
+    open_menu(&mut h, CellRef::new(7, 0))?;
+    h.state_mut().run("table.resize", json!({"table":"Staff", "range":"B8:B12"}))?;
+    h.run_steps(2);
+    assert!(h.state().grid.filter_menu.is_none(), "the table no longer owns A8");
+    assert_eq!(sheet_criteria(&h)?, Some(vec![]));
+    Ok(())
+}
+
+#[test]
+fn header_only_table_popup_has_no_data_values() -> TestResult {
+    let mut s = Session::new();
+    s.new_workbook();
+    s.execute("cell.set", json!({"cell":"A1", "input":"Header"}))?;
+    s.execute("insert.table", json!({"range":"A1", "header":true, "name":"EmptyTable"}))?;
+    let mut h = harness(s);
+    open_menu(&mut h, CellRef::new(0, 0))?;
+    assert_eq!(sheet_criteria(&h)?, None, "opening the empty table's popup installs no filter");
+    assert!(h.query_by_label("(Blanks)").is_none(), "a header-only table has no blank data row");
+    press(&mut h, "Apply")?;
+    assert_eq!(table_criteria(&h, "EmptyTable")?, []);
+    assert_eq!(hidden(&h)?, Vec::<u32>::new());
+    Ok(())
+}
+
+fn overlapping_worksheet_and_slicer_filters() -> TestResult<Harness> {
+    // An explicit Data > Filter range can be set from a selection outside the table.
+    let mut s = Session::new();
+    s.new_workbook();
+    s.execute("range.setValues", json!({"range":"A1", "values":[["Name"], ["Ann"], ["Ben"], ["Cat"]]}))?;
+    s.execute("insert.table", json!({"range":"A1:A4", "header":true, "name":"People"}))?;
+    s.execute("data.filter", json!({}))?;
+    s.execute("insert.slicer", json!({"table":"People", "column":"Name", "at":"J2"}))?;
+    s.execute("slicer.toggle", json!({"value":"Ann"}))?;
+    s.execute("selection.set", json!({"range":"F1"}))?;
+    s.execute("data.filter", json!({"range":"A1:A4"}))?;
+    Ok(harness(s))
+}
+
+#[test]
+fn worksheet_popup_applies_only_to_the_worksheet_filter() -> TestResult {
+    let mut h = overlapping_worksheet_and_slicer_filters()?;
+    open_menu(&mut h, CellRef::new(0, 0))?;
+    // Ann and Ben start checked for the worksheet, though the table slicer hides Ben.
+    press(&mut h, "Cat")?;
+    press(&mut h, "Apply")?;
+    assert_eq!(sheet_criteria(&h)?, Some(vec![(0, values(&["Ann", "Ben"]))]), "Apply must target only the worksheet filter");
+    assert_eq!(table_criteria(&h, "People")?, [(0, values(&["Ann"]))]);
+    assert_eq!(hidden(&h)?, [3, 4]);
+    Ok(())
+}
+
+#[test]
+fn worksheet_popup_clears_only_the_worksheet_filter() -> TestResult {
+    let mut h = overlapping_worksheet_and_slicer_filters()?;
+    open_menu(&mut h, CellRef::new(0, 0))?;
+    press(&mut h, "Clear Filter")?;
+    assert_eq!(table_criteria(&h, "People")?, [(0, values(&["Ann"]))], "worksheet Clear left the table's native filter alone");
+    assert_eq!(sheet_criteria(&h)?, Some(vec![]));
+    assert_eq!(hidden(&h)?, [3, 4]);
+    Ok(())
+}

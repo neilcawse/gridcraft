@@ -23,9 +23,9 @@ mod sort;
 mod tools;
 mod validation;
 
-pub use filter::filter_values;
 pub(crate) use filter::{apply_filters, clear_table_filter, grow_autofilter};
 use filter::{clear_filter, filter_by, reapply, toggle_filter};
+pub use filter::{filter_values, worksheet_filter_values};
 use grouping::{detail, group, outline_settings, show_levels, subtotal};
 pub use sort::sort_context;
 use sort::{quick_sort, sort};
@@ -65,7 +65,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Filter Column",
             [],
             None,
-            "{column: \"B\" (or 0-based offset), table?: \"Name\" (that table's own filter, else the sheet AutoFilter), values?: [..], blanks?: bool, custom?: {op: \">\", value: \"10\", op2?, value2?, and?}, top?: {count, bottom?, percent?}, aboveAverage?: bool, clear?: bool}",
+            "{column: \"B\" (or 0-based offset), table?: name (that table's own filter) | null/empty (existing worksheet AutoFilter); omit table for legacy owner resolution, values?: [..], blanks?: bool, custom?: {op: \">\", value: \"10\", op2?, value2?, and?}, top?: {count, bottom?, percent?}, aboveAverage?: bool, clear?: bool}",
             has_doc,
             filter_by
         ),

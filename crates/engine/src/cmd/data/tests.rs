@@ -209,6 +209,9 @@ fn totals_toggle_leaves_worksheet_filter_over_headerless_table_unchanged() {
     assert_filter(&s, &[1]);
     s.execute("table.totalRow", json!({"table": "Sales", "on": false})).unwrap();
     assert_filter(&s, &[1]);
+    let err = s.execute("data.filterBy", json!({"table":"Sales", "column":"A", "clear":true})).unwrap_err();
+    assert!(err.to_string().contains("no table named `Sales` with filter buttons"), "{err}");
+    assert_filter(&s, &[1]);
 }
 
 #[test]
@@ -222,15 +225,13 @@ fn filter_by_table_changes_only_that_tables_own_filter() {
     s.execute("table.totalRow", json!({"table": "Sales", "on": true})).unwrap();
     s.execute("selection.set", json!({"range": "E1"})).unwrap();
     let hidden = |s: &Session| (0..12).filter(|&r| s.doc().unwrap().wb.active().unwrap().is_row_hidden(r)).collect::<Vec<_>>();
-    assert_eq!(filter_values(&s.doc().unwrap().wb, 0, Some("sales"), 1), [("10".into(), true), ("20".into(), true)], "totals row omitted");
     let depth = s.doc().unwrap().undo.len();
-    s.execute("data.filterBy", json!({"table": "Sales", "column": "B", "values": ["20"]})).unwrap();
+    s.execute("data.filterBy", json!({"table": "sales", "column": "B", "values": ["20"]})).unwrap();
     assert_eq!(s.doc().unwrap().undo.len(), depth + 1, "one undo step");
     let sh = s.doc().unwrap().wb.active().unwrap();
     assert_eq!(sh.tables[0].filter, [(1, FilterCriterion::Values { values: vec!["20".into()], blanks: false })]);
     assert!(sh.autofilter.as_ref().unwrap().criteria.is_empty(), "the worksheet AutoFilter is untouched");
     assert_eq!(hidden(&s), [6], "East's row only; the totals row 9 shows");
-    assert_eq!(filter_values(&s.doc().unwrap().wb, 0, Some("Sales"), 1), [("10".into(), false), ("20".into(), true)]);
     // Saved in the table part and read back as the table's own criteria.
     let bytes = crate::io::save_bytes(&s.doc().unwrap().wb, "sales.xlsx").unwrap();
     let (back, _) = crate::io::open_bytes("sales.xlsx", &bytes).unwrap();
@@ -244,13 +245,40 @@ fn filter_by_table_changes_only_that_tables_own_filter() {
     assert!(sh.tables[0].filter.is_empty());
     assert_eq!(sh.autofilter.as_ref().unwrap().criteria.len(), 1);
     assert_eq!(hidden(&s), [1]);
+    assert_eq!(s.doc().unwrap().undo.len(), depth + 3, "Clear adds one step");
     s.execute("edit.undo", json!({})).unwrap();
     assert_eq!(hidden(&s), [1, 6]);
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(hidden(&s), [1]);
+    s.execute("edit.undo", json!({})).unwrap();
     let e = s.execute("data.filterBy", json!({"table": "Sales", "column": "C", "values": ["x"]})).unwrap_err();
     assert!(e.to_string().contains("outside the filter range"), "{e}");
+    let e = s.execute("data.filterBy", json!({"table": 7, "column": "A", "values": ["x"]})).unwrap_err();
+    assert!(e.to_string().contains("`table` must be a name"), "{e}");
     let e = s.execute("data.filterBy", json!({"table": "Nope", "column": "A", "values": ["x"]})).unwrap_err();
     assert!(e.to_string().contains("no table named `Nope`"), "{e}");
     assert_eq!(hidden(&s), [1, 6], "refused targets change nothing");
+}
+
+#[test]
+fn filter_by_null_or_empty_table_requires_an_existing_worksheet_filter() {
+    for table in [Json::Null, json!(""), json!("  ")] {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("range.setValues", json!({"range":"A1", "values":[["Name"], ["Ann"], ["Ben"]]})).unwrap();
+        let depth = s.doc().unwrap().undo.len();
+        let err = s.execute("data.filterBy", json!({"table":table, "column":"A", "values":["Ann"]})).unwrap_err();
+        assert!(err.to_string().contains("no worksheet AutoFilter"), "{err}");
+        assert_eq!(s.doc().unwrap().undo.len(), depth);
+        assert!(s.doc().unwrap().wb.active().unwrap().autofilter.is_none());
+
+        s.execute("data.filterBy", json!({"column":"A", "values":["Ann"]})).unwrap();
+        assert!(s.doc().unwrap().wb.active().unwrap().is_row_hidden(2), "omitting table still installs a filter");
+        s.execute("data.filterBy", json!({"table":table, "column":"A", "clear":true})).unwrap();
+        let sh = s.doc().unwrap().wb.active().unwrap();
+        assert!(sh.autofilter.as_ref().unwrap().criteria.is_empty());
+        assert!(!sh.is_row_hidden(2));
+    }
 }
 
 #[test]
@@ -264,12 +292,53 @@ fn filter_by_table_adopts_a_worksheet_proxy_over_the_table() {
     s.execute("selection.set", json!({"range": "E1"})).unwrap();
     s.execute("data.filter", json!({"range": "A1:B5"})).unwrap();
     s.execute("data.filterBy", json!({"column": "A", "values": ["East"]})).unwrap();
-    assert_eq!(filter_values(&s.doc().unwrap().wb, 0, Some("Sales"), 0), [("East".into(), true), ("West".into(), false)]);
+    let state = |s: &Session| {
+        let sh = s.doc().unwrap().wb.active().unwrap();
+        (sh.autofilter.clone(), sh.tables[0].filter.clone(), (0..6).filter(|&r| sh.is_row_hidden(r)).collect::<Vec<_>>())
+    };
+    let proxy = state(&s);
+    let depth = s.doc().unwrap().undo.len();
     s.execute("data.filterBy", json!({"table": "Sales", "column": "B", "top": {"count": 1}})).unwrap();
     let sh = s.doc().unwrap().wb.active().unwrap();
     assert!(sh.autofilter.is_none(), "the proxy is folded into the table");
-    assert_eq!(sh.tables[0].filter.iter().map(|(o, _)| *o).collect::<Vec<_>>(), [0, 1]);
-    assert_eq!((0..6).filter(|&r| sh.is_row_hidden(r)).collect::<Vec<_>>(), [1, 2], "East 30 shows, and the totals row");
+    assert_eq!(sh.tables[0].filter.first(), proxy.0.as_ref().unwrap().criteria.first(), "the old criterion moves unchanged");
+    assert_eq!(sh.tables[0].filter.len(), 2);
+    let applied = state(&s);
+    assert_eq!(applied.2, [1, 2], "East 30 shows, and the totals row");
+    assert_eq!(s.doc().unwrap().undo.len(), depth + 1);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(state(&s), proxy, "undo restores the exact worksheet proxy and row visibility");
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(state(&s), applied, "redo restores the exact table filter and row visibility");
+
+    s.execute("edit.undo", json!({})).unwrap();
+    s.execute("data.filterBy", json!({"table": "Sales", "column": "A", "clear": true})).unwrap();
+    let cleared = state(&s);
+    assert_eq!(cleared, (None, vec![], vec![]));
+    assert_eq!(s.doc().unwrap().undo.len(), depth + 1);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(state(&s), proxy);
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(state(&s), cleared);
+}
+
+#[test]
+fn filtering_a_table_does_not_adopt_other_overlapping_worksheet_ranges() {
+    for range in ["A1:B3", "A1:B5"] {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("range.setValues", json!({"range":"A1", "values":[["Region", "Amount"], ["East", 10], ["West", 20], ["East", 30], ["West", 40]]}))
+            .unwrap();
+        s.execute("data.filter", json!({"range":range})).unwrap();
+        s.execute("data.filterBy", json!({"column":"A", "values":["East"]})).unwrap();
+        s.execute("insert.table", json!({"range":"A1:B4", "name":"Sales", "header":true})).unwrap();
+        let worksheet = s.doc().unwrap().wb.active().unwrap().autofilter.clone();
+        assert!(worksheet.is_some());
+        s.execute("data.filterBy", json!({"table":"Sales", "column":"B", "values":["30"]})).unwrap();
+        let sh = s.doc().unwrap().wb.active().unwrap();
+        assert_eq!(sh.autofilter, worksheet, "{range} is not the table's proxy");
+        assert_eq!(sh.tables[0].filter, [(1, FilterCriterion::Values { values: vec!["30".into()], blanks: false })]);
+    }
 }
 
 #[test]

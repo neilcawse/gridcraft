@@ -1,7 +1,7 @@
 use super::sort::sort_key;
 use super::{
     AutoFilter, CellRef, EngineError, FilterCriterion, Json, Ordering, RangeRef, Result, Session, Sheet, Value, Workbook, bad, bool_param, col_param,
-    current_region, data_target, edit, json, str_param,
+    current_region, data_target, edit, json,
 };
 
 // ---------------------------------------------------------------- filter
@@ -66,20 +66,26 @@ pub(super) fn filter_by(s: &mut Session, p: &Json) -> Result<Json> {
     let sheet = s.doc()?.wb.active_sheet();
     crate::cmd::refuse_unless_allowed(s, sheet, "Filtering", |p| p.autofilter)?;
     let Some(sh) = s.doc()?.wb.sheet(sheet) else { return Err(EngineError::NoDocument) };
-    // `table` names the table whose own filter is changed (its header buttons); without it the
-    // worksheet AutoFilter is, turned on over the selection's region when there is none.
-    let table = match str_param(p, "table") {
-        Some(name) => Some(
+    // Omission keeps the legacy install/proxy behavior. Null or empty explicitly targets the worksheet.
+    let (name, worksheet_only) = match p.get("table") {
+        None => (None, false),
+        Some(Json::Null) => (None, true),
+        Some(Json::String(name)) if name.trim().is_empty() => (None, true),
+        Some(Json::String(name)) => (Some(name.as_str()), false),
+        Some(_) => return Err(bad("data.filterBy", "`table` must be a name, null, or empty")),
+    };
+    let table = name
+        .map(|name| {
             sh.tables
                 .iter()
-                .position(|t| t.name.eq_ignore_ascii_case(name) && t.filter_button)
-                .ok_or_else(|| bad("data.filterBy", format!("no table named `{name}` with filter buttons on the active sheet")))?,
-        ),
-        None => None,
-    };
+                .position(|t| t.name.eq_ignore_ascii_case(name) && t.filter_button && t.autofilter_range().is_some())
+                .ok_or_else(|| bad("data.filterBy", format!("no table named `{name}` with filter buttons on the active sheet")))
+        })
+        .transpose()?;
     let range = match (table.and_then(|i| sh.tables.get(i)), &sh.autofilter) {
         (Some(t), _) => t.range,
         (None, Some(a)) => a.range,
+        (None, None) if worksheet_only => return Err(bad("data.filterBy", "no worksheet AutoFilter on the active sheet")),
         (None, None) => {
             install_filter(s, &json!({}))?;
             s.doc()?.wb.sheet(sheet).and_then(|sh| sh.autofilter.as_ref()).map(|af| af.range).ok_or_else(|| EngineError::Other("no filter".into()))?
@@ -118,7 +124,8 @@ pub(super) fn filter_by(s: &mut Session, p: &Json) -> Result<Json> {
     };
     edit(s, |cx| {
         let sh = cx.sheet_mut(sheet)?;
-        let native = table.or_else(|| sh.tables.iter().position(|t| !t.filter.is_empty() && t.matches_autofilter(range)));
+        let native =
+            table.or_else(|| if worksheet_only { None } else { sh.tables.iter().position(|t| !t.filter.is_empty() && t.matches_autofilter(range)) });
         let criteria = if let Some(i) = native {
             sh.adopt_table_autofilter(i);
             &mut sh.tables.get_mut(i).ok_or_else(|| EngineError::Other("no table".into()))?.filter
@@ -357,27 +364,34 @@ pub(super) fn reapply(s: &mut Session, _: &Json) -> Result<Json> {
 /// filter (`data.filterBy`'s `table`), or of the worksheet AutoFilter without one.
 pub fn filter_values(wb: &Workbook, sheet: usize, table: Option<&str>, col: u32) -> Vec<(String, bool)> {
     let Some(sh) = wb.sheet(sheet) else { return vec![] };
-    let (range, selected) =
-        match table {
-            Some(name) => {
-                let Some(t) = sh.tables.iter().find(|t| t.name.eq_ignore_ascii_case(name)) else { return vec![] };
-                let Some(range) = t.autofilter_range() else { return vec![] };
-                let Some(off) = col.checked_sub(range.start.col).filter(|_| col <= range.end.col) else { return vec![] };
-                // A worksheet proxy of an older GridCraft file still holds criteria the table adopts on its next change.
-                let proxy = sh.autofilter.as_ref().filter(|af| t.matches_autofilter(af.range));
-                let selected = t.filter.iter().chain(proxy.into_iter().flat_map(|af| af.criteria.iter())).find(|(o, _)| *o == off).map(|(_, c)| c);
-                (range, selected)
-            }
-            None => {
-                let Some(af) = &sh.autofilter else { return vec![] };
-                let off = col.saturating_sub(af.range.start.col);
-                let selected =
-                    af.criteria.iter().find(|(o, _)| *o == off).map(|(_, c)| c).or_else(|| {
-                        sh.tables.iter().find(|t| t.matches_autofilter(af.range))?.filter.iter().find(|(o, _)| *o == off).map(|(_, c)| c)
-                    });
-                (sh.effective_autofilter_range(af.range), selected)
-            }
-        };
+    let Some(name) = table else { return worksheet_values(wb, sh, col, true) };
+    let Some(t) = sh.tables.iter().find(|t| t.name.eq_ignore_ascii_case(name)) else { return vec![] };
+    let Some(range) = t.autofilter_range() else { return vec![] };
+    let Some(off) = col.checked_sub(range.start.col).filter(|_| col <= range.end.col) else { return vec![] };
+    // A worksheet proxy of an older GridCraft file still holds criteria the table adopts on its next change.
+    let proxy = sh.autofilter.as_ref().filter(|af| t.matches_autofilter(af.range));
+    let selected = t.filter.iter().chain(proxy.into_iter().flat_map(|af| af.criteria.iter())).find(|(o, _)| *o == off).map(|(_, c)| c);
+    column_values(wb, sh, range, col, selected)
+}
+
+/// The worksheet popup does not inherit criteria from a separate table filter.
+pub fn worksheet_filter_values(wb: &Workbook, sheet: usize, col: u32) -> Vec<(String, bool)> {
+    wb.sheet(sheet).map_or_else(Vec::new, |sh| worksheet_values(wb, sh, col, false))
+}
+
+fn worksheet_values(wb: &Workbook, sh: &Sheet, col: u32, legacy: bool) -> Vec<(String, bool)> {
+    let Some(af) = &sh.autofilter else { return vec![] };
+    let off = col.saturating_sub(af.range.start.col);
+    let selected = af.criteria.iter().find(|(o, _)| *o == off).map(|(_, c)| c).or_else(|| {
+        if !legacy {
+            return None;
+        }
+        sh.tables.iter().find(|t| t.matches_autofilter(af.range))?.filter.iter().find(|(o, _)| *o == off).map(|(_, c)| c)
+    });
+    column_values(wb, sh, sh.effective_autofilter_range(af.range), col, selected)
+}
+
+fn column_values(wb: &Workbook, sh: &Sheet, range: RangeRef, col: u32, selected: Option<&FilterCriterion>) -> Vec<(String, bool)> {
     let mut seen = std::collections::BTreeMap::new();
     for row in range.start.row.saturating_add(1)..=range.end.row.min(range.start.row.saturating_add(1_000_000)) {
         let c = CellRef::new(row, col);
