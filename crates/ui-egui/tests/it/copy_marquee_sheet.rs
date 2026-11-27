@@ -21,11 +21,7 @@ fn copied_on_sheet2(sheets: &[&str], cut: bool) -> Harness {
     session.run("range.setValues", json!({"range": "B2", "values": [[1, 2], [3, 4]]})).unwrap();
     session.run("selection.set", json!({"range": "B2:C3"})).unwrap();
     session.run(if cut { "edit.cut" } else { "edit.copy" }, json!({})).unwrap();
-    let mut h = crate::common::harness_with(
-        crate::common::builder().with_size(egui::vec2(1200.0, 800.0)),
-        crate::common::app(session),
-        4,
-    );
+    let mut h = crate::common::harness_with(crate::common::builder().with_size(egui::vec2(1200.0, 800.0)), crate::common::app(session), 4);
     assert_eq!(h.state().session.active().unwrap().wb.sheets.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), sheets);
     assert!(ants(&h) > 0, "the marquee shows on the source sheet");
     h
