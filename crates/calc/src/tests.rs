@@ -937,6 +937,12 @@ fn lookups_distinguish_failed_linked_caches_from_local_index_errors() {
     assert_eq!([t.get("B5"), t.get("B6"), t.get("B7")], [div0.clone(), div0.clone(), Value::Error(CellError::Name)]);
     assert_eq!([t.get("B12"), t.get("B13")], [div0.clone(), div0]);
     assert_eq!([t.get("B14"), t.get("B15"), t.get("B16")], [const { Value::Error(CellError::NA) }; 3]);
+    // A multi-area index of error cells: refused on the reference-table path, lifted over its
+    // cells on the evaluated-table path; on a miss both are #N/A, on a hit the first is #REF!.
+    t.set("H20", "=VLOOKUP(\"z\",D1:E2,(D3,D3),FALSE)");
+    t.set("J20", "=VLOOKUP(\"z\",{\"x\",1;\"y\",2},(D3,D3),FALSE)");
+    t.set("L20", "=VLOOKUP(\"x\",D1:E2,(D3,D3),FALSE)");
+    assert_eq!([t.get("H20"), t.get("J20"), t.get("L20")], [Value::Error(CellError::NA), Value::Error(CellError::NA), Value::Error(CellError::Ref)]);
 }
 
 // Excel for Mac 16.115.2, Batch 5 lookup-vlookup and lookup-hlookup: the rows and expected
