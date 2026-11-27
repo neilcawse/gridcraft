@@ -144,6 +144,12 @@ fn copy_numbering_keeps_existing_unmeasured_edge_cases() {
         copy(&mut one, name, 1);
         assert_eq!(sheet_names(&one), [name, copied]);
     }
+
+    let mut whitespace = s();
+    let source = "   ";
+    whitespace.execute("home.insertSheet", json!({"name": source})).unwrap();
+    copy(&mut whitespace, source, 2);
+    assert_eq!(sheet_names(&whitespace)[2], "Sheet (2)");
 }
 
 #[test]
@@ -474,8 +480,8 @@ fn total_book_with_one_copy() -> crate::Result<Session> {
     Ok(s)
 }
 
-/// Copy provenance is in memory only: it rides along with undo, redo, renames and further copies,
-/// but a reopened workbook has no in-session copies. Only the in-session sequence was measured.
+/// GridCraft keeps copy provenance through copy chains, rename, move and undo/redo, but not
+/// through save and reopen. Excel only measured a simple in-session copy of a copy.
 #[test]
 fn copy_provenance_follows_the_sheet_until_the_workbook_is_reopened() -> crate::Result<()> {
     let mut s = total_book_with_one_copy()?;
@@ -504,7 +510,7 @@ fn copy_provenance_follows_the_sheet_until_the_workbook_is_reopened() -> crate::
     assert!(names(&s).contains(&local("Data (3)", "Total", "SUM(Sales53[Qty])")));
 
     let mut s = total_book_with_one_copy()?;
-    let (bytes, warnings) = crate::io::save_bytes_reported(wb(&s), "book.xlsx", crate::io::FileKind::Xlsx).unwrap();
+    let (bytes, warnings) = crate::io::save_bytes_reported(wb(&s), "book.xlsx", crate::io::FileKind::Xlsx)?;
     assert!(warnings.is_empty(), "{warnings:?}");
     s.execute("file.open", json!({"name": "book.xlsx", "base64": crate::io::base64_encode(&bytes)}))?;
     assert!(wb(&s).sheets.iter().all(|sh| !sh.copied_in_session));
