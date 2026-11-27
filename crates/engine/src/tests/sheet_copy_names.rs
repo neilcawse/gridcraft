@@ -442,3 +442,73 @@ fn sheet_level_copies_save_with_their_sheet_and_reopen() {
     s.execute("file.open", json!({"name": "book.xlsx", "base64": crate::io::base64_encode(&bytes)})).unwrap();
     assert_eq!((sheet_names(&s), names(&s)), changed);
 }
+
+#[test]
+fn copy_numbering_falls_back_when_the_next_number_does_not_fit_u64() {
+    let max = u64::MAX;
+    let below = max - 1;
+    for (tabs, expected) in [
+        (vec![format!("Q ({below})")], format!("Q ({max})")),
+        (vec![format!("Q ({below})"), format!("Q ({max})")], format!("Q ({below}) (2)")),
+        (vec![format!("Q({below})"), format!("Q({max})")], format!("Q({below}) (2)")),
+    ] {
+        let mut s = s();
+        s.execute("sheet.rename", json!({"sheet": 0, "name": tabs[0]})).unwrap();
+        for name in &tabs[1..] {
+            s.execute("home.insertSheet", json!({"name": name})).unwrap();
+        }
+        copy(&mut s, &tabs[0], tabs.len());
+        assert_eq!(sheet_names(&s).last(), Some(&expected));
+    }
+}
+
+/// Data with table `Sales5` and workbook `Total = SUM(Sales5[Qty])`, copied once to `Data (2)`.
+fn total_book_with_one_copy() -> crate::Result<Session> {
+    let mut s = s();
+    s.execute("sheet.rename", json!({"sheet": 0, "name": "Data"}))?;
+    s.execute("range.setValues", json!({"range": "A1", "values": [["Region", "Qty"], ["East", 3], ["West", 5], ["East", 2], ["North", 8]]}))?;
+    s.execute("insert.table", json!({"range": "A1:B5", "name": "Sales5"}))?;
+    s.execute("cell.set", json!({"cell": "H1", "input": "=SUM(Sales5[Qty])"}))?;
+    s.execute("formulas.defineName", json!({"name": "Total", "refersTo": "=SUM(Sales5[Qty])"}))?;
+    copy(&mut s, "Data", 1);
+    Ok(s)
+}
+
+/// Copy provenance is in memory only: it rides along with undo, redo, renames and further copies,
+/// but a reopened workbook has no in-session copies. Only the in-session sequence was measured.
+#[test]
+fn copy_provenance_follows_the_sheet_until_the_workbook_is_reopened() -> crate::Result<()> {
+    let mut s = total_book_with_one_copy()?;
+    copy(&mut s, "Data (2)", 2);
+    copy(&mut s, "Data (3)", 3);
+    for sheet in ["Data (2)", "Data (3)", "Data (4)"] {
+        assert!(names(&s).contains(&local(sheet, "Total", "SUM(Sales53[Qty])")), "{sheet}");
+    }
+    let newest = wb(&s).sheets[3].tables[0].name.clone();
+    assert_ne!(newest, "Sales53");
+    assert_eq!(formula(&s, "Data (4)", "H1"), format!("SUM({newest}[Qty])"));
+
+    let mut s = total_book_with_one_copy()?;
+    s.execute("sheet.rename", json!({"sheet": "Data (2)", "name": "Foo"}))?;
+    s.execute("sheet.move", json!({"sheet": "Foo", "to": 0}))?;
+    copy(&mut s, "Foo", 2);
+    assert_eq!(sheet_names(&s), ["Foo", "Data", "Foo (2)"]);
+    assert!(names(&s).contains(&local("Foo (2)", "Total", "SUM(Sales53[Qty])")));
+
+    let mut s = total_book_with_one_copy()?;
+    copy(&mut s, "Data (2)", 2);
+    s.execute("edit.undo", json!({}))?;
+    s.execute("edit.undo", json!({}))?;
+    s.execute("edit.redo", json!({}))?;
+    copy(&mut s, "Data (2)", 2);
+    assert!(names(&s).contains(&local("Data (3)", "Total", "SUM(Sales53[Qty])")));
+
+    let mut s = total_book_with_one_copy()?;
+    let (bytes, warnings) = crate::io::save_bytes_reported(wb(&s), "book.xlsx", crate::io::FileKind::Xlsx).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    s.execute("file.open", json!({"name": "book.xlsx", "base64": crate::io::base64_encode(&bytes)}))?;
+    assert!(wb(&s).sheets.iter().all(|sh| !sh.copied_in_session));
+    copy(&mut s, "Data (2)", 2);
+    assert!(names(&s).contains(&local("Data (3)", "Total", "SUM(Sales534[Qty])")));
+    Ok(())
+}
