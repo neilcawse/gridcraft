@@ -351,7 +351,7 @@ fn filter_forwards_table_exactly_through_json_rpc() {
         ok(&mut s, "filter", args);
         assert_eq!(*calls.borrow(), [("engine.execute".to_string(), json!({"command": "data.filterBy", "params": expected}))]);
     }
-    for table in [Value::Null, json!(""), json!("Flags")] {
+    for table in [Value::Null, json!(""), json!(" \t"), json!("Flags")] {
         calls.borrow_mut().clear();
         fails(&mut s, "filter", json!({"range": "A1:A3", "column": "A", "table": table, "values": ["keep"]}));
         assert!(calls.borrow().is_empty(), "{:?}", calls.borrow());

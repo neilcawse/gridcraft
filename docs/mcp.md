@@ -64,13 +64,15 @@ with a file open.
   AutoFilter for the selection's current region if needed. `range`, if given, sets the selection first.
 - Pass `table: null`, `table: ""`, or a whitespace-only string to use only the existing worksheet AutoFilter.
   If none exists, the tool returns an error without creating one.
-- Pass a table name (case-insensitive) to use that table's own filter. The table must have a header row and visible
-  filter buttons. Find names in `inspect_workbook` under `sheets[].tables[].name`.
+- Pass a table name to use that table's own filter. Matching ignores ASCII letter case; non-ASCII characters
+  must match exactly. The table must have a header row and visible filter buttons. Find names in
+  `inspect_workbook` under `sheets[].tables[].name`.
 
 Omit `range` whenever you pass `table`; the tool rejects the combination before running any command, so the selection
 and filters are unchanged. A `table` value other than a string or `null` is rejected by MCP schema validation
-(`-32602`) before the tool runs; embedders calling `call_tool` directly get `data.filterBy`'s own type error instead.
-Other errors (no such table, no worksheet AutoFilter) are `data.filterBy`'s messages, returned as tool errors.
+(`-32602`) before the tool runs. Embedders calling `call_tool` directly bypass schema validation; when an invalid
+value reaches `data.filterBy`, it returns its own type error. Target errors such as a missing table or worksheet
+AutoFilter likewise come from `data.filterBy` and are returned as tool errors.
 
 Every tool that acts on a workbook (all but `list_commands`, `list_functions`, `list_windows`, `open_workbook`,
 `new_workbook` and `screenshot`) also takes `window` or `doc`, an id from `list_windows`, and acts in that window
