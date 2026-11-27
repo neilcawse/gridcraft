@@ -651,6 +651,38 @@ fn row_sort_leaves_hidden_rows_in_place() {
     assert_eq!(s.doc().unwrap().wb.sheets[0], after, "redo restores the sort");
 }
 
+#[test]
+fn row_sort_replaces_each_moved_line_record_including_absence() {
+    use gridcraft_model::LineInfo;
+
+    let mut s = Session::new();
+    s.new_workbook();
+    s.execute("range.setValues", json!({"range": "A1", "values": [["Key"], [3], [9], [null], [1], [2], [100]]})).unwrap();
+    s.execute("home.fillColor", json!({"range": "2:2", "color": "#FFFF00"})).unwrap();
+    let sh = Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+    let styled = LineInfo { size: Some(40.0), saved_size: Some(30.0), custom: true, thick_edges: (true, true), ..sh.rows[&1] };
+    assert!(styled.style.is_some());
+    let bare = LineInfo { saved_element: true, ..Default::default() };
+    let hidden = LineInfo { size: Some(32.0), hidden: true, outline: 1, custom: true, ..Default::default() };
+    let untouched = LineInfo { size: Some(28.0), custom: true, collapsed: true, ..Default::default() };
+    sh.rows.extend([(0, untouched), (1, styled), (2, hidden), (3, bare), (6, untouched)]);
+    for row in [4, 5] {
+        assert!(!sh.rows.contains_key(&row));
+    }
+
+    s.execute("data.sort", json!({"range": "A1:A6", "header": true, "keys": [{"column": "A"}]})).unwrap();
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    let keys = [1, 2, 3, 4, 5, 6].map(|row| sh.value(CellRef::new(row, 0)));
+    assert_eq!(keys, [Value::Number(1.), Value::Number(9.), Value::Number(2.), Value::Number(3.), Value::Empty, Value::Number(100.)]);
+    assert_eq!(sh.rows.get(&1), None, "the recordless source does not inherit a style, edges or custom height");
+    assert_eq!(sh.rows.get(&3), None, "the bare marker does not stay on its old row");
+    assert_eq!(sh.rows.get(&4), Some(&styled));
+    assert_eq!(sh.rows.get(&5), Some(&bare));
+    assert_eq!(sh.rows.get(&2), Some(&hidden));
+    assert_eq!(sh.rows.get(&0), Some(&untouched), "the header is outside the sort body");
+    assert_eq!(sh.rows.get(&6), Some(&untouched), "the row below the range does not change");
+}
+
 /// Sorting left to right leaves hidden columns where they are, a column shown with no width
 /// included, the way the row sort treats rows. Derived from Microsoft's "Sort data in a range or
 /// table" ("hidden columns are not moved when you sort columns"); not measured in Excel.
