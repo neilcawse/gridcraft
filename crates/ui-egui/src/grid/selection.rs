@@ -160,9 +160,13 @@ pub(crate) fn paint_selection(input: SelectionPaintInput<'_>) {
         let x = geo.x(sh, *before);
         p.line_segment([pos2(x, geo.rect.top()), pos2(x, geo.rect.bottom())], Stroke::new(3.0, t.accent));
     }
-    // Marching ants around the copied range.
+    // Marching ants around the copied range, on the sheet it was copied from. That sheet is found
+    // by its identity, as a paste checks a cut's source (`Clipboard::check_cut_source`): inserting,
+    // deleting or moving sheets can leave its old index on another sheet, and a deleted source
+    // shows no ants.
     if let Some(clip) = &app.session.clipboard
-        && app.session.active().is_some_and(|d| d.uid == clip.doc_uid && d.wb.active_sheet() == clip.sheet)
+        && app.session.active().is_some_and(|d| d.uid == clip.doc_uid)
+        && clip.wb.sheets.get(clip.sheet).is_some_and(|source| source.uid.get() == sh.uid.get())
         && range_in_pane(clip.range, rows, cols)
     {
         // A multi-area copy marks each area as selected.
