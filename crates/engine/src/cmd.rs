@@ -375,6 +375,8 @@ pub struct Ctx<'a> {
     pub sel: &'a mut Selection,
     /// Rows whose automatic height should be recomputed (sheet, row).
     pub fit_rows: Vec<(usize, u32)>,
+    /// This command already chose its fit rows; don't infer additional rows from changed cells.
+    pub explicit_fit_rows: bool,
     /// The command applied sheet protection itself (row/column inserts and deletes the
     /// protection allows), so cells it shifts aren't refused as edits of locked cells.
     pub protection_checked: bool,
@@ -468,6 +470,7 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
         recalc_all: false,
         sel: &mut sel,
         fit_rows: Vec::new(),
+        explicit_fit_rows: false,
         protection_checked: false,
         moved_names: Vec::new(),
         changed_names: Vec::new(),
@@ -481,6 +484,7 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
         structural,
         recalc_all,
         mut fit_rows,
+        explicit_fit_rows,
         protection_checked,
         moved_names,
         changed_names: rewrite_changed_names,
@@ -519,7 +523,7 @@ pub(crate) fn commit<R>(d: &mut DocState, f: impl FnOnce(&mut Ctx) -> Result<R>)
             }
         }
     }
-    if changed.len() <= 200_000 {
+    if !explicit_fit_rows && changed.len() <= 200_000 {
         fit_rows.extend(changed.iter().map(|(s, c)| (*s, c.row)));
     }
     if let Some(t0) = t0 {
