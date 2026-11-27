@@ -5,11 +5,34 @@ use super::{Arc, CellRef, Drag, FillTag, RangeRef, Rect, Sense, Sheet, SheetApp,
 
 /// Draws the filter-header popup: sort, search/select-all, apply/clear, a lazily installed table autofilter, new-open search focus and dismissal.
 pub(super) fn filter_menu(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_open: bool) {
-    let Some((col, row, at)) = app.grid.filter_menu else { return };
+    let Some((col, row, at)) = app.grid.filter_menu else {
+        app.grid.filter_menu_sheet = None;
+        return;
+    };
+    let key = egui::Id::unique(("filter_sel", col));
+    let search_key = egui::Id::unique(("filter_search", col));
+    let buttons_key = egui::Id::unique(("filter_buttons", col));
+    let forget = |ctx: &egui::Context| {
+        ctx.data_mut(|d| {
+            d.remove::<Vec<(String, bool)>>(key);
+            d.remove::<String>(search_key);
+            d.remove::<Vec<egui::Id>>(buttons_key);
+        });
+    };
     let Some(d) = app.session.active() else { return };
     let wb = d.wb.clone();
     let si = wb.active_sheet();
     let Some(sh) = wb.sheet(si) else { return };
+    // The popup belongs to the sheet it opened on. A sheet switch, insert or window change made
+    // while it is open by anything but a click (which dismisses it), such as a control client,
+    // closes it instead of letting it sort or filter the sheet now shown.
+    let home = (d.uid, sh.uid.get());
+    if *app.grid.filter_menu_sheet.get_or_insert(home) != home {
+        forget(ui.ctx());
+        app.grid.filter_menu = None;
+        app.grid.filter_menu_sheet = None;
+        return;
+    }
     let _ = geo;
     let header = CellRef::new(row, col);
     let table = filter_table(sh, header);
@@ -27,9 +50,6 @@ pub(super) fn filter_menu(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_
     }
     let wb = app.session.active().map(|d| d.wb.clone()).unwrap_or(wb);
     let values = gridcraft_engine::cmd::data::filter_values(&wb, si, col);
-    let key = egui::Id::unique(("filter_sel", col));
-    let search_key = egui::Id::unique(("filter_search", col));
-    let buttons_key = egui::Id::unique(("filter_buttons", col));
     // Enter is the menu's OK, as in Excel: taken before the search box (which would only drop its
     // focus) and the value checkboxes (which would toggle) see it. A focused button keeps it as its click.
     let buttons: Vec<egui::Id> = ui.ctx().data_mut(|d| d.get_temp(buttons_key)).unwrap_or_default();
@@ -108,12 +128,9 @@ pub(super) fn filter_menu(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_
         });
     });
     if close || popup_dismissed(&response.response, was_open) {
-        ui.ctx().data_mut(|d| {
-            d.remove::<Vec<(String, bool)>>(key);
-            d.remove::<String>(search_key);
-            d.remove::<Vec<egui::Id>>(buttons_key);
-        });
+        forget(ui.ctx());
         app.grid.filter_menu = None;
+        app.grid.filter_menu_sheet = None;
     }
 }
 

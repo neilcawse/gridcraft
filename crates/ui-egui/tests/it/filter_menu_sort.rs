@@ -109,3 +109,80 @@ fn table_filter_sorts_clicked_column_descending_from_outside_the_table() -> Test
     assert_eq!(sheet(&h)?.value(CellRef::new(1, 7)).display(), "Y");
     Ok(())
 }
+
+fn harness(s: Session) -> Harness {
+    common::harness_with(common::builder().with_size(vec2(1200.0, 800.0)), common::app(s), 4)
+}
+
+fn column_of(h: &Harness, sheet: usize, col: u32, rows: u32) -> TestResult<Vec<String>> {
+    let sh = h.state().session.active().and_then(|d| d.wb.sheet(sheet)).ok_or("sheet")?;
+    Ok((0..rows).map(|row| sh.value(CellRef::new(row, col)).display()).collect())
+}
+
+fn open_menu(h: &mut Harness, header: CellRef) -> TestResult {
+    let sh = sheet(h)?;
+    let geo = grid::Geo::new(sh, h.state().grid.rect.ok_or("grid rect")?, h.state().view().scroll);
+    click(h, grid::filter_button_rect(&geo, sh, header).center());
+    assert!(h.state().grid.filter_menu.is_some(), "header button opens its popup");
+    Ok(())
+}
+
+/// Clicks Sort Ascending if the popup still shows it.
+fn click_ascending_if_shown(h: &mut Harness) {
+    if let Some(button) = h.query_by_label("↑  Sort Ascending").map(|b| b.rect().center()) {
+        click(h, button);
+    }
+}
+
+#[test]
+fn popup_left_open_across_a_sheet_switch_sorts_neither_sheet() -> TestResult {
+    let mut s = Session::new();
+    s.new_workbook();
+    s.execute("range.setValues", json!({"range":"A1", "values":[["N"], ["c"], ["a"], ["b"]]}))?;
+    s.execute("data.filter", json!({"range":"A1:A4"}))?;
+    s.execute("home.insertSheet", json!({}))?;
+    s.execute("range.setValues", json!({"range":"A1", "values":[["M"], ["z"], ["x"], ["y"]]}))?;
+    s.execute("data.filter", json!({"range":"A1:A4"}))?;
+    s.execute("sheet.activate", json!({"sheet": 0}))?;
+    let mut h = harness(s);
+    open_menu(&mut h, CellRef::new(0, 0))?;
+    // Not a click (that would dismiss the popup): a control client switches sheets.
+    h.state_mut().run("sheet.activate", json!({"sheet": 1}))?;
+    h.run_steps(2);
+    click_ascending_if_shown(&mut h);
+    assert!(h.state().grid.filter_menu.is_none(), "the popup closes with the sheet it opened on");
+    assert_eq!(column_of(&h, 0, 0, 4)?, ["N", "c", "a", "b"]);
+    assert_eq!(column_of(&h, 1, 0, 4)?, ["M", "z", "x", "y"], "the newly shown sheet's filter is not sorted");
+    Ok(())
+}
+
+#[test]
+fn popup_whose_filter_was_removed_sorts_nothing() -> TestResult {
+    let mut s = Session::new();
+    s.new_workbook();
+    s.execute("range.setValues", json!({"range":"A1", "values":[["N"], ["c"], ["a"], ["b"]]}))?;
+    s.execute("data.filter", json!({"range":"A1:A4"}))?;
+    let mut h = harness(s);
+    open_menu(&mut h, CellRef::new(0, 0))?;
+    h.state_mut().run("data.filter", json!({}))?;
+    h.run_steps(2);
+    assert!(sheet(&h)?.autofilter.is_none());
+    click_ascending_if_shown(&mut h);
+    assert_eq!(column_of(&h, 0, 0, 4)?, ["N", "c", "a", "b"], "no filter owns the header any more");
+    Ok(())
+}
+
+#[test]
+fn table_away_from_column_a_sorts_by_the_clicked_column_and_keeps_its_totals() -> TestResult {
+    let mut s = Session::new();
+    s.new_workbook();
+    s.execute("range.setValues", json!({"range":"C3", "values":[["Name", "Score"], ["Zoe", 4], ["Bob", 1], ["Amy", 5]]}))?;
+    s.execute("insert.table", json!({"range":"C3:D6", "header":true, "name":"Offset"}))?;
+    s.execute("table.totalRow", json!({"table":"Offset", "on":true}))?;
+    s.execute("selection.set", json!({"range":"A1"}))?;
+    let mut h = harness(s);
+    sort_from_button(&mut h, CellRef::new(2, 3), "↑  Sort Ascending")?;
+    assert_eq!(column_of(&h, 0, 2, 8)?, ["", "", "Name", "Bob", "Zoe", "Amy", "Total", ""]);
+    assert_eq!(column_of(&h, 0, 3, 8)?, ["", "", "Score", "1", "4", "5", "10", ""]);
+    Ok(())
+}
