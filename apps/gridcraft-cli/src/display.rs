@@ -697,6 +697,61 @@ mod tests {
     }
 
     #[test]
+    fn display_group_keeps_a_collapsed_marker_only_at_the_member_edge() {
+        use gridcraft_engine::model::{DrawingMarker, DrawingPlacement};
+
+        // Inferred, not measured in Excel. Columns B:C and rows 7:8 have no size, so B7 and D9
+        // share a corner. The marker is kept only where its point is the members' start.
+        let from = DrawingMarker { col: 1, row: 6, col_off: 0, row_off: 0 };
+        let two_cell = |from| DrawingPlacement::TwoCell { from, to: DrawingMarker { col: 5, row: 10, col_off: 0, row_off: 0 }, edit_as: None };
+        let offset = DrawingMarker { col_off: 4 * 9525, row_off: 4 * 9525, ..from };
+        let absolute = DrawingPlacement::Absolute { pos: (64 * 9525, 120 * 9525), ext: (128 * 9525, 40 * 9525) };
+        // (placement, member shift in px, stale file, lines collapsed after placing, cell, dx_pt, dy_pt)
+        for (case, placement, shift, stale, collapse_after, cell, dx, dy) in [
+            ("flush", two_cell(from), (0.0, 0.0), false, false, "B7", 0.0, 0.0),
+            ("members a row lower", two_cell(from), (0.0, 20.0), false, false, "B10", 0.0, 0.0),
+            ("members a column right", two_cell(from), (64.0, 0.0), false, false, "E7", 0.0, 0.0),
+            ("members inset", two_cell(from), (4.0, 4.0), false, false, "D9", 3.0, 3.0),
+            ("marker offset off the edge", two_cell(offset), (-4.0, -4.0), false, false, "D9", 0.0, 0.0),
+            ("stale file placement", two_cell(from), (0.0, 0.0), true, false, "D9", 0.0, 0.0),
+            ("absolute position", absolute, (0.0, 0.0), false, true, "D9", 0.0, 0.0),
+        ] {
+            let mut wb = Workbook::new();
+            let sh = Arc::make_mut(&mut wb.sheets[0]);
+            sh.default_row_height = 20.0;
+            sh.default_col_width = 64.0;
+            let collapse = |sh: &mut Sheet| {
+                for line in 1..3 {
+                    sh.cols.insert(line, LineInfo { hidden: true, ..LineInfo::default() });
+                }
+                for line in 6..8 {
+                    sh.rows.insert(line, LineInfo { size: Some(0.0), custom: true, ..LineInfo::default() });
+                }
+            };
+            if !collapse_after {
+                collapse(sh);
+            }
+            placed_group(sh, placement, 0, 0.0);
+            if collapse_after {
+                collapse(sh);
+            }
+            let mut bounds = sh.anchor_rect(&sh.shapes[0].anchor);
+            bounds.x += shift.0;
+            bounds.y += shift.1;
+            bounds.w -= shift.0;
+            bounds.h -= shift.1;
+            sh.shapes[0].anchor = sh.rect_anchor(bounds, sh.shapes[0].anchor.mode);
+            if stale {
+                sh.groups[0].anchor.width += 1.0;
+            }
+
+            let result = render(&wb, None);
+            let group = &result["sheets"][0]["drawings"][1]["anchor"];
+            assert_eq!((&group["cell"], &group["dx_pt"], &group["dy_pt"]), (&json!(cell), &json!(dx), &json!(dy)), "{case}");
+        }
+    }
+
+    #[test]
     fn display_v1_cell_schema() {
         let mut wb = Workbook::new();
         let style = wb.styles.derive(StyleId::DEFAULT, |s| {
