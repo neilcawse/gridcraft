@@ -381,11 +381,11 @@ Measured, Excel for Mac 16.115.2 (synthetic action probes):
 | `x23-p3-table-r` | Source `name=R`, `display_name=R_`; copy `R__3` in both properties. Formula changes from `SUM(R_[Qty])` to `SUM(R__3[Qty])`. | The table model stores the display spelling. Sheet copy of modeled `R_` inserts a separator to produce `R__3`; table rename and validation are unchanged. |
 | `x23-p4-table-255` | `T` + 254 `x` becomes `T` + 252 `x` + `3` (254 characters); the copied formula uses that exact name. | Same; when the base plus suffix would exceed 255 characters, trim the base so the result fits 254. |
 
-P1 also measured a defined-name difference. Excel's first copy creates local `Local` and a local `Global` that shadows the workbook name, both referring to `Sales5[Qty]`; the second copy from `Data` does the equivalent for `Sales7`. On the copy of the first copy, both locals still refer to `Sales5[Qty]`, even though the copied cells now use `Sales59[Qty]`. X35 adds the sheet-level copies of workbook names and Excel's tab name for a copy of a copy; it deliberately leaves GridCraft's copy-of-copy retargeting unchanged.
+P1 also measured the defined-name bindings now implemented by X43: both locals follow `Sales5` or `Sales7` on the first two copies from `Data`, but stay on `Sales5` when `Data (2)` is copied. The copied cells still move to `Sales59`.
 
 Sheet copy uses X27's `Workbook::table_name_taken` plus the names already allocated to this copy.
 
-GridCraft retargets explicit structured references in the copied sheet's cells, calculated columns, custom totals, sheet-scoped names, conditional formatting, data validation, and charts. The copy's table slicers follow its copied tables too (`Workbook::retarget_table_on_sheet`). Table-local structured references with no table token need no rewrite; bare table-name formulas are left alone. The public sample also shows an explicit totals-row reference retargeted to `SUBTOTAL(109,Table69[Sales])`.
+GridCraft retargets explicit structured references in the copied sheet's cells, calculated columns, custom totals, conditional formatting, data validation, and charts. The copy's table slicers follow its copied tables too (`Workbook::retarget_table_on_sheet`). Defined names are handled separately (see X35/X43 below). Table-local structured references with no table token need no rewrite; bare table-name formulas are left alone. The public sample also shows an explicit totals-row reference retargeted to `SUBTOTAL(109,Table69[Sales])`.
 
 Slicers: a copied slicer drops its import provenance (cache name, marker and item options), as X19 documents. At save, X19's planner gives it a fresh `Slicer_<column>` cache name and a unique slicer name, and binds the cache to the copied table's written id. Save, reopen and save again keep the same tables, bindings and formulas. `scripts/parity/table_slicer_package_diff.py` was run on a synthetic copy against its re-save. The copy's cache `Slicer_Region2` resolves to the copied table `Sales3`, and the original's `Slicer_Region` resolves to `Sales`. The copy has slicer name `Region 2` and visible caption `Region`. The diff reports no difference, and the re-saved package is byte-identical.
 
@@ -403,32 +403,52 @@ Base: X23 head `ddd2380538e78d5e67872771ec675aa45e532bc3`. Evidence: `x23-p1-cop
 
 Measured (P1: `Data` and `Report` exist; copy `Data` after `Data`, copy `Data` to the end, then copy `Data (2)` to the end):
 
-| Copy | Sheets before | Excel tab | Excel names on the copy | GridCraft after X35 |
+| Copy | Sheets before | Excel tab | Excel names on the copy | GridCraft |
 | --- | --- | --- | --- | --- |
 | 1, of `Data` | `Data`, `Report` | `Data (2)` | `Global` and `Local`, both `=SUM(Sales5[Qty])` | Same |
 | 2, of `Data` | `Data`, `Data (2)`, `Report` | `Data (3)` | `Global` and `Local`, both `=SUM(Sales7[Qty])` | Same |
-| 3, of `Data (2)` | `Data`, `Data (2)`, `Report`, `Data (3)` | `Data (4)` | `Global` and `Local`, both `=SUM(Sales5[Qty])`; the copied cells use `Sales59` | Tab same; both names `=SUM(Sales59[Qty])` (GridCraft still retargets them; see below) |
+| 3, of `Data (2)` | `Data`, `Data (2)`, `Report`, `Data (3)` | `Data (4)` | `Global` and `Local`, both `=SUM(Sales5[Qty])`; the copied cells use `Sales59` | Tab same; X43 also preserves the two names' bindings |
 
 In every copy, the workbook-scoped `Global` and `Data`'s `Local` remain `=SUM(Sales[Qty])`. Table names (`Sales5`/`Keys6`, `Sales7`/`Keys8`, `Sales59`/`Keys610`) are X23's and unchanged.
 
-Tab name (`copied_sheet_name` in `crates/engine/src/cmd/sheet/tabs.rs`): a source name ending in ` (n)` (decimal digits) is numbered from its base, so a copy of `Data (2)` takes the next free `Data (k)` instead of becoming `Data (2) (2)`. Inferred, not measured:
-- Lowest free number from 2, not one more than the source's or the largest existing number. In P1 the free numbers were 2, 3, then 4, so these rules give the same result. With gaps (`Data (3)` alone, copied) GridCraft gives `Data (2)`. A user name such as `Budget (2019)` is treated as a copy number too, so its copy is `Budget (2)`.
-- Only ` (digits)` at the end counts: `Q(2)`, `Q (2a)` and `Q ()` copy as `Q(2) (2)` and so on. A name that is only a number in parentheses keeps it. Leading zeros count as digits (`Data (02)` copies to `Data (2)` if free), and the digit run is not parsed as a number.
-- To stay within 31 characters, GridCraft counts Unicode scalar values as elsewhere in the workbook model, fits the suffix, and trims trailing whitespace from the shortened base. If nothing remains, it uses `Sheet` as the base. The generated tab skips case-folded collisions, including non-ASCII names and names of tabs preserved for export. General sheet lookup is unchanged.
-No Microsoft documentation found describes the numbering rule.
+X35 originally numbered a spaced suffix from the lowest free number at or above 2. X43 replaces that inference using the Batch 5 readbacks below.
 
 Sheet-level copies of workbook names: when a sheet is copied, each workbook-scoped name that refers to it gets a sheet-level copy on the copy. That copy has the same name, comment and hidden flag, and the copy's sheet name and table names in its formula. It is written with the copy's `localSheetId` and reopens with that scope. Within the copy, it shadows the workbook name, as Excel's readback shows. The copy is part of the same undoable edit as the sheet copy, so undo removes it along with the sheet. Inferred, not measured:
 - "Refers to the sheet" means the formula names the sheet (a qualified reference or name; 3-D span ends follow the rename rule already applied to the sheet's own names) or has an explicit structured reference to one of the sheet's tables. A bare table name (`=ROWS(Sales)`), a constant and references to other sheets or their tables give no copy. Only structured references were measured.
 - A name the source sheet already defines (copy 3: `Data (2)!Global`) is copied from that sheet-level definition, not again from the workbook name. P1 fits this: copy 3 has one `Global`. If an imported file contains duplicate names within a scope, only its first definition is eligible, matching GridCraft's name lookup.
 - Workbook names starting with `_xl` (Excel's internal names, such as `_xlchart.*`) do not gain sheet-local copies.
 
-Copy-of-copy binding is a known mismatch. In P1's third copy Excel kept both names at `Sales5` while the cells moved to `Sales59`. GridCraft deliberately keeps its current behavior: both copied names retarget to `Sales59`, as the regression test asserts. The Excel rule behind the observed mismatch remains unmeasured; X35 adds no copy provenance, table-origin tracking, or name-shape heuristic.
+X43 supersedes X35's decision to retarget inherited local names even on a copy of a copy.
 
-Out of scope: P3's reserved `R` and split `name`/`displayName` surface wait on the lead decision shared with X27.
+Out of scope: P3's reserved `R` and split `name`/`displayName` surface (see X43 below).
 
-Published behavior changes: a copy of a numbered sheet is named from the base (`Data (4)`, was `Data (2) (2)`), and a copy now gains sheet-level definitions of workbook names that refer to its source.
+X35 introduced sheet-level definitions of workbook names that refer to the source and stopped appending a second suffix to an already numbered tab such as `Data (2)`.
 
-Tests: `crates/engine/src/tests/sheet_copy_names.rs` covers the P1 sequence (tabs, tables, names and their values), the inferred numbering and reference cases, undo/redo across two copies, and XLSX `localSheetId` and reopen before and after moving and deleting tabs. `sheet_copy_tables.rs` now expects `Data (4)` for its copies of copies.
+Tests: `crates/engine/src/tests/sheet_copy_names.rs` covers the P1 sequence (tabs, tables, names and their values), the reference cases, undo/redo across two copies, and XLSX `localSheetId` and reopen before and after moving and deleting tabs. `sheet_copy_tables.rs` now expects `Data (4)` for its copies of copies. X43 replaced X35's inferred numbering tests with the Batch 5 readbacks.
+
+## X43 — Increment numbered copy tabs; preserve inherited local table bindings
+
+Batch 5, Excel for Mac 16.115.2, synthetic staged read-only fixtures. The independent readbacks show:
+
+| Case | Source and result |
+| --- | --- |
+| `x35-number-gap` | `Data (3)` → `Data (4)` even with `Data (2)` free. |
+| `x35-number-year` | `Budget (2019)` → `Budget (2020)`. |
+| `x35-number-glued` | `Q(2)` → `Q(3)` with no added space. |
+| `x35-number-31-chars` | `ABCDEFGHIJKLMNOPQRSTUVWXYZabcde` → `ABCDEFGHIJKLMNOPQRSTUVWXYZa (2)` (31 characters). |
+| `x35-total-copy`, `x35-copy-of-copy` | `Data` → `Data (2)` → `Data (3)`; tables `Sales5` → `Sales53` → `Sales534`. On both copies the local `Total` reads `=SUM(Sales53[Qty])`, whereas H1 on each sheet names that sheet's own table. Workbook `Total` remains `=SUM(Sales5[Qty])`. |
+
+The inferred naming rule starts after the source's trailing parenthesised number, keeping the separator, and skips occupied candidates (Batch 4 P1 skips `Data (3)` when copying `Data (2)`). Without a numbered suffix, start with ` (2)`. Only a single ASCII space counts as the separator; any other character before `(` stays part of the base, as in `Q(2)`. The base is kept verbatim unless it must be shortened; only a shortened base loses trailing whitespace. The 31-character limit was confirmed for an ASCII base; existing case-folded collision checks, including preserved tabs, are unchanged. Not measured, kept from X35: a malformed suffix (`Q (2a)`, `Q ()`) or a bare parenthesised number (`(2)`) gets ` (2)` appended; a spaced suffix with a leading zero, including `(0)`, or one too large for a 64-bit count restarts at ` (2)` after its base (`Data (02)` → `Data (2)`). A glued suffix in those cases is treated as part of the base (`Q(0)` → `Q(0) (2)`). If the incremented number reaches the 64-bit limit while every candidate is taken, numbering restarts at ` (2)` after the whole source name.
+
+Also unmeasured: GridCraft uses `Sheet` when the whole base is whitespace or shortening leaves only whitespace (for example, a tab named `   ` copies to `Sheet (2)`).
+
+An original sheet's local names and newly localized workbook names follow the copied tables. When copying a sheet that was itself copied in this session, every name in the source sheet's local scope keeps its table reference; sheet qualifiers are still adjusted as before. That includes a local name the user defined on the copy after it was made, which no probe measured. Inferred, not measured: a workbook name that is newly localized on a copy of a copy (one the source sheet does not shadow) still follows the new tables, as do cells and other table consumers (measured for cells). Workbook names are never rewritten. GridCraft tracks whether the sheet was copied only in memory (`Sheet::copied_in_session`, not written to XLSX or JSON). Undo and redo restore it with the sheet, and renaming or moving the copy keeps it. After save and reopen, GridCraft treats the source as an original for name binding. Excel's behavior on a copy after save and reopen remains unmeasured, as do later edits to the names in these sequences.
+
+Published behavior changes (from X35's `24e48086`): copying `Data (3)` when `Data (2)` is free gives `Data (4)` (was `Data (2)`). `Budget (2019)` copies to `Budget (2020)` (was `Budget (2)`), and `Q(2)` to `Q(3)` (was `Q(2) (2)`). On a copy of an in-session copy, the inherited local names keep the source copy's table: P1's `'Data (4)'!Global` and `'Data (4)'!Local` are now `=SUM(Sales5[Qty])` (were `=SUM(Sales59[Qty])`), and Batch 5's `'Data (3)'!Total` is `=SUM(Sales53[Qty])` (was `=SUM(Sales534[Qty])`). Cell formulas are unchanged.
+
+No X23 table-name allocator change was needed. P3's copy of formula-visible `R_` still produces `R__3`. Excel's raw `AB` → `R` object-model rename splits `name=R` / `display_name=R_`; GridCraft's `table.rename` rejects `R` as invalid and retains the single-name Table Design model. P1's entry of `=SUM(Data!Sales[Qty])` already works: Excel and GridCraft both expose `=SUM(Sales[Qty])` with value 18.
+
+Tests build the workbooks in code in `crates/engine/src/tests/sheet_copy_names.rs` and `sheet_copy_tables.rs`.
 
 ## X22 — Table rename follows references
 

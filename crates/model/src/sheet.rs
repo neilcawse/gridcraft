@@ -107,6 +107,9 @@ pub struct Sheet {
     /// sheet by its id keeps finding it; 0 for a sheet the file did not have. Not in JSON.
     #[serde(skip)]
     pub file_id: u32,
+    /// Whether this sheet was copied in the current session. Not persisted.
+    #[serde(skip)]
+    pub copied_in_session: bool,
     /// Whether this worksheet uses Lotus 1-2-3 transition formula evaluation.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub transition_evaluation: bool,
@@ -238,6 +241,7 @@ impl Sheet {
             name: name.into(),
             uid: SheetUid::fresh(),
             file_id: 0,
+            copied_in_session: false,
             transition_evaluation: false,
             cells: CellStore::new(),
             cell_pictures: BTreeMap::new(),

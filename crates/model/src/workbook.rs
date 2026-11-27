@@ -887,21 +887,18 @@ impl Workbook {
 
     /// Points sheet `si`'s own references to table `old` at table `new`, as a sheet copy does for
     /// each table it copies (`si` the copy, `old` the original table and `new` its copy). That
-    /// retargets structured references in formulas, names, formatting and validation rules, and
-    /// chart series. Table slicers also follow the copy. Bare table names are left alone, as are
-    /// references on other sheets and workbook-scoped names.
-    pub fn retarget_table_on_sheet(&mut self, si: usize, old: &str, new: &str) {
+    /// retargets cells, formatting and validation rules, chart series, and the supplied copy-local
+    /// names. Table slicers also follow the copy. Bare table names are left alone.
+    pub fn retarget_table_on_sheet(&mut self, si: usize, old: &str, new: &str, copied_names: &mut [DefinedName]) {
         if si >= self.sheets.len() {
             return;
         }
         let rename = TableRename { wb: None, old, new };
-        let names: Vec<(usize, String)> = self
-            .names
-            .iter()
-            .enumerate()
-            .filter(|(_, n)| n.scope == Some(si))
-            .filter_map(|(at, n)| Some((at, rename.text(&n.formula, si)?)))
-            .collect();
+        for name in copied_names {
+            if let Some(formula) = rename.text(&name.formula, si) {
+                name.formula = formula;
+            }
+        }
         let columns: Vec<(usize, usize, Option<String>, Option<String>)> = self.sheets[si]
             .tables
             .iter()
@@ -916,9 +913,6 @@ impl Workbook {
         let cells = rename.cells(&self.sheets[si], si);
         rename.features(Arc::make_mut(&mut self.sheets[si]), si);
         self.set_formulas(si, cells);
-        for (at, formula) in names {
-            self.names[at].formula = formula;
-        }
         let names_old = |s: &crate::Slicer| matches!(&s.source, crate::SlicerSource::Table { table, .. } if table.eq_ignore_ascii_case(old));
         if columns.is_empty() && !self.sheets[si].slicers.iter().any(names_old) {
             return;
