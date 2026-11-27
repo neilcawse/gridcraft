@@ -817,12 +817,15 @@ mod tests {
         is_err(ev("VLOOKUP", vec![n(0.5), rf(table()), e(CellError::Div0), b(false)]), CellError::Div0);
         is_err(ev("HLOOKUP", vec![n(0.5), rf(table()), e(CellError::Div0), b(false)]), CellError::Div0);
         is_err(ev("VLOOKUP", vec![n(0.5), rf(table()), rf(Value::Error(CellError::Div0)), b(false)]), CellError::NA);
-        // Fractional text of 1 or more and negative text stay #REF!; only [0, 1) is below one.
+        // Fractional text outside [0, 1) fails reference-text coercion before the bounds check.
         for idx in [rf(Value::Error(CellError::Div0)), rf(Value::Error(CellError::NA)), rf(tv("abc")), rf(tv("29.9e-1")), rf(tv("-0.5"))] {
             is_err(ev("VLOOKUP", vec![n(3.0), rf(table()), idx, b(false)]), CellError::Ref);
         }
         is_err(ev("VLOOKUP", vec![n(3.0), rf(table()), rf(tv("0.9")), b(false)]), CellError::Value);
-        is_text(ev("VLOOKUP", vec![n(3.0), rf(table()), rf(tv("2")), b(false)]), "three");
+        for text in ["2", " 2 "] {
+            is_text(ev("VLOOKUP", vec![n(3.0), rf(table()), rf(tv(text)), b(false)]), "three");
+        }
+        close(ev("VLOOKUP", vec![n(3.0), rf(table()), rf(tv("1.0")), b(false)]), 3.0);
         close(ev("VLOOKUP", vec![n(3.0), rf(table()), t("3"), b(false)]), 30.0);
         is_err(ev("VLOOKUP", vec![n(3.0), rf(table()), t("invalid"), b(false)]), CellError::Value);
         is_text(ev("VLOOKUP", vec![n(3.0), rf(table()), t("2.75"), b(false)]), "three");
