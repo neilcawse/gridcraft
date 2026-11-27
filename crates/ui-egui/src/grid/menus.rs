@@ -2,7 +2,8 @@ use super::editor::popup_dismissed;
 use super::geo::Geo;
 use super::tables::filter_table;
 use super::{
-    Arc, CellRef, Drag, FillTag, FilterMenu, Pos2, RangeRef, Rect, Sense, Sheet, SheetApp, Stroke, Tokens, col_to_letters, json, pos2, vec2,
+    CellRef, Drag, FillTag, FilterMenu, FilterMenuOwner, Pos2, RangeRef, Rect, Sense, Sheet, SheetApp, Stroke, Tokens, col_to_letters, json, pos2,
+    vec2,
 };
 
 fn forget_filter_menu(ctx: &egui::Context, col: u32) {
@@ -13,9 +14,20 @@ fn forget_filter_menu(ctx: &egui::Context, col: u32) {
     });
 }
 
+fn worksheet_filter_at(sh: &Sheet, header: CellRef) -> Option<RangeRef> {
+    sh.autofilter.as_ref().map(|af| af.range).filter(|r| r.start.row == header.row && r.contains(header))
+}
+
 pub(crate) fn open_filter_menu(app: &mut SheetApp, ctx: &egui::Context, sh: &Sheet, header: CellRef, at: Pos2) {
     let Some(d) = app.session.active() else { return };
-    let menu = FilterMenu { header, at, home: (d.uid, sh.uid.get()) };
+    let owner = match filter_table(sh, header) {
+        Some(t) => FilterMenuOwner::Table(t.uid.get()),
+        None => {
+            let Some(range) = worksheet_filter_at(sh, header) else { return };
+            FilterMenuOwner::Worksheet(range)
+        }
+    };
+    let menu = FilterMenu { header, at, home: (d.uid, sh.uid.get()), owner };
     if app.grid.filter_menu != Some(menu) {
         if let Some(previous) = app.grid.filter_menu.filter(|p| p.header.col != header.col) {
             forget_filter_menu(ctx, previous.header.col);
@@ -25,10 +37,12 @@ pub(crate) fn open_filter_menu(app: &mut SheetApp, ctx: &egui::Context, sh: &She
     }
 }
 
-/// Draws the filter-header popup: sort, search/select-all, apply/clear, a lazily installed table autofilter, new-open search focus and dismissal.
+/// Draws the filter-header popup: sort, search/select-all, apply/clear, new-open search focus and dismissal.
+/// Every action targets the filter that owned the header when the popup opened: a table's own
+/// filter, or the worksheet AutoFilter.
 pub(super) fn filter_menu(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_open: bool) {
-    let Some(FilterMenu { header, at, home }) = app.grid.filter_menu else { return };
-    let CellRef { col, row } = header;
+    let Some(FilterMenu { header, at, home, owner }) = app.grid.filter_menu else { return };
+    let col = header.col;
     let Some(d) = app.session.active() else { return };
     let wb = d.wb.clone();
     let si = wb.active_sheet();
@@ -41,20 +55,26 @@ pub(super) fn filter_menu(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_
     }
     let _ = geo;
     let table = filter_table(sh, header);
-    let sort_range = match table {
-        Some(table) => table.autofilter_range(),
-        None => sh.autofilter.as_ref().filter(|af| af.range.start.row == row && af.range.contains(header)).map(|af| af.range),
+    let worksheet = worksheet_filter_at(sh, header);
+    // Close before drawing buttons or consuming Enter if the header's owner changed.
+    let owned = match table {
+        Some(t) => owner == FilterMenuOwner::Table(t.uid.get()),
+        None => worksheet.is_some_and(|range| owner == FilterMenuOwner::Worksheet(range)),
     };
-    // Tables get an autofilter on demand.
-    if sh.autofilter.is_none()
-        && let Some(range) = table.map(|t| t.range)
-        && let Some(d) = app.session.active_mut()
-        && let Some(s) = Arc::make_mut(&mut d.wb).sheet_mut(si)
-    {
-        s.autofilter = Some(gridcraft_engine::model::AutoFilter { range, criteria: vec![] });
+    if !owned {
+        forget_filter_menu(ui.ctx(), col);
+        app.grid.filter_menu = None;
+        return;
     }
-    let wb = app.session.active().map(|d| d.wb.clone()).unwrap_or(wb);
-    let values = gridcraft_engine::cmd::data::filter_values(&wb, si, col);
+    let sort_range = match table {
+        Some(t) => t.autofilter_range(),
+        None => worksheet,
+    };
+    let table_name = table.map(|t| t.name.as_str());
+    let values = match table_name {
+        Some(name) => gridcraft_engine::cmd::data::filter_values(&wb, si, Some(name), col),
+        None => gridcraft_engine::cmd::data::worksheet_filter_values(&wb, si, col),
+    };
     let key = egui::Id::unique(("filter_sel", col));
     let search_key = egui::Id::unique(("filter_search", col));
     let buttons_key = egui::Id::unique(("filter_buttons", col));
@@ -114,7 +134,7 @@ pub(super) fn filter_menu(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_
             ui.horizontal(|ui| {
                 let clear = ui.button("Clear Filter");
                 if clear.clicked() {
-                    let _ = app.run("data.filterBy", json!({"column": col_to_letters(col), "clear": true}));
+                    let _ = app.run("data.filterBy", json!({"column": col_to_letters(col), "clear": true, "table": table_name}));
                     close = true;
                 }
                 // Nothing checked would hide every row, so Enter (unlike a click on Apply) does nothing then.
@@ -125,9 +145,9 @@ pub(super) fn filter_menu(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_
                     let blanks = checks.iter().any(|(v, on)| v == "(Blanks)" && *on);
                     let vals: Vec<String> = checks.iter().filter(|(v, on)| *on && v != "(Blanks)").map(|(v, _)| v.clone()).collect();
                     let p = if checks.iter().all(|(_, b)| *b) {
-                        json!({"column": col_to_letters(col), "clear": true})
+                        json!({"column": col_to_letters(col), "clear": true, "table": table_name})
                     } else {
-                        json!({"column": col_to_letters(col), "values": vals, "blanks": blanks})
+                        json!({"column": col_to_letters(col), "values": vals, "blanks": blanks, "table": table_name})
                     };
                     let _ = app.run("data.filterBy", p);
                     close = true;
@@ -216,14 +236,20 @@ pub(super) fn context_menu(app: &mut SheetApp, ui: &mut egui::Ui) {
                         }
                         "ui:pickList" => app.open_dialog("pickList", json!({})),
                         "ui:filterValue" => {
-                            if let Some(d) = app.session.active() {
+                            if let Some(d) = app.session.active()
+                                && let Some(sh) = d.wb.active()
+                            {
                                 let a = d.selection.active;
-                                let text = d.wb.active().map(|sh| gridcraft_engine::display::cell_text(&d.wb, sh, a)).unwrap_or_default();
-                                let has = d.wb.active().is_some_and(|sh| sh.autofilter.is_some());
-                                if !has {
-                                    let _ = app.run("data.filter", json!({}));
+                                let text = gridcraft_engine::display::cell_text(&d.wb, sh, a);
+                                let column = col_to_letters(a.col);
+                                if let Some(t) = sh.table_at(a).filter(|t| t.filter_button && t.header_row) {
+                                    app.run_or_alert("data.filterBy", json!({"table": t.name, "column": column, "values": [text]}));
+                                } else {
+                                    if sh.autofilter.is_none() {
+                                        let _ = app.run("data.filter", json!({}));
+                                    }
+                                    app.run_or_alert("data.filterBy", json!({"column": column, "values": [text]}));
                                 }
-                                app.run_or_alert("data.filterBy", json!({"column": col_to_letters(a.col), "values": [text]}));
                             }
                         }
                         "edit.copy" | "edit.cut" => {
