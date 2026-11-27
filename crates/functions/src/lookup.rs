@@ -111,11 +111,9 @@ fn bsearch_last_within(x: &Value, hay: &[Value], desc: bool, len: usize) -> Opti
             }
             lo = j + 1;
         } else {
-            // Below the probe: the search goes on below the midpoint, even when the probe was
-            // found under it. Excel-cached values in the public fuse corpus file 1803f231… show
-            // this for a whole linked column whose midpoints fall in the blank tail:
-            // `VLOOKUP(key,'[1]Cognos Feb 14, 2014'!$A:$I,7)` finds row 8 of 77 saved rows,
-            // where narrowing to below the fallback probe (row 76) reaches row 3 instead.
+            // Keep bisecting below the midpoint. This reproduces a saved Excel result from
+            // row 8 of a whole linked column with 77 saved rows; narrowing below the fallback
+            // probe reaches row 3 instead. The general probe order is inferred, not measured.
             let Some(h) = mid.checked_sub(1) else { break };
             hi = h;
         }

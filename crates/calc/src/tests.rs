@@ -700,6 +700,8 @@ fn uncached_cells_of_a_failed_linked_sheet_keep_the_saved_formula_value() {
         ("B3", "=B2+1", Value::Number(1.0)),
         ("B4", "=VLOOKUP(\"ACCT\",[1]Pivot!$A:M,2,FALSE)", Value::Number(3.0)),
         ("B5", "=[1]Pivot!C9", Value::Error(CellError::Ref)),
+        ("B6", "=A1+[1]Pivot!X338+[1]Pivot!B1", Value::Number(42.0)),
+        ("B7", "=SUM([1]Pivot!A1:C1)", Value::Number(42.0)),
     ];
     for (at, formula, value) in saved {
         let mut cell = Cell::formula(Formula::new(formula));
@@ -709,6 +711,14 @@ fn uncached_cells_of_a_failed_linked_sheet_keep_the_saved_formula_value() {
     t.calc.recalc_all(&mut t.wb);
     assert_eq!((t.num("B1"), t.num("B2"), t.num("B3"), t.num("B4")), (0.0, 0.0, 1.0, 16.7));
     assert_eq!(t.get("B5"), Value::Error(CellError::Ref));
+    assert_eq!(t.get("B6"), Value::Number(42.0));
+    assert_eq!(t.get("B7"), Value::Error(CellError::Ref));
+    t.set("A2", "1");
+    assert_eq!(t.get("B6"), Value::Number(42.0));
+    t.set("A1", "1");
+    assert_eq!(t.get("B6"), Value::Error(CellError::Ref));
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!(t.get("B6"), Value::Error(CellError::Ref));
     // Entered again, they are calculated: the uncached cell is #REF!.
     t.set("B1", "=IFERROR(VLOOKUP(\"ACCT\",[1]Pivot!$A:M,3,FALSE),\"\")");
     t.set("B2", "=[1]Pivot!X338");

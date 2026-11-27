@@ -4620,8 +4620,15 @@ fn an_uncached_cell_of_a_failed_linked_sheet_keeps_the_saved_formula_value() {
     let saved = s.execute("file.saveBytes", json!({"format": "xlsx"})).unwrap();
     let saved = crate::io::base64_decode(saved["base64"].as_str().unwrap()).unwrap();
     assert_eq!(part(&saved), part(&bytes));
+    s.execute("file.open", json!({"name": "Reopened.xlsx", "base64": crate::io::base64_encode(&saved)})).unwrap();
+    s.execute("formulas.calculateNow", json!({})).unwrap();
+    assert_eq!(v(&s, "B1"), Value::Number(10.0));
+    assert_eq!(v(&s, "C1"), Value::Number(15.0));
     // Entered again, the formula is calculated: the uncached cell is #REF!.
     s.execute("cell.set", json!({"cell": "B1", "input": "=[1]Sheet1!A1"})).unwrap();
+    assert_eq!(v(&s, "B1"), Value::Error(gridcraft_core::CellError::Ref));
+    let recalculated = s.execute("file.saveBytes", json!({"format": "xlsx"})).unwrap();
+    s.execute("file.open", json!({"name": "Recalculated.xlsx", "base64": recalculated["base64"]})).unwrap();
     assert_eq!(v(&s, "B1"), Value::Error(gridcraft_core::CellError::Ref));
     // A failed sheet that saved no cells is #REF! throughout, as Excel's caches show.
     let bytes = linked_workbook_with_data("Gone.xlsx", r#"<sheetDataSet><sheetData sheetId="0" refreshError="1"/></sheetDataSet>"#);
