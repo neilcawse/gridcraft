@@ -733,7 +733,9 @@ mod tests {
             }
             placed_group(sh, placement, 0, 0.0);
             if collapse_after {
+                let before = sh.line_geometry();
                 collapse(sh);
+                sh.follow_line_sizes(&before, &|_| false);
             }
             let mut bounds = sh.anchor_rect(&sh.shapes[0].anchor);
             bounds.x += shift.0;
@@ -742,7 +744,12 @@ mod tests {
             bounds.h -= shift.1;
             sh.shapes[0].anchor = sh.rect_anchor(bounds, sh.shapes[0].anchor.mode);
             if stale {
-                sh.groups[0].anchor.width += 1.0;
+                // Resizing a row within the span updates the group's editable height while
+                // leaving the old file anchor in the table. The start edge still coincides.
+                let before = sh.line_geometry();
+                sh.rows.insert(9, LineInfo { size: Some(40.0), custom: true, ..LineInfo::default() });
+                sh.follow_line_sizes(&before, &|_| false);
+                assert_ne!(sh.groups[0].anchor, sh.drawing_files[&DrawingRef::Group(1)].anchor);
             }
 
             let result = render(&wb, None);
