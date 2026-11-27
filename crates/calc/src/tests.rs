@@ -937,12 +937,30 @@ fn lookups_distinguish_failed_linked_caches_from_local_index_errors() {
     assert_eq!([t.get("B5"), t.get("B6"), t.get("B7")], [div0.clone(), div0.clone(), Value::Error(CellError::Name)]);
     assert_eq!([t.get("B12"), t.get("B13")], [div0.clone(), div0]);
     assert_eq!([t.get("B14"), t.get("B15"), t.get("B16")], [const { Value::Error(CellError::NA) }; 3]);
-    // A multi-area index of error cells: refused on the reference-table path, lifted over its
-    // cells on the evaluated-table path; on a miss both are #N/A, on a hit the first is #REF!.
-    t.set("H20", "=VLOOKUP(\"z\",D1:E2,(D3,D3),FALSE)");
-    t.set("J20", "=VLOOKUP(\"z\",{\"x\",1;\"y\",2},(D3,D3),FALSE)");
-    t.set("L20", "=VLOOKUP(\"x\",D1:E2,(D3,D3),FALSE)");
-    assert_eq!([t.get("H20"), t.get("J20"), t.get("L20")], [Value::Error(CellError::NA), Value::Error(CellError::NA), Value::Error(CellError::Ref)]);
+}
+
+#[test]
+fn lookup_multi_area_index_errors_on_reference_and_evaluated_tables() {
+    let mut t = T::new();
+    for (at, input) in [("D1", "1"), ("D2", "2"), ("E1", "10"), ("E2", "20"), ("G3", "=1/0"), ("G4", "=NA()")] {
+        t.set(at, input);
+    }
+    // A reference table cannot dereference a multi-area index. An evaluated table lifts it.
+    t.set("A1", "=VLOOKUP(9,D1:E2,(G3,G4),FALSE)");
+    t.set("A2", "=VLOOKUP(9,{1,10;2,20},(G3,G4),FALSE)");
+    t.set("A3", "=VLOOKUP(2,D1:E2,(G3,G4),FALSE)");
+    t.set("A4", "=VLOOKUP(2,{1,10;2,20},(D1,D2),FALSE)");
+    assert_eq!(
+        ["A1", "A2", "B2", "A3", "A4", "B4"].map(|at| t.get(at)),
+        [
+            Value::Error(CellError::NA),
+            Value::Error(CellError::NA),
+            Value::Error(CellError::NA),
+            Value::Error(CellError::Ref),
+            Value::Number(2.0),
+            Value::Number(20.0),
+        ],
+    );
 }
 
 // Excel for Mac 16.115.2, Batch 5 lookup-vlookup and lookup-hlookup: the rows and expected
