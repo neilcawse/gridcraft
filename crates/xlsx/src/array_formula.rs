@@ -179,7 +179,7 @@ fn legacy(wb: &Workbook, sheet: usize, at: CellRef, formula: &Formula, functions
         }
         // Text round trip: the stored expression is exactly what the text parses to.
         if let Some(out) = reads_back(out) {
-            return Some(formula.rewritten(out));
+            return Some(Formula::from_expr(out));
         }
         // The reading's `@` take it past the parser's nesting limit: handled as unfinished.
     }
@@ -190,7 +190,7 @@ fn legacy(wb: &Workbook, sheet: usize, at: CellRef, formula: &Formula, functions
     // it was read.
     let whole = matches!(expr.as_ref(), Expr::Unary(UnOp::At, _));
     let multi = legacy.top != Kind::Scalar || (legacy.certain && legacy.complete);
-    (multi && !whole).then(|| self::at(expr.as_ref().clone())).and_then(reads_back).map(|e| formula.rewritten(e))
+    (multi && !whole).then(|| self::at(expr.as_ref().clone())).and_then(reads_back).map(Formula::from_expr)
 }
 
 /// `e` when its text (the printer writes only the parentheses the expression has) reads back as
@@ -647,8 +647,13 @@ impl<'a> Legacy<'a> {
         if name == "LET" && args.len() >= 3 {
             return self.let_(args, sheet, ctx, depth);
         }
-        let lambda_name =
-            user_function(&name, self.functions) && gridcraft_formula::file_prefix(&name).is_none() && self.wb.name(&name, sheet).is_some();
+        let lambda_name = if let Some(bare) = gridcraft_formula::user_defined_name(&name) {
+            self.wb
+                .name(bare, sheet)
+                .is_some_and(|n| n.formula.trim_start_matches('=').trim_start().get(..7).is_some_and(|prefix| prefix.eq_ignore_ascii_case("LAMBDA(")))
+        } else {
+            user_function(&name, self.functions) && gridcraft_formula::file_prefix(&name).is_none() && self.wb.name(&name, sheet).is_some()
+        };
         if args.len() > 255
             || lambda_name
             || matches!(name.as_str(), "LAMBDA" | "MAP" | "REDUCE" | "SCAN" | "BYROW" | "BYCOL" | "MAKEARRAY" | "ISOMITTED")
@@ -916,7 +921,7 @@ fn host_function(name: &str) -> bool {
 
 /// Not a built-in worksheet function: an add-in or VBA function.
 fn user_function(name: &str, functions: FunctionInfo) -> bool {
-    gridcraft_formula::user_defined_name(name).is_some() || !host_function(name) && !(functions.is_builtin)(name)
+    !host_function(name) && !(functions.is_builtin)(name)
 }
 
 fn param(name: &str, i: usize, functions: FunctionInfo) -> Param {
