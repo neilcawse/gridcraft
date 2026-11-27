@@ -277,15 +277,15 @@ after Paste Special All; GridCraft tests C8/C9's inherited bold as an inference,
 Excel result. The whole-column readback stayed `false` after Insert. Batch 4 returned no hidden,
 outline or named style for row 9, and no XML was saved. GridCraft follows ordinary Paste:
 visibility transfers and an unstyled source line clears the destination's line style. Boundary
-edges and bare-row markers stay on their own lines; since X44 the outline level and
-collapsed-summary marker transfer, as the Batch 5 readbacks of both clipboard cases show.
-Whole columns use the same rule as rows; the clipboard cases only exercised rows. Protection,
-undo/redo, Insert Cut Cells and the system clipboard were not compared in these probes.
+edges and bare-row markers stay on their own lines. X44 also transfers outline levels and
+collapsed-summary markers; Batch 5 observed the new summary marker after Paste Special All,
+but not after Insert Copied Rows. Whole columns use the same rule as rows; the clipboard
+probes only exercised rows. Undo/redo, Insert Cut Cells and the system clipboard were not compared.
 Insert Copied and Insert Cut Cells check row/column formatting protection against the sheet as
 the insertion left it, so a new line that inherited the format of the line before it and is
-then given a different source format counts as a formatting change and is refused when the
-sheet does not allow formatting rows (or columns). That is GridCraft's choice; Excel was not
-measured on protected sheets here.
+then given a different source format counts as a formatting change. Batch 5's protected Insert
+Copied Rows probe refused the operation when inserting rows was allowed but formatting rows
+was not; it did not isolate which change caused the refusal.
 
 Other Paste Special modes (including Values, Formulas, Formats and All Except Borders), arithmetic
 operations, Skip Blanks, Transpose, Paste Link and partial-range paste retain their previous
@@ -390,25 +390,29 @@ row 10, outside the paste, reads `ShowDetail` false; columns C:D to H do the sam
 returns to level 1, visible and default size. A summary line outside the cut keeps
 `ShowDetail` false: row 5, column E. A default source line resets the destination's level 3 to 1
 (`x25-default-row-over-custom`, `x25-default-col-over-custom`). Insert Copied Cells gives new
-rows 8/9 levels 1/2; its row 11 keeps `ShowDetail` true, because group 9:10 is not all hidden.
+rows 8/9 levels 1/2; row 11 reads `ShowDetail` true, consistent with group 9:10 containing a visible row.
 
-GridCraft now matches these readbacks. Whole-line `edit.paste`, Paste Special All and Insert
-Copied Cells move each source line's outline level and collapsed-summary marker with its size,
-visibility and style. A missing source line resets them, and a same-workbook Cut resets them on
-the source. After the transfer, if every detail line is hidden in a group that ends at the
-paste's last line, its summary line just past the paste gets the collapsed marker. With summary
-lines before their detail, the group must start at the paste's first line. This is the `ShowDetail`
-false on row 10 / column J, and it reproduces Excel's `A1:I10` / `A1:J9` extent (X33 residual).
-GridCraft stores and saves `ShowDetail` false as the summary line's `collapsed` marker. Excel's
-`ShowDetail` reads that marker rather than recomputing it: after `x25-cut-rows-to-s-a8`, row 5
-summarizes nothing and still reads false, while cut row 6 in the x33 cases turns true. Undo
-restores the lines and save/reopen keeps them. The marker is a row (column) formatting change,
-so a protected sheet must allow formatting rows (columns), as for the other line changes.
+Whole-line `edit.paste`, Paste Special All and Insert Copied Cells transfer each source line's
+outline level and collapsed-summary marker with its size, visibility and style. A missing source
+line resets them, and a same-workbook Cut resets them on vacated source lines. GridCraft
+infers a collapsed marker on the adjacent summary if a fully hidden outline group ends at the
+paste's last line (or starts at its first line with before-detail summaries). This rule gives
+the measured `ShowDetail` false on row 10 / column J and the corresponding extent (X33 residual).
+GridCraft represents `ShowDetail` false with the line's `collapsed` field and saves that field
+in XLSX. After `x25-cut-rows-to-s-a8`, row 5 still reads false even without detail below it;
+this supports retaining the marker independently of the current group. Undo restores the lines
+and save/reopen keeps their outline state in GridCraft.
 
-Inferred or unmeasured: the saved XML (`collapsed`, `outlineLevelRow`) was not read; the
-marker past the paste was only measured with summaries below/right; nothing is cleared on a
-summary line past the paste; and nested hidden groups were not probed. AutoFill keeps
-visibility and outline on the destination, as X31 documents. Batch 5's
+Batch 5 did not inspect Excel's saved XML or measure summary placement above/left, nesting,
+stale markers at the destination boundary, or either of these GridCraft policies:
+
+- A marker-only write requires Format Rows or Format Columns on a protected sheet, even if
+  the pasted line records already match. Without permission the paste is refused.
+- A same-sheet Cut resets the vacated source lines before marking the destination boundary.
+  A vacated line immediately outside the paste can receive a marker based on the final group.
+
+GridCraft does not clear a marker outside the paste. AutoFill keeps visibility and outline on
+the destination, as X31 documents. Batch 5's
 `x25-autofill-hidden-*` readbacks concern AutoFill visibility, not outline, and are outside this
 lane. Paste Special modes other than All, transposed, linked, filtered, tiled and drag-and-drop
 pastes keep their previous behavior: they transfer no line formats.

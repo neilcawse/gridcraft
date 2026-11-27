@@ -576,9 +576,8 @@ impl LineAxis {
         Ok(())
     }
 
-    /// Excel marks the summary line just past a whole-line paste collapsed (ShowDetail false)
-    /// when the pasted lines leave a group ending at the paste's last line (or, with summaries
-    /// before their detail, starting at its first) with every detail line hidden (X44).
+    /// Infer a collapsed summary just outside the paste if a fully hidden group meets its edge.
+    /// Batch 5 measured this with summaries below/right; before-detail summaries are symmetric.
     pub(super) fn mark_collapsed_summary(self, cx: &mut Ctx, sheet: usize, first: u32, last: u32) -> Result<()> {
         let target = cx.wb.sheets.get(sheet).ok_or(EngineError::NoDocument)?;
         let (rows, end) = match self {
@@ -587,12 +586,26 @@ impl LineAxis {
         };
         let before = crate::outline::summary_before(target, rows);
         let lines = self.lines(target);
-        let summary = crate::outline::groups_with(lines, before)
-            .into_iter()
-            .find(|g| g.collapsed && g.has_summary() && if before { g.start == first } else { g.end == last })
-            .map(|g| g.summary())
-            .filter(|&i| i < end && !lines.get(&i).is_some_and(|l| l.collapsed));
-        let Some(i) = summary else { return Ok(()) };
+        let Some(i) = (if before { first.checked_sub(1) } else { last.checked_add(1).filter(|&i| i < end) }) else { return Ok(()) };
+        let boundary = if before { first } else { last };
+        let Some(detail) = lines.get(&boundary) else { return Ok(()) };
+        let level = detail.outline.min(crate::outline::MAX_LEVEL);
+        if level == 0 || !detail.hidden || lines.get(&i).is_some_and(|l| l.collapsed || l.outline >= level) {
+            return Ok(());
+        }
+        // Only the deepest group touching the boundary matters: all shallower groups contain
+        // it and share its summary coordinate if they also end here.
+        let mut run = if before { lines.range(first + 1..) } else { lines.range(..last) };
+        let mut prev = boundary;
+        while let Some((&index, line)) = if before { run.next() } else { run.next_back() } {
+            if index.abs_diff(prev) != 1 || line.outline < level {
+                break;
+            }
+            if !line.hidden {
+                return Ok(());
+            }
+            prev = index;
+        }
         self.refuse_unless_formatting_allowed(cx, sheet)?;
         let target = cx.sheet_mut(sheet)?;
         let lines = match self {

@@ -24,8 +24,8 @@ fn sheet<'a>(s: &'a Session, name: &str) -> &'a Sheet {
 }
 
 /// Excel's row readback: (OutlineLevel, Hidden, RowHeight in points, ShowDetail). OutlineLevel
-/// counts from 1 where the file's `outlineLevel` counts from 0; ShowDetail false is the
-/// collapsed-summary marker GridCraft stores and saves.
+/// counts from 1 where the file's `outlineLevel` counts from 0; GridCraft models ShowDetail
+/// false with a collapsed-summary marker.
 fn row_readback(sh: &Sheet, row: u32) -> (u8, bool, f32, bool) {
     let info = sh.rows.get(&(row - 1)).copied().unwrap_or_default();
     (info.outline + 1, info.hidden, sh.row_height(row - 1) * 0.75, !info.collapsed)
@@ -245,12 +245,14 @@ fn x33_whole_row_copy_and_cut_carry_outline_levels_and_the_collapsed_summary() {
         assert_rows(&s, after, case);
         assert_cells(&s, case, cut);
         assert_eq!(extent(&mut s, "S"), (json!(used), json!("A34")), "{case}: UsedRange / Last Cell");
+        let pasted = sheet(&s, "S").rows.clone();
 
         s.execute("edit.undo", json!({})).unwrap();
         assert_eq!(sheet(&s, "S").rows, before, "{case}: undo restores every row record");
         assert_rows(&s, X33_BEFORE, &format!("{case} undone"));
         assert_eq!(sheet(&s, "S").value(at("A3")), Value::text("S-A3"), "{case}: undo restores A3");
         s.execute("edit.redo", json!({})).unwrap();
+        assert_eq!(sheet(&s, "S").rows, pasted, "{case}: redo restores every pasted row record");
         assert_rows(&s, after, &format!("{case} redone"));
 
         let mut reopened = reopen(&mut s);
@@ -333,11 +335,22 @@ fn x25_whole_line_copy_and_cut_carry_outline_and_reach_excels_extent() {
     for (case, op, range, dest, cell) in cases {
         let mut s = x25_fixture();
         let rows = range == "3:4";
+        // Track both column maps to check fields hidden by the effective width readback.
+        let columns = |s: &Session| [sheet(s, "S").cols.clone(), sheet(s, "T").cols.clone()];
+        let before = (!rows && op == "edit.cut" && dest == "T").then(|| columns(&s));
         s.execute(op, json!({"sheet": "S", "range": range})).unwrap();
         s.execute("sheet.activate", json!({"sheet": dest})).unwrap();
         s.execute("edit.paste", json!({"at": cell})).unwrap();
         let d = sheet(&s, dest);
         assert_eq!(if rows { rows_8_to_10(d) } else { cols_h_to_j(d) }, PASTED_GROUP, "{case}: destination lines");
+        let cells = if rows { [("A3", "A8"), ("A4", "A9")] } else { [("C1", "H1"), ("D1", "I1")] };
+        let source = sheet(&s, "S");
+        for (from, to) in cells {
+            // The fixture gives each original cell its address as a unique value.
+            let expected = Value::text(from);
+            assert_eq!(d.value(at(to)), expected, "{case}: destination {to}");
+            assert_eq!(source.value(at(from)), if op == "edit.cut" { Value::Empty } else { expected }, "{case}: source {from}");
+        }
         let expected = if rows { ("A1:I10", "H10") } else { ("A1:J9", "J8") };
         assert_eq!(extent(&mut s, dest), (json!(expected.0), json!(expected.1)), "{case}: destination UsedRange / Last Cell");
         let src = sheet(&s, "S");
@@ -356,6 +369,13 @@ fn x25_whole_line_copy_and_cut_carry_outline_and_reach_excels_extent() {
             if dest == "T" {
                 assert_eq!(extent(&mut s, "S"), (json!("A1:I9"), json!("H8")), "{case}: source UsedRange / Last Cell");
             }
+        }
+        if let Some(before) = before {
+            let pasted = columns(&s);
+            s.execute("edit.undo", json!({})).unwrap();
+            assert_eq!(columns(&s), before, "{case}: undo restores both column maps");
+            s.execute("edit.redo", json!({})).unwrap();
+            assert_eq!(columns(&s), pasted, "{case}: redo restores both column maps");
         }
         let mut reopened = reopen(&mut s);
         let d = sheet(&reopened, dest);
@@ -408,6 +428,7 @@ fn x25_paste_special_all_and_insert_copied_rows_carry_outline() {
 fn whole_row_paste_marking_a_summary_needs_row_formatting_on_a_protected_sheet() {
     use gridcraft_engine::model::SheetProtection;
 
+    // GridCraft policy, not measured in Excel: a marker-only write still needs Format Rows.
     // The destination rows already match the source, so only the summary marker would change.
     for format_rows in [false, true] {
         let mut s = Session::new();
@@ -436,6 +457,56 @@ fn whole_row_paste_marking_a_summary_needs_row_formatting_on_a_protected_sheet()
             let err = pasted.unwrap_err().to_string();
             assert!(err.contains("Formatting rows"), "{err}");
             assert_eq!(sh.rows, before);
+        }
+    }
+}
+
+#[test]
+fn adjacent_whole_row_cut_marks_its_summary_after_resetting_the_source() {
+    // GridCraft policy, not measured in Excel: the summary may land on a just-vacated row.
+    let mut s = Session::new();
+    s.new_workbook();
+    let sh = Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+    let detail = LineInfo { outline: 1, hidden: true, size: Some(32.), custom: true, ..Default::default() };
+    sh.rows.insert(2, detail);
+    sh.rows.insert(3, detail);
+    sh.set_value(at("A3"), Value::text("first detail"));
+
+    s.execute("edit.cut", json!({"range": "3:4"})).unwrap();
+    s.execute("edit.paste", json!({"at": "A1"})).unwrap();
+    let sh = sheet(&s, "Sheet1");
+    assert_eq!(sh.rows[&0], detail);
+    assert_eq!(sh.rows[&1], detail);
+    assert_eq!(sh.rows[&2], LineInfo { collapsed: true, ..Default::default() });
+    assert!(!sh.rows.contains_key(&3));
+    assert_eq!(sh.value(at("A1")), Value::text("first detail"));
+    assert_eq!(sh.value(at("A3")), Value::Empty);
+}
+
+/// The summary is determined by the deepest contiguous group touching the paste, even when
+/// it extends beyond the pasted selection. These are GridCraft rules, not Excel probes.
+#[test]
+fn whole_line_paste_marks_a_summary_only_for_a_hidden_group_at_its_boundary() {
+    for (rows, before) in [(true, false), (true, true), (false, false), (false, true)] {
+        for (neighbor_depth, gap, summary_depth, collapsed) in [(1, false, 1, true), (2, false, 1, false), (2, true, 1, true), (1, false, 2, false)] {
+            let mut s = Session::new();
+            s.new_workbook();
+            let sh = Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+            sh.summary_below = !before;
+            sh.summary_right = !before;
+            let lines = if rows { &mut sh.rows } else { &mut sh.cols };
+            let (summary, inside) = if before { (4, 6 + u32::from(gap)) } else { (6, 4 - u32::from(gap)) };
+            lines.insert(1, LineInfo { outline: 2, hidden: true, ..Default::default() });
+            lines.insert(inside, LineInfo { outline: neighbor_depth, ..Default::default() });
+            lines.insert(summary, LineInfo { outline: summary_depth, ..Default::default() });
+            s.execute("edit.copy", json!({"range": if rows { "2:2" } else { "B:B" }})).unwrap();
+            s.execute("edit.paste", json!({"at": if rows { "A6" } else { "F1" }})).unwrap();
+            let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+            let lines = if rows { &sh.rows } else { &sh.cols };
+            assert_eq!(
+                lines[&summary].collapsed, collapsed,
+                "rows={rows}, before={before}, gap={gap}, inside={neighbor_depth}, summary={summary_depth}"
+            );
         }
     }
 }
