@@ -319,12 +319,14 @@ impl<'h> Evaluator<'h> {
             // A defined name holding a LAMBDA, or a LET-bound lambda. `_xludf.` names a workbook
             // name, never a variable or a built-in.
             let callee = match gridcraft_formula::user_defined_name(name) {
-                Some(defined) => self.defined_name(defined),
-                None => self.name(name),
+                Some(defined) => Some(self.defined_name(defined)),
+                // Future built-ins without an implementation cannot call defined names.
+                None if gridcraft_formula::file_prefix(name).is_some() => self.local_name(name),
+                None => Some(self.name(name)),
             };
             return match callee {
-                Ev::L(l) => self.apply_lambda(&l, args),
-                Ev::V(Value::Error(x)) => err(x),
+                Some(Ev::L(l)) => self.apply_lambda(&l, args),
+                Some(Ev::V(Value::Error(x))) => err(x),
                 _ => err(CellError::Name),
             };
         };

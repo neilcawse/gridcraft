@@ -179,7 +179,7 @@ fn legacy(wb: &Workbook, sheet: usize, at: CellRef, formula: &Formula, functions
         }
         // Text round trip: the stored expression is exactly what the text parses to.
         if let Some(out) = reads_back(out) {
-            return Some(Formula::new(&gridcraft_formula::print(&out)));
+            return Some(formula.rewritten(out));
         }
         // The reading's `@` take it past the parser's nesting limit: handled as unfinished.
     }
@@ -190,14 +190,23 @@ fn legacy(wb: &Workbook, sheet: usize, at: CellRef, formula: &Formula, functions
     // it was read.
     let whole = matches!(expr.as_ref(), Expr::Unary(UnOp::At, _));
     let multi = legacy.top != Kind::Scalar || (legacy.certain && legacy.complete);
-    (multi && !whole).then(|| self::at(expr.as_ref().clone())).and_then(reads_back).map(|e| Formula::new(&gridcraft_formula::print(&e)))
+    (multi && !whole).then(|| self::at(expr.as_ref().clone())).and_then(reads_back).map(|e| formula.rewritten(e))
 }
 
 /// `e` when its text (the printer writes only the parentheses the expression has) reads back as
 /// the same expression, so a dropped `@` never takes parentheses the text needs with it. An `@`
 /// of a bare union has no such text, so its formula is saved as a dynamic one.
 fn reads_back(e: Expr) -> Option<Expr> {
-    gridcraft_formula::parse(&gridcraft_formula::print(&e)).is_ok_and(|p| p == e).then_some(e)
+    let p = gridcraft_formula::parse(&gridcraft_formula::print(&e)).ok()?;
+    if p == e {
+        return Some(e);
+    }
+    // The parser uppercases function names, but imported UDF calls spell the bound name.
+    let normalized = e.clone().map(&mut |x| match x {
+        Expr::Call(n, args) if gridcraft_formula::user_defined_name(&n).is_some() => Expr::Call(gridcraft_formula::normalize_function_name(&n), args),
+        other => other,
+    });
+    (p == normalized).then_some(e)
 }
 
 /// The operand of an `@` without the parentheses [`at`] adds.
@@ -638,7 +647,8 @@ impl<'a> Legacy<'a> {
         if name == "LET" && args.len() >= 3 {
             return self.let_(args, sheet, ctx, depth);
         }
-        let lambda_name = !(self.functions.is_builtin)(&name) && !host_function(&name) && self.wb.name(&name, sheet).is_some();
+        let lambda_name =
+            user_function(&name, self.functions) && gridcraft_formula::file_prefix(&name).is_none() && self.wb.name(&name, sheet).is_some();
         if args.len() > 255
             || lambda_name
             || matches!(name.as_str(), "LAMBDA" | "MAP" | "REDUCE" | "SCAN" | "BYROW" | "BYCOL" | "MAKEARRAY" | "ISOMITTED")
@@ -906,7 +916,7 @@ fn host_function(name: &str) -> bool {
 
 /// Not a built-in worksheet function: an add-in or VBA function.
 fn user_function(name: &str, functions: FunctionInfo) -> bool {
-    !host_function(name) && !(functions.is_builtin)(name)
+    gridcraft_formula::user_defined_name(name).is_some() || !host_function(name) && !(functions.is_builtin)(name)
 }
 
 fn param(name: &str, i: usize, functions: FunctionInfo) -> Param {

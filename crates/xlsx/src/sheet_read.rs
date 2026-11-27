@@ -1213,7 +1213,7 @@ mod tests {
             rich_errors: vec![],
             cf_ext_ids: vec![],
             known_function: None,
-            name_calls: vec![],
+            name_calls: Default::default(),
             python: Default::default(),
             cells: 0,
             shared_formula_bytes: 0,

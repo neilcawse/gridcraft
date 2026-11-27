@@ -470,23 +470,25 @@ Batch 3 measured internal hyperlink sub-addresses in Excel for Mac 16.115.2: `Sa
 | A6 | `_xlfn.LET(_xlpm.vstack,_xlfn.LAMBDA(_xlpm.x,5),_xlpm.vstack(1))` | 5 | `=LET(vstack,LAMBDA(x,5),vstack(1))` |
 
 This contradicts X30's published rule that the built-in wins for unprefixed calls.
+Excel's `Range.Formula2` added a leading `@` to every formula in the table, including the LET call.
 
 **GridCraft rule.** These are the functions the file format writes with `_xlfn.` (the writer's newer-function list, now `gridcraft_formula::file_prefix`, which the reader, the evaluator and the writer share).
-- XLSX open: an unprefixed cell-formula call of one of them binds to a LAMBDA name of the same spelling that is visible from the cell's sheet (workbook-level, or sheet-level on that sheet). The reader stores that call as `_xludf.<Name>`. `_xlfn.` calls stay built-in calls, and `_xludf.` calls stay name calls.
+- XLSX open: an unprefixed cell-formula call binds to a LAMBDA name of the same spelling if the visible definition holds a LAMBDA. A sheet-level name takes precedence, even if it holds no LAMBDA. The reader stores bound calls as `_xludf.<Name>`. `_xlfn.` normally selects the built-in; see the lexical exception below.
 - Model and evaluator: `_xludf.Name(…)` calls the workbook name `Name` (sheet scope first, then workbook), never a LET/LAMBDA variable or the built-in. Its dependencies and link checks follow the name's definition. An unprefixed call in the model is the built-in. A LET or LAMBDA variable that holds a LAMBDA comes before a newer function of its name, so A6 gives 5.
-- Spelling: `_xludf.` calls take the defined name's casing (`_xludf.VSTACK` → `_xludf.VStack`), on import, entry and table rename.
+- Spelling: `_xludf.` calls take the visible defined name's casing (`_xludf.VSTACK` → `_xludf.VStack`) on import, entry and table rename. Explicit cell calls follow a rename of their resolved definition; built-in calls do not.
 - Save: a name-bound call is written `_xludf.VStack(1)`, and a built-in call `_xlfn.VSTACK(1)`. Reopening gives the same bindings in GridCraft, and Excel reads both spellings as measured (A5, A4).
-- Display: the formula bar hides `_xludf.` as it already does (`=TrimRange(1)`, `=VStack(1)`). Confirming the shown text unchanged keeps the name call. `cell.get` and `sheet.read` return the stored `=_xludf.TrimRange(1)`: entering that text again keeps the binding. These legacy formulas (no dynamic-array metadata) read with GridCraft's existing implicit `@` where a built-in can return an array (`=@TRIMRANGE(1)`, `=@LET(…)`, which matches Excel's `Formula2`), and name calls read without it (Excel's `Formula2` shows `=@TrimRange(1)`; that does not change the value).
+- Legacy formulas without dynamic-array metadata use implicit intersection for both built-in and explicit name calls that may return arrays. For example, the stored text is `=@_xludf.TrimRange(1)`; `cell.get`, `sheet.read` and `FORMULATEXT` expose it. The formula bar hides `_xludf.`. The writer removes the implied `@` in legacy XML without adding dynamic metadata; dynamic calls remain dynamic.
 
 **Why `_xludf.` and not unprefixed.** `_xludf.` is GridCraft's existing marker for a user-defined call (#726). The parser keeps it, the writer writes it unchanged, and the editor hides and restores it, so no new model state is needed. Excel measurably reads it as the name (A5). An unprefixed spelling would need the writer to know each call's binding. Other readers that apply the file format's rule would also take an unprefixed call as the built-in.
 
-**Unmeasured, current behaviour kept.**
+**Unmeasured in Excel.**
 - Older functions (no `_xlfn.` prefix in files, e.g. `ISREF`) with a same-named LAMBDA keep X30's rule: the built-in. A LET-bound call of an older function, such as `LET(sum,LAMBDA(x,5),sum(1))`, also stays the built-in (1).
 - Typed entry: `=vstack(1)` stays the built-in, spelled `VSTACK`, and `=_xludf.vstack(1)` calls the name. The LET rule is in the evaluator, so a typed `LET(vstack,LAMBDA(x,5),vstack(1))` also gives 5. Excel measured that formula only as read from a file.
 - A same-named defined name that holds no LAMBDA leaves the call with the built-in. Unprefixed calls inside defined names, conditional formats, validation and chart formulas are read as before. Sheet-level LAMBDA names bind like workbook-level ones from their own sheet, which is an inference.
 - Excel's saved spelling for these calls (no workbook was saved). `.xls`, `.xlsb` and ODS import are unchanged.
-- Newer functions GridCraft does not calculate (`TRANSLATE`, `STOCKHISTORY`, …): `_xlfn.TRANSLATE(1)` with a LAMBDA `Translate` still calls the LAMBDA in GridCraft, which has no built-in to run, and is saved `_xlfn.TRANSLATE(1)` again. The same call typed is saved the same way. An unprefixed `TRANSLATE(1)` in a file now becomes `_xludf.Translate(1)` and is saved that way.
-- FORMULATEXT shows the stored `_xludf.` text; X30's canonical-text fallback for file-only spellings is unchanged. A call of a LET variable shows in upper case (`VSTACK(1)`; Excel shows `vstack(1)`). This is the existing spelling of LET-bound calls. The binding is unaffected.
+- Unsupported newer built-ins such as `_xlfn.TRANSLATE(1)` give the same result as when no colliding name exists, and retain the built-in spelling on save. Typed `translate(1)` likewise gives the unsupported-function result instead of calling the LAMBDA, consistent with typed entry binding to the built-in. An unprefixed `TRANSLATE(1)` in file XML still binds to a visible LAMBDA and is saved as `_xludf.Translate(1)`.
+- A call of a LET variable shows in upper case (`VSTACK(1)`; Excel shows `vstack(1)`). GridCraft also discards the `_xlfn.` marker during parsing, so an explicitly prefixed call inside a LET with a same-named lexical LAMBDA uses that LAMBDA. Excel's behavior for that combination was not measured; the fixture used `_xlpm.vstack` at the call site.
+- Mixed bindings on rename: GridCraft rewrites a workbook-scoped name body even if the old name resolved to a sheet-local definition for some callers. This matches the existing behavior for plain name references; those callers can therefore switch to the renamed global definition. Excel behavior is unmeasured.
 
 ## X36 — Structured-reference entry and display text
 
