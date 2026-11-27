@@ -281,21 +281,123 @@ fn popup_whose_table_was_replaced_by_another_applies_nothing() -> TestResult {
 #[test]
 fn context_filter_by_value_targets_the_table_not_the_worksheet() -> TestResult {
     let mut h = sheet_filter_and_table()?;
-    let sh = sheet(&h)?;
-    let geo = grid::Geo::new(sh, h.state().grid.rect.ok_or("grid rect")?, h.state().view().scroll);
-    let pos = geo.cell_rect(sh, CellRef::new(8, 0)).center();
     let depth = undo_depth(&h)?;
+    filter_by_cell_value(&mut h, CellRef::new(8, 0))?;
+    assert_eq!(sheet_criteria(&h)?, Some(vec![]), "the context action leaves the worksheet filter alone");
+    assert_eq!(table_criteria(&h, "People")?, [(0, values(&["Dan"]))]);
+    assert_eq!(hidden(&h)?, [10, 11]);
+    assert_eq!(undo_depth(&h)?, depth + 1);
+    Ok(())
+}
+
+fn filter_by_cell_value(h: &mut Harness, at: CellRef) -> TestResult {
+    let sh = sheet(h)?;
+    let geo = grid::Geo::new(sh, h.state().grid.rect.ok_or("grid rect")?, h.state().view().scroll);
+    let pos = geo.cell_rect(sh, at).center();
     h.input_mut().events.push(Event::PointerMoved(pos));
     for pressed in [true, false] {
         h.input_mut().events.push(Event::PointerButton { pos, button: PointerButton::Secondary, pressed, modifiers: Modifiers::NONE });
     }
     h.run_steps(4);
     assert!(h.state().grid.context_menu.is_some(), "right-click opens the real cell menu");
-    press(&mut h, "Filter by Selected Cell's Value")?;
-    assert_eq!(sheet_criteria(&h)?, Some(vec![]), "the context action leaves the worksheet filter alone");
-    assert_eq!(table_criteria(&h, "People")?, [(0, values(&["Dan"]))]);
-    assert_eq!(hidden(&h)?, [10, 11]);
+    press(h, "Filter by Selected Cell's Value")
+}
+
+#[test]
+fn context_filter_by_value_with_buttons_off_undoes_and_redoes_as_one_step() -> TestResult {
+    // GridCraft's existing targeting and button behavior; this Excel path is unmeasured.
+    for has_worksheet_filter in [true, false] {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("range.setValues", json!({"range":"A1", "values":[["Name", "Region"], ["Ann", "West"], ["Ben", "West"], ["Cat", "East"]]}))?;
+        s.execute("insert.table", json!({"range":"A1:B4", "header":true, "name":"People"}))?;
+        s.execute("data.filter", json!({}))?;
+        s.execute("insert.slicer", json!({"table":"People", "column":"Region", "at":"J2"}))?;
+        s.execute("slicer.toggle", json!({"value":"West"}))?;
+        if has_worksheet_filter {
+            s.execute("selection.set", json!({"range":"F1"}))?;
+            s.execute("data.filter", json!({"range":"A1:B4"}))?;
+        }
+        let mut h = harness(s);
+        let state = |h: &Harness| -> TestResult<_> {
+            let sh = sheet(h)?;
+            let t = sh.tables.iter().find(|t| t.name == "People").ok_or("People")?;
+            Ok((t.filter_button, t.filter.clone(), sh.autofilter.as_ref().map(|af| (af.range.a1(), af.criteria.clone())), hidden(h)?))
+        };
+        let before = (false, vec![(1, values(&["West"]))], has_worksheet_filter.then(|| ("A1:B4".into(), vec![])), vec![4]);
+        let after = (!has_worksheet_filter, vec![(1, values(&["West"])), (0, values(&["Ann"]))], None, vec![3, 4]);
+        assert_eq!(state(&h)?, before);
+        let depth = undo_depth(&h)?;
+        filter_by_cell_value(&mut h, CellRef::new(1, 0))?;
+        assert_eq!(state(&h)?, after);
+        h.state_mut().run("edit.undo", json!({}))?;
+        assert_eq!(state(&h)?, before, "one undo must also restore the table's filter buttons");
+        assert_eq!(undo_depth(&h)?, depth);
+        h.state_mut().run("edit.redo", json!({}))?;
+        assert_eq!(state(&h)?, after);
+        assert_eq!(undo_depth(&h)?, depth + 1);
+    }
+    Ok(())
+}
+
+/// The worksheet AutoFilter's range and criteria, or `None` without one.
+type SheetFilter = Option<(String, Vec<(u32, FilterCriterion)>)>;
+
+fn autofilter(h: &Harness) -> TestResult<SheetFilter> {
+    Ok(sheet(h)?.autofilter.as_ref().map(|af| (af.range.a1(), af.criteria.clone())))
+}
+
+fn undo_label(h: &Harness) -> TestResult<String> {
+    Ok(h.state().session.active().ok_or("active document")?.undo.last().ok_or("no undo step")?.label.clone())
+}
+
+/// Name/Q in A1:B4: no table, no worksheet AutoFilter.
+fn plain_range() -> TestResult<Session> {
+    let mut s = Session::new();
+    s.new_workbook();
+    s.execute("range.setValues", json!({"range":"A1", "values":[["Name","Q"],["Ann",1],["Ben",2],["Cat",3]]}))?;
+    Ok(s)
+}
+
+#[test]
+fn context_filter_by_value_on_a_plain_range_undoes_and_redoes_as_one_step() -> TestResult {
+    let mut h = harness(plain_range()?);
+    let depth = undo_depth(&h)?;
+    let after = Some(("A1:B4".to_string(), vec![(0, values(&["Ann"]))]));
+    filter_by_cell_value(&mut h, CellRef::new(1, 0))?;
+    assert_eq!(autofilter(&h)?, after, "the action creates the worksheet AutoFilter with the criterion");
+    assert_eq!(hidden(&h)?, [3, 4]);
     assert_eq!(undo_depth(&h)?, depth + 1);
+    // The undo list names the step as it does when the action is a single `data.filterBy`.
+    let label = gridcraft_engine::find_command("data.filterBy").ok_or("data.filterBy")?.label;
+    assert_eq!(undo_label(&h)?, label);
+    h.state_mut().run("edit.undo", json!({}))?;
+    assert_eq!(autofilter(&h)?, None, "one undo also removes the AutoFilter it created");
+    assert_eq!(hidden(&h)?, Vec::<u32>::new());
+    assert_eq!(undo_depth(&h)?, depth);
+    h.state_mut().run("edit.redo", json!({}))?;
+    assert_eq!(autofilter(&h)?, after);
+    assert_eq!(hidden(&h)?, [3, 4]);
+    assert_eq!(undo_label(&h)?, label);
+    Ok(())
+}
+
+#[test]
+fn context_filter_by_value_whose_criterion_fails_rolls_its_setup_back() -> TestResult {
+    let mut s = plain_range()?;
+    s.execute("range.setValues", json!({"range":"B2", "values":[[9]]}))?;
+    s.execute("edit.undo", json!({}))?;
+    // Column C is empty: the AutoFilter `data.filter` installs over the selection's data (A1:B4) leaves out the
+    // active cell's column, and `data.filterBy` then refuses it.
+    s.execute("selection.set", json!({"range":"A1:C4", "active":"C1"}))?;
+    let mut h = harness(s);
+    let depth = undo_depth(&h)?;
+    filter_by_cell_value(&mut h, CellRef::new(0, 2))?;
+    let message = h.state().message.as_ref().map(|(_, m)| m.clone()).ok_or("the failure is reported")?;
+    assert!(message.contains("column outside the filter range"), "{message}");
+    assert_eq!(autofilter(&h)?, None, "no AutoFilter is left behind without its criterion");
+    assert_eq!(undo_depth(&h)?, depth, "a failed action adds no undo step");
+    assert_eq!(h.state().session.active().ok_or("active document")?.redo.len(), 1, "and keeps the redo history");
     Ok(())
 }
 
