@@ -548,3 +548,84 @@ fn x25_paste_all_hidden_rows_move_last_cell_with_the_pasted_visibility() {
         }
     }
 }
+
+/// The pre-review summary rule over every outline group, kept here as the oracle for the
+/// boundary-local scan in `LineAxis::mark_collapsed_summary`.
+fn group_rule(lines: &std::collections::BTreeMap<u32, LineInfo>, before: bool, first: u32, last: u32, end: u32) -> Option<u32> {
+    gridcraft_engine::outline::groups_with(lines, before)
+        .into_iter()
+        .find(|g| g.collapsed && g.has_summary() && if before { g.start == first } else { g.end == last })
+        .map(|g| g.summary())
+        .filter(|&i| i < end && !lines.get(&i).is_some_and(|l| l.collapsed))
+}
+
+/// Generated small sheets (levels 0-9, gaps, hidden mixes, both summary directions, both sheet
+/// edges): the marker the paste sets equals what the group rule gives on the pasted lines.
+#[test]
+fn boundary_summary_marker_matches_the_group_rule_on_generated_sheets() {
+    use gridcraft_engine::core::{MAX_COLS, MAX_ROWS, col_to_letters};
+
+    let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = |n: u64| {
+        seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        (seed >> 33) % n
+    };
+    let mut marked = 0;
+    for iteration in 0..1500 {
+        let (rows, before) = (next(2) == 0, next(2) == 0);
+        let width = 1 + next(3) as u32;
+        let end = if rows { MAX_ROWS } else { MAX_COLS };
+        let (first, last) = match next(6) {
+            0 => (0, width - 1),
+            1 => (end - width, end - 1),
+            _ => (8, 7 + width),
+        };
+        let source = 100;
+        let mut s = Session::new();
+        s.new_workbook();
+        let sh = Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
+        sh.summary_below = !before;
+        sh.summary_right = !before;
+        let lines = if rows { &mut sh.rows } else { &mut sh.cols };
+        let neighbourhood = first.saturating_sub(6)..=last.saturating_add(6).min(end - 1);
+        for i in (source..source + width).chain(neighbourhood) {
+            if next(4) != 0 {
+                // Deep levels make "at or above the boundary's level" cases frequent.
+                let outline = [0, 1, 1, 2, 2, 3, 7, 9][next(8) as usize];
+                lines.insert(i, LineInfo { outline, hidden: next(3) != 0, collapsed: next(5) == 0, ..Default::default() });
+            }
+        }
+        let original = lines.clone();
+        let name = |i: u32| if rows { (i + 1).to_string() } else { col_to_letters(i) };
+        let anchor = if rows { CellRef::new(first, 0) } else { CellRef::new(0, first) };
+        s.execute("edit.copy", json!({"range": format!("{}:{}", name(source), name(source + width - 1))})).unwrap();
+        s.execute("edit.paste", json!({"at": anchor.a1()})).unwrap();
+        let sh = s.doc().unwrap().wb.sheet(0).unwrap();
+        let after = if rows { &sh.rows } else { &sh.cols };
+        let candidate = if before { first.checked_sub(1) } else { Some(last + 1).filter(|&i| i < end) };
+        // The pasted lines as they stand before any marker: the candidate keeps its old record.
+        let mut unmarked = after.clone();
+        if let Some(i) = candidate {
+            match original.get(&i) {
+                Some(&line) => unmarked.insert(i, line),
+                None => unmarked.remove(&i),
+            };
+        }
+        let expected = group_rule(&unmarked, before, first, last, end);
+        let context = format!("#{iteration}: rows={rows} before={before} paste={first}..={last} lines={original:?}");
+        for (&i, line) in after.range(..first).chain(after.range(last.saturating_add(1)..)) {
+            let mut old = original.get(&i).copied().unwrap_or_default();
+            if expected == Some(i) {
+                old.collapsed = true;
+            }
+            assert_eq!(*line, old, "{context}: line {i}");
+        }
+        if let Some(i) = expected {
+            assert!(after.get(&i).is_some_and(|l| l.collapsed), "{context}: marker on {i}");
+            marked += 1;
+        } else if let Some(i) = candidate {
+            assert_eq!(after.get(&i).copied(), original.get(&i).copied(), "{context}: no marker on {i}");
+        }
+    }
+    assert!(marked > 50, "the generator should reach the marking branch often, got {marked}");
+}

@@ -283,9 +283,10 @@ but not after Insert Copied Rows. Whole columns use the same rule as rows; the c
 probes only exercised rows. Undo/redo, Insert Cut Cells and the system clipboard were not compared.
 Insert Copied and Insert Cut Cells check row/column formatting protection against the sheet as
 the insertion left it, so a new line that inherited the format of the line before it and is
-then given a different source format counts as a formatting change. Batch 5's protected Insert
-Copied Rows probe refused the operation when inserting rows was allowed but formatting rows
-was not; it did not isolate which change caused the refusal.
+then given a different source format counts as a formatting change. In Batch 5's protected
+Insert Copied Rows probe (Insert Rows allowed, Format Rows denied), Excel returned `Parameter
+error.` and left A8/A9 and rows 7–10 unchanged. That is consistent with a refusal, but the error
+text does not name protection and the probe did not isolate which change caused it.
 
 Other Paste Special modes (including Values, Formulas, Formats and All Except Borders), arithmetic
 operations, Skip Blanks, Transpose, Paste Link and partial-range paste retain their previous
