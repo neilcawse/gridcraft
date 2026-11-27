@@ -58,7 +58,7 @@ pub(crate) use selection::{SelectionPaintInput, paint_selection};
 pub(crate) use show::horizontal_scrollbar;
 pub use show::show;
 #[cfg(test)]
-use tables::filter_table_range;
+use tables::filter_table;
 pub use tables::{TableHeading, filter_button_rect, heading_table, table_headings};
 
 pub const COL_HEADER_H: f32 = 21.0;

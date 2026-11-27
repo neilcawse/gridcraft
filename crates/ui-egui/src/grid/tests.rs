@@ -176,9 +176,9 @@ fn filter_menu_uses_the_table_whose_header_was_clicked() {
     let mut sh = Sheet::new("S");
     sh.tables.push(table(1, 0, 2));
     sh.tables.push(table(2, 4, 7));
-    assert_eq!(filter_table_range(&sh, 0, 4), Some(sh.tables[1].range));
-    assert_eq!(filter_table_range(&sh, 0, 0), Some(sh.tables[0].range));
-    assert_eq!(filter_table_range(&sh, 1, 4), None);
+    assert_eq!(filter_table(&sh, CellRef::new(4, 0)), sh.tables.get(1));
+    assert_eq!(filter_table(&sh, CellRef::new(0, 0)), sh.tables.first());
+    assert_eq!(filter_table(&sh, CellRef::new(4, 1)), None);
 }
 
 /// The `("Label", "id")` keys written in `src`, without separators.

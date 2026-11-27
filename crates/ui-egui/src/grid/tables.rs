@@ -1,5 +1,6 @@
 use super::geo::Geo;
-use super::{CellRef, Painter, Pos2, RangeRef, Rect, Sheet, Stroke, StrokeKind, Tokens, pos2, vec2};
+use super::{CellRef, Painter, Pos2, Rect, Sheet, Stroke, StrokeKind, Tokens, pos2, vec2};
+use gridcraft_engine::model::Table;
 
 pub fn filter_button_rect(geo: &Geo, sh: &Sheet, c: CellRef) -> Rect {
     let rect = geo.cell_rect(sh, c);
@@ -82,6 +83,6 @@ pub(super) fn is_filter_button(sh: &Sheet, geo: &Geo, p: Pos2) -> bool {
 }
 
 /// The table whose header cell (`row`, `col`) was clicked, not just the first table in the column.
-pub(super) fn filter_table_range(sh: &Sheet, col: u32, row: u32) -> Option<RangeRef> {
-    sh.tables.iter().find(|t| t.range.start.row == row && col >= t.range.start.col && col <= t.range.end.col).map(|t| t.range)
+pub(super) fn filter_table(sh: &Sheet, header: CellRef) -> Option<&Table> {
+    sh.tables.iter().find(|t| t.filter_button && t.header_row && t.range.start.row == header.row && t.range.contains(header))
 }
