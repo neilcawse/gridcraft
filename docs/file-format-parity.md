@@ -118,10 +118,17 @@ worksheet anchor is the on-screen box. Its unturned frame swaps width and height
 same centre and can start above or left of the sheet. GridCraft uses the on-screen box for
 line sizing and placement, including sort, and uses the frame for child projection and for
 the transform when recomputing the group's drawing. This convention matches Excel for Mac
-16.115.2 at open and after a row height edit; Excel-written anchors and transforms were not
-measured. The turned content itself is still drawn unturned and reported on import. Other
-group angles retain the prior layout and warnings. An untouched group writes its original
-worksheet anchor and group and member transforms, including the members' own flips.
+16.115.2 at open and after a row height edit. Column width edits, moves, sorts and nested
+groups follow the same rule but were not measured, and neither were Excel-written anchors and
+transforms. A recomputed group transform keeps the file's `ext`/`chExt` scale, so its `ext`
+need not match the frame after a resize. GridCraft places a root group from its anchor, as
+Excel did in the measured fixtures, whose root `off`/`ext` disagreed with the anchor.
+Rotation stored as any equivalent angle (for example `-5400000` or `27000000` for 270° and
+90°) is treated the same way. The turned content itself is still drawn unturned and reported
+on import. Other group angles retain the prior layout and warnings. An untouched group writes
+its original worksheet anchor and group and member transforms, including the members' own
+flips. Files saved by unreleased integration builds that carried X38's convention (anchor as
+the unturned frame) now open with that anchor read as the on-screen box; no release used it.
 
 Imported objects keep their source stacking order and nonvisual IDs and names; a name is kept
 even when its ID is the placeholder `0`, which is renumbered. Bring Forward and Send Backward

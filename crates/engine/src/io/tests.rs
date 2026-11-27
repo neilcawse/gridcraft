@@ -574,6 +574,10 @@ fn assert_excel_turned_group(rotation: i64, to: (u32, u32), frames: [[f64; 4]; 2
         Ok(())
     };
     check(&wb, frames[0], 25.0)?;
+    // Untouched, the source markers and the group's source transform go back as read.
+    let untouched = drawing_xml(&save_bytes(&wb, "turned.xlsx")?);
+    let source_xfrm = drawing.split_once("<a:xfrm").and_then(|(_, rest)| rest.split_once("</a:xfrm>")).ok_or("source xfrm")?.0;
+    assert!(untouched.contains(&from) && untouched.contains(&to) && untouched.contains(source_xfrm), "untouched group changed: {untouched}");
     let mut session = Session::new();
     session.add_document(DocState::from_saved(wb, None, "Turned".to_owned(), Trust::FromFile));
     session.execute("home.rowHeight", json!({"sheet": 0, "rows": "4:4", "points": 50}))?;
@@ -584,7 +588,14 @@ fn assert_excel_turned_group(rotation: i64, to: (u32, u32), frames: [[f64; 4]; 2
     assert!(xml.contains(&from) && xml.contains(&to), "changed worksheet markers: {xml}");
     let [x, y, _, _] = frames[1];
     let emu = |pt: f64| (pt * 12700.0).round() as i64;
-    assert!(xml.contains(&format!(r#"<a:xfrm rot="{rotation}"><a:off x="{}" y="{}"/>"#, emu(x), emu(y))), "incorrect saved frame: {xml}");
+    // The frame origin follows the resized anchor; `ext` keeps the file's scale over the
+    // unchanged child box (see docs/file-format-parity.md).
+    let frame = format!(
+        r#"<a:xfrm rot="{rotation}"><a:off x="{}" y="{}"/><a:ext cx="2540000" cy="1270000"/><a:chOff x="0" y="0"/><a:chExt cx="2540000" cy="1270000"/></a:xfrm>"#,
+        emu(x),
+        emu(y)
+    );
+    assert!(xml.contains(&frame), "incorrect saved frame: {xml}");
     let (reopened, _) = open_bytes("turned.xlsx", &saved)?;
     check(&reopened, frames[1], 50.0)?;
     assert_eq!(drawing_xml(&save_bytes(&reopened, "turned.xlsx")?), xml);
