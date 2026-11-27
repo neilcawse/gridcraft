@@ -478,8 +478,7 @@ fn changing_the_summary_direction_moves_collapsed_marks() {
 
 /// Sorting rows leaves a hidden row where it is, with its cells, note, link, format and height
 /// ("Sort data in a range or table": hidden rows are not moved when you sort rows); the rows
-/// showing are sorted among the positions they hold, formulas following their rows. Undo puts
-/// the sheet back exactly.
+/// showing are sorted among the positions they hold, formulas following their rows.
 #[test]
 fn row_sort_leaves_hidden_rows_in_place() {
     let mut s = Session::new();
@@ -507,6 +506,7 @@ fn row_sort_leaves_hidden_rows_in_place() {
         assert_eq!(hidden(CellRef::new(3, col)), was(CellRef::new(3, col)), "the hidden row keeps its cells");
     }
     assert_eq!(sh.rows.get(&3), before.rows.get(&3), "the hidden row keeps its height and stays hidden");
+    assert_eq!(sh.value(CellRef::new(0, 0)), Value::from("Key"));
     assert_eq!(sh.comments.len(), 1);
     assert_eq!(sh.hyperlinks.len(), 1);
     // Key 2 came from row 6 with its height; row 2's key 4 went to row 6 with the default.
@@ -514,8 +514,11 @@ fn row_sort_leaves_hidden_rows_in_place() {
     assert_eq!(sh.rows.get(&2).and_then(|l| l.size), before.rows.get(&5).and_then(|l| l.size));
     assert_eq!(sh.rows.get(&5).and_then(|l| l.size), None);
 
+    let after = s.doc().unwrap().wb.sheets[0].clone();
     s.execute("edit.undo", json!({})).unwrap();
     assert_eq!(s.doc().unwrap().wb.sheets[0], before, "undo restores the sheet");
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(s.doc().unwrap().wb.sheets[0], after, "redo restores the sort");
 }
 
 /// Sorting left to right leaves hidden columns where they are, a column shown with no width
@@ -545,23 +548,77 @@ fn column_sort_leaves_hidden_columns_in_place() {
     assert_eq!(s.doc().unwrap().wb.sheets[0], before, "undo restores the sheet");
 }
 
-/// Rows an AutoFilter hides are hidden rows too: sorting the filtered range (the filter menu's
-/// sort runs the same command) sorts only the rows the filter shows. Follows the documented rule
-/// for hidden rows; sorting a filtered range is not measured in Excel.
+/// Quick sort, also used by the filter menu, preserves filtered-out rows inside its target.
+/// The menu does not explicitly pass a filter range or header; this fixture makes the selection
+/// and the ordinary header guess unambiguous. Filtered sorting is not measured in Excel.
 #[test]
-fn sorting_a_filtered_range_leaves_filtered_out_rows_in_place() {
+fn quick_sort_preserves_filtered_out_rows_inside_its_target() {
     let mut s = Session::new();
     s.new_workbook();
-    let rows = json!([["Name", "Status"], ["d", "Active"], ["x", "Inactive"], ["b", "Active"], ["a", "Inactive"], ["c", "Active"]]);
+    let rows = json!([["Key", "Status"], [4, "Active"], [5, "Inactive"], [2, "Active"], [1, "Inactive"], [3, "Active"]]);
     s.execute("range.setValues", json!({"range": "A1", "values": rows})).unwrap();
     s.execute("selection.set", json!({"cell": "A1"})).unwrap();
     s.execute("data.filter", json!({})).unwrap();
     s.execute("data.filterBy", json!({"column": "B", "values": ["Active"]})).unwrap();
-    s.execute("data.sort", json!({"range": "A1:B6", "header": true, "keys": [{"column": "A"}]})).unwrap();
+    let before = s.doc().unwrap().wb.sheets[0].clone();
+    s.execute("data.sortAscending", json!({"column": "A"})).unwrap();
+    let after = s.doc().unwrap().wb.sheets[0].clone();
+    let values: Vec<Value> = (1..6).map(|r| after.value(CellRef::new(r, 0))).collect();
+    assert_eq!(values, [2.0, 5.0, 3.0, 1.0, 4.0].map(Value::Number));
+    assert_eq!(after.value(CellRef::new(0, 0)), Value::from("Key"));
+    assert_eq!(after.autofilter, before.autofilter);
+    assert_eq!((1..6).map(|r| after.is_row_hidden(r)).collect::<Vec<_>>(), [false, true, false, true, false]);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.doc().unwrap().wb.sheets[0], before);
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(s.doc().unwrap().wb.sheets[0], after);
+}
+
+/// The auto-fit after a real sort still fits visible rows that kept their rank. Excluded
+/// rows, including zero-height rows without a custom height flag, keep their height.
+#[test]
+fn row_sort_fits_even_fixed_visible_rows_but_not_excluded_rows() {
+    let mut s = Session::new();
+    s.new_workbook();
+    s.execute("range.setValues", json!({"range": "A1", "values": [[3], [2], [1], [0], [5]]})).unwrap();
+    {
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let large = wb.styles.derive(gridcraft_model::StyleId::DEFAULT, |st| st.font.size = 36.0);
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.set_style(CellRef::new(1, 0), large);
+        sh.rows.insert(3, gridcraft_model::LineInfo { size: Some(0.0), ..Default::default() });
+        sh.rows.insert(4, gridcraft_model::LineInfo { size: Some(30.0), hidden: true, ..Default::default() });
+    }
+    let before = s.doc().unwrap().wb.sheets[0].clone();
+    s.execute("data.sort", json!({"range": "A1:A5", "header": false, "keys": [{"column": "A"}]})).unwrap();
     let sh = s.doc().unwrap().wb.active().unwrap();
-    let names: Vec<Value> = (1..6).map(|r| sh.value(CellRef::new(r, 0))).collect();
-    assert_eq!(names, ["b", "x", "c", "a", "d"].map(Value::from));
-    assert_eq!((1..6).map(|r| sh.is_row_hidden(r)).collect::<Vec<_>>(), [false, true, false, true, false]);
+    assert_eq!((0..5).map(|r| sh.value(CellRef::new(r, 0))).collect::<Vec<_>>(), [1.0, 2.0, 3.0, 0.0, 5.0].map(Value::Number));
+    assert!(sh.row_height(1) > before.row_height(1), "the fixed visible row is still fitted");
+    assert_eq!(sh.rows.get(&3), before.rows.get(&3));
+    assert_eq!(sh.rows.get(&4), before.rows.get(&4));
+    let after = s.doc().unwrap().wb.sheets[0].clone();
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.doc().unwrap().wb.sheets[0], before);
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(s.doc().unwrap().wb.sheets[0], after);
+}
+
+/// Two moved lines do not trigger automatic fitting if the sort body is over the fit limit.
+#[test]
+fn sort_does_not_fit_a_large_body_with_few_moves() {
+    let mut s = Session::new();
+    s.new_workbook();
+    s.execute("range.setValues", json!({"range": "A1", "values": [[2], [1]]})).unwrap();
+    {
+        let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+        let large = wb.styles.derive(gridcraft_model::StyleId::DEFAULT, |st| st.font.size = 36.0);
+        wb.sheet_mut(0).unwrap().set_style(CellRef::new(0, 0), large);
+    }
+    let height = s.doc().unwrap().wb.active().unwrap().row_height(0);
+    s.execute("data.sort", json!({"range": "A1:XFD13", "header": false, "keys": [{"column": "A"}]})).unwrap();
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    assert_eq!(sh.value(CellRef::new(1, 0)), Value::Number(2.0));
+    assert_eq!(sh.row_height(1), height, "a large sort does not auto-fit");
 }
 
 #[test]

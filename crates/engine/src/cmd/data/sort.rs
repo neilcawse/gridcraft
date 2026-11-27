@@ -152,6 +152,9 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
         // place (Batch 5 probe `x38-collapsed-sort-moves`).
         let shown: Vec<u32> =
             (0..n).filter(|&i| if by_cols { sh.col_width(body.start.col + i) > 0.0 } else { sh.row_height(body.start.row + i) > 0.0 }).collect();
+        if shown.len() < 2 {
+            return Ok(Json::Null);
+        }
         let keyed: Vec<Vec<(Value, u32)>> = shown.iter().map(|&i| keys.iter().map(|k| key_val(i, k)).collect()).collect();
         let mut ranked: Vec<usize> = (0..shown.len()).collect();
         ranked.sort_by(|&a, &b| {
@@ -190,17 +193,22 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
             }
             Ordering::Equal
         });
-        // `order[dst] = src`: each shown position takes the shown line ranked for it.
-        let mut order: Vec<u32> = (0..n).collect();
-        for (&dst, &rank) in shown.iter().zip(&ranked) {
-            if let (Some(slot), Some(&src)) = (order.get_mut(dst as usize), shown.get(rank)) {
-                *slot = src;
-            }
-        }
-        // The lines that move, as (destination, source); the rest are left untouched.
-        let moves: Vec<(u32, u32)> = order.iter().enumerate().map(|(dst, &src)| (dst as u32, src)).filter(|&(dst, src)| dst != src).collect();
+        // Only moved lines have cells to rewrite, as (destination, source).
+        let moves: Vec<(u32, u32)> = shown.iter().copied().zip(ranked.into_iter().map(|rank| shown[rank])).filter(|&(dst, src)| dst != src).collect();
         if moves.is_empty() {
             return Ok(Json::Null);
+        }
+        // Keep the same bounding-box limit for the separate automatic row fit. In a row
+        // sort, fit every shown body row (even if its sorted position is unchanged), but
+        // never fit a row the permutation excluded. In a column sort the rows are lanes,
+        // not the lines being sorted.
+        cx.explicit_fit_rows = true;
+        if body.count() <= 200_000 {
+            if by_cols {
+                cx.fit_rows.extend((body.start.row..=body.end.row).map(|row| (sheet, row)));
+            } else {
+                cx.fit_rows.extend(shown.into_iter().map(|i| (sheet, body.start.row + i)));
+            }
         }
         // Move whole lines (cells with formulas adjusted for relative references).
         let lanes: Vec<u32> = if by_cols { (body.start.row..=body.end.row).collect() } else { (body.start.col..=body.end.col).collect() };
@@ -217,7 +225,7 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
             .flat_map(|&(dst_i, src_i)| lanes.iter().map(move |&k| (src_i, dst_i, k)))
             .filter_map(|(src_i, dst_i, k)| sh.hyperlinks.get(&line(src_i, k)).map(|h| (line(dst_i, k), h.clone())))
             .collect();
-        let mut moved: Vec<(CellRef, Option<Cell>)> = Vec::with_capacity(moves.len().saturating_mul(lanes.len()));
+        let mut moved: Vec<(CellRef, Option<Cell>)> = Vec::with_capacity(moves.len() * lanes.len());
         let mut pictures = Vec::new();
         for &(dst_i, src_i) in &moves {
             for &k in &lanes {
@@ -245,13 +253,11 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
             moves.iter().map(|&(dst, src)| (body.start.row + dst, sh.rows.get(&(body.start.row + src)).copied())).collect()
         };
         // Ungrouped floating objects anchored inside the sorted body travel with their lines,
-        // unless pinned absolutely. Reordering is the inverse of `order`: `dst_of[src] = dst`.
+        // unless pinned absolutely. The identity holds on every line not in `moves`.
         let dst_of: Vec<u32> = {
-            let mut v = vec![0u32; order.len()];
-            for (dst_i, &src_i) in order.iter().enumerate() {
-                if let Some(slot) = v.get_mut(src_i as usize) {
-                    *slot = dst_i as u32;
-                }
+            let mut v: Vec<u32> = (0..n).collect();
+            for &(dst, src) in &moves {
+                v[src as usize] = dst;
             }
             v
         };
@@ -289,13 +295,14 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
             }))
         .then(|| Arc::clone(&cx.wb.sheets[sheet]));
         let shm = cx.wb.sheet_mut(sheet).ok_or_else(|| EngineError::Other("no such sheet".into()))?;
-        for (c, cell) in &moved {
+        for (c, cell) in moved {
             match cell {
-                Some(x) => shm.set_cell(*c, x.clone()),
+                Some(cell) => shm.set_cell(c, cell),
                 None => {
-                    shm.remove_cell(*c);
+                    shm.remove_cell(c);
                 }
             }
+            cx.changed.push((sheet, c));
         }
         // Every cell of a moved line is the destination of exactly one source cell, so clearing
         // those lines and inserting the permuted entries is the same permutation the cells went
@@ -379,9 +386,6 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
             }
         }
         shm.discard_changed_drawing_files();
-        for (c, _) in moved {
-            cx.changed.push((sheet, c));
-        }
         cx.structural = true;
         Ok(Json::Null)
     })?;

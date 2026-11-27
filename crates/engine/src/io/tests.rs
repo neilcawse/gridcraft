@@ -763,7 +763,7 @@ fn collapsed_sort_book(keys: [f64; 6]) -> Vec<u8> {
 /// sorting A5:D10 by column A permutes only the visible rows 5, 6, 9 and 10 among themselves.
 /// The zero-height rows 7:8 keep their keys, cells and height, as Microsoft's "Sort data in a
 /// range or table" says of hidden rows; the collapsed group stays at F7 with no height and
-/// grows back to 30 pt once rows 7 and 8 are set to 15 pt. Undo restores the sheet exactly.
+/// grows back to 30 pt once rows 7 and 8 are set to 15 pt, even after saving and reopening.
 #[test]
 fn sort_leaves_zero_height_rows_and_their_collapsed_group_in_place() {
     use crate::{DocState, Session, Trust};
@@ -793,6 +793,22 @@ fn sort_leaves_zero_height_rows_and_their_collapsed_group_in_place() {
         assert_eq!(after.rows, before.rows, "{keys:?}: every row keeps its height");
         assert_box(group(&after), frame, "group after the sort");
 
+        let saved = save_bytes(&s.doc().unwrap().wb, "sorted.xlsx").unwrap();
+        let (reopened, _) = open_bytes("sorted.xlsx", &saved).unwrap();
+        let reopened_sheet = reopened.sheet(0).unwrap();
+        assert_eq!((6..8).map(|r| reopened_sheet.row_height(r)).collect::<Vec<_>>(), [0.0, 0.0]);
+        for row in 4..10 {
+            for col in 0..4 {
+                let c = CellRef::new(row, col);
+                assert_eq!(reopened_sheet.value(c), after.value(c));
+            }
+        }
+        assert_box(group(reopened_sheet), frame, "reopened group after the sort");
+        let mut reopened_session = Session::new();
+        reopened_session.add_document(DocState::from_saved(reopened, None, "Sorted".to_owned(), Trust::FromFile));
+        reopened_session.execute("home.rowHeight", json!({"sheet": 0, "rows": "7:8", "points": 15})).unwrap();
+        assert_box(group(&sheet(&reopened_session)), gridcraft_model::ObjectRect { h: 40.0, ..frame }, "reopened group recovers");
+
         s.execute("home.rowHeight", json!({"sheet": 0, "rows": "7:8", "points": 15})).unwrap();
         let grown = sheet(&s);
         assert_box(group(&grown), gridcraft_model::ObjectRect { h: 40.0, ..frame }, "group after rows 7:8 take 15 pt");
@@ -800,6 +816,10 @@ fn sort_leaves_zero_height_rows_and_their_collapsed_group_in_place() {
         s.execute("edit.undo", json!({})).unwrap();
         s.execute("edit.undo", json!({})).unwrap();
         assert_eq!(sheet(&s), before, "{keys:?}: undo restores the sheet");
+        s.execute("edit.redo", json!({})).unwrap();
+        assert_eq!(sheet(&s), after, "redo restores the sort");
+        s.execute("edit.redo", json!({})).unwrap();
+        assert_eq!(sheet(&s), grown, "redo restores the resize");
     }
 }
 
