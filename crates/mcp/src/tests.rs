@@ -235,6 +235,90 @@ fn sort_and_filter() {
     assert_eq!(info["sheets"][0]["autofilter"], "A1:B4");
 }
 
+fn visible_filter_rows(s: &mut Server, range: &str) -> Value {
+    ok(s, "evaluate_formula", json!({"formula": format!("SUBTOTAL(103,{range})")}))["result"].clone()
+}
+
+#[test]
+fn filter_with_explicit_targets_keeps_each_owners_criteria() {
+    let mut s = server();
+    ok(&mut s, "write_range", json!({"range": "A1", "values": [["Flag"], ["sheet"], ["other"], ["other"]]}));
+    ok(&mut s, "write_range", json!({"range": "A8", "values": [["Flag"], ["table"], ["other"], ["other"]]}));
+    ok(&mut s, "execute_command", json!({"command": "data.filter", "params": {"range": "A1:A4"}}));
+    ok(&mut s, "create_table", json!({"range": "A8:A11", "name": "Flags"}));
+    ok(&mut s, "select", json!({"range": "A1"}));
+
+    ok(&mut s, "filter", json!({"column": "A", "table": "Flags", "values": ["table"]}));
+    assert_eq!(visible_filter_rows(&mut s, "A9:A11"), 1.0);
+    assert_eq!(visible_filter_rows(&mut s, "A2:A4"), 3.0);
+
+    for (target, keep, expected) in [(Value::Null, "sheet", 1.0), (json!(""), "other", 2.0), (json!(" \t"), "sheet", 1.0)] {
+        ok(&mut s, "select", json!({"range": "A8"}));
+        ok(&mut s, "filter", json!({"column": "A", "table": target, "values": [keep]}));
+        assert_eq!(visible_filter_rows(&mut s, "A2:A4"), expected);
+        assert_eq!(visible_filter_rows(&mut s, "A9:A11"), 1.0);
+    }
+
+    ok(&mut s, "filter", json!({"column": "A", "table": "Flags", "clear": true}));
+    assert_eq!(visible_filter_rows(&mut s, "A9:A11"), 3.0);
+    assert_eq!(visible_filter_rows(&mut s, "A2:A4"), 1.0);
+}
+
+#[test]
+fn filter_rejects_missing_owners_without_installing_a_filter() {
+    let mut s = server();
+    ok(&mut s, "write_range", json!({"range": "A1", "values": [["Flag"], ["keep"], ["hide"]]}));
+    let before = ok(&mut s, "inspect_workbook", json!({}));
+
+    for target in [Value::Null, json!(""), json!(" \t"), json!("Missing")] {
+        let args = json!({"column": "A", "table": target, "values": ["keep"]});
+        let engine_error = cmd_fails(&mut s, "data.filterBy", args.clone());
+        let engine_error = engine_error.strip_prefix("execute_command: ").unwrap();
+        assert_eq!(fails(&mut s, "filter", args), format!("filter: {engine_error}"));
+        assert_eq!(ok(&mut s, "inspect_workbook", json!({})), before);
+        assert_eq!(visible_filter_rows(&mut s, "A2:A3"), 2.0);
+    }
+}
+
+#[test]
+fn filter_rejects_non_string_or_null_table_targets() {
+    let mut s = server();
+    ok(&mut s, "write_range", json!({"range": "A1", "values": [["Flag"], ["keep"], ["hide"]]}));
+    let before = ok(&mut s, "inspect_workbook", json!({}));
+    let args = json!({"column": "A", "table": 7, "values": ["keep"]});
+
+    let reply = rpc(&mut s, 99, "tools/call", json!({"name": "filter", "arguments": &args}));
+    assert_eq!(err_code(&reply), -32602);
+    assert_eq!(reply["error"]["message"], "filter: argument `table` must be of type [\"string\",\"null\"]");
+    assert_eq!(ok(&mut s, "inspect_workbook", json!({})), before);
+
+    // Embedders can call the tool directly; the engine must see the original value.
+    let result = crate::call_tool(s.backend(), "filter", &args);
+    assert!(result.is_error);
+    assert_eq!(text_of(&result.to_value()), "filter: invalid parameters for `data.filterBy`: `table` must be a name, null, or empty");
+    assert_eq!(ok(&mut s, "inspect_workbook", json!({})), before);
+    assert_eq!(visible_filter_rows(&mut s, "A2:A3"), 2.0);
+}
+
+#[test]
+fn filter_refuses_range_with_a_target_before_changing_selection() {
+    let mut s = server();
+    ok(&mut s, "write_range", json!({"range": "A1", "values": [["Flag"], ["keep"], ["hide"]]}));
+    ok(&mut s, "write_range", json!({"range": "A8", "values": [["Flag"], ["keep"], ["hide"]]}));
+    ok(&mut s, "execute_command", json!({"command": "data.filter", "params": {"range": "A1:A3"}}));
+    ok(&mut s, "create_table", json!({"range": "A8:A10", "name": "Flags"}));
+    ok(&mut s, "select", json!({"range": "D5"}));
+    let before = ok(&mut s, "inspect_workbook", json!({}));
+
+    for target in [json!("Flags"), Value::Null, json!("")] {
+        let msg = fails(&mut s, "filter", json!({"range": "A1:A3", "column": "A", "table": target, "values": ["keep"]}));
+        assert!(msg.contains("omit `range`"), "{msg}");
+        assert_eq!(ok(&mut s, "inspect_workbook", json!({})), before);
+        assert_eq!(visible_filter_rows(&mut s, "A2:A3"), 2.0);
+        assert_eq!(visible_filter_rows(&mut s, "A9:A10"), 2.0);
+    }
+}
+
 #[test]
 fn save_and_open_roundtrip() {
     let mut s = server();
