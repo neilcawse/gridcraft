@@ -683,6 +683,38 @@ fn linked_names_that_cannot_be_calculated_keep_their_saved_value() {
     expect(&t);
 }
 
+/// Excel-cached values in the public fuse corpus file 0003fea7…: `IFERROR(VLOOKUP(…,'[1]PIVOT FOR
+/// FTES SUBJECT TOTALS'!$A:M,…),"")` shows 0 where the key's row is saved but the hit cell isn't,
+/// on a sheet whose last refresh failed. Converted Enron workbooks show `#REF!` for such cells, so
+/// a formula reading one keeps its saved value; one that only reads saved cells is calculated.
+#[test]
+fn uncached_cells_of_a_failed_linked_sheet_keep_the_saved_formula_value() {
+    use gridcraft_model::{ExternalBook, ExternalSheet};
+    let mut t = T::new();
+    let cells = vec![(c("A1"), Value::text("ACCT")), (c("B1"), Value::Number(16.7)), (c("A2"), Value::text("ADS"))];
+    let partial = ExternalSheet { name: "Pivot".into(), cells, refresh_error: true, ..Default::default() };
+    t.wb.external_books = vec![ExternalBook { sheets: vec![partial], ..Default::default() }].into();
+    let saved = [
+        ("B1", "=IFERROR(VLOOKUP(\"ACCT\",[1]Pivot!$A:M,3,FALSE),\"\")", Value::Number(0.0)),
+        ("B2", "=[1]Pivot!X338", Value::Number(0.0)),
+        ("B3", "=B2+1", Value::Number(1.0)),
+        ("B4", "=VLOOKUP(\"ACCT\",[1]Pivot!$A:M,2,FALSE)", Value::Number(3.0)),
+        ("B5", "=[1]Pivot!C9", Value::Error(CellError::Ref)),
+    ];
+    for (at, formula, value) in saved {
+        let mut cell = Cell::formula(Formula::new(formula));
+        cell.value = value;
+        t.wb.sheet_mut(0).unwrap().cells.set(c(at), cell);
+    }
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!((t.num("B1"), t.num("B2"), t.num("B3"), t.num("B4")), (0.0, 0.0, 1.0, 16.7));
+    assert_eq!(t.get("B5"), Value::Error(CellError::Ref));
+    // Entered again, they are calculated: the uncached cell is #REF!.
+    t.set("B1", "=IFERROR(VLOOKUP(\"ACCT\",[1]Pivot!$A:M,3,FALSE),\"\")");
+    t.set("B2", "=[1]Pivot!X338");
+    assert_eq!((t.get("B1"), t.get("B2"), t.get("B3")), (Value::text(""), Value::Error(CellError::Ref), Value::Error(CellError::Ref)));
+}
+
 #[test]
 fn linked_dynamic_array_keeps_saved_spill_values_after_recalc() {
     use gridcraft_core::RangeRef;

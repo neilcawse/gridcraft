@@ -105,8 +105,10 @@ pub(super) fn linked_definition_readable(b: &ExternalBook, def: &ExternalName, e
 }
 
 /// A value read from a linked sheet's saved cells. When the last update of the link failed for
-/// the sheet (`refreshError`), Excel keeps the values it had and shows `#REF!` for anything it
-/// hadn't saved.
+/// the sheet (`refreshError`), the cells it hadn't saved read as `#REF!`. That is what Excel's
+/// caches show for them in some files and not in others (0 in others, as if blank), and nothing
+/// in the link part tells the two apart, so a formula reading one as a value keeps the value
+/// Excel saved for it (see `Host::note_unknown_link`) until it has to be calculated again.
 pub fn linked_value(s: &ExternalSheet, v: Option<&Value>) -> Value {
     match v {
         Some(v) => v.clone(),
