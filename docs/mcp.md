@@ -52,11 +52,27 @@ with a file open.
 | `insert_chart` | `range`, `type`, `title?`, `subtype?`, `at?` | `insert.chart`. |
 | `create_table` | `range`, `style?`, `header?`, `name?` | `insert.table`. |
 | `sort_range` | `keys`, `range?`, `header?` | `data.sort`; keys are `"B"`, `"B desc"` or `{column, order}`. |
-| `filter` | `column`, `range?`, `values?`, `custom?`, `top?`, `blanks?`, `clear?` | `data.filterBy` (turns AutoFilter on when needed). |
+| `filter` | `column`, `range?`, `table?`, `values?`, `custom?`, `top?`, `blanks?`, `clear?` | `data.filterBy`; apply or clear a column criterion on a table or worksheet AutoFilter. |
 | `open_workbook` / `save_workbook` / `new_workbook` | `path` / `path?` / `sample?` | Files (`.xlsx`, `.csv`, `.tsv`, `.json`, `.html`). |
 | `undo` / `redo` | `steps?` | History. |
 | `screenshot` | `path` | PNG of the window (Remote only). |
 | `list_functions` | `search?`, `category?` | Worksheet functions with signatures. |
+
+`filter` resolves the target on the active sheet:
+
+- Omit `table` for the legacy behavior: use the existing AutoFilter (or its associated table filter), or turn on
+  AutoFilter for the selection's current region if needed. `range`, if given, sets the selection first.
+- Pass `table: null`, `table: ""`, or a whitespace-only string to use only the existing worksheet AutoFilter.
+  If none exists, the tool returns an error without creating one.
+- Pass a table name to use that table's own filter. Matching ignores ASCII letter case; non-ASCII characters
+  must match exactly. The table must have a header row and visible filter buttons. Find names in
+  `inspect_workbook` under `sheets[].tables[].name`.
+
+Omit `range` whenever you pass `table`; the tool rejects the combination before running any command, so the selection
+and filters are unchanged. A `table` value other than a string or `null` is rejected by MCP schema validation
+(`-32602`) before the tool runs. Embedders calling `call_tool` directly bypass schema validation; when an invalid
+value reaches `data.filterBy`, it returns its own type error. Target errors such as a missing table or worksheet
+AutoFilter likewise come from `data.filterBy` and are returned as tool errors.
 
 Every tool that acts on a workbook (all but `list_commands`, `list_functions`, `list_windows`, `open_workbook`,
 `new_workbook` and `screenshot`) also takes `window` or `doc`, an id from `list_windows`, and acts in that window

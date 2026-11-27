@@ -337,13 +337,15 @@ fn base_tool_definitions() -> Vec<Value> {
         tool(
             "filter",
             "Filter",
-            "Filter rows by a column (turns on AutoFilter on the current region, or `range`, when needed). Give `values` (keep rows whose \
-             cell text is one of them), `custom` ({op:\">\", value:\"10\", op2?, value2?, and?}), `top` ({count, bottom?, percent?}), or \
-             clear:true to remove this column's filter.",
+            "Apply or clear a column filter on the active sheet. Name a `table` to use its own filter, pass null or blank for the \
+             existing worksheet AutoFilter only, or omit `table` for legacy behavior (turn on AutoFilter when needed). Use `range` \
+             only when `table` is omitted. Give `values` (keep rows whose cell text matches), `custom` ({op:\">\", value:\"10\", \
+             op2?, value2?, and?}), `top` ({count, bottom?, percent?}), or clear:true to remove this column's filter.",
             obj(
                 json!({
                     "column": string("Column letter, e.g. \"C\""),
-                    "range": string("Data range to filter (default: the current region of the selection)"),
+                    "range": string("Select this data range before filtering; only allowed when `table` is omitted"),
+                    "table": {"type": ["string", "null"], "description": "Omit for legacy resolution (including installing an AutoFilter when needed or following its table proxy). Null or a blank string (including whitespace) requires an existing worksheet AutoFilter. A name selects that table's own filter; it must have a header row and visible filter buttons."},
                     "values": {"type": "array", "items": {"type": ["string", "number", "boolean"]}, "description": "Values to keep"},
                     "custom": {"type": "object", "description": "Custom criteria: {op: \"=\"|\"<>\"|\">\"|\">=\"|\"<\"|\"<=\"|\"beginsWith\"|\"contains\"…, value, op2?, value2?, and?: bool}"},
                     "top": {"type": "object", "description": "Top/bottom N: {count, bottom?: bool, percent?: bool}"},
@@ -601,10 +603,19 @@ fn sort_range(b: &mut dyn Backend, a: &Args) -> Result<Value, String> {
 }
 
 fn filter(b: &mut dyn Backend, a: &Args) -> Result<Value, String> {
+    let table = a.get("table");
+    if table.is_some() && a.contains_key("range") {
+        return Err("omit `range` when specifying a `table` target".into());
+    }
     if let Some(r) = a.get("range").and_then(Value::as_str) {
         exec(b, "selection.set", json!({"range": r}))?;
     }
-    exec(b, "data.filterBy", pick(a, &["column", "values", "custom", "top", "blanks", "clear"]))
+    let mut params = pick(a, &["column", "values", "custom", "top", "blanks", "clear"]);
+    if let Some(table) = table {
+        // Explicit null selects the worksheet AutoFilter; pick would drop it.
+        params["table"] = table.clone();
+    }
+    exec(b, "data.filterBy", params)
 }
 
 fn save_workbook(b: &mut dyn Backend, a: &Args) -> Result<Value, String> {
