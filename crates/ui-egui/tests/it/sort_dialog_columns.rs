@@ -219,8 +219,19 @@ fn sort_dialog_keeps_the_worksheet_the_range_names() {
 /// An open filter menu closes when Sort opens, so it cannot take the Enter that confirms Sort.
 #[test]
 fn sort_dialog_closes_an_open_filter_menu() {
-    let mut h = harness(sales());
-    h.state_mut().grid.filter_menu = Some((1, 0, egui::pos2(100.0, 100.0)));
+    let mut s = sales();
+    s.execute("data.filter", json!({"range": "A1:B4"})).unwrap();
+    s.execute("selection.set", json!({"range": "B1"})).unwrap();
+    let mut h = harness(s);
+    h.input_mut().events.push(egui::Event::Key {
+        key: Key::ArrowDown,
+        physical_key: Some(Key::ArrowDown),
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers::ALT,
+    });
+    h.run_steps(2);
+    assert!(h.state().grid.filter_menu.is_some());
     h.state_mut().open_dialog("sort", json!({}));
     h.run_steps(2);
     assert!(h.state().grid.filter_menu.is_none());

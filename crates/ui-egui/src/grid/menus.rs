@@ -1,20 +1,53 @@
 use super::editor::popup_dismissed;
 use super::geo::Geo;
-use super::tables::filter_table_range;
-use super::{Arc, Drag, FillTag, RangeRef, Rect, Sense, Sheet, SheetApp, Stroke, Tokens, col_to_letters, json, pos2, vec2};
+use super::tables::filter_table;
+use super::{
+    Arc, CellRef, Drag, FillTag, FilterMenu, Pos2, RangeRef, Rect, Sense, Sheet, SheetApp, Stroke, Tokens, col_to_letters, json, pos2, vec2,
+};
+
+fn forget_filter_menu(ctx: &egui::Context, col: u32) {
+    ctx.data_mut(|d| {
+        d.remove::<Vec<(String, bool)>>(egui::Id::unique(("filter_sel", col)));
+        d.remove::<String>(egui::Id::unique(("filter_search", col)));
+        d.remove::<Vec<egui::Id>>(egui::Id::unique(("filter_buttons", col)));
+    });
+}
+
+pub(crate) fn open_filter_menu(app: &mut SheetApp, ctx: &egui::Context, sh: &Sheet, header: CellRef, at: Pos2) {
+    let Some(d) = app.session.active() else { return };
+    let menu = FilterMenu { header, at, home: (d.uid, sh.uid.get()) };
+    if app.grid.filter_menu != Some(menu) {
+        if let Some(previous) = app.grid.filter_menu.filter(|p| p.header.col != header.col) {
+            forget_filter_menu(ctx, previous.header.col);
+        }
+        forget_filter_menu(ctx, header.col);
+        app.grid.filter_menu = Some(menu);
+    }
+}
 
 /// Draws the filter-header popup: sort, search/select-all, apply/clear, a lazily installed table autofilter, new-open search focus and dismissal.
 pub(super) fn filter_menu(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_open: bool) {
-    let Some((col, row, at)) = app.grid.filter_menu else { return };
+    let Some(FilterMenu { header, at, home }) = app.grid.filter_menu else { return };
+    let CellRef { col, row } = header;
     let Some(d) = app.session.active() else { return };
     let wb = d.wb.clone();
     let si = wb.active_sheet();
     let Some(sh) = wb.sheet(si) else { return };
+    // The active sheet can change before the first draw, e.g. in a batched keyboard input.
+    if home != (d.uid, sh.uid.get()) {
+        forget_filter_menu(ui.ctx(), col);
+        app.grid.filter_menu = None;
+        return;
+    }
     let _ = geo;
+    let table = filter_table(sh, header);
+    let sort_range = match table {
+        Some(table) => table.autofilter_range(),
+        None => sh.autofilter.as_ref().filter(|af| af.range.start.row == row && af.range.contains(header)).map(|af| af.range),
+    };
     // Tables get an autofilter on demand.
-    let table_range = filter_table_range(sh, col, row);
     if sh.autofilter.is_none()
-        && let Some(range) = table_range
+        && let Some(range) = table.map(|t| t.range)
         && let Some(d) = app.session.active_mut()
         && let Some(s) = Arc::make_mut(&mut d.wb).sheet_mut(si)
     {
@@ -36,13 +69,14 @@ pub(super) fn filter_menu(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_
         egui::Frame::popup(ui.style()).show(ui, |ui| {
             ui.set_width(230.0);
             let ascending = ui.button("↑  Sort Ascending");
-            if ascending.clicked() {
-                let _ = app.run("data.sortAscending", json!({"column": col_to_letters(col)}));
-                close = true;
-            }
             let descending = ui.button("↓  Sort Descending");
-            if descending.clicked() {
-                let _ = app.run("data.sortDescending", json!({"column": col_to_letters(col)}));
+            if ascending.clicked() || descending.clicked() {
+                // A filter with only its header has nothing to sort.
+                if let Some(range) = sort_range.filter(|r| r.end.row > r.start.row) {
+                    let order = if descending.clicked() { "desc" } else { "asc" };
+                    let _ =
+                        app.run("data.sort", json!({"range": range.a1(), "header": true, "keys": [{"column": col_to_letters(col), "order": order}]}));
+                }
                 close = true;
             }
             ui.separator();
@@ -102,11 +136,7 @@ pub(super) fn filter_menu(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_
         });
     });
     if close || popup_dismissed(&response.response, was_open) {
-        ui.ctx().data_mut(|d| {
-            d.remove::<Vec<(String, bool)>>(key);
-            d.remove::<String>(search_key);
-            d.remove::<Vec<egui::Id>>(buttons_key);
-        });
+        forget_filter_menu(ui.ctx(), col);
         app.grid.filter_menu = None;
     }
 }

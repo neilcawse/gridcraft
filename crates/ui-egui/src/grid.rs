@@ -17,6 +17,14 @@ use crate::SheetApp;
 use crate::editor::EditState;
 use crate::theme::{self, Tokens};
 
+/// A filter-header popup belongs to the document and sheet hit when it opened.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FilterMenu {
+    pub header: CellRef,
+    pub at: Pos2,
+    home: (u64, u64),
+}
+
 /// A painted pane: its row span, column span and screen rectangle.
 pub(crate) type PaneQuad = ((u32, u32), (u32, u32), Rect);
 /// Cached Page Break Preview ranges, keyed by (doc uid, revision, sheet).
@@ -52,13 +60,14 @@ pub use editor::validation_arrow;
 use editor::{editor_slack, editor_width, list_picker_height};
 pub use geo::Geo;
 pub use interact::{follow_link, freeze_handles, point_move};
+pub(crate) use menus::open_filter_menu;
 pub(crate) use quadrant::{QuadrantPaint, paint_quadrant};
 pub use selection::selection_fill;
 pub(crate) use selection::{SelectionPaintInput, paint_selection};
 pub(crate) use show::horizontal_scrollbar;
 pub use show::show;
 #[cfg(test)]
-use tables::filter_table_range;
+use tables::filter_table;
 pub use tables::{TableHeading, filter_button_rect, heading_table, table_headings};
 
 pub const COL_HEADER_H: f32 = 21.0;
@@ -286,8 +295,7 @@ pub struct GridState {
     pub drag_select: bool,
     pub rect: Option<Rect>,
     pub cells_rect: Option<Rect>,
-    /// Column and row of the clicked header cell, and where to open the menu.
-    pub filter_menu: Option<(u32, u32, Pos2)>,
+    pub filter_menu: Option<FilterMenu>,
     pub context_menu: Option<Pos2>,
     /// The frame a right-click opened `context_menu` in: that click's own press doesn't close it.
     pub context_menu_frame: u64,

@@ -191,7 +191,8 @@ fn alt_down_opens_autofilter_headers_without_changing_the_workbook() {
             let mut h = harness(session);
             let before = h.state().session.active().unwrap().wb.clone();
             key(&mut h, Key::ArrowDown, Modifiers::ALT);
-            let (column, _row, at) = h.state().grid.filter_menu.expect("Alt+Down must open the filter header menu");
+            let menu = h.state().grid.filter_menu.expect("Alt+Down must open the filter header menu");
+            let (column, at) = (menu.header.col, menu.at);
             let d = h.state().session.active().unwrap();
             let active = CellRef::parse(cell).unwrap();
             assert_eq!(column, active.col);
@@ -241,7 +242,7 @@ fn alt_down_only_opens_enabled_table_filter_buttons() {
         session.execute("selection.set", json!({"cell": "B1"})).unwrap();
         let mut h = harness(session);
         key(&mut h, Key::ArrowDown, Modifiers::ALT);
-        assert_eq!(h.state().grid.filter_menu.map(|(column, _, _)| column), enabled.then_some(1));
+        assert_eq!(h.state().grid.filter_menu.map(|menu| menu.header.col), enabled.then_some(1));
         assert_eq!(h.state().session.active().unwrap().selection.active.a1(), "B1");
     }
 }

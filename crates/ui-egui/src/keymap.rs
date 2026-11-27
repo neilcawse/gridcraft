@@ -407,7 +407,7 @@ pub(crate) fn dispatch(app: &mut SheetApp, ctx: &egui::Context, key: Key, physic
                 app.grid.list_picker = Some(active);
             } else if sh.has_filter_button(active) {
                 let at = geo.mirror_pos(crate::grid::filter_button_rect(geo, sh, active).center());
-                app.grid.filter_menu = Some((active.col, active.row, at));
+                crate::grid::open_filter_menu(app, ctx, sh, active, at);
             }
         }
         Shortcut::Zoom(step) => {
