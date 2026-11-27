@@ -281,21 +281,62 @@ fn popup_whose_table_was_replaced_by_another_applies_nothing() -> TestResult {
 #[test]
 fn context_filter_by_value_targets_the_table_not_the_worksheet() -> TestResult {
     let mut h = sheet_filter_and_table()?;
-    let sh = sheet(&h)?;
-    let geo = grid::Geo::new(sh, h.state().grid.rect.ok_or("grid rect")?, h.state().view().scroll);
-    let pos = geo.cell_rect(sh, CellRef::new(8, 0)).center();
     let depth = undo_depth(&h)?;
+    filter_by_cell_value(&mut h, CellRef::new(8, 0))?;
+    assert_eq!(sheet_criteria(&h)?, Some(vec![]), "the context action leaves the worksheet filter alone");
+    assert_eq!(table_criteria(&h, "People")?, [(0, values(&["Dan"]))]);
+    assert_eq!(hidden(&h)?, [10, 11]);
+    assert_eq!(undo_depth(&h)?, depth + 1);
+    Ok(())
+}
+
+fn filter_by_cell_value(h: &mut Harness, at: CellRef) -> TestResult {
+    let sh = sheet(h)?;
+    let geo = grid::Geo::new(sh, h.state().grid.rect.ok_or("grid rect")?, h.state().view().scroll);
+    let pos = geo.cell_rect(sh, at).center();
     h.input_mut().events.push(Event::PointerMoved(pos));
     for pressed in [true, false] {
         h.input_mut().events.push(Event::PointerButton { pos, button: PointerButton::Secondary, pressed, modifiers: Modifiers::NONE });
     }
     h.run_steps(4);
     assert!(h.state().grid.context_menu.is_some(), "right-click opens the real cell menu");
-    press(&mut h, "Filter by Selected Cell's Value")?;
-    assert_eq!(sheet_criteria(&h)?, Some(vec![]), "the context action leaves the worksheet filter alone");
-    assert_eq!(table_criteria(&h, "People")?, [(0, values(&["Dan"]))]);
-    assert_eq!(hidden(&h)?, [10, 11]);
-    assert_eq!(undo_depth(&h)?, depth + 1);
+    press(h, "Filter by Selected Cell's Value")
+}
+
+#[test]
+fn context_filter_by_value_with_buttons_off_undoes_and_redoes_as_one_step() -> TestResult {
+    // GridCraft's existing targeting and button behavior; this Excel path is unmeasured.
+    for has_worksheet_filter in [true, false] {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("range.setValues", json!({"range":"A1", "values":[["Name", "Region"], ["Ann", "West"], ["Ben", "West"], ["Cat", "East"]]}))?;
+        s.execute("insert.table", json!({"range":"A1:B4", "header":true, "name":"People"}))?;
+        s.execute("data.filter", json!({}))?;
+        s.execute("insert.slicer", json!({"table":"People", "column":"Region", "at":"J2"}))?;
+        s.execute("slicer.toggle", json!({"value":"West"}))?;
+        if has_worksheet_filter {
+            s.execute("selection.set", json!({"range":"F1"}))?;
+            s.execute("data.filter", json!({"range":"A1:B4"}))?;
+        }
+        let mut h = harness(s);
+        let state = |h: &Harness| -> TestResult<_> {
+            let sh = sheet(h)?;
+            let t = sh.tables.iter().find(|t| t.name == "People").ok_or("People")?;
+            Ok((t.filter_button, t.filter.clone(), sh.autofilter.as_ref().map(|af| (af.range.a1(), af.criteria.clone())), hidden(h)?))
+        };
+        let before = (false, vec![(1, values(&["West"]))], has_worksheet_filter.then(|| ("A1:B4".into(), vec![])), vec![4]);
+        let after = (!has_worksheet_filter, vec![(1, values(&["West"])), (0, values(&["Ann"]))], None, vec![3, 4]);
+        assert_eq!(state(&h)?, before);
+        let depth = undo_depth(&h)?;
+        filter_by_cell_value(&mut h, CellRef::new(1, 0))?;
+        assert_eq!(state(&h)?, after);
+        h.state_mut().run("edit.undo", json!({}))?;
+        assert_eq!(state(&h)?, before, "one undo must also restore the table's filter buttons");
+        assert_eq!(undo_depth(&h)?, depth);
+        h.state_mut().run("edit.redo", json!({}))?;
+        assert_eq!(state(&h)?, after);
+        assert_eq!(undo_depth(&h)?, depth + 1);
+    }
     Ok(())
 }
 
