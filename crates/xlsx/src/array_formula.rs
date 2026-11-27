@@ -648,7 +648,7 @@ impl<'a> Legacy<'a> {
             return self.let_(args, sheet, ctx, depth);
         }
         let lambda_name = if let Some(bare) = gridcraft_formula::user_defined_name(&name) {
-            self.wb.name(bare, sheet).is_some_and(|n| gridcraft_model::workbook::holds_lambda(&n.formula))
+            self.wb.name(bare, sheet).is_some_and(|n| gridcraft_model::workbook::starts_with_lambda(n.formula.trim_start_matches('=').trim_start()))
         } else {
             user_function(&name, self.functions) && gridcraft_formula::file_prefix(&name).is_none() && self.wb.name(&name, sheet).is_some()
         };

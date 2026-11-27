@@ -1795,6 +1795,15 @@ fn non_lambda_local_name_shadows_global_lambda_on_import() {
     assert_eq!(sh.cell(at("B1")).unwrap().formula.as_ref().unwrap().text, "@TRIMRANGE(1)");
 }
 
+#[test]
+fn malformed_name_with_whitespace_after_equals_does_not_bind_call() {
+    let sheet = r#"<sheetData><row r="1"><c r="A1"><f>VSTACK(1)</f></c></row></sheetData>"#;
+    let names = r#"<definedNames><definedName name="VStack">= LAMBDA(</definedName></definedNames>"#;
+    let (wb, _) = read_xlsx(&super::minimal(sheet, &[], "", names)).unwrap();
+    let f = wb.sheet(0).unwrap().cell(at("A1")).unwrap().formula.as_ref().unwrap();
+    assert_eq!(f.text, "@VSTACK(1)");
+}
+
 /// A line break in a table column name (and its header cell) survives; a
 /// leading backslash in a table name is legal and kept.
 #[test]

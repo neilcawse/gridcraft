@@ -351,10 +351,10 @@ pub struct DefinedName {
     pub uid: DefinitionUid,
 }
 
-/// Whether a defined name's formula text (with or without `=`, prefixes as the model stores
-/// them) holds a LAMBDA, so that the name is callable like a function.
-pub fn holds_lambda(formula: &str) -> bool {
-    formula.trim_start_matches('=').trim_start().get(..7).is_some_and(|p| p.eq_ignore_ascii_case("LAMBDA("))
+/// Whether canonical formula text starts with a direct `LAMBDA(` call. This is a prefix
+/// check, not a parse or a test of what the formula evaluates to.
+pub fn starts_with_lambda(formula: &str) -> bool {
+    formula.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("LAMBDA("))
 }
 
 /// The identity of a defined name or table while the app runs, so that what was bound to it (a
@@ -842,7 +842,7 @@ impl Workbook {
     }
     /// Names of the defined names holding a LAMBDA (callable like functions), as they are spelled.
     pub(crate) fn lambda_names(&self) -> Vec<String> {
-        self.names.iter().filter(|n| holds_lambda(&n.formula)).map(|n| n.name.clone()).collect()
+        self.names.iter().filter(|n| starts_with_lambda(n.formula.trim_start_matches('=').trim_start())).map(|n| n.name.clone()).collect()
     }
     /// Table by name across sheets: (sheet index, table index).
     pub fn table(&self, name: &str) -> Option<(usize, usize)> {
