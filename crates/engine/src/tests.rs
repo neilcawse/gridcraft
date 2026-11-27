@@ -3209,6 +3209,96 @@ fn builtin_call_spelling_after_name_import() {
     assert_builtin_and_lambda_entry(&mut opened);
 }
 
+/// Batch 5 `x30-lambda-collisions`: workbook names `TrimRange` and `VStack` hold
+/// `LAMBDA(x,"lam")`, and the cells call TRIMRANGE and VSTACK as Excel's formula XML spells
+/// them. Excel: an unprefixed call is the LAMBDA, `_xlfn.` the built-in, `_xludf.` the LAMBDA, and
+/// a LET variable its own LAMBDA.
+fn lambda_collision_workbook() -> Vec<u8> {
+    use std::io::{Cursor, Write};
+    const NS_REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    let types = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#.to_string();
+    let rels = format!(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{NS_REL}/officeDocument" Target="xl/workbook.xml"/></Relationships>"#
+    );
+    let book = format!(
+        r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="{NS_REL}"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets><definedNames><definedName name="TrimRange">_xlfn.LAMBDA(_xlpm.x,"lam")</definedName><definedName name="VStack">_xlfn.LAMBDA(_xlpm.x,"lam")</definedName></definedNames><calcPr fullCalcOnLoad="1"/></workbook>"#
+    );
+    let book_rels = format!(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{NS_REL}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#
+    );
+    let cells: String = [
+        "TRIMRANGE(1)",
+        "_xlfn.TRIMRANGE(1)",
+        "VSTACK(1)",
+        "_xlfn.VSTACK(1)",
+        "_xludf.VSTACK(1)",
+        "_xlfn.LET(_xlpm.vstack,_xlfn.LAMBDA(_xlpm.x,5),_xlpm.vstack(1))",
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, f)| format!(r#"<row r="{0}"><c r="A{0}"><f>{f}</f><v>424242.5</v></c></row>"#, i + 1))
+    .collect();
+    let sheet = format!(r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{cells}</sheetData></worksheet>"#);
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    for (name, data) in [
+        ("[Content_Types].xml", types),
+        ("_rels/.rels", rels),
+        ("xl/workbook.xml", book),
+        ("xl/_rels/workbook.xml.rels", book_rels),
+        ("xl/worksheets/sheet1.xml", sheet),
+    ] {
+        zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(data.as_bytes()).unwrap();
+    }
+    zip.finish().unwrap().into_inner()
+}
+
+/// The six Excel results, and each call's binding as the model stores it. A legacy formula
+/// (no dynamic-array metadata) of a built-in that can return an array reads with Excel's implicit
+/// `@`, as Excel's `Formula2` shows it.
+fn assert_lambda_collision_bindings(s: &Session) {
+    let lam = Value::from("lam");
+    let expected = [
+        ("A1", "_xludf.TrimRange(1)", lam.clone()),
+        ("A2", "@TRIMRANGE(1)", Value::Number(1.0)),
+        ("A3", "_xludf.VStack(1)", lam.clone()),
+        ("A4", "@VSTACK(1)", Value::Number(1.0)),
+        ("A5", "_xludf.VStack(1)", lam),
+        ("A6", "@LET(vstack,LAMBDA(x,5),VSTACK(1))", Value::Number(5.0)),
+    ];
+    let actual: Vec<_> = expected.iter().map(|(cell, _, _)| (*cell, formula_at(s, cell).unwrap_or_default(), v(s, cell))).collect();
+    let expected: Vec<_> = expected.into_iter().map(|(cell, formula, value)| (cell, formula.to_string(), value)).collect();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn future_function_calls_bind_like_excel_through_save() {
+    let mut s = s();
+    s.execute("file.open", json!({"name": "x30-lambda-collisions.xlsx", "base64": crate::io::base64_encode(&lambda_collision_workbook())})).unwrap();
+    assert_lambda_collision_bindings(&s);
+    // Editing: another cell changes, and each call confirmed as it reads back keeps its binding.
+    s.execute("cell.set", json!({"cell": "B1", "input": "2"})).unwrap();
+    for cell in ["A1", "A2", "A3", "A4", "A5", "A6"] {
+        let read = s.execute("cell.get", json!({"cell": cell})).unwrap();
+        let input = read["formula"].as_str().unwrap().to_string();
+        s.execute("cell.set", json!({"cell": cell, "input": input})).unwrap();
+    }
+    assert_lambda_collision_bindings(&s);
+    let saved = s.execute("file.saveBytes", json!({"format": "xlsx"})).unwrap();
+    let bytes = crate::io::base64_decode(saved["base64"].as_str().unwrap()).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(
+        &mut zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap().by_name("xl/worksheets/sheet1.xml").unwrap(),
+        &mut xml,
+    )
+    .unwrap();
+    for spelled in ["<f>_xludf.TrimRange(1)</f>", "_xlfn.TRIMRANGE(1)", "<f>_xludf.VStack(1)</f>", "_xlfn.VSTACK(1)", "_xlpm.VSTACK(1))"] {
+        assert!(xml.contains(spelled), "{spelled}: {xml}");
+    }
+    s.execute("file.open", json!({"name": "reopened.xlsx", "base64": saved["base64"]})).unwrap();
+    assert_lambda_collision_bindings(&s);
+}
+
 #[test]
 fn sheets() {
     let mut s = s();
