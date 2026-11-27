@@ -3383,6 +3383,45 @@ fn known_limit_workbook_name_rename_rewrites_mixed_binding_body() {
     check(&mut s, 3.0, "_xludf.GlobalFn(1)");
 }
 
+/// Cells calling a newer function follow the colliding LAMBDA as it is added, redefined,
+/// renamed and deleted: an explicit `_xludf.` call recalculates with the name, while the
+/// unsupported built-in and its typed spelling never call it. A LET variable still comes first.
+#[test]
+fn colliding_lambda_edits_recalculate_name_calls_only() {
+    let mut s = s();
+    for (cell, input) in [
+        ("A1", "=_xludf.Translate(1)"),
+        ("A2", "=_xlfn.TRANSLATE(1)"),
+        ("A3", "=translate(1)"),
+        ("A4", "=LET(translate,LAMBDA(x,8),translate(1))"),
+        ("A5", "=_xludf.VStack(1)"),
+        ("A6", "=VSTACK(1)"),
+    ] {
+        s.execute("cell.set", json!({"cell": cell, "input": input})).unwrap();
+    }
+    let check = |s: &Session, step: &str, translate: Value, vstack: Value| {
+        let name = Value::Error(gridcraft_core::CellError::Name);
+        let expected =
+            [("A1", translate), ("A2", name.clone()), ("A3", name), ("A4", Value::Number(8.0)), ("A5", vstack), ("A6", Value::Number(1.0))];
+        let actual: Vec<_> = expected.iter().map(|(c, _)| (*c, v(s, c))).collect();
+        assert_eq!(actual, expected, "{step}");
+    };
+    let name = || Value::Error(gridcraft_core::CellError::Name);
+    check(&s, "no names", name(), name());
+    s.execute("formulas.defineName", json!({"name": "Translate", "refersTo": "=LAMBDA(x,x+1)"})).unwrap();
+    s.execute("formulas.defineName", json!({"name": "VStack", "refersTo": "=LAMBDA(x,x+2)"})).unwrap();
+    check(&s, "added", Value::Number(2.0), Value::Number(3.0));
+    s.execute("formulas.defineName", json!({"name": "Translate", "oldName": "Translate", "refersTo": "=LAMBDA(x,x+4)"})).unwrap();
+    check(&s, "redefined", Value::Number(5.0), Value::Number(3.0));
+    s.execute("formulas.defineName", json!({"name": "Other", "oldName": "VStack", "refersTo": "=LAMBDA(x,x+2)"})).unwrap();
+    assert_eq!(formula_at(&s, "A5").unwrap(), "_xludf.Other(1)");
+    check(&s, "renamed", Value::Number(5.0), Value::Number(3.0));
+    s.execute("formulas.deleteName", json!({"name": "Translate"})).unwrap();
+    check(&s, "deleted", name(), Value::Number(3.0));
+    s.execute("edit.undo", json!({})).unwrap();
+    check(&s, "undone", Value::Number(5.0), Value::Number(3.0));
+}
+
 #[test]
 fn legacy_array_lambda_intersects_while_dynamic_call_spills() {
     let names = r#"<definedName name="VStack">_xlfn.LAMBDA(_xlpm.x,_xlfn.SEQUENCE(2))</definedName>"#;

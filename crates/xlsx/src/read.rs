@@ -371,7 +371,7 @@ fn future_name_scopes(wb_xml: &El) -> HashMap<Option<usize>, HashMap<String, boo
             .entry(scope)
             .or_default()
             .entry(name.to_ascii_uppercase())
-            .or_insert_with(|| crate::fmla::from_file(d.text.trim()).get(..7).is_some_and(|p| p.eq_ignore_ascii_case("LAMBDA(")));
+            .or_insert_with(|| gridcraft_model::workbook::holds_lambda(&crate::fmla::from_file(d.text.trim())));
     }
     scopes
 }

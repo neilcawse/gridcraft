@@ -351,6 +351,12 @@ pub struct DefinedName {
     pub uid: DefinitionUid,
 }
 
+/// Whether a defined name's formula text (with or without `=`, prefixes as the model stores
+/// them) holds a LAMBDA, so that the name is callable like a function.
+pub fn holds_lambda(formula: &str) -> bool {
+    formula.trim_start_matches('=').trim_start().get(..7).is_some_and(|p| p.eq_ignore_ascii_case("LAMBDA("))
+}
+
 /// The identity of a defined name or table while the app runs, so that what was bound to it (a
 /// PivotTable's source) can tell it from another one with the same text. Editing the definition
 /// keeps it; a definition deleted and made again gets a new one (they are never reused), and
@@ -836,8 +842,7 @@ impl Workbook {
     }
     /// Names of the defined names holding a LAMBDA (callable like functions), as they are spelled.
     pub(crate) fn lambda_names(&self) -> Vec<String> {
-        let is_lambda = |f: &str| f.trim_start_matches('=').trim_start().get(..7).is_some_and(|p| p.eq_ignore_ascii_case("LAMBDA("));
-        self.names.iter().filter(|n| is_lambda(&n.formula)).map(|n| n.name.clone()).collect()
+        self.names.iter().filter(|n| holds_lambda(&n.formula)).map(|n| n.name.clone()).collect()
     }
     /// Table by name across sheets: (sheet index, table index).
     pub fn table(&self, name: &str) -> Option<(usize, usize)> {
