@@ -920,10 +920,8 @@ fn lookups_distinguish_failed_linked_caches_from_local_index_errors() {
         [t.get("B9"), t.get("B10"), t.get("B11")],
         [Value::Error(CellError::Div0), Value::Error(CellError::Name), Value::Error(CellError::Ref)]
     );
-    // Over local tables and arrays an error index is the answer before the search, as Excel's
-    // trusted cache shows for `VLOOKUP($A31,skewtable,HLOOKUP(ROUND(I31-AO31,1),skewtable,2,
-    // FALSE),FALSE)` in Enron's larryoptmodel.xlsx (`$A31` missing, the index `#DIV/0!`). A
-    // non-error index is resolved only once the key is found: a miss is #N/A whatever the number.
+    // The Enron larryoptmodel.xlsx cache keeps a computed index error on a miss, including
+    // when the error comes from an inner HLOOKUP; a cell-read index is resolved only on a hit.
     for (at, v) in [("D1", "x"), ("D2", "y"), ("E1", "1"), ("E2", "2"), ("D3", "=1/0")] {
         t.set(at, v);
     }
@@ -938,9 +936,90 @@ fn lookups_distinguish_failed_linked_caches_from_local_index_errors() {
     let div0 = Value::Error(CellError::Div0);
     assert_eq!([t.get("B5"), t.get("B6"), t.get("B7")], [div0.clone(), div0.clone(), Value::Error(CellError::Name)]);
     assert_eq!([t.get("B12"), t.get("B13")], [div0.clone(), div0]);
-    // An error read from a cell resolves as X15's index rule does (#REF!); a number past the
-    // table is not checked when the key is missing.
-    assert_eq!([t.get("B14"), t.get("B15"), t.get("B16")], [Value::Error(CellError::Ref), Value::Error(CellError::NA), Value::Error(CellError::NA)]);
+    assert_eq!([t.get("B14"), t.get("B15"), t.get("B16")], [const { Value::Error(CellError::NA) }; 3]);
+}
+
+#[test]
+fn lookup_multi_area_index_errors_on_reference_and_evaluated_tables() {
+    let mut t = T::new();
+    for (at, input) in [("D1", "1"), ("D2", "2"), ("E1", "10"), ("E2", "20"), ("G3", "=1/0"), ("G4", "=NA()")] {
+        t.set(at, input);
+    }
+    // A reference table cannot dereference a multi-area index. An evaluated table lifts it.
+    t.set("A1", "=VLOOKUP(9,D1:E2,(G3,G4),FALSE)");
+    t.set("A2", "=VLOOKUP(9,{1,10;2,20},(G3,G4),FALSE)");
+    t.set("A3", "=VLOOKUP(2,D1:E2,(G3,G4),FALSE)");
+    t.set("A4", "=VLOOKUP(2,{1,10;2,20},(D1,D2),FALSE)");
+    assert_eq!(
+        ["A1", "A2", "B2", "A3", "A4", "B4"].map(|at| t.get(at)),
+        [
+            Value::Error(CellError::NA),
+            Value::Error(CellError::NA),
+            Value::Error(CellError::NA),
+            Value::Error(CellError::Ref),
+            Value::Number(2.0),
+            Value::Number(20.0),
+        ],
+    );
+}
+
+// Excel for Mac 16.115.2, Batch 5 lookup-vlookup and lookup-hlookup: the rows and expected
+// displayed errors/values below follow the reports, including the text-index readbacks.
+#[test]
+fn lookup_argument_order_matches_batch5() {
+    use CellError::{Div0, NA, Name, Ref, Value as ValueError};
+
+    let indexes = ["2", "1/0", "#NAME?", "5", "0", "$G$1", "$G$2", "$G$3", "$G$4"];
+    let hit = [None, Some(Div0), Some(Name), Some(Ref), Some(ValueError), Some(Ref), Some(ValueError), Some(Ref), Some(Ref)];
+    let miss = [Some(NA), Some(Div0), Some(Name), Some(NA), Some(NA), Some(NA), Some(NA), Some(NA), Some(NA)];
+    let invalid_mode = [
+        Some(ValueError),
+        Some(Div0),
+        Some(Name),
+        Some(ValueError),
+        Some(ValueError),
+        Some(ValueError),
+        Some(ValueError),
+        Some(ValueError),
+        Some(ValueError),
+    ];
+    let cases = [
+        (2, "FALSE", hit),
+        (9, "FALSE", miss),
+        (2, "TRUE", hit),
+        (9, "TRUE", hit),
+        (0, "TRUE", miss),
+        (2, r#""x""#, invalid_mode),
+        (9, r#""x""#, invalid_mode),
+    ];
+    let mut mismatches = Vec::new();
+    for (func, d2, e1, array) in [("VLOOKUP", "2", "10", "{1,10;2,20}"), ("HLOOKUP", "10", "2", "{1,2;10,20}")] {
+        let mut t = T::new();
+        for (at, input) in [("D1", "1"), ("D2", d2), ("E1", e1), ("E2", "20"), ("G1", "abc"), ("G2", "'0.9"), ("G3", "=1/0"), ("G4", "=NA()")] {
+            t.set(at, input);
+        }
+        assert_eq!(t.get("G2"), Value::text("0.9"));
+        // The measured reference table (column A), then the same table as an array constant
+        // (column B), which takes the evaluated-table path rather than the reference one.
+        for (col, table) in [("A", "$D$1:$E$2"), ("B", array)] {
+            let formulas = cases.into_iter().flat_map(|(key, mode, expected)| {
+                indexes
+                    .into_iter()
+                    .zip(expected)
+                    .map(move |(index, error)| (format!("={func}({key},{table},{index},{mode})"), error.map_or(Value::Number(20.0), Value::Error)))
+            });
+            let array_control = (func == "VLOOKUP" && col == "A").then(|| ("=VLOOKUP(9,{1,2;3,4},#NAME?,FALSE)".to_owned(), Value::Error(Name)));
+            for (i, (formula, expected)) in formulas.chain(array_control).enumerate() {
+                let at = format!("{col}{}", i + 1);
+                t.set(&at, &formula);
+                let got = t.get(&at);
+                if got != expected {
+                    mismatches.push(format!("{at} {formula}: expected {expected:?}, got {got:?}"));
+                }
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
 #[test]
@@ -953,6 +1032,9 @@ fn lookup_error_precedence_applies_to_each_lifted_index() {
         t.set(&format!("{col}4"), &format!(r#"=VLOOKUP("z",{table},1/0,#NAME?)"#));
         let got = [1, 2, 3, 4].map(|r| t.get(&format!("{col}{r}")));
         assert_eq!(got, [CellError::Div0, CellError::NA, CellError::NA, CellError::Name].map(Value::Error), "{table}");
+        t.set(&format!("{col}5"), &format!(r#"=VLOOKUP("z",{table},{{#DIV/0!;2;9}},"x")"#));
+        let got = [5, 6, 7].map(|r| t.get(&format!("{col}{r}")));
+        assert_eq!(got, [CellError::Div0, CellError::Value, CellError::Value].map(Value::Error), "{table}");
     }
 }
 
@@ -998,6 +1080,10 @@ fn lookups_into_linked_tables_coerce_cell_arguments_as_local_ones() {
         let got = [1, 2, 3, 4].map(|r| t.get(&format!("{col}{r}")));
         assert_eq!(got, [Value::Error(CellError::Ref), Value::Error(CellError::Value), Value::Number(10.0), Value::Error(CellError::Ref)], "{col}");
     }
+    // Direct linked tables keep X15's linked coercion; Batch 5 only measured local tables.
+    t.set("D5", "'0.9");
+    t.set("A5", "=VLOOKUP(\"x\",[1]Data!A1:B2,D5,FALSE)");
+    assert_eq!(t.get("A5"), Value::Error(CellError::Ref));
 }
 
 #[test]
