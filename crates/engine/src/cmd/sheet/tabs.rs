@@ -359,7 +359,8 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
 }
 
 /// A copy starts at ` (2)` or increments the source's trailing `(n)`, keeping its separator.
-/// Skip occupied numbers and shorten the base so the suffix fits Excel's 31 characters.
+/// Skip occupied numbers and shorten the base so the suffix fits Excel's 31 characters; only a
+/// shortened base loses its trailing whitespace.
 fn copied_sheet_name(wb: &gridcraft_model::Workbook, source: &str) -> String {
     use std::fmt::Write;
 
@@ -368,7 +369,7 @@ fn copied_sheet_name(wb: &gridcraft_model::Workbook, source: &str) -> String {
     loop {
         let keep = 31 - (k.ilog10() as usize + 3 + separator.len());
         let end = base.char_indices().nth(keep).map_or(base.len(), |(i, _)| i);
-        let prefix = base[..end].trim_end();
+        let prefix = if end < base.len() { base[..end].trim_end() } else { base };
         candidate.clear();
         candidate.push_str(if prefix.is_empty() { "Sheet" } else { prefix });
         let tail = candidate.len();

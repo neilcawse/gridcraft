@@ -248,7 +248,9 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
   of workbook names are written with their `localSheetId`. In the measured in-memory copy-of-copy
   cases, the inherited local names stay bound to the source copy's table while cell formulas use
   the newest table. See [X43](parity/INTEGRATION_NOTES.md#x43--increment-numbered-copy-tabs-preserve-inherited-local-table-bindings).
-- **Unmeasured:** copying a copied sheet after save and reopen. GridCraft does not persist copy provenance.
+- **Unmeasured:** copying a copied sheet after save and reopen (GridCraft does not persist copy
+  provenance, so it retargets those names again), local names defined on a copy after it was made,
+  and malformed, zero-padded or oversized tab suffixes.
 
 ## Revision history
 

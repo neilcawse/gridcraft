@@ -122,9 +122,23 @@ fn copy_numbering_keeps_existing_unmeasured_edge_cases() {
     copy(&mut long_book, &first, 2);
     assert_eq!(sheet_names(&long_book)[2], format!("{} (3)", "A".repeat(27)));
 
-    for (name, copied) in
-        [("Q (2a)", "Q (2a) (2)"), ("Q ()", "Q () (2)"), ("(2)", "(2) (2)"), ("Data (02)", "Data (2)"), ("Q (999999999999999999999999999)", "Q (2)")]
-    {
+    for (name, copied) in [
+        ("Q (2a)", "Q (2a) (2)"),
+        ("Q ()", "Q () (2)"),
+        ("(2)", "(2) (2)"),
+        ("Data (02)", "Data (2)"),
+        ("Data (0)", "Data (2)"),
+        ("Q(0)", "Q(0) (2)"),
+        ("Data ((3))", "Data ((3)) (2)"),
+        ("Data (3)(4)", "Data (3)(5)"),
+        ("Q (999999999999999999999999999)", "Q (2)"),
+        ("Q(999999999999999999999999999)", "Q(9999999999999999999999999 (2)"),
+        ("ABCDEFGHIJKLMNOPQRSTUVWXYZ (99)", "ABCDEFGHIJKLMNOPQRSTUVWXY (100)"),
+        ("ABCDEFGHIJKLMNOPQRSTUVWXYZab(9)", "ABCDEFGHIJKLMNOPQRSTUVWXYZa(10)"),
+        // Only an ASCII space is the separator; the rest of an unshortened base is kept as is.
+        ("X\u{3000}(3)", "X\u{3000}(4)"),
+        ("Data  (3)", "Data  (4)"),
+    ] {
         let mut one = s();
         one.execute("sheet.rename", json!({"sheet": 0, "name": name})).unwrap();
         copy(&mut one, name, 1);
