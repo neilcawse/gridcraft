@@ -113,13 +113,25 @@ object or a grouped member changes.
 If an imported group's collapsed axis grows during open-time row fit or a later line resize,
 GridCraft recovers its member boxes from the original DrawingML child coordinates. Group flips
 and exact 90°, 180° and 270° turns compose through nested groups and affect member boxes even
-when the group never collapsed. The outermost group's worksheet anchor is taken as its unturned
-frame, so after a 90° or 270° turn its members fill that box swapped about its centre, and a
-member past the sheet's top or left edge is moved back onto the sheet. The turned content is
-still drawn unturned and is reported on import. Other group angles retain the unturned layout
-and warn on import. These are DrawingML layout rules, not measurements of Excel for Mac. A
-group opened and saved untouched writes its worksheet anchor and the group and member transforms
-as read, now including grouped members' own flips.
+when the group never collapsed. For an outermost group turned exactly 90° or 270°, the XLSX
+worksheet anchor is the on-screen box. Its unturned frame swaps width and height about the
+same centre and can start above or left of the sheet. GridCraft uses the on-screen box for
+line sizing and placement, including sort, and uses the frame for child projection and for
+the transform when recomputing the group's drawing. This convention matches Excel for Mac
+16.115.2 at open and after a row height edit. GridCraft uses the same on-screen box for
+column width edits, moves, and sorts, but Excel was not measured for those edits or for nested
+variants. Nested groups still use their local transforms. In the B3:F7 fixtures, Excel read
+back a frame of `(109, -26, 100, 212)` pt, matching the anchor-derived frame rather than the
+root `off` of `(0, 0)` and `ext` of `200 × 100` pt. The probes did not save the workbooks.
+GridCraft retains its existing export rule: a recomputed imported root transform keeps the
+file's `ext`/`chExt` scale, so `ext` need not match the resized frame. Excel's save behavior is
+unmeasured.
+Rotation stored as any equivalent angle (for example `-5400000` or `27000000` for 270° and
+90°) is treated the same way. The turned content itself is still drawn unturned and reported
+on import. Other group angles retain the prior layout and warnings. An untouched group writes
+its original worksheet anchor and group and member transforms, including the members' own
+flips. Files saved by unreleased integration builds that carried X38's convention (anchor as
+the unturned frame) now open with that anchor read as the on-screen box; no release used it.
 
 Imported objects keep their source stacking order and nonvisual IDs and names; a name is kept
 even when its ID is the placeholder `0`, which is renumbered. Bring Forward and Send Backward

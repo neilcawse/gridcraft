@@ -993,10 +993,9 @@ fn a_group_of_horizontal_lines_maps_each_axis_on_its_own() {
 
 #[test]
 fn a_flipped_group_mirrors_its_members_and_keeps_its_transform() {
-    // The anchor spans B2:F12 (x 64, y 20, 256 × 200 px) and the group maps its child box 1:1.
-    // It is flipped horizontally (and rotated a quarter turn, which isn't laid out): its members
-    // are mirrored about the group's box. The nested group isn't flipped itself, but everything
-    // in it is mirrored with the outer group.
+    // B2:F12 is the turned box (x 64, y 20, 256 × 200 px). Mirror in the unturned
+    // 200 × 256 px frame, then turn about its centre. The nested group has no flip
+    // of its own but is mirrored with its parent.
     let rect = |name: &str, x: i64, y: i64, cx: i64, cy: i64| {
         format!(
             r#"<xdr:sp macro="" textlink=""><xdr:nvSpPr><xdr:cNvPr id="3" name="R"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr><xdr:txBody><a:bodyPr/><a:p><a:r><a:t>{name}</a:t></a:r></a:p></xdr:txBody></xdr:sp>"#
@@ -1020,11 +1019,9 @@ fn a_flipped_group_mirrors_its_members_and_keeps_its_transform() {
     );
     let (wb, rep) = read_xlsx(&with_drawing(&drawing)).unwrap();
     let s = wb.sheet(0).unwrap();
-    // Mirror about the unturned frame, then rotate clockwise about its center. The sheet
-    // clamps the second member's negative top edge to zero.
-    assert!(near_box(shape_box(s, "A"), (252.0, 198.0, 40.0, 50.0)), "{:?}", shape_box(s, "A"));
-    assert!(near_box(shape_box(s, "B"), (172.0, 0.0, 20.0, 60.0)), "{:?}", shape_box(s, "B"));
-    assert!(near_box(shape_box(s, "C"), (92.0, 118.0, 50.0, 30.0)), "{:?}", shape_box(s, "C"));
+    assert!(near_box(shape_box(s, "A"), (268.8, 180.9375, 51.2, 39.0625)), "{:?}", shape_box(s, "A"));
+    assert!(near_box(shape_box(s, "B"), (166.4, 20.0, 25.6, 46.875)), "{:?}", shape_box(s, "B"));
+    assert!(near_box(shape_box(s, "C"), (64.0, 118.4375, 64.0, 23.4375)), "{:?}", shape_box(s, "C"));
     // The quarter turn affects layout, but the unturned and unmirrored content is reported.
     let content = ["aren't drawn rotated", "aren't drawn mirrored"];
     assert!(content.iter().all(|c| rep.warnings.iter().any(|w| w.contains(c))), "{:?}", rep.warnings);
@@ -1076,7 +1073,7 @@ fn sp_named<'a>(g: &'a crate::xml::El, text: &str) -> &'a crate::xml::El {
 
 #[test]
 fn a_rotated_group_keeps_its_box_when_a_member_is_dropped() {
-    // A group turned a quarter over B2:F12 (x 64, y 20, 256 × 200 px), its child box mapped 1:1,
+    // A group turned a quarter over B2:F12 (x 64, y 20, 256 × 200 px in sheet space)
     // holds a SmartArt frame in its left half (dropped) and rectangle A in its right half. It
     // turns about the centre of its own box, so saving it with the box around A alone would
     // move A in Excel: the group's box and child box are kept.
@@ -1112,7 +1109,7 @@ fn a_rotated_group_keeps_its_box_when_a_member_is_dropped() {
     };
     let (from, off, ext, ch_off, ch_ext, a) = saved_group(&wb);
     assert_eq!(from, (1, 0, 1, 0));
-    assert!(close_emu(off, (609600, 190500)) && close_emu(ext, (2438400, 1905000)), "{off:?} {ext:?}");
+    assert!(close_emu(off, (876300, -76200)) && close_emu(ext, (2438400, 1905000)), "{off:?} {ext:?}");
     assert!(close_emu(ch_off, (0, 0)) && close_emu(ch_ext, (2438400, 1905000)), "{ch_off:?} {ch_ext:?}");
     assert!(close_emu(a, (1219200, 0)), "{a:?}");
 
@@ -1123,9 +1120,44 @@ fn a_rotated_group_keeps_its_box_when_a_member_is_dropped() {
     s.transform_group(gid, r, gridcraft_model::ObjectRect { x: r.x + 64.0, ..r });
     let (from, off, ext, ch_off, ch_ext, a) = saved_group(&wb);
     assert_eq!(from, (2, 0, 1, 0));
-    assert!(close_emu(off, (1219200, 190500)) && close_emu(ext, (2438400, 1905000)), "{off:?} {ext:?}");
+    assert!(close_emu(off, (1485900, -76200)) && close_emu(ext, (2438400, 1905000)), "{off:?} {ext:?}");
     assert!(close_emu(ch_off, (0, 0)) && close_emu(ch_ext, (2438400, 1905000)), "{ch_off:?} {ch_ext:?}");
     assert!(close_emu(a, (1219200, 0)), "{a:?}");
+}
+
+#[test]
+fn equivalent_quarter_turn_angles_read_the_root_anchor_as_the_turned_box() {
+    // B2:F12 is the on-screen box (x 64, y 20, 256 × 200 px); its unturned frame is
+    // (92, -8, 200 × 256). Rectangle A fills the child box's top right quarter, which turns
+    // into the lower right (90°) or upper left (270°) quarter of the on-screen box, however the
+    // angle is written. The angle goes back to the file as written.
+    for (rot, expected) in [
+        ("5400000", (192.0, 120.0, 128.0, 100.0)),
+        ("27000000", (192.0, 120.0, 128.0, 100.0)),
+        ("-16200000", (192.0, 120.0, 128.0, 100.0)),
+        ("16200000", (64.0, 20.0, 128.0, 100.0)),
+        ("-5400000", (64.0, 20.0, 128.0, 100.0)),
+    ] {
+        let drawing = format!(
+            r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+      <xdr:twoCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>5</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>11</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+        <xdr:grpSp><xdr:nvGrpSpPr><xdr:cNvPr id="2" name="Turned"/><xdr:cNvGrpSpPr/></xdr:nvGrpSpPr>
+          <xdr:grpSpPr><a:xfrm rot="{rot}"><a:off x="876300" y="-76200"/><a:ext cx="1905000" cy="2438400"/><a:chOff x="0" y="0"/><a:chExt cx="2438400" cy="1905000"/></a:xfrm></xdr:grpSpPr>
+          <xdr:sp macro="" textlink=""><xdr:nvSpPr><xdr:cNvPr id="4" name="R"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:xfrm><a:off x="1219200" y="0"/><a:ext cx="1219200" cy="952500"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr><xdr:txBody><a:bodyPr/><a:p><a:r><a:t>A</a:t></a:r></a:p></xdr:txBody></xdr:sp>
+        </xdr:grpSp><xdr:clientData/></xdr:twoCellAnchor>
+    </xdr:wsDr>"#
+        );
+        let (wb, _) = read_xlsx(&with_drawing(&drawing)).unwrap();
+        let s = wb.sheet(0).unwrap();
+        assert!(near_box(shape_box(s, "A"), expected), "rot {rot}: {:?}", shape_box(s, "A"));
+        let saved = crate::write_xlsx(&wb).unwrap();
+        let mut pkg = crate::package::Package::open(&saved).unwrap();
+        let x = pkg.read_xml("xl/drawings/drawing1.xml").unwrap().unwrap();
+        let xf = x.children[0].child("grpSp").unwrap().path(&["grpSpPr", "xfrm"]).unwrap().clone();
+        assert_eq!(xf.attr("rot"), Some(rot));
+        let (back, _) = read_xlsx(&saved).unwrap();
+        assert!(near_box(shape_box(back.sheet(0).unwrap(), "A"), expected), "rot {rot} reopened");
+    }
 }
 
 #[test]

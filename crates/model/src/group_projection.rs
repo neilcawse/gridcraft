@@ -47,9 +47,9 @@ pub fn group_quarter_turn(rotation: i64) -> Option<usize> {
     (rot % 5_400_000 == 0).then_some((rot / 5_400_000) as usize)
 }
 
-/// A box swapped about its centre for an exact 90° or 270° group turn, else unchanged. It is
-/// its own inverse: it takes an outermost group's anchor to the box its members fill, and a
-/// nested group's placed (turned) box back to its frame.
+/// The unturned frame of a group's placed box in its enclosing space. For an exact 90° or
+/// 270° turn this swaps the axes about the centre; otherwise it leaves the box unchanged.
+/// The same operation converts the frame back to the turned box.
 pub fn group_unturned_box(r: ObjectRect, rotation: i64) -> ObjectRect {
     swap_about_center(r, group_quarter_turn(rotation).is_some_and(|q| q % 2 == 1))
 }

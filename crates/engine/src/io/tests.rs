@@ -428,6 +428,10 @@ fn group_projection_book(height: f32, attrs: &str, member_attrs: &str, nested: b
 
 /// `xlsx` with its first drawing part replaced by `drawing`.
 fn with_drawing_xml(xlsx: Vec<u8>, drawing: &str) -> Vec<u8> {
+    with_xlsx_parts(xlsx, &[("xl/drawings/drawing1.xml", drawing)])
+}
+
+fn with_xlsx_parts(xlsx: Vec<u8>, replacements: &[(&str, &str)]) -> Vec<u8> {
     use std::io::{Cursor, Read, Write};
     use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
 
@@ -436,8 +440,8 @@ fn with_drawing_xml(xlsx: Vec<u8>, drawing: &str) -> Vec<u8> {
     for entry in 0..src.len() {
         let mut part = src.by_index(entry).unwrap();
         dst.start_file(part.name(), SimpleFileOptions::default()).unwrap();
-        if part.name() == "xl/drawings/drawing1.xml" {
-            dst.write_all(drawing.as_bytes()).unwrap();
+        if let Some((_, xml)) = replacements.iter().find(|(name, _)| *name == part.name()) {
+            dst.write_all(xml.as_bytes()).unwrap();
         } else {
             let mut bytes = Vec::new();
             part.read_to_end(&mut bytes).unwrap();
@@ -451,7 +455,7 @@ fn assert_group_projection(wb: &Workbook, expected: [[f64; 4]; 2]) {
     use gridcraft_model::ObjectRect;
     let sh = wb.sheet(0).unwrap();
     let frame = sh.groups.iter().find(|g| g.name == "Frame").unwrap();
-    let b = gridcraft_model::group_unturned_box(sh.anchor_rect(&frame.anchor), frame.rotation);
+    let b = sh.anchor_rect(&frame.anchor);
     assert!(b.w > 0.0 && b.h > 0.0, "fitted group: {b:?}");
     assert_eq!(sh.shapes.len(), 2);
     for (s, [x, y, w, h]) in sh.shapes.iter().zip(expected) {
@@ -521,6 +525,107 @@ fn drawing_xml(bytes: &[u8]) -> String {
     xml
 }
 
+#[cfg(target_os = "macos")]
+fn assert_excel_turned_group(rotation: i64, to: (u32, u32), frames: [[f64; 4]; 2]) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    use crate::{DocState, Session, Trust};
+    use gridcraft_model::{AnchorMode, DrawingRef, ObjectRect, group_unturned_box};
+    use serde_json::json;
+
+    let (col, row) = to;
+    // Explicit 53 pt columns and 15 pt leading rows reproduce the measured cell readbacks,
+    // independently of font-dependent default widths and automatic row fitting.
+    let rows: String = (1..=10).map(|r| format!(r#"<row r="{r}" ht="{}" customHeight="1"/>"#, if r <= 2 { 15 } else { 25 })).collect();
+    let sheet = format!(
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetFormatPr defaultRowHeight="15"/><cols><col min="1" max="5" width="8.833333333333334" customWidth="1"/></cols><sheetData>{rows}</sheetData><drawing r:id="rId1"/></worksheet>"#
+    );
+    let marker = |tag, col, row| {
+        format!("<xdr:{tag}><xdr:col>{col}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{row}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:{tag}>")
+    };
+    let from = marker("from", 1, 2);
+    let to = marker("to", col, row);
+    let shapes: String = [(2, 0), (3, 1270000)].map(|(id, x)| format!(r#"<xdr:sp><xdr:nvSpPr><xdr:cNvPr id="{id}" name="Member {id}"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:xfrm><a:off x="{x}" y="0"/><a:ext cx="1270000" cy="1270000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:sp>"#)).concat();
+    let drawing = format!(
+        r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><xdr:twoCellAnchor>{from}{to}<xdr:grpSp><xdr:nvGrpSpPr><xdr:cNvPr id="1" name="Turned group"/><xdr:cNvGrpSpPr/></xdr:nvGrpSpPr><xdr:grpSpPr><a:xfrm rot="{rotation}"><a:off x="673100" y="381000"/><a:ext cx="2540000" cy="1270000"/><a:chOff x="0" y="0"/><a:chExt cx="2540000" cy="1270000"/></a:xfrm></xdr:grpSpPr>{shapes}</xdr:grpSp><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#
+    );
+    let bytes = with_xlsx_parts(
+        group_projection_book(25.0, "", "", false, true),
+        &[("xl/worksheets/sheet1.xml", &sheet), ("xl/drawings/drawing1.xml", &drawing)],
+    );
+    let (wb, _) = open_bytes("turned.xlsx", &bytes)?;
+    let check = |wb: &Workbook, [x, y, w, h]: [f64; 4], height_pt| -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let sh = wb.sheet(0).ok_or("missing sheet")?;
+        let group = sh.groups.first().ok_or("missing group")?;
+        assert_eq!((group.rotation, group.anchor.mode), (rotation, AnchorMode::MoveAndSize));
+        let rect = sh.drawing_rect(DrawingRef::Group(group.id)).ok_or("missing member bounds")?;
+        let frame = group_unturned_box(rect, rotation);
+        let near = |px: f64, pt: f64| assert!((px * 0.75 - pt).abs() < 0.01, "{rotation}, row 4 = {height_pt} pt: {} pt != {pt} pt", px * 0.75);
+        for (px, pt) in [(frame.x, x), (frame.y, y), (frame.w, w), (frame.h, h), (f64::from(sh.row_height(3)), height_pt)] {
+            near(px, pt);
+        }
+        let expected = group_unturned_box(ObjectRect { x, y, w, h }, rotation);
+        for (px, pt) in [
+            (sh.col_left(1), expected.x),
+            (sh.row_top(2), expected.y),
+            (sh.col_left(col), expected.x + expected.w),
+            (sh.row_top(row), expected.y + expected.h),
+        ] {
+            near(px, pt);
+        }
+        Ok(())
+    };
+    check(&wb, frames[0], 25.0)?;
+    // Untouched, the source markers and the group's source transform go back as read.
+    let untouched = drawing_xml(&save_bytes(&wb, "turned.xlsx")?);
+    let source_xfrm = drawing.split_once("<a:xfrm").and_then(|(_, rest)| rest.split_once("</a:xfrm>")).ok_or("source xfrm")?.0;
+    assert!(untouched.contains(&from) && untouched.contains(&to) && untouched.contains(source_xfrm), "untouched group changed: {untouched}");
+    let mut session = Session::new();
+    session.add_document(DocState::from_saved(wb, None, "Turned".to_owned(), Trust::FromFile));
+    session.execute("home.rowHeight", json!({"sheet": 0, "rows": "4:4", "points": 50}))?;
+    let resized = &session.doc()?.wb;
+    check(resized, frames[1], 50.0)?;
+    let saved = save_bytes(resized, "turned.xlsx")?;
+    let xml = drawing_xml(&saved);
+    assert!(xml.contains(&from) && xml.contains(&to), "changed worksheet markers: {xml}");
+    let [x, y, _, _] = frames[1];
+    let emu = |pt: f64| (pt * 12700.0).round() as i64;
+    // The frame origin follows the resized anchor. The `ext`/`chExt` scale is inherited
+    // GridCraft export behavior, not an Excel readback: the probe did not save the workbook.
+    let frame = format!(
+        r#"<a:xfrm rot="{rotation}"><a:off x="{}" y="{}"/><a:ext cx="2540000" cy="1270000"/><a:chOff x="0" y="0"/><a:chExt cx="2540000" cy="1270000"/></a:xfrm>"#,
+        emu(x),
+        emu(y)
+    );
+    assert!(xml.contains(&frame), "incorrect saved frame: {xml}");
+    let (reopened, _) = open_bytes("turned.xlsx", &saved)?;
+    check(&reopened, frames[1], 50.0)?;
+    assert_eq!(drawing_xml(&save_bytes(&reopened, "turned.xlsx")?), xml);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn excel_turned_group_90_frame_markers() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    assert_excel_turned_group(5400000, (5, 6), [[109.0, -26.0, 100.0, 212.0], [96.5, -13.5, 125.0, 212.0]])
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn excel_turned_group_270_frame_markers() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    assert_excel_turned_group(16200000, (5, 6), [[109.0, -26.0, 100.0, 212.0], [96.5, -13.5, 125.0, 212.0]])
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn excel_turned_group_90_turned_markers() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    assert_excel_turned_group(5400000, (3, 10), [[6.0, 77.0, 200.0, 106.0], [-6.5, 89.5, 225.0, 106.0]])
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn excel_turned_group_270_turned_markers() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    assert_excel_turned_group(16200000, (3, 10), [[6.0, 77.0, 200.0, 106.0], [-6.5, 89.5, 225.0, 106.0]])
+}
+
 #[test]
 fn recovered_group_preserves_source_markers_and_transforms_on_save() {
     let original = group_projection_book(0.0, r#"flipH="1" rot="5400000""#, r#"flipV="1" rot="16200000""#, false, false);
@@ -558,7 +663,7 @@ fn collapsed_group_recovers_on_row_resize_with_undo_and_redo() {
         sheet.shapes.iter().map(|s| sheet.anchor_rect(&s.anchor)).collect()
     };
     let collapsed = member_boxes(&session.doc().unwrap().wb);
-    assert!(collapsed.iter().all(|r| r.w == 0.0));
+    assert!(collapsed.iter().all(|r| r.h == 0.0));
     session.execute("home.rowHeight", json!({"sheet": 0, "rows": "2:3", "height": 48})).unwrap();
     let wb = &session.doc().unwrap().wb;
     assert_group_projection(wb, [[0.57, 0.71, 0.04, 0.09], [0.20, 0.25, 0.10, 0.15]]);
@@ -642,7 +747,7 @@ fn collapsed_group_recovers_during_sort_row_fit() {
     assert!(fitted.sheet(0).unwrap().row_top(2) > held_sheet.row_top(2));
     assert_eq!(boxes(&fitted)[0].h, 0.0);
     let expected = boxes(&control);
-    assert!(expected[0].h > 0.0 && expected[1..].iter().all(|r| r.w > 0.0), "control: {expected:?}");
+    assert!(expected[0].h > 0.0 && expected[1..].iter().all(|r| r.h > 0.0), "control: {expected:?}");
     for actual in [&sorted, &fitted_later, &fitted_after_second_sort] {
         for (actual, expected) in boxes(actual).into_iter().zip(&expected) {
             assert_box(actual, *expected, "collapsed group box after sort and fit");
