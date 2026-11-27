@@ -17,12 +17,14 @@ use crate::SheetApp;
 use crate::editor::EditState;
 use crate::theme::{self, Tokens};
 
-/// A filter-header popup belongs to the document and sheet hit when it opened.
+/// A filter-header popup belongs to the document and sheet hit when it opened, and to the filter
+/// whose header button opened it: the table's identity, or `None` for the worksheet AutoFilter.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FilterMenu {
     pub header: CellRef,
     pub at: Pos2,
     home: (u64, u64),
+    owner: Option<u64>,
 }
 
 /// A painted pane: its row span, column span and screen rectangle.

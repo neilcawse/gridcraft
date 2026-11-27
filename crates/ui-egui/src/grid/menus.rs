@@ -1,9 +1,7 @@
 use super::editor::popup_dismissed;
 use super::geo::Geo;
 use super::tables::filter_table;
-use super::{
-    Arc, CellRef, Drag, FillTag, FilterMenu, Pos2, RangeRef, Rect, Sense, Sheet, SheetApp, Stroke, Tokens, col_to_letters, json, pos2, vec2,
-};
+use super::{CellRef, Drag, FillTag, FilterMenu, Pos2, RangeRef, Rect, Sense, Sheet, SheetApp, Stroke, Tokens, col_to_letters, json, pos2, vec2};
 
 fn forget_filter_menu(ctx: &egui::Context, col: u32) {
     ctx.data_mut(|d| {
@@ -15,7 +13,7 @@ fn forget_filter_menu(ctx: &egui::Context, col: u32) {
 
 pub(crate) fn open_filter_menu(app: &mut SheetApp, ctx: &egui::Context, sh: &Sheet, header: CellRef, at: Pos2) {
     let Some(d) = app.session.active() else { return };
-    let menu = FilterMenu { header, at, home: (d.uid, sh.uid.get()) };
+    let menu = FilterMenu { header, at, home: (d.uid, sh.uid.get()), owner: filter_table(sh, header).map(|t| t.uid.get()) };
     if app.grid.filter_menu != Some(menu) {
         if let Some(previous) = app.grid.filter_menu.filter(|p| p.header.col != header.col) {
             forget_filter_menu(ctx, previous.header.col);
@@ -25,9 +23,11 @@ pub(crate) fn open_filter_menu(app: &mut SheetApp, ctx: &egui::Context, sh: &She
     }
 }
 
-/// Draws the filter-header popup: sort, search/select-all, apply/clear, a lazily installed table autofilter, new-open search focus and dismissal.
+/// Draws the filter-header popup: sort, search/select-all, apply/clear, new-open search focus and dismissal.
+/// Every action targets the filter that owned the header when the popup opened: a table's own
+/// filter, or the worksheet AutoFilter.
 pub(super) fn filter_menu(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_open: bool) {
-    let Some(FilterMenu { header, at, home }) = app.grid.filter_menu else { return };
+    let Some(FilterMenu { header, at, home, owner }) = app.grid.filter_menu else { return };
     let CellRef { col, row } = header;
     let Some(d) = app.session.active() else { return };
     let wb = d.wb.clone();
@@ -45,16 +45,26 @@ pub(super) fn filter_menu(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_
         Some(table) => table.autofilter_range(),
         None => sh.autofilter.as_ref().filter(|af| af.range.start.row == row && af.range.contains(header)).map(|af| af.range),
     };
-    // Tables get an autofilter on demand.
-    if sh.autofilter.is_none()
-        && let Some(range) = table.map(|t| t.range)
-        && let Some(d) = app.session.active_mut()
-        && let Some(s) = Arc::make_mut(&mut d.wb).sheet_mut(si)
-    {
-        s.autofilter = Some(gridcraft_engine::model::AutoFilter { range, criteria: vec![] });
+    // The header now belongs to another filter, or to none (removed, resized or replaced while
+    // the popup was open): close rather than act on it.
+    let owned = match table {
+        Some(t) => owner == Some(t.uid.get()),
+        None => owner.is_none() && sort_range.is_some(),
+    };
+    if !owned {
+        forget_filter_menu(ui.ctx(), col);
+        app.grid.filter_menu = None;
+        return;
     }
-    let wb = app.session.active().map(|d| d.wb.clone()).unwrap_or(wb);
-    let values = gridcraft_engine::cmd::data::filter_values(&wb, si, col);
+    let table_name = table.map(|t| t.name.as_str());
+    let values = gridcraft_engine::cmd::data::filter_values(&wb, si, table_name, col);
+    // Apply and Clear change only the owning filter: the table's own, or the worksheet AutoFilter.
+    let target = |mut p: serde_json::Value| {
+        if let (Some(name), Some(o)) = (table_name, p.as_object_mut()) {
+            o.insert("table".into(), name.into());
+        }
+        p
+    };
     let key = egui::Id::unique(("filter_sel", col));
     let search_key = egui::Id::unique(("filter_search", col));
     let buttons_key = egui::Id::unique(("filter_buttons", col));
@@ -114,7 +124,7 @@ pub(super) fn filter_menu(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_
             ui.horizontal(|ui| {
                 let clear = ui.button("Clear Filter");
                 if clear.clicked() {
-                    let _ = app.run("data.filterBy", json!({"column": col_to_letters(col), "clear": true}));
+                    let _ = app.run("data.filterBy", target(json!({"column": col_to_letters(col), "clear": true})));
                     close = true;
                 }
                 // Nothing checked would hide every row, so Enter (unlike a click on Apply) does nothing then.
@@ -129,7 +139,7 @@ pub(super) fn filter_menu(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, was_
                     } else {
                         json!({"column": col_to_letters(col), "values": vals, "blanks": blanks})
                     };
-                    let _ = app.run("data.filterBy", p);
+                    let _ = app.run("data.filterBy", target(p));
                     close = true;
                 }
             });
