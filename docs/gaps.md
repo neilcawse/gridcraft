@@ -81,7 +81,8 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
   landed too, with its settings in File › Options › Formulas.
 - **Added:** cell entry accepts same-workbook sheet qualifiers on structured references. The
   formula bar, editor and formula readback omit the containing table's name without changing
-  the stored formula. See X36 in [integration notes](parity/INTEGRATION_NOTES.md).
+  the stored formula. Typing a structured reference without a table name outside every table
+  is refused, as in Excel. See X36 and X46 in [integration notes](parity/INTEGRATION_NOTES.md).
 - **Impact:** wrong numbers are worse than missing features, so this entry is kept until the
   oracle suite of §15 can say the category is clear rather than only these five reports being so.
 - **Estimate:** — [function-parity.md](function-parity.md#formula-language)
@@ -261,6 +262,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 | 2026-11-26 | minor | §25: inspection reports Excel's UsedRange and Ctrl+End, Go To Special and Workbook Statistics use its Last Cell; the shared work extent is unchanged; record the residual paste-payload differences and pending probes. |
 | 2026-11-25 | minor | §25: transfer and reset inherited column styles on ordinary whole-column paste, as Excel's blank-cell readbacks show for copy and cut. |
 | 2026-11-25 | minor | §25: copy and cut whole-line geometry and inherited row style on ordinary paste; record the remaining extent and Paste Special gaps. |
+| 2026-11-26 | minor | §6, X46: typing a structured reference without a table name outside every table is refused (cell entry, multi-cell writes, Ctrl+Enter fill and AutoSum); imported formulas are unchanged |
 | 2026-11-26 | minor | §6, X36: range fill binds short structured references per destination; Ctrl+' uses localized formula syntax |
 | 2026-11-25 | minor | §6, X36: cell entry accepts same-workbook sheet qualifiers on structured references; formula readback omits the name of the containing table |
 | 2026-11-25 | minor | §17: X34 keeps groups overlapping the visible sorted block in place during the permutation, replacing X28's member-by-member movement there. |

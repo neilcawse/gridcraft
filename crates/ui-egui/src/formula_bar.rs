@@ -1069,6 +1069,30 @@ mod spill_tests {
     }
 
     #[test]
+    fn x46_editor_refuses_a_bare_structured_ref_outside_every_table() {
+        let mut app = app();
+        app.run("range.setValues", json!({"range": "A1", "values": [["Qty", "Double"], [3], [4]]})).unwrap();
+        app.run("insert.table", json!({"range": "A1:B3", "hasHeaders": true})).unwrap();
+        let undo = app.session.active().unwrap().undo.len();
+        for fill in [false, true] {
+            select(&mut app, "D2");
+            app.begin_edit(Some("=SUM([Qty])".into()), false);
+            assert!(!app.commit_edit(1, 0, false, fill), "fill {fill}");
+            let (_, msg) = app.message.take().unwrap();
+            assert!(msg.contains("There's a problem with this formula"), "{msg}");
+            assert_eq!(app.editor.as_ref().unwrap().text, "=SUM([Qty])", "the draft stays open");
+            app.cancel_edit();
+            assert_eq!(app.run("cell.get", json!({"cell": "D2"})).unwrap()["formula"], json!(null));
+        }
+        assert_eq!(app.session.active().unwrap().undo.len(), undo);
+        // In the table the same text is entered for its table.
+        select(&mut app, "B2");
+        app.begin_edit(Some("=[@Qty]*2".into()), false);
+        assert!(app.commit_edit(1, 0, false, false));
+        assert_eq!(app.run("cell.get", json!({"cell": "B2"})).unwrap()["value"], 6.0);
+    }
+
+    #[test]
     fn spill_ownership_follows_recalculation_and_obstructions() {
         let mut app = app();
         set(&mut app, "D1", "2");

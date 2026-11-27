@@ -20,12 +20,33 @@ pub(crate) fn is_formula_input(input: &str) -> bool {
 
 /// What typing `input` into a cell produces (constant or formula, plus an automatic number
 /// format). Inherits the destination's cell, row or column style, including its number
-/// format, before parsing. Errors when the formula can't be parsed.
+/// format, before parsing. Errors when the formula can't be parsed. A structured reference
+/// without a table name is bound to the table holding `at`, and left as written outside every
+/// table: this is entry on behalf of paste, replace, text to columns and other tools, which
+/// Excel has not been measured refusing it in. Typing into a cell is [`typed_input_to_cell`].
 pub(crate) fn input_to_cell(input: &str, sheet: usize, at: CellRef, wb: &mut gridcraft_model::Workbook) -> Result<Option<Cell>> {
-    input_to_cell_impl(input, sheet, at, wb, true)
+    input_to_cell_impl(input, sheet, at, wb, BareTableRefs::Bind)
 }
 
-fn input_to_cell_impl(input: &str, sheet: usize, at: CellRef, wb: &mut gridcraft_model::Workbook, bind_tables: bool) -> Result<Option<Cell>> {
+/// [`input_to_cell`] for direct formula entry (`cell.set`, `range.setValues`, and generated
+/// AutoSum formulas): a structured reference without a table name outside every table is
+/// refused, as Excel refuses `=SUM([Qty])` there.
+pub(crate) fn typed_input_to_cell(input: &str, sheet: usize, at: CellRef, wb: &mut gridcraft_model::Workbook) -> Result<Option<Cell>> {
+    input_to_cell_impl(input, sheet, at, wb, BareTableRefs::BindOrRefuse)
+}
+
+/// What entry does with a structured reference written without a table name (`[Qty]`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BareTableRefs {
+    /// Bound to the table holding the cell; left as written outside every table.
+    Bind,
+    /// Bound to the table holding the cell; refused outside every table.
+    BindOrRefuse,
+    /// Left as written: the caller binds it for each destination.
+    Defer,
+}
+
+fn input_to_cell_impl(input: &str, sheet: usize, at: CellRef, wb: &mut gridcraft_model::Workbook, bare: BareTableRefs) -> Result<Option<Cell>> {
     let style = wb.sheet(sheet).map(|sh| sh.style_id(at)).unwrap_or_default();
     if input.is_empty() {
         let c = Cell { value: Value::Empty, formula: None, style, py: None };
@@ -42,8 +63,12 @@ fn input_to_cell_impl(input: &str, sheet: usize, at: CellRef, wb: &mut gridcraft
     if is_formula {
         let body = input.strip_prefix('=').unwrap_or(input);
         let mut expr = wb.name_call_case(parse_typed_formula(body, wb, sheet)?, sheet);
-        if bind_tables && body.contains('[') && has_bare_table_refs(&expr) {
-            expr = bind_local_tables(expr, wb, sheet, at);
+        if bare != BareTableRefs::Defer && body.contains('[') && has_bare_table_refs(&expr) {
+            match wb.sheet(sheet).and_then(|sh| crate::display::containing_table(wb, sh, at)) {
+                Some(table) => expr = bind_to_table(expr, &table.name),
+                None if bare == BareTableRefs::BindOrRefuse => return Err(bare_table_ref_error(&expr)),
+                None => {}
+            }
         }
         check_linked_books(&expr, wb.external_books.len())?;
         check_arg_counts(&expr)?;
@@ -229,19 +254,35 @@ fn has_bare_table_refs(expr: &gridcraft_formula::Expr) -> bool {
 }
 
 /// Binds structured references typed without a table name (`[@Qty]`, as the formula bar shows
-/// them inside their own table) to the table holding `at`, so re-entering the shown text stores
-/// the formula it came from and the formula keeps its table when it is moved out of it. Left
-/// unbound when `at` is in no table, or its table's name finds another table first.
-fn bind_local_tables(expr: gridcraft_formula::Expr, wb: &gridcraft_model::Workbook, sheet: usize, at: CellRef) -> gridcraft_formula::Expr {
+/// them inside their own table) to `table`, the table holding the cell they are entered in
+/// ([`crate::display::containing_table`]), so re-entering the shown text stores the formula it
+/// came from and the formula keeps its table when it is moved out of it.
+fn bind_to_table(expr: gridcraft_formula::Expr, table: &str) -> gridcraft_formula::Expr {
     use gridcraft_formula::Expr;
-    let Some(table) = wb.sheet(sheet).and_then(|sh| crate::display::containing_table(wb, sh, at)) else { return expr };
     expr.map(&mut |e| match e {
         Expr::Struct(mut st) if st.table.is_empty() => {
-            st.table.clone_from(&table.name);
+            table.clone_into(&mut st.table);
             Expr::Struct(st)
         }
         other => other,
     })
+}
+
+/// Typing a structured reference without a table name into a cell with no table to mean (outside
+/// every table, or in one its own name doesn't find) is refused like any other formula that
+/// can't be entered: Excel for Mac 16.115 refused `=SUM([Qty])` written outside the table
+/// (action-probe Batch 5, `x36-short-structured-refs`).
+fn bare_table_ref_error(expr: &gridcraft_formula::Expr) -> EngineError {
+    let mut first = None;
+    expr.walk(&mut |e| {
+        if first.is_none() && matches!(e, gridcraft_formula::Expr::Struct(st) if st.table.is_empty()) {
+            first = Some(gridcraft_formula::printer::print(e));
+        }
+    });
+    let reference = first.unwrap_or_default();
+    EngineError::Other(format!(
+        "There's a problem with this formula: {reference} has no table name, which only a formula in a cell of that table can leave out."
+    ))
 }
 
 /// Parses a formula as it is typed (without the `=`). Excel closes missing parentheses for you,
@@ -313,7 +354,7 @@ pub(super) fn cell_set(s: &mut Session, p: &Json) -> Result<Json> {
             if !range.is_single() && cx.wb.sheet(sheet).is_some_and(|sh| sh.tables.iter().any(|t| t.range.intersects(&range))) {
                 return Err(EngineError::Other("Multi-cell array formulas aren't allowed in tables.".into()));
             }
-            let mut cell = input_to_cell(&input, sheet, range.start, &mut cx.wb)?.unwrap_or_default();
+            let mut cell = typed_input_to_cell(&input, sheet, range.start, &mut cx.wb)?.unwrap_or_default();
             if let Some(f) = cell.formula.as_mut() {
                 keep_identical_display_text(&cx.wb, sheet, range.start, &input, f);
                 std::sync::Arc::make_mut(f).array = Some(range);
@@ -330,7 +371,7 @@ pub(super) fn cell_set(s: &mut Session, p: &Json) -> Result<Json> {
             cx.touch(sheet, range.start);
             return Ok(Json::Null);
         }
-        let mut cell = input_to_cell(&input, sheet, at, &mut cx.wb)?;
+        let mut cell = typed_input_to_cell(&input, sheet, at, &mut cx.wb)?;
         if let Some(f) = cell.as_mut().and_then(|c| c.formula.as_mut()) {
             keep_identical_display_text(&cx.wb, sheet, at, &input, f);
         }
@@ -452,7 +493,7 @@ pub(super) fn range_set_values(s: &mut Session, p: &Json) -> Result<Json> {
                             Some(Cell { value: Value::Text(text.as_str().into()), formula: None, style, py: None })
                         }
                     }
-                    _ => input_to_cell(&input, sheet, at, &mut cx.wb)?,
+                    _ => typed_input_to_cell(&input, sheet, at, &mut cx.wb)?,
                 };
                 // A string that became a formula was written as one (`=`), which is deliberate;
                 // only a number (dates and times included), boolean or error is a reading of the
@@ -501,7 +542,8 @@ pub(super) fn range_fill(s: &mut Session, p: &Json) -> Result<Json> {
     let origin = s.doc()?.selection.active;
     edit(s, |cx| {
         // Cache parsing and automatic formats by style, but defer local table binding until
-        // the destination is known. Cells of the same style can belong to different tables.
+        // the destination is known. Cells of the same style can belong to different tables. A
+        // destination outside every table refuses the whole fill, as typing it there would.
         let mut by_style: std::collections::HashMap<StyleId, (Option<Cell>, bool)> = std::collections::HashMap::new();
         for r in &ranges {
             if r.count() > 2_000_000 {
@@ -516,7 +558,7 @@ pub(super) fn range_fill(s: &mut Session, p: &Json) -> Result<Json> {
                 let (base, bare_table_refs) = match by_style.get(&style) {
                     Some(c) => c.clone(),
                     None => {
-                        let c = input_to_cell_impl(&input, sheet, at, &mut cx.wb, false)?;
+                        let c = input_to_cell_impl(&input, sheet, at, &mut cx.wb, BareTableRefs::Defer)?;
                         let bare = input.contains('[')
                             && c.as_ref().and_then(|cell| cell.formula.as_ref()).and_then(|f| f.with_expr(has_bare_table_refs)).unwrap_or(false);
                         by_style.insert(style, (c.clone(), bare));
@@ -527,7 +569,14 @@ pub(super) fn range_fill(s: &mut Session, p: &Json) -> Result<Json> {
                 if let Some(f) = &cell.formula
                     && let Some(e) = f.expr()
                 {
-                    let e = if bare_table_refs { bind_local_tables(e, &cx.wb, sheet, at) } else { e };
+                    let e = if bare_table_refs {
+                        match cx.wb.sheet(sheet).and_then(|sh| crate::display::containing_table(&cx.wb, sh, at)) {
+                            Some(table) => bind_to_table(e, &table.name),
+                            None => return Err(bare_table_ref_error(&e)),
+                        }
+                    } else {
+                        e
+                    };
                     let shifted = gridcraft_formula::adjust::shift_relative(e, at.row as i64 - origin.row as i64, at.col as i64 - origin.col as i64);
                     cell.formula = Some(std::sync::Arc::new(f.rewritten(shifted)));
                 }
