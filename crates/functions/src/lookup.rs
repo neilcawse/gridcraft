@@ -111,9 +111,12 @@ fn bsearch_last_within(x: &Value, hay: &[Value], desc: bool, len: usize) -> Opti
             }
             lo = j + 1;
         } else {
-            // Below the probe; between `mid` and a probe above it there is nothing to find.
-            let next = if above { mid } else { j };
-            let Some(h) = next.checked_sub(1) else { break };
+            // Below the probe: the search goes on below the midpoint, even when the probe was
+            // found under it. Excel-cached values in the public fuse corpus file 1803f231… show
+            // this for a whole linked column whose midpoints fall in the blank tail:
+            // `VLOOKUP(key,'[1]Cognos Feb 14, 2014'!$A:$I,7)` finds row 8 of 77 saved rows,
+            // where narrowing to below the fallback probe (row 76) reaches row 3 instead.
+            let Some(h) = mid.checked_sub(1) else { break };
             hi = h;
         }
     }
@@ -930,6 +933,23 @@ mod tests {
         close(ev("VLOOKUP", vec![t("Gamma"), rf(keys.clone()), n(2.0)]), 3.0);
         close(ev("VLOOKUP", vec![n(5.0), rf(keys.clone()), n(2.0)]), 55.0);
         close(ev("VLOOKUP", vec![n(99.0), rf(keys), n(2.0)]), 58.0);
+    }
+
+    /// Excel-cached values in the public fuse corpus file 1803f231…:
+    /// `VLOOKUP(key,'[1]Cognos Feb 14, 2014'!$A:$I,7)` over a whole linked column that saved 77
+    /// rows (report headings, two zeros, then sorted account codes) finds the key's own row 8.
+    /// Each midpoint in the blank tail narrows the search to below it.
+    #[test]
+    fn approximate_match_over_a_whole_linked_column_halves_through_the_blank_tail() {
+        let mut keys = vec![tv("Printed on: Feb 24, 2014"), tv(" West Valley"), tv(" Financial Summary"), tv("Fiscal Year: 2014"), nv(0.0), nv(0.0)];
+        let codes = ["100_300130", "100_301120", "100_301125", "100_304010", "100_304020", "100_304168", "100_304190", "100_305200", "100_309600"];
+        keys.extend(codes.iter().map(|c| tv(c)));
+        keys.extend((keys.len()..75).map(|i| tv(&format!("100_31{i:04}"))));
+        keys.push(tv("891_304169"));
+        keys.push(Value::Empty);
+        let keys = Value::from(gridcraft_core::Array::new(keys.len(), 1, keys).unwrap());
+        let found = super::vh_lookup_pos(&tv("100_301120"), Some(&keys), (&nv(7.0), false), None, 9, Some(1_048_576));
+        assert_eq!(found, Ok((7, 6)));
     }
 
     #[test]
