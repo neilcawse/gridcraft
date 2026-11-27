@@ -247,8 +247,11 @@ pub(super) fn context_menu(app: &mut SheetApp, ui: &mut egui::Ui) {
                                 } else if sh.autofilter.is_some() {
                                     app.run_or_alert("data.filterBy", json!({"column": column, "values": [text]}));
                                 } else {
-                                    // Keep the legacy target and setup, but undo them together with the criterion.
-                                    let result = app.session.grouped(label, |s| {
+                                    // Keep the legacy target and setup, but undo them together with the criterion, under
+                                    // the criterion's own undo label as in the branches above. If the criterion fails, the
+                                    // group rolls the setup back too: the alert leaves the sheet as it was.
+                                    let step = gridcraft_engine::find_command("data.filterBy").map_or(label, |c| c.label);
+                                    let result = app.session.grouped(step, |s| {
                                         let _ = s.execute("data.filter", json!({}));
                                         s.execute("data.filterBy", json!({"column": column, "values": [text]}))
                                     });

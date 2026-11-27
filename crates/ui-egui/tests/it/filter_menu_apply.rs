@@ -340,6 +340,67 @@ fn context_filter_by_value_with_buttons_off_undoes_and_redoes_as_one_step() -> T
     Ok(())
 }
 
+/// The worksheet AutoFilter's range and criteria, or `None` without one.
+type SheetFilter = Option<(String, Vec<(u32, FilterCriterion)>)>;
+
+fn autofilter(h: &Harness) -> TestResult<SheetFilter> {
+    Ok(sheet(h)?.autofilter.as_ref().map(|af| (af.range.a1(), af.criteria.clone())))
+}
+
+fn undo_label(h: &Harness) -> TestResult<String> {
+    Ok(h.state().session.active().ok_or("active document")?.undo.last().ok_or("no undo step")?.label.clone())
+}
+
+/// Name/Q in A1:B4: no table, no worksheet AutoFilter.
+fn plain_range() -> TestResult<Session> {
+    let mut s = Session::new();
+    s.new_workbook();
+    s.execute("range.setValues", json!({"range":"A1", "values":[["Name","Q"],["Ann",1],["Ben",2],["Cat",3]]}))?;
+    Ok(s)
+}
+
+#[test]
+fn context_filter_by_value_on_a_plain_range_undoes_and_redoes_as_one_step() -> TestResult {
+    let mut h = harness(plain_range()?);
+    let depth = undo_depth(&h)?;
+    let after = Some(("A1:B4".to_string(), vec![(0, values(&["Ann"]))]));
+    filter_by_cell_value(&mut h, CellRef::new(1, 0))?;
+    assert_eq!(autofilter(&h)?, after, "the action creates the worksheet AutoFilter with the criterion");
+    assert_eq!(hidden(&h)?, [3, 4]);
+    assert_eq!(undo_depth(&h)?, depth + 1);
+    // The undo list names the step as it does when the action is a single `data.filterBy`.
+    let label = gridcraft_engine::find_command("data.filterBy").ok_or("data.filterBy")?.label;
+    assert_eq!(undo_label(&h)?, label);
+    h.state_mut().run("edit.undo", json!({}))?;
+    assert_eq!(autofilter(&h)?, None, "one undo also removes the AutoFilter it created");
+    assert_eq!(hidden(&h)?, Vec::<u32>::new());
+    assert_eq!(undo_depth(&h)?, depth);
+    h.state_mut().run("edit.redo", json!({}))?;
+    assert_eq!(autofilter(&h)?, after);
+    assert_eq!(hidden(&h)?, [3, 4]);
+    assert_eq!(undo_label(&h)?, label);
+    Ok(())
+}
+
+#[test]
+fn context_filter_by_value_whose_criterion_fails_rolls_its_setup_back() -> TestResult {
+    let mut s = plain_range()?;
+    s.execute("range.setValues", json!({"range":"B2", "values":[[9]]}))?;
+    s.execute("edit.undo", json!({}))?;
+    // Column C is empty: the AutoFilter `data.filter` installs over the selection's data (A1:B4) leaves out the
+    // active cell's column, and `data.filterBy` then refuses it.
+    s.execute("selection.set", json!({"range":"A1:C4", "active":"C1"}))?;
+    let mut h = harness(s);
+    let depth = undo_depth(&h)?;
+    filter_by_cell_value(&mut h, CellRef::new(0, 2))?;
+    let message = h.state().message.as_ref().map(|(_, m)| m.clone()).ok_or("the failure is reported")?;
+    assert!(message.contains("column outside the filter range"), "{message}");
+    assert_eq!(autofilter(&h)?, None, "no AutoFilter is left behind without its criterion");
+    assert_eq!(undo_depth(&h)?, depth, "a failed action adds no undo step");
+    assert_eq!(h.state().session.active().ok_or("active document")?.redo.len(), 1, "and keeps the redo history");
+    Ok(())
+}
+
 #[test]
 fn popup_closes_when_the_worksheet_filter_range_grows() -> TestResult {
     let mut h = sheet_filter_and_table()?;
