@@ -194,7 +194,8 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
             Ordering::Equal
         });
         // Only moved lines have cells to rewrite, as (destination, source).
-        let moves: Vec<(u32, u32)> = shown.iter().copied().zip(ranked.into_iter().map(|rank| shown[rank])).filter(|&(dst, src)| dst != src).collect();
+        let moves: Vec<(u32, u32)> =
+            shown.iter().zip(&ranked).filter_map(|(&dst, &rank)| shown.get(rank).map(|&src| (dst, src))).filter(|&(dst, src)| dst != src).collect();
         if moves.is_empty() {
             return Ok(Json::Null);
         }
@@ -225,7 +226,7 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
             .flat_map(|&(dst_i, src_i)| lanes.iter().map(move |&k| (src_i, dst_i, k)))
             .filter_map(|(src_i, dst_i, k)| sh.hyperlinks.get(&line(src_i, k)).map(|h| (line(dst_i, k), h.clone())))
             .collect();
-        let mut moved: Vec<(CellRef, Option<Cell>)> = Vec::with_capacity(moves.len() * lanes.len());
+        let mut moved: Vec<(CellRef, Option<Cell>)> = Vec::with_capacity(moves.len().checked_mul(lanes.len()).unwrap_or(0));
         let mut pictures = Vec::new();
         for &(dst_i, src_i) in &moves {
             for &k in &lanes {
@@ -257,7 +258,9 @@ fn do_sort(s: &mut Session, sheet: usize, r: RangeRef, header: bool, keys: Vec<S
         let dst_of: Vec<u32> = {
             let mut v: Vec<u32> = (0..n).collect();
             for &(dst, src) in &moves {
-                v[src as usize] = dst;
+                if let Some(slot) = v.get_mut(src as usize) {
+                    *slot = dst;
+                }
             }
             v
         };
