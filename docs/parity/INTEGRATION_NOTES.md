@@ -563,6 +563,12 @@ Documented, not measured (Microsoft's form check box documentation, ECMA-376, [M
 - **Not changed:** Data › Clear (`data.clearFilter`, every filter on the sheet) and slicers are a different path. A popup filter on a slicer's column still doesn't update the slicer's selection, as before.
 - **X51 MCP:** The `filter` tool forwards `table` to `data.filterBy` without collapsing explicit null into omission. A name targets the table; null or blank targets only an existing worksheet AutoFilter. `range` cannot be combined with `table`; calls that omit `table` keep their legacy behavior.
 
+## X52 — Copy and cut marquee stays on its source sheet
+
+- **Before (reproduced on X51 `96b79187`):** The marching-ants marquee drew on whichever sheet was active at the position the copy recorded. After copying or cutting on Sheet2, inserting a sheet before it put the marquee on the new sheet and none on Sheet2; deleting an earlier sheet or the source sheet put it on the sheet that took that position.
+- **Now (GridCraft choice, unmeasured in Excel):** The marquee draws only on the source sheet, found by the same run-time sheet identity that X29's `Clipboard::check_cut_source` uses, wherever that sheet now is. A deleted source sheet shows no marquee. Copy and cut behave the same.
+- **Not changed:** Clipboard lifetime and paste. Whether Excel ends copy mode when a sheet is inserted, deleted or moved is still unmeasured (see X29); the copy stays pending.
+
 ## X14b–X38 integration (`wip/integration-x38`)
 
 **X15 lookup criteria and X20 external names.** For VLOOKUP and HLOOKUP over a readable local table or array:
