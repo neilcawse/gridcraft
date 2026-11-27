@@ -751,3 +751,31 @@ Changes against the published integration `4a40b886` (X38 order: mode, then any 
 - **Unmeasured:** Excel-written markers and transforms (no saves); quarter-turned moves, column edits, sorts, nested variants and non-quarter angles. The measured frame at open matches the anchor-derived box, not the source root `off`/`ext` (for B3:F7, `(109, -26, 100, 212)` pt rather than `(0, 0, 200, 100)` pt). This does not establish how Excel handles those fields in other workbooks. GridCraft's inherited export rule keeps the file's `ext`/`chExt` scale; after a resize `off` is the new frame origin but `ext` retains the file scale. Nested local transforms, ungrouped shapes/pictures, content rendering, hide/unhide and the X38(c) collapsed-span rule are unchanged. The sort edit in Batch 5's `x38-collapsed-sort-moves` errored, so it does not measure Excel's behavior for a displaced collapsed span.
 - **Compatibility:** this reverses X38 decision (a) for saved files too. A workbook written by an integration build with X38's convention (root anchor = unturned frame) now opens with that anchor read as the on-screen box, so its members swap proportions. X38 never reached a release (v0.9.0 has no group-turn layout), and no file marker distinguishes those workbooks from Excel's, so no migration is attempted.
 - **Corpus coverage:** the scan found no quarter-turned groups at any depth among the readable files in 49,653 public OOXML workbooks (24 unreadable). The lane eval and drawing audit did not exercise the changed behavior.
+
+## Integration X51 (`wip/integration-x51`)
+
+Base: published integration `4a40b8867755e6f2541f6e9f2ec45dda2f6f25f0`. Each lane was merged with `git merge --no-ff` after checking that its ref equaled the published SHA. X41–X48 are siblings on the base; X49–X51 stack on X48; X52 and X53 are siblings on X51.
+
+| Merge | Lane head | Conflicts and resolution |
+|---|---|---|
+| X41 lookup argument order | `b4a5d472` | None. |
+| X42 LAMBDA name calls | `5c39502c` | None. |
+| X43 sheet-copy numbering | `0a481f76` | None. |
+| X44 row-paste outline | `10cbe249` | None. |
+| X45 turned group anchor | `97e6fddb` | None. |
+| X46 bare structured-reference entry | `757fbf2b` | `crates/engine/src/cmd/edit/cell.rs`: both lanes changed the typed-formula line. Kept X42's sheet-aware `name_call_case(…, sheet)` together with X46's `BareTableRefs` bind-or-refuse match. |
+| X47 protected line formatting | `68fab507` | `docs/cli.md`: X43's `sheet.move` copy paragraph and X47's protection paragraph were added at the same place. Kept both. |
+| X48 sort hidden lines | `7b1afb79` | `crates/engine/src/io/tests.rs`: in the collapsed-group sort test, kept X45's member assertion (`r.h > 0.0`, the turned box) and X48's list of checked workbooks (no `sorted`, because the sort now holds the group). `INTEGRATION_NOTES.md` X38 section: kept X45's "Superseded by X45" bullet in place of the old frame bullet, and X48's updated collapse-recovery bullet. The X47 and X48 sections follow in merge order. |
+| X49 filter-menu sort | `48e70e1e` | None. |
+| X50 filter-menu apply | `4510ba8d` | None. |
+| X51 MCP filter table | `96b79187` | None. |
+| X52 copy marquee sheet | `5acf076e` | None. |
+| X53 filter value undo | `2f980e2b` | None. |
+
+After each merge, every lane-added line in the lane's diff against its base was checked against the merged tree, so no lane test or helper was dropped. The only differences were X50 superseding X49's own popup lines, and X43 replacing name-retargeting code next to identical X42 lines. Combined behavior:
+
+- **X44 × X48 (fix).** A row sort moves a shown row's whole line record (X48). A source row without a record used to clear only the destination's size, so the destination kept its outline level, collapsed-summary marker and line style. After an X44 paste marks a summary row, a sort that moves that row left a copy of the marker behind on the row that took its place. Now a recordless source row also resets the destination line (`crates/engine/src/cmd/data/sort.rs`), as X48 describes: "the moved line's settings replace the destination's". Test: `row_paste_outline::sort_after_whole_row_paste_keeps_hidden_detail_and_moves_the_summary_line`. The sort still has no outline awareness (X48 "Not handled"), so the marker moves with its row away from the hidden group.
+- **X45 × X48/X34/X38.** X48's collapsed-group sort tests use a 270° group. With X45 they pass with the root anchor as the turned box: members have height after the fit, and the hold, span check and recovery behave as X48 states. No code change.
+- **X44 × X47.** X44 gates its outline and marker writes on Format Rows or Format Columns, as whole-line paste already gated line formats; X47 gates direct sizing, including Default Width, on the same permissions. Under Format Rows only, a direct whole-row fill is refused (X47, measured). A whole-row paste still carries the source row's line style and outline level (X25/X44; X47 leaves transfers outside its direct-setter rule). Pinned by `protected_format_rows_refuses_direct_row_fill_but_whole_row_paste_carries_line_format`. Whether Excel lets a whole-row paste change fill under Format Rows only is unmeasured.
+- **X41 × X42.** An index computed by a `_xludf.` call is an index expression, like the unprefixed call of the same LAMBDA, so X41's order applies to it: its error beats a missed key and invalid mode text. Pinned by calc `name_bound_lookup_index_takes_the_x41_expression_order`.
+- **X42 × X46.** Typed entry applies both rules to one formula. `=_xludf.vstack([@Qty])` in a table takes the casing of the sheet-level name and binds to that table; outside every table it is refused. Pinned by `typed_name_call_with_a_bare_structured_ref_binds_or_is_refused`.
