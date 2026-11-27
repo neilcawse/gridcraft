@@ -8388,14 +8388,15 @@ fn check_whole_row_clipboard_all(insert: bool) {
         let sh = wb.active().unwrap();
         assert_eq!([sh.row_height(7), sh.row_height(8)], [0., 0.]);
         for (source, target) in [(2, 7), (3, 8)] {
-            // As with ordinary Paste, size, visibility and style transfer, not outline.
-            let outline = if insert { 0 } else { before[&target].outline };
-            assert_eq!(sh.rows[&target], gridcraft_model::LineInfo { outline, ..before[&source] });
+            // As with ordinary Paste, size, visibility, style and outline level transfer (X44).
+            assert_eq!(sh.rows[&target], before[&source]);
         }
         if insert {
             assert_eq!([sh.row_height(9), sh.row_height(10)], [16., 0.]);
             assert_eq!([sh.rows[&9], sh.rows[&10]], [before[&7], before[&8]]);
         } else {
+            // x25-paste-special-all-rows: row 10 reads ShowDetail false after the hidden group.
+            assert_eq!(sh.rows.get(&9).copied(), Some(gridcraft_model::LineInfo { collapsed: true, ..Default::default() }));
             // Inferred from Excel's whole-column C Bold readback, not individual samples.
             for row in [7, 8] {
                 let cell = CellRef::new(row, 2);

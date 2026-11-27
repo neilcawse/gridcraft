@@ -220,18 +220,16 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
   conditional formatting, selection, clipboard, fill, clear, sort, validation, AutoFit, sheet
   operations, spelling, forecast, what-if analysis, macros, Ctrl+arrow navigation and the grid's
   scroll extent. Excel's default print and CSV bounds for bare or geometry-only lines are unmeasured.
-- Two residual extent differences come from the paste payload, not the extent rule. After
-  whole-row or whole-column Copy/Cut of an outlined hidden group (`x25-copy-*`, `x25-cut-*`, Paste
-  Special All), Excel's extent includes the line after the group (`A1:I10`, `A1:J9`). The
-  inferred cause is that Excel transfers the source outline level and marks that summary line
-  collapsed; GridCraft keeps outline and collapse on the destination lines, so after a GridCraft
-  `edit.paste` the reported extent stays `A1:I9` and Last Cell, with both pasted lines hidden, is
-  `H7` (rows) or `G8` (columns). Excel's outline getters returned no value, so the cause is
-  unmeasured.
+- One residual extent difference comes from the paste payload, not the extent rule. The other,
+  after whole-row or whole-column Copy/Cut of an outlined hidden group (`x25-copy-*`,
+  `x25-cut-*`, Paste Special All: Excel `A1:I10`, `A1:J9`), is resolved by
+  [X44](parity/INTEGRATION_NOTES.md#x44--whole-line-paste-carries-outline-levels). Batch 5
+  measured the source outline level moving with each line and `ShowDetail` false on the line
+  after the pasted group. GridCraft now transfers the level and sets that collapsed marker.
   Copy of a bare or absent whole row onto untouched rows grows Excel's extent to those rows
-  (`A1:I11`, `A1:I12`) with no readable line change; GridCraft keeps no record for them. Pending
-  probes: OutlineLevel/ShowDetail after a whole-row copy, and save/reopen of pasted bare or
-  absent rows. A persisted record found there belongs in paste, not in the extent rule.
+  (`A1:I11`, `A1:I12`) with no readable line change (Batch 5 read level, visibility, height and
+  `ShowDetail` unchanged); GridCraft keeps no record for them. Pending probe: save/reopen of
+  pasted bare or absent rows. A persisted record found there belongs in paste, not in the extent rule.
 - Whole-line Paste Special modes other than plain All, drag-and-drop, and filtered or packed
   pastes retain their previous behavior; Excel's line-format behavior on these paths is unmeasured.
   See [X32](parity/INTEGRATION_NOTES.md#x32--paste-special-all-and-insert-copied-cells-carry-line-formatting)
@@ -240,8 +238,8 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
   source column's; Excel readbacks of blank cells confirmed both. GridCraft also resets the
   destination style when copying an unstyled source column. That Excel probe did not measure
   the destination column's aggregate style or sample a blank destination cell.
-  Hidden/outline/show-detail and saved XML flags were not recovered; a size of zero
-  established only effective geometry.
+  Saved XML flags were not recovered; a size of zero established only effective geometry.
+  Hidden, outline level and `ShowDetail` were read in Batch 5 (X44).
 
 ### 26. Sheet copy: names on a copy of a copy (F)
 - **Added (X35/X43):** numbered tabs increment from the source suffix, and sheet-local copies

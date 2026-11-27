@@ -1,9 +1,9 @@
 //! Excel's reported UsedRange and Last Cell (X25 measurements, Excel for Mac 16.115.2) against
 //! the shared work extent that print, export and calculation keep using.
 //!
-//! Each case builds the final worksheet state of a measured probe in code. Where the probe's
-//! outline getters returned nothing, the outline level and collapsed summary line after a hidden
-//! group are inferred (see `docs/gaps.md` §25).
+//! Each case builds the final worksheet state of a measured probe in code. The outline level
+//! and collapsed summary line after a hidden group follow the Batch 5 `OutlineLevel` and
+//! `ShowDetail` readbacks; `row_paste_outline.rs` reaches the same states through paste (X44).
 
 use std::sync::Arc;
 
@@ -81,8 +81,8 @@ fn s_base(sh: &mut Sheet, st: StyleId) {
     destination_lines(sh, st);
 }
 
-/// Rows 3:4 of S pasted at row 8: their size, style and visibility, with the source outline level
-/// and a collapsed summary row 10 (inferred), and the source cells.
+/// Rows 3:4 of S pasted at row 8: their size, style, visibility and outline level, a collapsed
+/// summary row 10 (`ShowDetail` false), and the source cells.
 fn rows_pasted_at_8(sh: &mut Sheet, st: StyleId) {
     put(sh, &["A8", "B8", "A9", "B9"]);
     row(sh, 8, LineInfo { style: Some(st), hidden: true, ..sized(40.) });
@@ -90,7 +90,7 @@ fn rows_pasted_at_8(sh: &mut Sheet, st: StyleId) {
     row(sh, 10, LineInfo { collapsed: true, ..Default::default() });
 }
 
-/// Columns C:D of S pasted at column H, likewise with a collapsed summary column J (inferred).
+/// Columns C:D of S pasted at column H, likewise with a collapsed summary column J.
 fn cols_pasted_at_h(sh: &mut Sheet, st: StyleId) {
     sh.set_value(at("H1"), Value::text("S-C1"));
     sh.set_style(at("H1"), st);
