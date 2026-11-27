@@ -253,7 +253,27 @@ fn popup_whose_table_became_a_worksheet_filter_applies_nothing() -> TestResult {
         press(&mut h, "Apply")?;
     }
     assert!(h.state().grid.filter_menu.is_none(), "the popup closes with the filter that owned it");
-    assert_eq!(sheet_criteria(&h)?, Some(vec![]), "the new worksheet filter is not filtered");
+    assert_eq!(sheet(&h)?.autofilter.as_ref().map(|af| (af.range.a1(), af.criteria.len())), Some(("A8:B11".into(), 0)), "no filter changed or added");
+    assert_eq!(hidden(&h)?, Vec::<u32>::new());
+    Ok(())
+}
+
+#[test]
+fn popup_whose_table_was_replaced_by_another_applies_nothing() -> TestResult {
+    let mut h = sheet_filter_and_table()?;
+    open_menu(&mut h, CellRef::new(7, 0))?;
+    // Unchecks every listed value; a click on Apply would then hide every row of its filter.
+    press(&mut h, "(Select All)")?;
+    // A control client replaces People by another table over the same header.
+    h.state_mut().run("table.convertToRange", json!({"table":"People"}))?;
+    h.state_mut().run("insert.table", json!({"range":"A8:B11", "header":true, "name":"Others"}))?;
+    h.run_steps(2);
+    if h.query_by_label("Apply").is_some() {
+        press(&mut h, "Apply")?;
+    }
+    assert!(h.state().grid.filter_menu.is_none(), "the popup closes with the table that owned it");
+    assert_eq!(table_criteria(&h, "Others")?, []);
+    assert_eq!(sheet_criteria(&h)?, Some(vec![]));
     assert_eq!(hidden(&h)?, Vec::<u32>::new());
     Ok(())
 }
