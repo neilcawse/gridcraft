@@ -9729,21 +9729,96 @@ fn whole_column_autofill_repeats_source_column_formatting() {
     assert_line_edit_refused(&mut s, "edit.autoFill", json!({"source": "B:B", "target": "B:F"}), "range too large");
 }
 
+/// X64, measured in Excel for Mac 16.115.2 (object-model measurement of a synthetic workbook,
+/// `Range("3:4").AutoFill Range("3:9")`, default fill): the whole-row fixture with source row 4
+/// hidden, destination row 8 hidden beforehand (holding -81 and -82), or both. Each destination
+/// row takes the Hidden flag and height of the source row it lines up with: a hidden source
+/// hides rows 6 and 8 (`RowHeight` 0), and a visible source shows row 8 again at 38 pt. Cells
+/// and styles fill as without hidden rows. Every row read `OutlineLevel` 1 and `ShowDetail`
+/// true before and after, so the outline is not exercised here.
+fn assert_whole_row_autofill_visibility(source_hidden: bool, dest_hidden: bool) {
+    let mut s = s();
+    let [red, blue, _] = whole_row_autofill_fixture(&mut s);
+    if dest_hidden {
+        s.execute("cell.set", json!({"cell": "A8", "input": "-81"})).unwrap();
+        s.execute("cell.set", json!({"cell": "B8", "input": "-82"})).unwrap();
+    }
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let rows = &mut wb.sheet_mut(0).unwrap().rows;
+    rows.get_mut(&3).unwrap().hidden = source_hidden;
+    rows.get_mut(&7).unwrap().hidden = dest_hidden;
+    let before = rows.clone();
+    s.execute("edit.autoFill", json!({"source": "3:4", "target": "3:9"})).unwrap();
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    let blue_height = if source_hidden { 0. } else { 38. * 4. / 3. };
+    for (row, (height, style)) in (4..=8).zip([(40., red), (blue_height, blue), (40., red), (blue_height, blue), (40., red)]) {
+        assert_eq!(sh.row_height(row), height, "row {}", row + 1);
+        assert_eq!(sh.is_row_hidden(row), style == blue && source_hidden, "row {}", row + 1);
+        assert_eq!(sh.rows[&row].size, Some(if style == red { 40. } else { 38. * 4. / 3. }), "row {}", row + 1);
+        assert_eq!((sh.rows[&row].outline, sh.rows[&row].collapsed), (0, false), "row {}", row + 1);
+        assert_eq!(sh.style_id(CellRef::new(row, 0)), style, "row {}", row + 1);
+    }
+    assert_eq!(sh.is_row_hidden(3), source_hidden, "source row 4 keeps its flag");
+    assert_eq!([v(&s, "A8"), v(&s, "B8")], [Value::Number(6.), Value::Number(12.)]);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.doc().unwrap().wb.sheet(0).unwrap().rows, before, "undo");
+}
+
 #[test]
-fn whole_row_autofill_keeps_destination_visibility() {
+fn whole_row_autofill_hides_rows_paired_with_a_hidden_source_row() {
+    assert_whole_row_autofill_visibility(true, false);
+}
+
+#[test]
+fn whole_row_autofill_shows_a_hidden_destination_paired_with_a_visible_source_row() {
+    assert_whole_row_autofill_visibility(false, true);
+}
+
+#[test]
+fn whole_row_autofill_keeps_a_hidden_destination_paired_with_a_hidden_source_row() {
+    assert_whole_row_autofill_visibility(true, true);
+}
+
+/// Not measured: AutoFill leaves the outline level and the collapsed-summary marker on the
+/// destination row, even though its visibility now follows the source row.
+#[test]
+fn whole_row_autofill_keeps_destination_outline() {
     let mut s = s();
     whole_row_autofill_fixture(&mut s);
     let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
-    let rows = &mut wb.sheet_mut(0).unwrap().rows;
-    rows.get_mut(&2).unwrap().hidden = true;
-    let dest = rows.get_mut(&7).unwrap();
+    let dest = wb.sheet_mut(0).unwrap().rows.get_mut(&7).unwrap();
     dest.hidden = true;
     dest.outline = 1;
     dest.collapsed = true;
     s.execute("edit.autoFill", json!({"source": "3:4", "target": "3:9"})).unwrap();
+    let line = s.doc().unwrap().wb.active().unwrap().rows[&7];
+    assert_eq!((line.hidden, line.outline, line.collapsed), (false, 1, true));
+}
+
+/// Whole-row Paste of the AutoFill fixture is unchanged by X64: it still moves each source row's
+/// visibility, outline level and collapsed marker onto its destination row (X25, X44).
+#[test]
+fn whole_row_paste_of_hidden_rows_still_moves_visibility_and_outline() {
+    let mut s = s();
+    let [red, blue, _] = whole_row_autofill_fixture(&mut s);
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let rows = &mut wb.sheet_mut(0).unwrap().rows;
+    let source = rows.get_mut(&3).unwrap();
+    source.hidden = true;
+    source.outline = 1;
+    let dest = rows.get_mut(&7).unwrap();
+    dest.hidden = true;
+    dest.outline = 2;
+    dest.collapsed = true;
+    rows.insert(6, gridcraft_model::LineInfo { hidden: true, outline: 2, ..Default::default() });
+    s.execute("edit.copy", json!({"range": "3:4"})).unwrap();
+    s.execute("edit.paste", json!({"at": "A7"})).unwrap();
     let sh = s.doc().unwrap().wb.active().unwrap();
-    assert!(sh.rows[&2].hidden && !sh.rows[&4].hidden && sh.rows[&7].hidden);
-    assert_eq!((sh.rows[&7].outline, sh.rows[&7].collapsed), (1, true));
+    let line = |r: u32| sh.rows[&r];
+    assert_eq!((line(6).hidden, line(6).outline, line(6).collapsed, line(6).style), (false, 0, false, Some(red)));
+    assert_eq!((line(7).hidden, line(7).outline, line(7).collapsed, line(7).style), (true, 1, false, Some(blue)));
+    assert_eq!([sh.row_height(6), sh.row_height(7)], [40., 0.]);
+    assert_eq!(line(7).size, Some(38. * 4. / 3.));
 }
 
 #[test]

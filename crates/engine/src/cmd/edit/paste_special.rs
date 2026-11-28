@@ -565,8 +565,9 @@ impl LineAxis {
 
     /// Replaces the line formatting of `first..=last` on `sheet` with `incoming` (ascending
     /// `(index, line)` pairs inside that span; a missing index resets to the default line).
-    /// `paste` also moves visibility, the outline level and the collapsed-summary marker, as
-    /// Excel's whole-line Copy/Cut does (X25, X33/X44); AutoFill leaves them on their own lines.
+    /// Size, style and visibility always transfer, as Excel's whole-line Copy/Cut (X25) and
+    /// AutoFill (X64) do. `outline` also moves the outline level and the collapsed-summary
+    /// marker, as Copy/Cut does (X33/X44); AutoFill leaves them on their own lines.
     pub(super) fn replace(
         self,
         cx: &mut Ctx,
@@ -574,7 +575,7 @@ impl LineAxis {
         span: std::ops::RangeInclusive<u32>,
         incoming: impl Iterator<Item = (u32, LineInfo)>,
         map_style: &mut impl FnMut(StyleId, &mut Workbook) -> StyleId,
-        paste: bool,
+        outline: bool,
     ) -> Result<()> {
         let target = cx.wb.sheets.get(sheet).ok_or(EngineError::NoDocument)?;
         let lines = self.lines(target);
@@ -586,9 +587,10 @@ impl LineAxis {
             let old = existing.next_if(|x| x.0 == i).map(|x| x.1).unwrap_or_default();
             let new = incoming.next_if(|x| x.0 == i).map(|x| x.1).unwrap_or_default();
             // Boundary edges and bare-row markers stay on their own lines.
-            let kept = if paste { LineInfo { hidden: new.hidden, outline: new.outline, collapsed: new.collapsed, ..old } } else { old };
+            let kept = if outline { LineInfo { outline: new.outline, collapsed: new.collapsed, ..old } } else { old };
             let info = LineInfo {
                 size: new.size,
+                hidden: new.hidden,
                 custom: new.custom,
                 saved_size: new.saved_size,
                 saved_col_flags: new.saved_col_flags,

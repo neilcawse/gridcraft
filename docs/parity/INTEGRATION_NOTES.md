@@ -234,12 +234,14 @@ The probe did not read UsedRange or Last Cell for this case, did not save the wo
 GridCraft `edit.autoFill` now gives each line the target adds to an entire-row source the height,
 custom-height flag, saved size and row style of the source row it lines up with, counting in
 source-sized steps from the source's first row. It reuses X25's `LineAxis::replace`, so line
-and cell edits share one undo entry. Destination visibility, outline/collapse, thickness and
-bare-row markers stay on their own lines.
+and cell edits share one undo entry. Destination outline/collapse, thickness and bare-row
+markers stay on their own lines. Since [X64](#x64--whole-row-autofill-carries-row-visibility)
+visibility follows the source row too.
 
 Inferred, not measured:
 
-- **Hidden** was not measured. AutoFill retains destination visibility; X25 paste still copies it.
+- **Hidden** was not measured here. X31 kept destination visibility; X64 measured it and
+  replaced that rule.
 - **A source row with no record** resets the target row to the default height and no row style,
   as in X25 paste; both measured source rows had a record.
 - **Protected sheets** need row-formatting (or column-formatting) permission for line changes.
@@ -259,6 +261,43 @@ Inferred, not measured:
 
 Partial-range AutoFill (any source that is not entire rows or entire columns) and Fill
 Down/Right/Up/Left keep their previous behaviour and leave line formatting alone.
+
+## X64 — Whole-row AutoFill carries row visibility
+
+Measured in Excel for Mac 16.115.2, an object-model measurement of a synthetic workbook: the
+X31 fixture and fill (`Range("3:4").AutoFill Range("3:9")`, default fill type), with source row
+4 hidden, destination row 8 hidden beforehand (holding -81 and -82), or both.
+
+| Case | Rows 5–9 `Hidden` after the fill | Rows 5–9 `RowHeight` (pt) |
+|---|---|---|
+| Source row 4 hidden | F, T, F, T, F | 30, 0, 30, 0, 30 |
+| Destination row 8 hidden | F, F, F, F, F (row 8 shown again) | 30, 38, 30, 38, 30 |
+| Both hidden | F, T, F, T, F (row 8 stays hidden) | 30, 0, 30, 0, 30 |
+
+Each destination row takes the Hidden flag and height of the source pattern row it lines up
+with, repeating the pattern; source rows 3 and 4 keep theirs. Values, formulas and styles fill
+exactly as in X31 (row 8 gets 6 and `=A8*2`). Every row read `OutlineLevel` 1 and `ShowDetail`
+true before and after, so these cases do not distinguish moving the outline from keeping it.
+
+Old rule (X31 decision 1, unmeasured): AutoFill keeps each destination row's Hidden flag. New
+rule: whole-line `edit.autoFill` transfers visibility with height, custom-height flag, saved
+size and line style, through the same `LineAxis::replace` as whole-line Paste.
+
+Unmeasured, unchanged: the outline level and collapsed-summary marker (`ShowDetail`) stay on
+the destination line, and AutoFill infers no collapsed summary. Whole-line Paste, Paste Special
+All and Insert Copied Cells are unchanged: they already move visibility, outline and marker.
+
+Inferred, not measured:
+
+- **Stored height of a hidden row.** Excel reads a hidden row's `RowHeight` as 0; GridCraft
+  keeps the source row's stored height under the Hidden flag (38 pt here), as Paste does.
+- **Fill modes.** The modes that repeat line formatting (see X31) also repeat visibility; Fill
+  Without Formatting transfers neither. Only the default fill type was measured.
+- **Whole columns** take the source column's Hidden flag symmetrically.
+- **Filtered rows.** A destination row hidden by a filter is treated like one hidden by hand and
+  takes the source row's visibility.
+- **Upward fills** and source rows with no record behave as in X31: a missing source row makes
+  the destination visible at the default height.
 
 ## X32 — Paste Special All and Insert Copied Cells carry line formatting
 
@@ -414,9 +453,9 @@ stale markers at the destination boundary, or either of these GridCraft policies
 - A same-sheet Cut resets the vacated source lines before marking the destination boundary.
   A vacated line immediately outside the paste can receive a marker based on the final group.
 
-GridCraft does not clear a marker outside the paste. AutoFill keeps visibility and outline on
-the destination, as X31 documents. Batch 5's
-`x25-autofill-hidden-*` readbacks concern AutoFill visibility, not outline, and are outside this
+GridCraft does not clear a marker outside the paste. AutoFill keeps the outline on the
+destination, as X31 documents; since X64 it moves visibility. Batch 5's
+`x25-autofill-hidden-*` readbacks concern AutoFill visibility, not outline (see X64), and are outside this
 lane. Paste Special modes other than All, transposed, linked, filtered, tiled and drag-and-drop
 pastes keep their previous behavior: they transfer no line formats.
 
