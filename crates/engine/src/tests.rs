@@ -9804,6 +9804,35 @@ fn whole_row_autofill_keeps_filter_hidden_destination_rows_hidden() {
     assert!(!sh.is_row_hidden(8), "row 9 was hidden by hand and is shown again");
 }
 
+/// Not measured: an upward fill whose pattern pairs destination rows with a source row that has
+/// no record resets them to the default line, except that a row a table filter hides stays hidden.
+/// A row hidden by hand outside every filter span is shown again.
+#[test]
+fn whole_row_upward_autofill_keeps_table_filter_hidden_rows_and_shows_manual_ones() {
+    use gridcraft_model::LineInfo;
+
+    let mut s = s();
+    s.execute("range.setValues", json!({"range": "C10", "values": [["Tag"], ["keep"], ["drop"], ["keep"]]})).unwrap();
+    s.execute("insert.table", json!({"range": "C10:C13", "name": "Tags", "header": true})).unwrap();
+    s.execute("data.filterBy", json!({"table": "Tags", "column": "C", "values": ["keep"]})).unwrap();
+    s.execute("range.setValues", json!({"range": "A15", "values": [[1], [2]]})).unwrap();
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let rows = &mut wb.sheet_mut(0).unwrap().rows;
+    rows.insert(14, LineInfo { size: Some(40.), custom: true, ..Default::default() });
+    rows.insert(13, LineInfo { size: Some(60.), custom: true, hidden: true, ..Default::default() });
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    assert!(sh.is_row_filtered(11) && sh.is_row_hidden(13) && !sh.is_row_filtered(13));
+    assert!(!sh.rows.contains_key(&15), "source row 16 has no record");
+
+    // Rows 12 and 14 line up with source row 16; row 13 with source row 15.
+    s.execute("edit.autoFill", json!({"source": "15:16", "target": "12:16"})).unwrap();
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    assert!(sh.is_row_filtered(11), "row 12 stays table-filter hidden");
+    assert_eq!((sh.rows[&11].size, sh.rows[&11].custom), (None, false));
+    assert_eq!(sh.rows.get(&12).map(|l| (l.size, l.hidden)), Some((Some(40.), false)));
+    assert!(!sh.rows.contains_key(&13), "row 14, hidden by hand, resets to the default line");
+}
+
 /// Not measured: AutoFill leaves the outline level and the collapsed-summary marker on the
 /// destination row, even though its visibility now follows the source row.
 #[test]

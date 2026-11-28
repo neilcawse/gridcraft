@@ -297,8 +297,9 @@ Inferred, not measured:
   Without Formatting transfers neither. Only the default fill type was measured.
 - **Whole columns** take the source column's Hidden flag symmetrically.
 - **Filtered destination rows** keep their previous visibility under GridCraft's existing
-  rule: a hidden row in the data span of an active sheet or table filter counts as filtered.
-  The fill still changes the row's cells and other line formatting as before.
+  rule: a hidden row in the data span of an active sheet or table filter counts as filtered,
+  even if it was hidden by hand (GridCraft does not record why a row is hidden; Clear uses the
+  same rule). The fill still changes the row's cells and other line formatting as before.
 - **Upward fills** repeat visibility using X31's pattern alignment. A missing source line
   resets the destination to default size and visibility, except that filter-hidden destination
   rows stay hidden.
