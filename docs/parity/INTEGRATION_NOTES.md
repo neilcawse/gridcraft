@@ -581,6 +581,8 @@ Excel's `Range.Formula2` added a leading `@` to every formula in the table, incl
 
 Qualified LET and LAMBDA still introduce locals, and qualified calls in a LAMBDA tail use built-in dispatch. `_xlfn.SINGLE(x)` still decodes to `@x`; `_xlws.` alone keeps its previous normalization and does not force built-in dispatch. These extensions were not measured in Excel ([inference]). Code that recognizes a call by name (the parser, Spanish input, defined-name and table renames, LAMBDA-call spelling, XLSX parameter spelling, name export and implicit-intersection analysis) goes through one rule, `gridcraft_formula::builtin_identity` (`_xlfn.LET` → `LET`).
 
+XLSX export applies the same parameter spelling to qualified and bare binders, and excludes a qualified LAMBDA from shared-formula runs just like a bare LAMBDA ([inference]).
+
 Known gap (unmeasured): a defined name's body can lose `_xlfn.` at parse time and is evaluated in the caller's LET/LAMBDA bindings, so a same-named binding can capture its call.
 
 ## X36 — Structured-reference entry and display text

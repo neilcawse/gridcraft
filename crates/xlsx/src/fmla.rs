@@ -36,7 +36,9 @@ fn needs_file_spelling(e: &Expr) -> bool {
     let mut found = false;
     e.walk(&mut |x| {
         found |= match x {
-            Expr::Call(name, _) => name == "LET" || name == "LAMBDA" || crate::tables::file_function_name(name).is_some(),
+            Expr::Call(name, _) => {
+                matches!(gridcraft_formula::builtin_identity(name), "LET" | "LAMBDA") || gridcraft_formula::file_prefix(name).is_some()
+            }
             Expr::Unary(gridcraft_formula::UnOp::Spill | gridcraft_formula::UnOp::At | gridcraft_formula::UnOp::Trim(_), _) => true,
             Expr::Struct(_) => true,
             _ => false,
@@ -537,6 +539,15 @@ mod tests {
         let file = "_xlfn.LET(_xlpm.let,_xlfn.LAMBDA(_xlpm.x,99),_xlpm.lambda,_xlfn.LAMBDA(_xlpm.x,98),_xlfn.LET(_xlpm.worker,_xlfn.LAMBDA(_xlpm.x,_xlpm.x),_xlpm.WORKER(7)))";
         assert_eq!(to_file(&Formula::new(model)), file);
         assert_eq!(from_file(file), model);
+    }
+
+    #[test]
+    fn standalone_qualified_binders_take_the_file_spelling_path() {
+        // An already-parsed AST can carry a qualified binder without an enclosing scope.
+        let lambda = Expr::Call("_xlfn.LAMBDA".into(), vec![Expr::Name("param".into()), Expr::Name("param".into())]);
+        assert_eq!(to_file_shifted(&lambda, 0, 0), "_xlfn.LAMBDA(_xlpm.param,_xlpm.param)");
+        let let_call = Expr::Call("_xlfn.LET".into(), vec![Expr::Name("local".into()), Expr::Number(1.0), Expr::Name("local".into())]);
+        assert_eq!(to_file_shifted(&let_call, 0, 0), "_xlfn.LET(_xlpm.local,1,_xlpm.local)");
     }
 
     #[test]
