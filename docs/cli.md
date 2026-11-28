@@ -88,9 +88,10 @@ Command ids and parameters: `gridcraft-cli commands`.
 
 `sheet.move` with `copy:true` inserts a copy at the zero-based `to` tab index. Copying `Data`
 starts with `Data (2)`; copying `Data (3)` starts with `Data (4)` even when `Data (2)` is free.
-The command skips existing tab names and keeps the original separator (`Q(2)` → `Q(3)`). On a copy
-of a sheet copied during the same session, inherited sheet-level names keep their table
-references while structured cell references follow the new tables.
+The command skips existing tab names and keeps the original separator when the name fits
+(`Q(2)` → `Q(3)`). If a candidate would exceed 31 characters, it shortens the base to fit a
+spaced suffix ` (N)`. On a copy of a sheet copied during the same session, inherited sheet-level
+names keep their table references while structured cell references follow the new tables.
 
 On a protected sheet, direct formatting commands use `review.protectSheet` permissions by
 operation, not by the shape of the selection. `formatRows` permits height and hide/unhide;

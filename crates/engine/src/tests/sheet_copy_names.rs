@@ -111,6 +111,22 @@ fn copy_numbers_increment_the_source_suffix() -> crate::Result<()> {
     Ok(())
 }
 
+/// Excel for Mac 16.115.2, object-model measurement of a synthetic workbook: each workbook
+/// has one sheet with A1 set to 1. Copy the sheet after itself and read both tab names.
+#[test]
+fn copy_preserves_the_separator_only_when_the_name_fits() -> crate::Result<()> {
+    for (source, expected) in
+        [("ABCDEFGHIJKLMNOPQRSTUVWXYZab(9)", "ABCDEFGHIJKLMNOPQRSTUVWXYZ (10)"), ("Data  (3)", "Data  (4)"), ("X\u{3000}(3)", "X\u{3000}(4)")]
+    {
+        let mut s = s();
+        s.execute("sheet.rename", json!({"sheet": 0, "name": source}))?;
+        s.execute("cell.set", json!({"cell": "A1", "input": "1"}))?;
+        s.execute("sheet.move", json!({"sheet": source, "to": 1, "copy": true}))?;
+        assert_eq!(sheet_names(&s), [source, expected]);
+    }
+    Ok(())
+}
+
 #[test]
 fn copy_numbering_keeps_existing_unmeasured_edge_cases() {
     let mut long_book = s();
@@ -134,10 +150,7 @@ fn copy_numbering_keeps_existing_unmeasured_edge_cases() {
         ("Q (999999999999999999999999999)", "Q (2)"),
         ("Q(999999999999999999999999999)", "Q(9999999999999999999999999 (2)"),
         ("ABCDEFGHIJKLMNOPQRSTUVWXYZ (99)", "ABCDEFGHIJKLMNOPQRSTUVWXY (100)"),
-        ("ABCDEFGHIJKLMNOPQRSTUVWXYZab(9)", "ABCDEFGHIJKLMNOPQRSTUVWXYZa(10)"),
-        // Only an ASCII space is the separator; the rest of an unshortened base is kept as is.
-        ("X\u{3000}(3)", "X\u{3000}(4)"),
-        ("Data  (3)", "Data  (4)"),
+        ("ABCDEFGHIJKLMNOPQRSTUVWXYZab(8)", "ABCDEFGHIJKLMNOPQRSTUVWXYZab(9)"),
     ] {
         let mut one = s();
         one.execute("sheet.rename", json!({"sheet": 0, "name": name})).unwrap();
@@ -150,6 +163,40 @@ fn copy_numbering_keeps_existing_unmeasured_edge_cases() {
     whitespace.execute("home.insertSheet", json!({"name": source})).unwrap();
     copy(&mut whitespace, source, 2);
     assert_eq!(sheet_names(&whitespace)[2], "Sheet (2)");
+}
+
+/// Unmeasured consequences of the overflow rule: an overlong glued copy keeps numbering in the
+/// spaced form past case-folded taken names and through a copy of the copy; a fitting glued
+/// name that is taken moves to a longer number that no longer fits; a cut that ends in a space
+/// loses it.
+#[test]
+fn overlong_glued_copies_keep_numbering_in_the_spaced_form() {
+    let stem = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let source = format!("{stem}ab(9)");
+    let mut book = s();
+    book.execute("sheet.rename", json!({"sheet": 0, "name": source})).unwrap();
+    let taken = format!("{} (10)", stem.to_lowercase());
+    book.execute("home.insertSheet", json!({"name": taken})).unwrap();
+    copy(&mut book, &source, 2);
+    copy(&mut book, &source, 3);
+    copy(&mut book, &format!("{stem} (11)"), 4);
+    let made: Vec<String> = (11..14).map(|k| format!("{stem} ({k})")).collect();
+    assert_eq!(sheet_names(&book), [&[source, taken][..], &made].concat());
+
+    for (tabs, copied) in [
+        (&[format!("{stem}ab(8)"), format!("{stem}ab(9)")][..], format!("{stem} (10)")),
+        (&["ABCDEFGHIJKLMNOPQRSTUVWXY ab(9)".into()][..], "ABCDEFGHIJKLMNOPQRSTUVWXY (10)".into()),
+    ] {
+        let mut s = s();
+        s.execute("sheet.rename", json!({"sheet": 0, "name": tabs[0]})).unwrap();
+        for name in &tabs[1..] {
+            s.execute("home.insertSheet", json!({"name": name})).unwrap();
+        }
+        copy(&mut s, &tabs[0], tabs.len());
+        let names = sheet_names(&s);
+        assert_eq!(names[tabs.len()..], [copied]);
+        assert!(wb(&s).check_sheet_name(&names[tabs.len()], Some(tabs.len())).is_ok());
+    }
 }
 
 #[test]
