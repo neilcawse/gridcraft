@@ -317,6 +317,26 @@ fn references_to_a_sheet_the_workbook_lacks_have_no_oracle() {
     assert_eq!((r.calc.checked, r.calc.matched), (1, 1), "{:?}", r.calc);
 }
 
+/// A shared formula's followers are judged on the references they hold once shifted, as their
+/// own parsed formulas would be: a reference to a missing sheet that the shift moves past the
+/// grid's edge is `#REF!` (it reads no sheet), so it gives no `missingSheet` reason.
+#[test]
+fn a_shared_formula_reads_a_missing_sheet_only_where_its_shift_stays_on_the_grid() {
+    let base = Formula::new("SUM(Gone!A1048576)").expr_arc().unwrap();
+    let mut wb = Workbook::new();
+    let sh = wb.sheet_mut(0).unwrap();
+    // A1 is the master, B1 a follower one column right (on the grid), A2 one row down (off it).
+    for (a1, dr, dc) in [("A1", 0, 0), ("B1", 0, 1), ("A2", 1, 0)] {
+        sh.set_cell(at(a1), Cell { value: n(1.0), formula: Some(Arc::new(Formula::from_shared(base.clone(), dr, dc))), ..Default::default() });
+    }
+    let reasons = super::taint::Scan::new(&wb).seed_reasons(super::taint::Source::Foreign);
+    let got: BTreeSet<String> = reasons.iter().map(|((_, c), why)| format!("{}:{why}", c.a1())).collect();
+    assert_eq!(got, BTreeSet::from(["A1:missingSheet".to_string(), "B1:missingSheet".to_string()]));
+    // The same answer as each follower's own materialized formula.
+    let a2 = wb.sheet(0).unwrap().cell(at("A2")).and_then(|c| c.formula.as_ref()).unwrap();
+    assert_eq!(a2.text(), "SUM(#REF!)");
+}
+
 /// `_xludf.` before the name of a function Excel has is still graded: the user-defined call is a
 /// function the workbook doesn't have (#726), so GridCraft's `#NAME?` against the cached value is a
 /// mismatch to look at, not a reclassification.
@@ -343,7 +363,7 @@ fn patched(bytes: &[u8], name: &str, from: &str, to: &str) -> Vec<u8> {
     let mut out = zip::ZipWriter::new(Cursor::new(Vec::new()));
     for i in 0..src.len() {
         let mut f = src.by_index(i).unwrap();
-        let Ok(entry) = f.name().map(|name| name.into_owned()) else { return Vec::new() };
+        let entry = f.name().unwrap().into_owned();
         let mut body = String::new();
         f.read_to_string(&mut body).unwrap();
         if entry == name {
@@ -2639,7 +2659,7 @@ fn with_thumbnail(thumbnail: gridcraft_xlsx::testing::Entry<'_>) -> Vec<u8> {
         let mut f = src.by_index(i).unwrap();
         let mut body = vec![];
         f.read_to_end(&mut body).unwrap();
-        let Ok(name) = f.name().map(|name| name.into_owned()) else { return Vec::new() };
+        let name = f.name().unwrap().into_owned();
         let body = match name.as_str() {
             "_rels/.rels" => String::from_utf8(body).unwrap().replace("</Relationships>", &format!("{thumbnail_rel}</Relationships>")).into_bytes(),
             "[Content_Types].xml" => String::from_utf8(body)
