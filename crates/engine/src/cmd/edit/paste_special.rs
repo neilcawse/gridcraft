@@ -550,11 +550,15 @@ pub(super) fn paste_internal(s: &mut Session, p: &Json, route: PasteRoute) -> Re
     Ok(json!({"pasted": s.doc()?.selection.a1()}))
 }
 
-/// Check whole rows using their inherited style and sparse explicit cells. A row without an
-/// unlocked style, or a cell overriding that style, is outside the measured case.
+/// Check whole rows using their inherited style and sparse explicit cells. A row without a style
+/// that is unlocked with formulas shown, or a cell overriding that style, is outside the
+/// measured case.
 fn unlocked_hidden_rows(wb: &Workbook, sh: &Sheet, first: u32, last: u32) -> bool {
-    (first..=last)
-        .all(|row| sh.rows.get(&row).is_some_and(|info| info.hidden && info.style.is_some_and(|style| !wb.styles.get(style).protection.locked)))
+    let unlocked = |style| {
+        let protection = wb.styles.get(style).protection;
+        !protection.locked && !protection.hidden
+    };
+    (first..=last).all(|row| sh.rows.get(&row).is_some_and(|info| info.hidden && info.style.is_some_and(unlocked)))
         && sh.cells.iter_range(RangeRef::rows(first, last)).all(|(at, cell)| sh.rows.get(&at.row).and_then(|row| row.style) == Some(cell.style))
 }
 
@@ -684,11 +688,11 @@ impl LineAxis {
             prev = index;
         }
         // When Format Rows is denied, reaching here means replace() left the row records
-        // unchanged. Only a plain copy onto entirely unlocked, already hidden rows may add
-        // the below-detail summary marker in this case (X65).
+        // unchanged. Only a plain copy onto entirely unlocked, already hidden rows whose group
+        // starts inside the paste may add the below-detail summary marker in this case (X65).
         if let Some(protection) = &target.protection
             && let Some(what) = self.denied_formatting(protection)
-            && !(rows && !before && plain_copy && unlocked_hidden_rows(&cx.wb, target, first, last))
+            && !(rows && !before && plain_copy && prev >= first && unlocked_hidden_rows(&cx.wb, target, first, last))
         {
             return Err(formatting_denied(what));
         }
