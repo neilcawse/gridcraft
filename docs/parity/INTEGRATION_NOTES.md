@@ -802,6 +802,13 @@ Parents: `c35907d9cb18ca95f352ca123194a645f2adb562` (parity), then `b99b4d5d5c0c
 
 The integrated IRR solver removes the parity-only fallback number for the `T1` flows in `an_older_excel_s_irr_gives_up_only_where_a_cache_shows_it`. Both the integrated parent and the re-sync return `#NUM!`, matching Excel 16.115. The fixture still runs under Excel 2007, 2003, and 2002 stamps and now asserts no mismatch at `T1`; the remaining legacy and trusted classifications are unchanged.
 
+Retired and adjusted CLI and function tests:
+
+- Integrated `check::package::tests::relationship_parts_count_against_the_decompression_budget` tested the package-wide `relationship_kinds` audit, which the re-sync doesn't keep. The same rule for the owner tree is covered by `check::rels::tests::relationship_parts_count_against_the_decompression_budget`: rels parts that each fit the per-part allowance but exceed the package budget together stop the check.
+- Integrated `check::package::tests::relationship_kinds_read_parts_with_the_same_decoded_name` now runs through `relationship_tree` and `lost_relationships`. Both same-name rels entries are still read, and losing either one's relationship is reported.
+- Foreign-sheet shifts: `a_shared_formula_reads_a_missing_sheet_only_where_its_shift_stays_on_the_grid` checks that a shared follower whose missing-sheet reference moves off the grid (`#REF!`) gets no `missingSheet` reason, and that an on-grid follower still gets one.
+- Parity `financial::tests::cash_flows` widens its XIRR tolerance from 1e-9 to 1e-8 for the integrated solver. That solver returns a bisection midpoint about 1e-8 from the exact rate, as the integrated tests already state.
+
 ### Engine and UI conflict resolutions
 
 - `a_table_rename_moves_a_pivot_source_a_defined_name_shadows`: seeds a malformed imported name collision, then still checks that the pivot source follows the table rename.
