@@ -53,11 +53,15 @@ impl<'h> Evaluator<'h> {
                     Err(x) => Tail::Done(err(x)),
                 }
             }
-            Expr::Call(name, args) if gridcraft_functions::lookup(name).is_none() && !is_special(name) => match self.name(name) {
-                Ev::L(l) => self.tail_call(l, args),
-                Ev::V(Value::Error(x)) => Tail::Done(err(x)),
-                _ => Tail::Done(err(CellError::Name)),
-            },
+            Expr::Call(name, args)
+                if gridcraft_functions::lookup(name).is_none() && !is_special(name) && gridcraft_formula::qualified_builtin(name).is_none() =>
+            {
+                match self.name(name) {
+                    Ev::L(l) => self.tail_call(l, args),
+                    Ev::V(Value::Error(x)) => Tail::Done(err(x)),
+                    _ => Tail::Done(err(CellError::Name)),
+                }
+            }
             Expr::Invoke(callee, args) => match self.eval(callee) {
                 Ev::L(l) => self.tail_call(l, args),
                 Ev::V(Value::Error(x)) => Tail::Done(err(x)),

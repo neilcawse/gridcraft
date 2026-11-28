@@ -377,7 +377,7 @@ impl Parser<'_> {
     /// [`crate::qualified_builtin`]). Unprefixed, the call is the variable's.
     fn call_name(&self, spelling: &str) -> String {
         let name = normalize_function_name(spelling);
-        if self.bound.is_empty() || name.len() == spelling.len() {
+        if self.bound.is_empty() || crate::qualified_builtin(spelling).is_none() {
             return name;
         }
         match crate::file_prefix(&name) {
@@ -403,7 +403,8 @@ impl Parser<'_> {
             Tok::LBrace => self.array(),
             Tok::Func(spelling) => {
                 let name = self.call_name(&spelling);
-                let mut args = self.args(Binder::of(&name))?;
+                let key = crate::qualified_builtin(&name).unwrap_or(&name);
+                let mut args = self.args(Binder::of(key))?;
                 // Files write `A1#` as `_xlfn.ANCHORARRAY(A1)`.
                 if name == "ANCHORARRAY"
                     && let [Expr::Ref(Reference { kind: RefKind::Cell(_), .. })] = args.as_slice()
@@ -412,7 +413,7 @@ impl Parser<'_> {
                     return Ok(Expr::Unary(UnOp::Spill, Box::new(r)));
                 }
                 // Files write `@x` as `_xlfn.SINGLE(x)`; `SINGLE(A1:A3*2)` is `@(A1:A3*2)`.
-                if name == "SINGLE"
+                if key == "SINGLE"
                     && args.len() == 1
                     && let Some(x) = args.pop()
                 {

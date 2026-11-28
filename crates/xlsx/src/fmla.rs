@@ -80,9 +80,9 @@ fn prefix_params(e: Expr, scope: &[String]) -> Expr {
             acc
         }
         Expr::Invoke(c, args) => Expr::Invoke(sub(c, scope), args.into_iter().map(|a| prefix_params(a, scope)).collect()),
-        Expr::Call(name, args) if name == "LET" || name == "LAMBDA" => {
+        Expr::Call(name, args) if matches!(gridcraft_formula::qualified_builtin(&name).unwrap_or(&name), "LET" | "LAMBDA") => {
             let last = args.len().saturating_sub(1);
-            let is_let = name == "LET";
+            let is_let = gridcraft_formula::qualified_builtin(&name).unwrap_or(&name) == "LET";
             let mut sc = scope.to_vec();
             let mut pending: Option<String> = None;
             let mut out = Vec::with_capacity(args.len());
@@ -529,6 +529,14 @@ mod tests {
         assert_eq!(text_to_file("=WORKDAY.INTL(A1,3,1)"), "WORKDAY.INTL(A1,3,1)");
         assert_eq!(from_file("_xlfn.NETWORKDAYS.INTL(A1,B1,1)+_xlfn.WORKDAY.INTL(A1,3,1)"), "NETWORKDAYS.INTL(A1,B1,1)+WORKDAY.INTL(A1,3,1)");
         assert_eq!(from_file("NETWORKDAYS.INTL(A1,B1,1)"), "NETWORKDAYS.INTL(A1,B1,1)");
+    }
+
+    #[test]
+    fn qualified_binders_write_local_parameters_and_calls() {
+        let model = "LET(let,LAMBDA(x,99),lambda,LAMBDA(x,98),_xlfn.LET(worker,_xlfn.LAMBDA(x,x),WORKER(7)))";
+        let file = "_xlfn.LET(_xlpm.let,_xlfn.LAMBDA(_xlpm.x,99),_xlpm.lambda,_xlfn.LAMBDA(_xlpm.x,98),_xlfn.LET(_xlpm.worker,_xlfn.LAMBDA(_xlpm.x,_xlpm.x),_xlpm.WORKER(7)))";
+        assert_eq!(to_file(&Formula::new(model)), file);
+        assert_eq!(from_file(file), model);
     }
 
     #[test]

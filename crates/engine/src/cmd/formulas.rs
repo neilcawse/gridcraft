@@ -529,7 +529,9 @@ fn rename_free_name(
         Expr::Call(name, args) if gridcraft_formula::user_defined_name(&name).is_some_and(|bare| bare.eq_ignore_ascii_case(old)) => {
             Expr::Call(format!("_xludf.{new}"), args.into_iter().map(|a| walk(a, bound)).collect())
         }
-        Expr::Call(name, args) if name == "LET" && args.len() >= 3 && !args.len().is_multiple_of(2) => {
+        Expr::Call(name, args)
+            if gridcraft_formula::qualified_builtin(&name).unwrap_or(&name) == "LET" && args.len() >= 3 && !args.len().is_multiple_of(2) =>
+        {
             let saved = bound.len();
             let mut args = args;
             // The arguments are odd in number: pairs of a declaration and its value, then the body.
@@ -550,7 +552,7 @@ fn rename_free_name(
             bound.truncate(saved);
             Expr::Call(name, out)
         }
-        Expr::Call(name, args) if name == "LAMBDA" => {
+        Expr::Call(name, args) if gridcraft_formula::qualified_builtin(&name).unwrap_or(&name) == "LAMBDA" => {
             let saved = bound.len();
             let last = args.len().saturating_sub(1);
             let mut out = Vec::with_capacity(args.len());
@@ -1464,6 +1466,18 @@ mod tests {
         let name = s.doc().unwrap().wb.names.iter().find(|n| n.name == "u").map(|n| n.formula.clone());
         assert_eq!(name.as_deref(), Some("Data!$A$1:$A$2,Data!$C$1:$C$2"));
         assert_eq!(v(&mut s, "E1"), json!(15.0));
+    }
+
+    #[test]
+    fn defined_name_rename_respects_qualified_binders() {
+        let mut s = Session::new();
+        s.new_workbook();
+        s.execute("formulas.defineName", json!({"name": "var", "refersTo": "=100"})).unwrap();
+        s.execute("cell.set", json!({"cell": "A1", "input": "=LET(let,0,lambda,0,_xlfn.LET(var,var,_xlfn.LAMBDA(var,var)(2)+var))"})).unwrap();
+        s.execute("formulas.defineName", json!({"name": "renamed", "oldName": "var", "refersTo": "=100"})).unwrap();
+        let cell = s.execute("cell.get", json!({"cell": "A1"})).unwrap();
+        assert_eq!(cell["formula"], "=LET(let,0,lambda,0,_xlfn.LET(var,renamed,_xlfn.LAMBDA(var,var)(2)+var))");
+        assert_eq!(cell["value"], json!(102.0));
     }
 
     /// A PivotTable source read from a file is bound to the name it named: renaming the name

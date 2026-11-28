@@ -3923,6 +3923,19 @@ fn qualified_builtin_in_let_binds_the_builtin_through_save() {
     // A structural edit rewrites the formula and keeps the qualification.
     s.execute("home.insertRows", json!({"rows": "1:1"})).unwrap();
     check(&s, "A2", "insert row");
+    s.execute("home.insertColumns", json!({"cols": "A:A"})).unwrap();
+    check(&s, "B2", "insert column");
+    s.execute("home.deleteRows", json!({"rows": "1:1"})).unwrap();
+    check(&s, "B1", "delete row");
+    s.execute("home.deleteColumns", json!({"cols": "A:A"})).unwrap();
+    check(&s, "A1", "delete column");
+    s.execute("edit.copy", json!({"range": "A1"})).unwrap();
+    s.execute("edit.paste", json!({"at": "A2"})).unwrap();
+    check(&s, "A2", "paste");
+    // Retyping the unqualified display text is different from confirming the existing formula.
+    // [inference]: this is GridCraft behavior, not an Excel measurement.
+    s.execute("cell.set", json!({"cell": "A3", "input": "=LET(vstack,LAMBDA(x,5),VSTACK(1))"})).unwrap();
+    assert_eq!(v(&s, "A3"), Value::Number(5.0));
     let saved = s.execute("file.saveBytes", json!({"format": "xlsx"})).unwrap();
     let bytes = crate::io::base64_decode(saved["base64"].as_str().unwrap()).unwrap();
     let mut xml = String::new();
@@ -3931,10 +3944,11 @@ fn qualified_builtin_in_let_binds_the_builtin_through_save() {
         &mut xml,
     )
     .unwrap();
-    assert!(xml.contains("_xlfn.LET(_xlpm.vstack,_xlfn.LAMBDA(_xlpm.x,5),_xlfn.VSTACK(1))"), "{xml}");
-    assert!(!xml.contains("_xlpm.VSTACK"), "{xml}");
+    assert_eq!(xml.matches("_xlfn.LET(_xlpm.vstack,_xlfn.LAMBDA(_xlpm.x,5),_xlfn.VSTACK(1))").count(), 2, "{xml}");
+    assert_eq!(xml.matches("_xlpm.VSTACK(1)").count(), 1, "{xml}");
     s.execute("file.open", json!({"name": "reopened.xlsx", "base64": saved["base64"]})).unwrap();
     check(&s, "A2", "reopen");
+    assert_eq!(v(&s, "A3"), Value::Number(5.0));
 }
 
 /// The typed `=VStack(1)`, with a workbook LAMBDA `VStack`, is stored as the built-in and gives 1

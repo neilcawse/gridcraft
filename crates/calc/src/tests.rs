@@ -2548,6 +2548,44 @@ fn qualified_builtin_call_beats_a_let_variable_of_its_name() {
     assert_eq!(text(&t, "A8").as_deref(), Some("LET(a,1,VSTACK(a))"));
 }
 
+#[test]
+fn qualified_builtin_preserves_nested_binders_and_lambda_tail_dispatch() {
+    let mut t = T::new();
+    let mut failures = Vec::new();
+    for (at, formula, expected) in [
+        ("A1", "=LET(let,LAMBDA(x,99),_xlfn.LET(vstack,LAMBDA(x,5),_xlfn.VSTACK(1)))", 1.0),
+        ("A2", "=LET(lambda,LAMBDA(x,99),_xlfn.LAMBDA(vstack,_xlfn.VSTACK(2))(LAMBDA(x,5)))", 2.0),
+        ("A3", "=LET(ifna,LAMBDA(x,5),LAMBDA(_xlfn.IFNA(NA(),8))())", 8.0),
+        ("A4", "=LET(single,LAMBDA(x,5),_xlfn.SINGLE(3))", 3.0),
+        ("A5", "=LET(vstack,LAMBDA(x,5),LAMBDA(LET(vstack,_xlfn.VSTACK(4),vstack))())", 4.0),
+        ("A6", "=LET(vstack,LAMBDA(x,5),_xlws.VSTACK(1))", 5.0),
+        ("A7", "=LET(filter,LAMBDA(x,5),LAMBDA(_xlfn._xlws.FILTER(8,TRUE))())", 8.0),
+    ] {
+        t.set(at, formula);
+        let actual = t.get(at);
+        if actual != Value::Number(expected) {
+            failures.push((formula, actual, expected));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
+fn qualified_future_call_is_not_resolved_as_a_defined_name() {
+    let mut t = T::new();
+    t.wb.names.push(gridcraft_model::DefinedName {
+        name: "_xlfn.TRANSLATE".into(),
+        scope: None,
+        formula: "LAMBDA(x,99)".into(),
+        comment: String::new(),
+        hidden: false,
+        uid: Default::default(),
+        legacy_grid: false,
+    });
+    t.set("A1", "=LET(translate,LAMBDA(x,5),LAMBDA(_xlfn.TRANSLATE(1))())");
+    assert_eq!(t.get("A1"), Value::Error(CellError::Name));
+}
+
 /// Integration X51 (X41 × X42): an index computed by a `_xludf.` name call is an index
 /// expression, like the unprefixed call of the same LAMBDA. Its error beats a missed key and
 /// invalid mode text (X41), and a valid index is resolved only on a hit.
