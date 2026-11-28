@@ -529,9 +529,7 @@ fn rename_free_name(
         Expr::Call(name, args) if gridcraft_formula::user_defined_name(&name).is_some_and(|bare| bare.eq_ignore_ascii_case(old)) => {
             Expr::Call(format!("_xludf.{new}"), args.into_iter().map(|a| walk(a, bound)).collect())
         }
-        Expr::Call(name, args)
-            if gridcraft_formula::qualified_builtin(&name).unwrap_or(&name) == "LET" && args.len() >= 3 && !args.len().is_multiple_of(2) =>
-        {
+        Expr::Call(name, args) if gridcraft_formula::builtin_identity(&name) == "LET" && args.len() >= 3 && !args.len().is_multiple_of(2) => {
             let saved = bound.len();
             let mut args = args;
             // The arguments are odd in number: pairs of a declaration and its value, then the body.
@@ -552,7 +550,7 @@ fn rename_free_name(
             bound.truncate(saved);
             Expr::Call(name, out)
         }
-        Expr::Call(name, args) if gridcraft_formula::qualified_builtin(&name).unwrap_or(&name) == "LAMBDA" => {
+        Expr::Call(name, args) if gridcraft_formula::builtin_identity(&name) == "LAMBDA" => {
             let saved = bound.len();
             let last = args.len().saturating_sub(1);
             let mut out = Vec::with_capacity(args.len());

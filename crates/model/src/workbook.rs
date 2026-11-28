@@ -175,7 +175,7 @@ pub fn rewrite_table_tokens(e: &mut Expr, replacement: &impl Fn(&str, bool, &[St
                     }
                     None => false,
                 },
-                Expr::Call(name, args) if name == "LET" && args.len() >= 3 && args.len() % 2 != 0 => {
+                Expr::Call(name, args) if gridcraft_formula::builtin_identity(name) == "LET" && args.len() >= 3 && args.len() % 2 != 0 => {
                     let Some((body, pairs)) = args.split_last_mut() else { return changed };
                     let before = env.len();
                     let mut rewritten = false;
@@ -191,7 +191,7 @@ pub fn rewrite_table_tokens(e: &mut Expr, replacement: &impl Fn(&str, bool, &[St
                     env.truncate(before);
                     rewritten
                 }
-                Expr::Call(name, args) if name == "LAMBDA" => {
+                Expr::Call(name, args) if gridcraft_formula::builtin_identity(name) == "LAMBDA" => {
                     let Some((body, params)) = args.split_last_mut() else { return changed };
                     let before = env.len();
                     for param in params {
@@ -205,7 +205,7 @@ pub fn rewrite_table_tokens(e: &mut Expr, replacement: &impl Fn(&str, bool, &[St
                     env.truncate(before);
                     rewritten
                 }
-                Expr::Call(name, _) if name == "LET" => false,
+                Expr::Call(name, _) if gridcraft_formula::builtin_identity(name) == "LET" => false,
                 Expr::Call(_, xs) => args(xs, env, replacement),
                 Expr::Invoke(c, xs) => visit(c, env, replacement) | args(xs, env, replacement),
                 Expr::Array(rows) => rows.iter_mut().fold(false, |changed, row| args(row, env, replacement) | changed),
@@ -1357,6 +1357,19 @@ pub(crate) fn lambda_call_spelling(call: &str, lambdas: &[String], names: &[Defi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A LET or LAMBDA kept qualified (`_xlfn.LET` under a variable `let`) still binds its
+    /// names: renaming the free name `Sales` leaves its locals alone.
+    #[test]
+    fn table_token_rewrite_respects_qualified_binders() -> Result<(), Box<dyn std::error::Error>> {
+        let text = "LET(let,0,lambda,0,_xlfn.LET(Sales,1,Sales+_xlfn.LAMBDA(Sales,Sales)(2))+Sales)";
+        let mut e = gridcraft_formula::parse(text)?;
+        assert_eq!(gridcraft_formula::print(&e), text);
+        let rename = |n: &str, _: bool, _: &[String]| n.eq_ignore_ascii_case("Sales").then(|| Expr::Name("Orders".into()));
+        assert!(rewrite_table_tokens(&mut e, &rename));
+        assert_eq!(gridcraft_formula::print(&e), "LET(let,0,lambda,0,_xlfn.LET(Sales,1,Sales+_xlfn.LAMBDA(Sales,Sales)(2))+Orders)");
+        Ok(())
+    }
 
     #[test]
     fn name_call_case_keeps_rewritten_followers_shared() -> Result<(), Box<dyn std::error::Error>> {

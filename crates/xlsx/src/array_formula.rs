@@ -763,8 +763,7 @@ impl<'a> Legacy<'a> {
 
     fn call(&mut self, name: String, args: Vec<Expr>, sheet: usize, ctx: Ctx, depth: usize) -> (Expr, Kind) {
         // A built-in qualified against a LET variable (`_xlfn.VSTACK`) has the built-in's shape.
-        let skip = name.len() - gridcraft_formula::qualified_builtin(&name).map_or(name.len(), str::len);
-        let key = name.get(skip..).unwrap_or_default();
+        let key = gridcraft_formula::builtin_identity(&name);
         if key == "LET" && args.len() >= 3 {
             return self.let_(name, args, sheet, ctx, depth);
         }
@@ -982,7 +981,7 @@ fn positive(e: &Expr) -> bool {
 fn positive_index(e: &Expr, kind: Option<Kind>) -> bool {
     // MATCH returns a one-based position or an error, never INDEX's zero whole-row selector.
     positive(e)
-        || (matches!(e, Expr::Call(name, _) if matches!(gridcraft_formula::qualified_builtin(name).unwrap_or(name), "MATCH" | "XMATCH"))
+        || (matches!(e, Expr::Call(name, _) if matches!(gridcraft_formula::builtin_identity(name), "MATCH" | "XMATCH"))
             && kind.is_some_and(|k| k != Kind::Ref))
 }
 

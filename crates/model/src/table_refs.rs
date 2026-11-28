@@ -152,7 +152,7 @@ fn spell_lambda_calls(mut e: &mut Expr, lambdas: &[String], wb: &Workbook, sheet
     }
     let before = env.len();
     match e {
-        Expr::Call(name, args) if name == "LET" && args.len() >= 3 && args.len() % 2 != 0 => {
+        Expr::Call(name, args) if gridcraft_formula::builtin_identity(name) == "LET" && args.len() >= 3 && args.len() % 2 != 0 => {
             if let Some((body, pairs)) = args.split_last_mut() {
                 for [binder, value] in pairs.as_chunks_mut::<2>().0 {
                     spell_lambda_calls(value, lambdas, wb, sheet, env);
@@ -163,7 +163,7 @@ fn spell_lambda_calls(mut e: &mut Expr, lambdas: &[String], wb: &Workbook, sheet
                 spell_lambda_calls(body, lambdas, wb, sheet, env);
             }
         }
-        Expr::Call(name, args) if name == "LAMBDA" => {
+        Expr::Call(name, args) if gridcraft_formula::builtin_identity(name) == "LAMBDA" => {
             if let Some((body, params)) = args.split_last_mut() {
                 for param in params.iter() {
                     if let Expr::Name(n) = param {

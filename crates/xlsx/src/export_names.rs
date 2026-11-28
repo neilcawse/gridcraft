@@ -525,7 +525,7 @@ fn visit_uses(e: &Expr, functions: crate::FunctionInfo, mut visit: impl FnMut(Us
                 }
             }
             Expr::Call(f, args)
-                if gridcraft_formula::qualified_builtin(f).unwrap_or(f) == "LET"
+                if gridcraft_formula::builtin_identity(f) == "LET"
                     && args.len() >= 3
                     && !args.len().is_multiple_of(2)
                     && let Some((body, pairs)) = args.split_last() =>
@@ -539,7 +539,7 @@ fn visit_uses(e: &Expr, functions: crate::FunctionInfo, mut visit: impl FnMut(Us
                     steps.push(Step::Expr(&pair[1]));
                 }
             }
-            Expr::Call(f, args) if gridcraft_formula::qualified_builtin(f).unwrap_or(f) == "LAMBDA" => {
+            Expr::Call(f, args) if gridcraft_formula::builtin_identity(f) == "LAMBDA" => {
                 if let Some((body, params)) = args.split_last() {
                     steps.push(Step::Restore(bindings.len()));
                     bindings.extend(params.iter().filter_map(|p| if let Expr::Name(n) = p { Some(n.as_str()) } else { None }));

@@ -80,9 +80,9 @@ fn prefix_params(e: Expr, scope: &[String]) -> Expr {
             acc
         }
         Expr::Invoke(c, args) => Expr::Invoke(sub(c, scope), args.into_iter().map(|a| prefix_params(a, scope)).collect()),
-        Expr::Call(name, args) if matches!(gridcraft_formula::qualified_builtin(&name).unwrap_or(&name), "LET" | "LAMBDA") => {
+        Expr::Call(name, args) if matches!(gridcraft_formula::builtin_identity(&name), "LET" | "LAMBDA") => {
             let last = args.len().saturating_sub(1);
-            let is_let = gridcraft_formula::qualified_builtin(&name).unwrap_or(&name) == "LET";
+            let is_let = gridcraft_formula::builtin_identity(&name) == "LET";
             let mut sc = scope.to_vec();
             let mut pending: Option<String> = None;
             let mut out = Vec::with_capacity(args.len());

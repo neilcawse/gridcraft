@@ -202,6 +202,13 @@ pub fn qualified_builtin(name: &str) -> Option<&str> {
     file_prefix(bare).is_some().then_some(bare)
 }
 
+/// The function a stored call name identifies, for code that recognizes calls by name (`LET`,
+/// `LAMBDA`, `SINGLE`, `MATCH`, …): the built-in of an explicitly qualified call
+/// (`_xlfn.LET` → `LET`, see [`qualified_builtin`]), otherwise the name as stored.
+pub fn builtin_identity(name: &str) -> &str {
+    qualified_builtin(name).unwrap_or(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

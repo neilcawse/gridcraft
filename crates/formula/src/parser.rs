@@ -403,7 +403,7 @@ impl Parser<'_> {
             Tok::LBrace => self.array(),
             Tok::Func(spelling) => {
                 let name = self.call_name(&spelling);
-                let key = crate::qualified_builtin(&name).unwrap_or(&name);
+                let key = crate::builtin_identity(&name);
                 let mut args = self.args(Binder::of(key))?;
                 // Files write `A1#` as `_xlfn.ANCHORARRAY(A1)`.
                 if name == "ANCHORARRAY"

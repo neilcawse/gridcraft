@@ -579,7 +579,7 @@ Excel's `Range.Formula2` added a leading `@` to every formula in the table, incl
 
 **Unmeasured ([inference]).** A LAMBDA parameter shadows like a LET name, and typed `_xlfn.` entry inside LET follows the same rule as file text. A qualified newer function GridCraft doesn't implement gives `#NAME?` rather than the variable. Older functions (no file prefix) are unaffected: the parser drops a `_xlfn.` on them and the variable never takes them (X42).
 
-Qualified LET and LAMBDA still introduce locals, and qualified calls in a LAMBDA tail use built-in dispatch. `_xlfn.SINGLE(x)` still decodes to `@x`; `_xlws.` alone keeps its previous normalization and does not force built-in dispatch. These extensions were not measured in Excel ([inference]).
+Qualified LET and LAMBDA still introduce locals, and qualified calls in a LAMBDA tail use built-in dispatch. `_xlfn.SINGLE(x)` still decodes to `@x`; `_xlws.` alone keeps its previous normalization and does not force built-in dispatch. These extensions were not measured in Excel ([inference]). Code that recognizes a call by name (the parser, Spanish input, defined-name and table renames, LAMBDA-call spelling, XLSX parameter spelling, name export and implicit-intersection analysis) goes through one rule, `gridcraft_formula::builtin_identity` (`_xlfn.LET` → `LET`).
 
 Known gap (unmeasured): a defined name's body can lose `_xlfn.` at parse time and is evaluated in the caller's LET/LAMBDA bindings, so a same-named binding can capture its call.
 
