@@ -627,6 +627,13 @@ fn spanish_input_counts_left_operand_of_a_chain_at_the_same_depth() -> Result<()
 }
 
 #[test]
+fn spanish_input_preserves_variables_of_qualified_binders() {
+    let expr = crate::parse_input("LET(let;0;lambda;0;_xlfn.LET(verdadero;2;_xlfn.LAMBDA(falso;verdadero+falso)(5)))", FormulaLocale::Es, |_| false)
+        .unwrap();
+    assert_eq!(crate::print(&expr), "LET(let,0,lambda,0,_xlfn.LET(verdadero,2,_xlfn.LAMBDA(falso,verdadero+falso)(5)))");
+}
+
+#[test]
 fn walk_is_preorder_and_map_is_postorder_left_to_right() -> Result<(), Box<dyn std::error::Error>> {
     // `(A1+B1)+SUM(C1,D1)-E1`: a chain with a call on its right. walk visits parents before
     // children, map rewrites children (left to right) before their parent.

@@ -2503,6 +2503,89 @@ fn future_function_names_bind_xludf_calls_and_let_variables() {
     assert_eq!(t.num("B4"), 1.0);
 }
 
+/// An explicitly qualified call of a newer function binds the built-in even where a LET or
+/// LAMBDA variable of its name is in scope: Excel gives 1 for
+/// `LET(vstack,LAMBDA(x,5),_xlfn.VSTACK(1))`, while the unprefixed call in the same LET still
+/// takes the variable (5) and, with a workbook LAMBDA `VStack`, `_xlfn.VSTACK(1)` outside any LET
+/// is the built-in and `_xludf.VStack(1)` the name (Excel for Mac 16.115.2, object-model
+/// measurement of a synthetic workbook). The model keeps the qualification only where a variable
+/// would otherwise take the call.
+#[test]
+fn qualified_builtin_call_beats_a_let_variable_of_its_name() {
+    let mut t = T::new();
+    t.wb.names.push(gridcraft_model::DefinedName {
+        name: "VStack".into(),
+        scope: None,
+        formula: "LAMBDA(x,\"lam\")".into(),
+        comment: String::new(),
+        hidden: false,
+        uid: Default::default(),
+        legacy_grid: false,
+    });
+    let text = |t: &T, at: &str| t.wb.sheet(0).unwrap().cell(c(at)).and_then(|cell| cell.formula.as_ref()).map(|f| f.text().into_owned());
+    t.set("A1", "=LET(vstack,LAMBDA(x,5),_xlfn.VSTACK(1))");
+    assert_eq!(t.num("A1"), 1.0);
+    assert_eq!(text(&t, "A1").as_deref(), Some("LET(vstack,LAMBDA(x,5),_xlfn.VSTACK(1))"));
+    t.set("A2", "=LET(vstack,LAMBDA(x,5),VSTACK(1))");
+    assert_eq!(t.num("A2"), 5.0);
+    t.set("A3", "=_xlfn.VSTACK(1)");
+    assert_eq!(t.num("A3"), 1.0);
+    assert_eq!(text(&t, "A3").as_deref(), Some("VSTACK(1)"));
+    t.set("A4", "=_xludf.VStack(1)");
+    assert_eq!(t.get("A4"), Value::text("lam"));
+    // A LAMBDA parameter shadows like a LET name; `_xlws.` functions keep their full prefix.
+    t.set("A5", "=LAMBDA(vstack,_xlfn.VSTACK(1))(LAMBDA(x,5))");
+    assert_eq!(t.num("A5"), 1.0);
+    t.set("A6", "=LET(filter,LAMBDA(x,5),_xlfn._xlws.FILTER(8,TRUE))");
+    assert_eq!(t.num("A6"), 8.0);
+    assert_eq!(text(&t, "A6").as_deref(), Some("LET(filter,LAMBDA(x,5),_xlfn._xlws.FILTER(8,TRUE))"));
+    // Without a variable of its name in scope (a LET name is not in scope in its own value), the
+    // prefix carries nothing and the model drops it as usual.
+    t.set("A7", "=LET(vstack,_xlfn.VSTACK(2),a,1,_xlfn.VSTACK(vstack+a))");
+    assert_eq!(text(&t, "A7").as_deref(), Some("LET(vstack,VSTACK(2),a,1,_xlfn.VSTACK(vstack+a))"));
+    assert_eq!(t.num("A7"), 3.0);
+    t.set("A8", "=LET(a,1,_xlfn.VSTACK(a))");
+    assert_eq!(text(&t, "A8").as_deref(), Some("LET(a,1,VSTACK(a))"));
+}
+
+#[test]
+fn qualified_builtin_preserves_nested_binders_and_lambda_tail_dispatch() {
+    let mut t = T::new();
+    let mut failures = Vec::new();
+    for (at, formula, expected) in [
+        ("A1", "=LET(let,LAMBDA(x,99),_xlfn.LET(vstack,LAMBDA(x,5),_xlfn.VSTACK(1)))", 1.0),
+        ("A2", "=LET(lambda,LAMBDA(x,99),_xlfn.LAMBDA(vstack,_xlfn.VSTACK(2))(LAMBDA(x,5)))", 2.0),
+        ("A3", "=LET(ifna,LAMBDA(x,5),LAMBDA(_xlfn.IFNA(NA(),8))())", 8.0),
+        ("A4", "=LET(single,LAMBDA(x,5),_xlfn.SINGLE(3))", 3.0),
+        ("A5", "=LET(vstack,LAMBDA(x,5),LAMBDA(LET(vstack,_xlfn.VSTACK(4),vstack))())", 4.0),
+        ("A6", "=LET(vstack,LAMBDA(x,5),_xlws.VSTACK(1))", 5.0),
+        ("A7", "=LET(filter,LAMBDA(x,5),LAMBDA(_xlfn._xlws.FILTER(8,TRUE))())", 8.0),
+    ] {
+        t.set(at, formula);
+        let actual = t.get(at);
+        if actual != Value::Number(expected) {
+            failures.push((formula, actual, expected));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
+fn qualified_future_call_is_not_resolved_as_a_defined_name() {
+    let mut t = T::new();
+    t.wb.names.push(gridcraft_model::DefinedName {
+        name: "_xlfn.TRANSLATE".into(),
+        scope: None,
+        formula: "LAMBDA(x,99)".into(),
+        comment: String::new(),
+        hidden: false,
+        uid: Default::default(),
+        legacy_grid: false,
+    });
+    t.set("A1", "=LET(translate,LAMBDA(x,5),LAMBDA(_xlfn.TRANSLATE(1))())");
+    assert_eq!(t.get("A1"), Value::Error(CellError::Name));
+}
+
 /// Integration X51 (X41 × X42): an index computed by a `_xludf.` name call is an index
 /// expression, like the unprefixed call of the same LAMBDA. Its error beats a missed key and
 /// invalid mode text (X41), and a valid index is resolved only on a hit.

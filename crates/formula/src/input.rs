@@ -204,7 +204,7 @@ fn normalize(expr: &mut Expr, known_name: &impl Fn(&str) -> bool, bindings: &mut
                 *expr = Expr::Bool(value);
             }
         }
-        Expr::Call(name, args) if name == "LET" && args.len() >= 3 && !args.len().is_multiple_of(2) => {
+        Expr::Call(name, args) if crate::builtin_identity(name) == "LET" && args.len() >= 3 && !args.len().is_multiple_of(2) => {
             let saved = bindings.len();
             if let Some((body, pairs)) = args.split_last_mut() {
                 for pair in pairs.chunks_mut(2) {
@@ -220,7 +220,7 @@ fn normalize(expr: &mut Expr, known_name: &impl Fn(&str) -> bool, bindings: &mut
             }
             bindings.truncate(saved);
         }
-        Expr::Call(name, args) if name == "LAMBDA" => {
+        Expr::Call(name, args) if crate::builtin_identity(name) == "LAMBDA" => {
             let saved = bindings.len();
             if let Some((body, params)) = args.split_last_mut() {
                 for param in params {

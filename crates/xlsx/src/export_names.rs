@@ -525,7 +525,7 @@ fn visit_uses(e: &Expr, functions: crate::FunctionInfo, mut visit: impl FnMut(Us
                 }
             }
             Expr::Call(f, args)
-                if f == "LET"
+                if gridcraft_formula::builtin_identity(f) == "LET"
                     && args.len() >= 3
                     && !args.len().is_multiple_of(2)
                     && let Some((body, pairs)) = args.split_last() =>
@@ -539,7 +539,7 @@ fn visit_uses(e: &Expr, functions: crate::FunctionInfo, mut visit: impl FnMut(Us
                     steps.push(Step::Expr(&pair[1]));
                 }
             }
-            Expr::Call(f, args) if f == "LAMBDA" => {
+            Expr::Call(f, args) if gridcraft_formula::builtin_identity(f) == "LAMBDA" => {
                 if let Some((body, params)) = args.split_last() {
                     steps.push(Step::Restore(bindings.len()));
                     bindings.extend(params.iter().filter_map(|p| if let Expr::Name(n) = p { Some(n.as_str()) } else { None }));
@@ -555,7 +555,7 @@ fn visit_uses(e: &Expr, functions: crate::FunctionInfo, mut visit: impl FnMut(Us
                     {
                         visit(Use::Indirect(arg));
                     }
-                } else if user_defined.is_some() || (free(n) && !(functions.is_builtin)(f)) {
+                } else if user_defined.is_some() || (free(n) && gridcraft_formula::qualified_builtin(f).is_none() && !(functions.is_builtin)(f)) {
                     visit(Use::Name(n, false));
                 }
                 steps.extend(args.iter().rev().map(Step::Expr));
@@ -569,5 +569,24 @@ fn visit_uses(e: &Expr, functions: crate::FunctionInfo, mut visit: impl FnMut(Us
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qualified_binders_hide_locals_from_export_name_walk() {
+        let expr =
+            gridcraft_formula::parse("LET(let,0,lambda,0,translate,0,_xlfn.LET(local,Free,_xlfn.LAMBDA(param,local+param+_xlfn.TRANSLATE(1))(5)))")
+                .unwrap();
+        let mut names = Vec::new();
+        visit_uses(&expr, crate::FunctionInfo::default(), |usage| {
+            if let Use::Name(n, _) = usage {
+                names.push(n.to_string());
+            }
+        });
+        assert_eq!(names, ["Free"]);
     }
 }

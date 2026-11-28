@@ -190,6 +190,25 @@ pub fn user_defined_name(name: &str) -> Option<&str> {
     name.get(..UDF_PREFIX.len()).filter(|p| p.eq_ignore_ascii_case(UDF_PREFIX)).and_then(|_| name.get(UDF_PREFIX.len()..))
 }
 
+/// The built-in an explicitly qualified call calls (`_xlfn.VSTACK` → `VSTACK`,
+/// `_xlfn._xlws.FILTER` → `FILTER`, any letter case), when it names a newer function. The parser
+/// keeps the qualification only on a call that a LET or LAMBDA variable of the same name would
+/// otherwise take: Excel reads `LET(vstack,LAMBDA(x,5),_xlfn.VSTACK(1))` as the built-in and
+/// gives 1 (Excel for Mac 16.115.2, object-model measurement of a synthetic workbook).
+pub fn qualified_builtin(name: &str) -> Option<&str> {
+    let strip = |s: &'static str, n: &str| n.get(..s.len()).filter(|p| p.eq_ignore_ascii_case(s)).map(|_| s.len());
+    let rest = name.get(strip("_xlfn.", name)?..)?;
+    let bare = strip("_xlws.", rest).and_then(|len| rest.get(len..)).unwrap_or(rest);
+    file_prefix(bare).is_some().then_some(bare)
+}
+
+/// The function a stored call name identifies, for code that recognizes calls by name (`LET`,
+/// `LAMBDA`, `SINGLE`, `MATCH`, …): the built-in of an explicitly qualified call
+/// (`_xlfn.LET` → `LET`, see [`qualified_builtin`]), otherwise the name as stored.
+pub fn builtin_identity(name: &str) -> &str {
+    qualified_builtin(name).unwrap_or(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,5 +222,10 @@ mod tests {
         assert_eq!(user_defined_name("_XLUDF.VStack"), Some("VStack"));
         assert_eq!(user_defined_name("VSTACK"), None);
         assert_eq!(user_defined_name("_xlud"), None);
+        assert_eq!(qualified_builtin("_xlfn.VSTACK"), Some("VSTACK"));
+        assert_eq!(qualified_builtin("_XLFN._xlws.Filter"), Some("Filter"));
+        assert_eq!(qualified_builtin("_xlfn.SUM"), None);
+        assert_eq!(qualified_builtin("VSTACK"), None);
+        assert_eq!(qualified_builtin("_xlfn."), None);
     }
 }

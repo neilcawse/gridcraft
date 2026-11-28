@@ -3899,6 +3899,71 @@ fn future_function_calls_bind_like_excel_through_save() {
     assert_lambda_collision_bindings(&s);
 }
 
+/// A newer function called with its explicit `_xlfn.` qualification inside a LET that binds the
+/// same name is the built-in. Excel for Mac 16.115.2 (object-model measurement of a synthetic
+/// workbook) reads the cell XML `_xlfn.LET(_xlpm.vstack,_xlfn.LAMBDA(_xlpm.x,5),_xlfn.VSTACK(1))`,
+/// shows `=LET(vstack,LAMBDA(x,5),VSTACK(1))` and gives 1. The model keeps the qualification
+/// through editing and saving ([inference]: Excel's saved spelling was not measured); the
+/// unprefixed call in the same LET still takes the variable (see the Batch 5 workbook above).
+#[test]
+fn qualified_builtin_in_let_binds_the_builtin_through_save() {
+    const MODEL: &str = "@LET(vstack,LAMBDA(x,5),_xlfn.VSTACK(1))";
+    let cells = r#"<row r="1"><c r="A1"><f>_xlfn.LET(_xlpm.vstack,_xlfn.LAMBDA(_xlpm.x,5),_xlfn.VSTACK(1))</f><v>424242.5</v></c></row>"#;
+    let mut s = s();
+    s.execute("file.open", json!({"name": "let-prefixed.xlsx", "base64": crate::io::base64_encode(&lambda_collision_workbook("", cells))})).unwrap();
+    let check = |s: &Session, at: &str, step: &str| {
+        assert_eq!((formula_at(s, at).as_deref(), v(s, at)), (Some(MODEL), Value::Number(1.0)), "{step}");
+    };
+    check(&s, "A1", "open");
+    // The formula the editor reads back, confirmed unchanged.
+    let read = s.execute("cell.get", json!({"cell": "A1"})).unwrap();
+    let input = read["formula"].as_str().unwrap().to_string();
+    s.execute("cell.set", json!({"cell": "A1", "input": input})).unwrap();
+    check(&s, "A1", "edit");
+    // A structural edit rewrites the formula and keeps the qualification.
+    s.execute("home.insertRows", json!({"rows": "1:1"})).unwrap();
+    check(&s, "A2", "insert row");
+    s.execute("home.insertColumns", json!({"cols": "A:A"})).unwrap();
+    check(&s, "B2", "insert column");
+    s.execute("home.deleteRows", json!({"rows": "1:1"})).unwrap();
+    check(&s, "B1", "delete row");
+    s.execute("home.deleteColumns", json!({"cols": "A:A"})).unwrap();
+    check(&s, "A1", "delete column");
+    s.execute("edit.copy", json!({"range": "A1"})).unwrap();
+    s.execute("edit.paste", json!({"at": "A2"})).unwrap();
+    check(&s, "A2", "paste");
+    // Retyping the unqualified display text is different from confirming the existing formula.
+    // [inference]: this is GridCraft behavior, not an Excel measurement.
+    s.execute("cell.set", json!({"cell": "A3", "input": "=LET(vstack,LAMBDA(x,5),VSTACK(1))"})).unwrap();
+    assert_eq!(v(&s, "A3"), Value::Number(5.0));
+    let saved = s.execute("file.saveBytes", json!({"format": "xlsx"})).unwrap();
+    let bytes = crate::io::base64_decode(saved["base64"].as_str().unwrap()).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(
+        &mut zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap().by_name("xl/worksheets/sheet1.xml").unwrap(),
+        &mut xml,
+    )
+    .unwrap();
+    assert_eq!(xml.matches("_xlfn.LET(_xlpm.vstack,_xlfn.LAMBDA(_xlpm.x,5),_xlfn.VSTACK(1))").count(), 2, "{xml}");
+    assert_eq!(xml.matches("_xlpm.VSTACK(1)").count(), 1, "{xml}");
+    s.execute("file.open", json!({"name": "reopened.xlsx", "base64": saved["base64"]})).unwrap();
+    check(&s, "A2", "reopen");
+    assert_eq!(v(&s, "A3"), Value::Number(5.0));
+}
+
+/// The typed `=VStack(1)`, with a workbook LAMBDA `VStack`, is stored as the built-in and gives 1
+/// (Excel for Mac 16.115.2, object-model measurement of a synthetic workbook), and so is a typed
+/// `_xlfn.VSTACK(1)` outside any LET: the qualification is kept only under a LET variable.
+#[test]
+fn typed_builtin_spellings_bind_the_builtin_beside_a_same_named_lambda() {
+    let mut s = s();
+    s.execute("formulas.defineName", json!({"name": "VStack", "refersTo": "=LAMBDA(x,\"lam\")"})).unwrap();
+    for (cell, input, stored) in [("A2", "=VStack(1)", "VSTACK(1)"), ("A3", "=_xlfn.VSTACK(1)", "VSTACK(1)")] {
+        s.execute("cell.set", json!({"cell": cell, "input": input})).unwrap();
+        assert_eq!((formula_at(&s, cell).as_deref(), v(&s, cell)), (Some(stored), Value::Number(1.0)), "{input}");
+    }
+}
+
 #[test]
 fn explicit_lambda_calls_follow_scoped_name_renames() {
     let mut s = s();
@@ -4069,17 +4134,6 @@ fn unsupported_future_calls_do_not_fall_back_to_workbook_names() {
     assert!(xml.contains(">_xlfn.TRANSLATE(1)</f>"), "{xml}");
     s.execute("file.open", json!({"name": "reopened.xlsx", "base64": saved["base64"]})).unwrap();
     check(&s);
-}
-
-#[test]
-fn known_gap_file_builtin_prefix_is_lost_inside_matching_let() {
-    // Unmeasured in Excel: both file spellings normalize to the same call in GridCraft.
-    let formula = "_xlfn.LET(_xlpm.vstack,_xlfn.LAMBDA(_xlpm.x,5),_xlfn.VSTACK(1))";
-    let mut s = s();
-    let rows = format!(r#"<row r="1"><c r="A1"><f>{formula}</f></c></row>"#);
-    let bytes = lambda_collision_workbook("", &rows);
-    s.execute("file.open", json!({"name": "lexical.xlsx", "base64": crate::io::base64_encode(&bytes)})).unwrap();
-    assert_eq!(v(&s, "A1"), Value::Number(5.0));
 }
 
 #[test]

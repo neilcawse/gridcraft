@@ -36,7 +36,9 @@ fn needs_file_spelling(e: &Expr) -> bool {
     let mut found = false;
     e.walk(&mut |x| {
         found |= match x {
-            Expr::Call(name, _) => name == "LET" || name == "LAMBDA" || crate::tables::file_function_name(name).is_some(),
+            Expr::Call(name, _) => {
+                matches!(gridcraft_formula::builtin_identity(name), "LET" | "LAMBDA") || gridcraft_formula::file_prefix(name).is_some()
+            }
             Expr::Unary(gridcraft_formula::UnOp::Spill | gridcraft_formula::UnOp::At | gridcraft_formula::UnOp::Trim(_), _) => true,
             Expr::Struct(_) => true,
             _ => false,
@@ -80,9 +82,9 @@ fn prefix_params(e: Expr, scope: &[String]) -> Expr {
             acc
         }
         Expr::Invoke(c, args) => Expr::Invoke(sub(c, scope), args.into_iter().map(|a| prefix_params(a, scope)).collect()),
-        Expr::Call(name, args) if name == "LET" || name == "LAMBDA" => {
+        Expr::Call(name, args) if matches!(gridcraft_formula::builtin_identity(&name), "LET" | "LAMBDA") => {
             let last = args.len().saturating_sub(1);
-            let is_let = name == "LET";
+            let is_let = gridcraft_formula::builtin_identity(&name) == "LET";
             let mut sc = scope.to_vec();
             let mut pending: Option<String> = None;
             let mut out = Vec::with_capacity(args.len());
@@ -216,7 +218,8 @@ pub(crate) fn bind_name_calls(text: &str, names: &std::collections::HashSet<Stri
 /// Excel stores some formula-bar operators and names as compatibility functions. Preserve the
 /// surrounding source layout, but only change actual tokens, not literals or sheet names. A
 /// formula holding a file-only spelling the formula bar shows otherwise (`[#This Row]`,
-/// `_xleta.SUM`, `_xludf.`, `_xlfn._TRO_ALL(…)`) keeps the canonical text instead.
+/// `_xleta.SUM`, `_xludf.`, `_xlfn._TRO_ALL(…)`, or a `_xlfn.` call the model keeps qualified
+/// against a LET variable) keeps the canonical text instead.
 pub(crate) fn formula_bar_text(text: &str, canonical: &str) -> Option<String> {
     use gridcraft_formula::{
         StructItem,
@@ -226,6 +229,11 @@ pub(crate) fn formula_bar_text(text: &str, canonical: &str) -> Option<String> {
 
     let body = text.strip_prefix('=').unwrap_or(text);
     if body == canonical {
+        return None;
+    }
+    if canonical.contains("_xlfn.")
+        && tokenize(canonical).is_ok_and(|ts| ts.iter().any(|t| matches!(&t.tok, Tok::Func(s) if gridcraft_formula::qualified_builtin(s).is_some())))
+    {
         return None;
     }
     let tokens = tokenize(body).ok()?;
@@ -523,6 +531,23 @@ mod tests {
         assert_eq!(text_to_file("=WORKDAY.INTL(A1,3,1)"), "WORKDAY.INTL(A1,3,1)");
         assert_eq!(from_file("_xlfn.NETWORKDAYS.INTL(A1,B1,1)+_xlfn.WORKDAY.INTL(A1,3,1)"), "NETWORKDAYS.INTL(A1,B1,1)+WORKDAY.INTL(A1,3,1)");
         assert_eq!(from_file("NETWORKDAYS.INTL(A1,B1,1)"), "NETWORKDAYS.INTL(A1,B1,1)");
+    }
+
+    #[test]
+    fn qualified_binders_write_local_parameters_and_calls() {
+        let model = "LET(let,LAMBDA(x,99),lambda,LAMBDA(x,98),_xlfn.LET(worker,_xlfn.LAMBDA(x,x),WORKER(7)))";
+        let file = "_xlfn.LET(_xlpm.let,_xlfn.LAMBDA(_xlpm.x,99),_xlpm.lambda,_xlfn.LAMBDA(_xlpm.x,98),_xlfn.LET(_xlpm.worker,_xlfn.LAMBDA(_xlpm.x,_xlpm.x),_xlpm.WORKER(7)))";
+        assert_eq!(to_file(&Formula::new(model)), file);
+        assert_eq!(from_file(file), model);
+    }
+
+    #[test]
+    fn standalone_qualified_binders_take_the_file_spelling_path() {
+        // An already-parsed AST can carry a qualified binder without an enclosing scope.
+        let lambda = Expr::Call("_xlfn.LAMBDA".into(), vec![Expr::Name("param".into()), Expr::Name("param".into())]);
+        assert_eq!(to_file_shifted(&lambda, 0, 0), "_xlfn.LAMBDA(_xlpm.param,_xlpm.param)");
+        let let_call = Expr::Call("_xlfn.LET".into(), vec![Expr::Name("local".into()), Expr::Number(1.0), Expr::Name("local".into())]);
+        assert_eq!(to_file_shifted(&let_call, 0, 0), "_xlfn.LET(_xlpm.local,1,_xlpm.local)");
     }
 
     #[test]

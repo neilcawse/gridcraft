@@ -762,18 +762,17 @@ impl<'a> Legacy<'a> {
     }
 
     fn call(&mut self, name: String, args: Vec<Expr>, sheet: usize, ctx: Ctx, depth: usize) -> (Expr, Kind) {
-        if name == "LET" && args.len() >= 3 {
-            return self.let_(args, sheet, ctx, depth);
+        // A built-in qualified against a LET variable (`_xlfn.VSTACK`) has the built-in's shape.
+        let key = gridcraft_formula::builtin_identity(&name);
+        if key == "LET" && args.len() >= 3 {
+            return self.let_(name, args, sheet, ctx, depth);
         }
         let lambda_name = if let Some(bare) = gridcraft_formula::user_defined_name(&name) {
             self.wb.name(bare, sheet).is_some_and(|n| gridcraft_model::workbook::starts_with_lambda(n.formula.trim_start_matches('=').trim_start()))
         } else {
-            user_function(&name, self.functions) && gridcraft_formula::file_prefix(&name).is_none() && self.wb.name(&name, sheet).is_some()
+            user_function(key, self.functions) && gridcraft_formula::file_prefix(key).is_none() && self.wb.name(key, sheet).is_some()
         };
-        if args.len() > 255
-            || lambda_name
-            || matches!(name.as_str(), "LAMBDA" | "MAP" | "REDUCE" | "SCAN" | "BYROW" | "BYCOL" | "MAKEARRAY" | "ISOMITTED")
-        {
+        if args.len() > 255 || lambda_name || matches!(key, "LAMBDA" | "MAP" | "REDUCE" | "SCAN" | "BYROW" | "BYCOL" | "MAKEARRAY" | "ISOMITTED") {
             self.certain = false;
             return (Expr::Call(name, args), Kind::Array);
         }
@@ -781,7 +780,7 @@ impl<'a> Legacy<'a> {
         let mut kinds = Vec::with_capacity(args.len());
         let mut out = Vec::with_capacity(args.len());
         for (i, arg) in args.into_iter().enumerate() {
-            let param = param(&name, i, self.functions);
+            let param = param(key, i, self.functions);
             let arg_ctx = match param {
                 Param::Value | Param::Single => Ctx::Value,
                 Param::Ref | Param::First => Ctx::Ref,
@@ -810,7 +809,7 @@ impl<'a> Legacy<'a> {
             out.push(arg);
         }
         let first = kinds.first().copied().unwrap_or(Kind::Scalar);
-        let kind = match name.as_str() {
+        let kind = match key {
             "IF" | "CHOOSE" if !lifted => kinds.iter().skip(1).fold(Kind::Scalar, |k, x| k.join(*x)),
             "ROW" | "COLUMN" => {
                 if first == Kind::Scalar {
@@ -945,7 +944,7 @@ impl Legacy<'_> {
         (acc, kind)
     }
 
-    fn let_(&mut self, args: Vec<Expr>, sheet: usize, ctx: Ctx, depth: usize) -> (Expr, Kind) {
+    fn let_(&mut self, name: String, args: Vec<Expr>, sheet: usize, ctx: Ctx, depth: usize) -> (Expr, Kind) {
         let saved = self.locals.len();
         let count = args.len();
         let mut out = Vec::with_capacity(count);
@@ -972,7 +971,7 @@ impl Legacy<'_> {
             }
         }
         self.locals.truncate(saved);
-        (Expr::Call("LET".into(), out), kind)
+        (Expr::Call(name, out), kind)
     }
 }
 
@@ -981,7 +980,9 @@ fn positive(e: &Expr) -> bool {
 }
 fn positive_index(e: &Expr, kind: Option<Kind>) -> bool {
     // MATCH returns a one-based position or an error, never INDEX's zero whole-row selector.
-    positive(e) || (matches!(e, Expr::Call(name, _) if matches!(name.as_str(), "MATCH" | "XMATCH")) && kind.is_some_and(|k| k != Kind::Ref))
+    positive(e)
+        || (matches!(e, Expr::Call(name, _) if matches!(gridcraft_formula::builtin_identity(name), "MATCH" | "XMATCH"))
+            && kind.is_some_and(|k| k != Kind::Ref))
 }
 
 fn one(e: &Expr) -> bool {
@@ -1096,5 +1097,21 @@ fn scalar_arg(name: &str, i: usize) -> bool {
         "FORECAST.ETS" | "FORECAST.ETS.CONFINT" => i != 1 && i != 2,
         "FORECAST.ETS.SEASONALITY" | "FORECAST.ETS.STAT" => i > 1,
         _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qualified_binders_and_indices_keep_the_builtin_shape() {
+        let wb = Workbook::new();
+        let mut names = NameCache::default();
+        let mut analyzer = Legacy::new(&wb, CellRef::parse("B1").unwrap(), FunctionInfo::default(), &mut names);
+        let text = "LET(let,0,xmatch,0,_xlfn.LET(local,INDEX(A1:A3,_xlfn.XMATCH(1,A1:A3)),local+1))";
+        let expr = analyzer.formula(gridcraft_formula::parse(text).unwrap(), 0);
+        assert_eq!(gridcraft_formula::print(&expr), text);
+        assert_eq!(analyzer.top, Kind::Scalar);
     }
 }

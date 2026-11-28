@@ -12,7 +12,7 @@ pub mod parser;
 pub mod printer;
 
 pub use ast::{Anchor, BinOp, Expr, RefKind, Reference, SheetSel, StructItem, StructRef, TrimMode, UnOp};
-pub use file_names::{file_prefix, user_defined_name};
+pub use file_names::{builtin_identity, file_prefix, qualified_builtin, user_defined_name};
 pub use input::{FormulaLocale, parse_cell_input, parse_input, print_input};
 pub use parser::{MAX_FORMULA_LEN, ParseError, normalize_function_name, parse, parse_closing_parens, parse_name};
 pub use printer::{print, print_r1c1, print_shifted, quote_sheet};

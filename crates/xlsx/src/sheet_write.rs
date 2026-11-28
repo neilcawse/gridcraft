@@ -870,7 +870,9 @@ fn shared_run_bounds(e: &gridcraft_formula::Expr) -> Option<(i64, i64, i64, i64)
         | Expr::Binary(BinOp::Range | BinOp::Union | BinOp::Intersect, _, _)
         | Expr::Invoke(_, _) => supported = false,
         Expr::Name(n) if n.contains('!') => supported = false,
-        Expr::Call(name, _) if name.eq_ignore_ascii_case("LAMBDA") || name.eq_ignore_ascii_case("RTD") => supported = false,
+        Expr::Call(name, _) if gridcraft_formula::builtin_identity(name).eq_ignore_ascii_case("LAMBDA") || name.eq_ignore_ascii_case("RTD") => {
+            supported = false
+        }
         Expr::Ref(r) => {
             if !matches!(r.sheet, SheetSel::Current) {
                 supported = false;
@@ -1490,3 +1492,16 @@ pub(crate) const DEFAULT_NOTE_BOX: NoteBox = NoteBox {
     size_pt: Some(DEFAULT_NOTE_SIZE_PT),
 };
 const DEFAULT_NOTE_SIZE_PT: (f64, f64) = (108.0, 59.25);
+
+#[cfg(test)]
+mod tests {
+    use super::shared_run_bounds;
+
+    #[test]
+    fn qualified_lambda_is_not_eligible_for_shared_export() {
+        // No invocation node or other unsupported token can mask the LAMBDA check.
+        let base = gridcraft_formula::parse("LET(lambda,0,IF(FALSE,_xlfn.LAMBDA(param,param),A1))").unwrap();
+        assert_eq!(gridcraft_formula::print(&base), "LET(lambda,0,IF(FALSE,_xlfn.LAMBDA(param,param),A1))");
+        assert!(shared_run_bounds(&base).is_none());
+    }
+}
