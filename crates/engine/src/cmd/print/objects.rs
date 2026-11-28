@@ -1,9 +1,94 @@
 use super::draw::{Block, PdfMeasure, Xf, draw_prims, rgb_of};
 use super::text::wrap_lines;
-use super::{Anchor, Baseline, Font, Page, Point, RangeRef, Rect, ShapeKind, Sheet, TextDirection, Value, Workbook};
+use super::{Anchor, Baseline, CellRef, Font, Page, Point, RangeRef, Rect, ShapeKind, Sheet, TextDirection, Value, Workbook};
+use std::borrow::Cow;
+use std::collections::hash_map::Entry;
+
+/// A decoded picture: RGBA pixels, width, height.
+type Decoded = (Vec<u8>, u32, u32);
+
+/// Most bytes of decoded pictures one render memoizes; a picture decoded past it is used once
+/// and dropped (and decoded again on the next page that prints it).
+const MAX_PIC_CACHE_BYTES: u64 = 256 * 1024 * 1024;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum PicKey {
+    /// A floating picture: sheet index and position in `Sheet::images`.
+    Floating(usize, usize),
+    /// A cell picture: sheet index, cell and the thumbnail size it is decoded at.
+    Cell(usize, CellRef, u32, u32),
+}
+
+/// Decoded pictures reused across the pages (and repeated title rows) that print them, so a
+/// picture is decoded once per render instead of once per page (#2389).
+#[derive(Default)]
+pub(super) struct PicCache {
+    map: std::collections::HashMap<PicKey, Option<Decoded>>,
+    /// Bytes of pixels in `map`.
+    bytes: u64,
+    /// Laid-out charts (with their [`chart_cost`](super::chart_cost)) keyed by (sheet, chart),
+    /// rendered once however many pages they touch. Only charts that can still be drawn are kept.
+    pub(super) charts: std::collections::HashMap<(usize, usize), (Vec<gridcraft_chart::Prim>, usize)>,
+    /// Charts too big for what was left of the budget: never drawn, so not rendered again.
+    pub(super) rejected_charts: std::collections::HashSet<(usize, usize)>,
+    /// Chart cost units emitted so far. Each page a chart touches gets its own copy in the PDF,
+    /// so a workbook-controlled anchor over thousands of pages would multiply them without bound.
+    pub(super) chart_prims: usize,
+}
+
+impl PicCache {
+    /// The decoded picture for `key`, running `decode` the first time. A failed decode is
+    /// remembered too; a decode that does not fit in the cache is returned without being kept.
+    fn get(&mut self, key: PicKey, decode: impl FnOnce() -> Option<Decoded>) -> Option<Cow<'_, Decoded>> {
+        let slot = match self.map.entry(key) {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => {
+                let decoded = decode();
+                let size = decoded.as_ref().map_or(0, |d| d.0.len() as u64);
+                if self.bytes.saturating_add(size) > MAX_PIC_CACHE_BYTES {
+                    return decoded.map(Cow::Owned);
+                }
+                self.bytes = self.bytes.saturating_add(size);
+                e.insert(decoded)
+            }
+        };
+        slot.as_ref().map(Cow::Borrowed)
+    }
+
+    /// The chart's primitives for one more page, or `None` once they no longer fit
+    /// [`MAX_CHART_PRIMS`](super::MAX_CHART_PRIMS). `render` runs at most once per chart; a chart
+    /// that doesn't fit is dropped at once and remembered, so its vectors are never retained.
+    pub(super) fn chart(&mut self, key: (usize, usize), render: impl FnOnce() -> Vec<gridcraft_chart::Prim>) -> Option<&[gridcraft_chart::Prim]> {
+        if self.rejected_charts.contains(&key) {
+            return None;
+        }
+        let (prims, cost) = match self.charts.remove(&key) {
+            Some(cached) => cached,
+            None => {
+                let prims = render();
+                let cost = super::chart_cost(&prims);
+                (prims, cost)
+            }
+        };
+        if self.chart_prims.saturating_add(cost) > super::MAX_CHART_PRIMS {
+            self.rejected_charts.insert(key);
+            return None;
+        }
+        self.chart_prims += cost;
+        Some(&self.charts.entry(key).or_insert((prims, cost)).0)
+    }
+}
+
+/// Whether a picture decoded into at most `max_w`×`max_h` pixels can still be kept by the PDF.
+/// The document's image room only shrinks while it is built, so a picture refused here would be
+/// refused on every later page too and is not decoded at all.
+fn fits(room: u64, max_w: u32, max_h: u32) -> bool {
+    u64::from(max_w).saturating_mul(u64::from(max_h)).saturating_mul(4) <= room
+}
 
 /// Cell pictures fit the current cell (or merged-cell) rectangle without changing aspect ratio.
-pub(super) fn draw_cell_picture(pg: &mut Page, data: &[u8], rect: (f32, f32, f32, f32), k: f32) {
+/// `at` (sheet index and cell) keys the decode in `pics`.
+pub(super) fn draw_cell_picture(pg: &mut Page, pics: &mut PicCache, at: (usize, CellRef), data: &[u8], rect: (f32, f32, f32, f32), k: f32) {
     let (x, y, w, h) = rect;
     let pad = 2.0 * k;
     let (w, h) = ((w - 2.0 * pad).max(0.0), (h - 2.0 * pad).max(0.0));
@@ -14,18 +99,30 @@ pub(super) fn draw_cell_picture(pg: &mut Page, data: &[u8], rect: (f32, f32, f32
     if iw == 0 || ih == 0 || iw > 8192 || ih > 8192 || u64::from(iw) * u64::from(ih) > 16_000_000 {
         return;
     }
-    let Ok(mut reader) = image::ImageReader::new(std::io::Cursor::new(data)).with_guessed_format() else { return };
+    let (tw, th) = (((w / 72.0) * 150.0).ceil().clamp(1.0, 4000.0) as u32, ((h / 72.0) * 150.0).ceil().clamp(1.0, 4000.0) as u32);
+    let room = pg.image_room();
+    let Some(image) = pics.get(PicKey::Cell(at.0, at.1, tw, th), || decode_cell_picture(data, tw, th, room)) else { return };
+    let (px, px_w, px_h) = &*image;
+    let fit = (w / iw as f32).min(h / ih as f32);
+    let (pw, ph) = (iw as f32 * fit, ih as f32 * fit);
+    pg.image_rgba(Rect::new(x + pad + (w - pw) / 2.0, y + pad + (h - ph) / 2.0, pw, ph), px, [*px_w, *px_h]);
+}
+
+/// Decodes a cell picture to RGBA scaled to fit `tw`×`th` pixels, unless the PDF has no `room`
+/// left for it.
+fn decode_cell_picture(data: &[u8], tw: u32, th: u32, room: u64) -> Option<Decoded> {
+    if !fits(room, tw, th) {
+        return None;
+    }
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(data)).with_guessed_format().ok()?;
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(8192);
     limits.max_image_height = Some(8192);
     limits.max_alloc = Some(64 * 1024 * 1024);
     reader.limits(limits);
-    let Ok(image) = reader.decode() else { return };
-    let image =
-        image.thumbnail(((w / 72.0) * 150.0).ceil().clamp(1.0, 4000.0) as u32, ((h / 72.0) * 150.0).ceil().clamp(1.0, 4000.0) as u32).to_rgba8();
-    let fit = (w / iw as f32).min(h / ih as f32);
-    let (pw, ph) = (iw as f32 * fit, ih as f32 * fit);
-    pg.image_rgba(Rect::new(x + pad + (w - pw) / 2.0, y + pad + (h - ph) / 2.0, pw, ph), image.as_raw(), [image.width(), image.height()]);
+    let image = reader.decode().ok()?.thumbnail(tw, th).to_rgba8();
+    let (pw, ph) = (image.width(), image.height());
+    Some((image.into_raw(), pw, ph))
 }
 
 /// Sheet pixel rectangle of an anchor.
@@ -49,14 +146,20 @@ pub(super) fn fallback_lines(text: &str, h: f32, line_h: f32) -> impl Iterator<I
     text.lines().take(n)
 }
 
-fn anchor_rect(sh: &Sheet, a: &Anchor) -> (f64, f64, f64, f64) {
-    (sh.col_left(a.cell.col) + a.dx as f64, sh.row_top(a.cell.row) + a.dy as f64, a.width.max(0.0) as f64, a.height.max(0.0) as f64)
+fn anchor_rect(lay: &super::layout::SheetLayout, sh: &Sheet, a: &Anchor) -> (f64, f64, f64, f64) {
+    let y = if a.mode == gridcraft_model::AnchorMode::Absolute {
+        sh.row_top(a.cell.row) + a.dy as f64
+    } else {
+        lay.row_top(sh, a.cell.row) + a.dy as f64
+    };
+    (sh.col_left(a.cell.col) + a.dx as f64, y, a.width.max(0.0) as f64, a.height.max(0.0) as f64)
 }
 
-/// Decodes an embedded picture to RGBA, downscaled to at most `max_w`×`max_h` pixels.
-fn decode_image(data: &[u8], max_w: u32, max_h: u32) -> Option<(Vec<u8>, u32, u32)> {
+/// Decodes an embedded picture to RGBA, downscaled to at most `max_w`×`max_h` pixels, unless the
+/// PDF has no `room` left for it.
+fn decode_image(data: &[u8], max_w: u32, max_h: u32, room: u64) -> Option<Decoded> {
     let (w, h) = crate::io::image_size(data)?;
-    if w == 0 || h == 0 || w as u64 * h as u64 > 60_000_000 {
+    if w == 0 || h == 0 || w as u64 * h as u64 > 60_000_000 || !fits(room, w.min(max_w.max(1)), h.min(max_h.max(1))) {
         return None;
     }
     let img = image::load_from_memory(data).ok()?;
@@ -69,43 +172,31 @@ fn decode_image(data: &[u8], max_w: u32, max_h: u32) -> Option<(Vec<u8>, u32, u3
 /// Draws charts, pictures, shapes and sparklines overlapping the body block of a page.
 /// `pics` memoizes decoded pictures for the whole render (one page at a time draws each
 /// picture again, but the decode happens once).
-pub(super) fn draw_objects(pg: &mut Page, wb: &Workbook, si: usize, sh: &Sheet, b: &Block, pics: &mut super::PicCache) {
+pub(super) fn draw_objects(pg: &mut Page, wb: &Workbook, si: usize, sh: &Sheet, b: &Block, pics: &mut PicCache) {
     let block = b.range();
-    let (sx0, sy0) = (sh.col_left(block.start.col), sh.row_top(block.start.row));
-    let (sx1, sy1) = (sh.col_left(block.end.col.saturating_add(1)), sh.row_top(block.end.row.saturating_add(1)));
+    let (sx0, sy0) = (sh.col_left(block.start.col), b.lay.row_top(sh, block.start.row));
+    let (sx1, sy1) = (sh.col_left(block.end.col.saturating_add(1)), b.lay.row_top(sh, block.end.row.saturating_add(1)));
     let (bx, by) = (b.xs.first().copied().unwrap_or(0.0), b.ys.first().copied().unwrap_or(0.0));
     let (bw, bh) = (b.xs.last().copied().unwrap_or(bx) - bx, b.ys.last().copied().unwrap_or(by) - by);
     let visible = |r: (f64, f64, f64, f64)| r.2 > 0.0 && r.3 > 0.0 && r.0 < sx1 && r.0 + r.2 > sx0 && r.1 < sy1 && r.1 + r.3 > sy0;
-    let place = |r: (f64, f64, f64, f64)| {
-        (b.text_x(bx + ((r.0 - sx0) as f32) * b.k, r.2 as f32 * b.k), by + ((r.1 - sy0) as f32) * b.k, r.2 as f32 * b.k, r.3 as f32 * b.k)
+    let place = |a: &Anchor, r: (f64, f64, f64, f64)| {
+        let (ox, oy, wk, hk) = match a.mode {
+            gridcraft_model::AnchorMode::Absolute => (bx + ((r.0 - sx0) as f32) * b.k, by + ((r.1 - sy0) as f32) * b.k, b.k, b.k),
+            gridcraft_model::AnchorMode::MoveOnly => (bx + ((r.0 - sx0) as f32) * b.kx, by + ((r.1 - sy0) as f32) * b.ky, b.k, b.k),
+            gridcraft_model::AnchorMode::MoveAndSize => (bx + ((r.0 - sx0) as f32) * b.kx, by + ((r.1 - sy0) as f32) * b.ky, b.kx, b.ky),
+        };
+        let w = r.2 as f32 * wk;
+        (b.text_x(ox, w), oy, w, r.3 as f32 * hk)
     };
     pg.save();
     pg.clip_rect(b.text_x(bx, bw), by, bw, bh);
     draw_sparklines(pg, wb, si, sh, b, block);
-    for (imi, im) in sh.images.iter().enumerate() {
-        let r = anchor_rect(sh, &im.anchor);
-        if !visible(r) {
-            continue;
-        }
-        let (x, y, w, h) = place(r);
-        // About 150 dpi is plenty for print.
-        let (mw, mh) = (((w / 72.0) * 150.0).ceil().clamp(1.0, 4000.0) as u32, ((h / 72.0) * 150.0).ceil().clamp(1.0, 4000.0) as u32);
-        let decoded = pics.decoded.entry((si, imi)).or_insert_with(|| decode_image(&im.data, mw, mh));
-        if let Some((px, pw, ph)) = decoded.as_ref() {
-            // Every page the picture touches embeds its own copy: past the budget it is left out.
-            let bytes = px.len();
-            if pics.image_bytes.saturating_add(bytes) <= super::MAX_EMBEDDED_IMAGE_BYTES {
-                pics.image_bytes += bytes;
-                pg.image_rgba(Rect::new(x, y, w, h), px, [*pw, *ph]);
-            }
-        }
-    }
     for shp in &sh.shapes {
-        let r = anchor_rect(sh, &shp.anchor);
+        let r = anchor_rect(b.lay, sh, &shp.anchor);
         if !visible(r) {
             continue;
         }
-        let (x, y, w, h) = place(r);
+        let (x, y, w, h) = place(&shp.anchor, r);
         if shp.kind == ShapeKind::Equation {
             let ink = rgb_of(shp.line, wb).unwrap_or([0, 0, 0]);
             match shp.math.get(&shp.text) {
@@ -127,16 +218,32 @@ pub(super) fn draw_objects(pg: &mut Page, wb: &Workbook, si: usize, sh: &Sheet, 
         }
         draw_shape(pg, wb, shp, b, (x, y, w, h));
     }
-    for (chi, ch) in sh.charts.iter().enumerate() {
-        let r = anchor_rect(sh, &ch.anchor);
+    for (imi, im) in sh.images.iter().enumerate() {
+        let r = anchor_rect(b.lay, sh, &im.anchor);
         if !visible(r) {
             continue;
         }
-        let (x, y, _, _) = place(r);
+        let (x, y, w, h) = place(&im.anchor, r);
+        // About 150 dpi is plenty for print.
+        let (mw, mh) = (((w / 72.0) * 150.0).ceil().clamp(1.0, 4000.0) as u32, ((h / 72.0) * 150.0).ceil().clamp(1.0, 4000.0) as u32);
+        let room = pg.image_room();
+        if let Some(decoded) = pics.get(PicKey::Floating(si, imi), || decode_image(&im.data, mw, mh, room)) {
+            let (px, pw, ph) = &*decoded;
+            pg.image_rgba(Rect::new(x, y, w, h), px, [*pw, *ph]);
+        }
+    }
+    for (chi, ch) in sh.charts.iter().enumerate() {
+        let r = anchor_rect(b.lay, sh, &ch.anchor);
+        if !visible(r) {
+            continue;
+        }
+        let (x, y, w, h) = place(&ch.anchor, r);
+        let chart_w = if b.k > 0.0 { w / b.k } else { r.2 as f32 };
+        let chart_h = if b.k > 0.0 { h / b.k } else { r.3 as f32 };
         // As for pictures, each page gets its own copy of the drawing commands.
         let prims = pics.chart((si, chi), || {
             let data = gridcraft_chart::resolve(wb, si, ch);
-            gridcraft_chart::render(ch, &data, r.2 as f32, r.3 as f32, &PdfMeasure)
+            gridcraft_chart::render(ch, &data, chart_w, chart_h, &PdfMeasure)
         });
         if let Some(prims) = prims {
             draw_prims(pg, prims, Xf { ox: x, oy: y, k: b.k });
@@ -221,22 +328,41 @@ fn draw_shape(pg: &mut Page, wb: &Workbook, shp: &gridcraft_model::Shape, b: &Bl
     let text_box = shp.kind == ShapeKind::TextBox;
     let size = fm.font_size.unwrap_or(11.0).clamp(1.0, 4000.0) * b.scale;
     let font = Font::styled(Font::family_for(fm.font.as_deref().unwrap_or("")), fm.bold, fm.italic);
-    let color = fm.text_color.and_then(|c| rgb_of(c, wb)).unwrap_or([0, 0, 0]);
+    let default_color = match fill {
+        Some([fr, fg, fb]) if shp.kind != ShapeKind::WordArt => {
+            let luma = 0.299 * f32::from(fr) + 0.587 * f32::from(fg) + 0.114 * f32::from(fb);
+            if luma < 128.0 { [255, 255, 255] } else { [0, 0, 0] }
+        }
+        _ => [0, 0, 0],
+    };
+    let color = fm.text_color.and_then(|c| rgb_of(c, wb)).unwrap_or(default_color);
     let align = fm.align.unwrap_or(if text_box { ShapeTextAlign::Left } else { ShapeTextAlign::Center });
     let anchor = fm.anchor.unwrap_or(if text_box { ShapeTextAnchor::Top } else { ShapeTextAnchor::Middle });
-    let lines = wrap_lines(&shp.text, font, size, (w - 4.0 * b.k).max(size), TextDirection::Auto);
+    let r_inset = 2.0 * b.k;
+    let l_indent =
+        if fm.left_indent.is_finite() && fm.left_indent > 0.0 { (fm.left_indent * b.scale).min((w - 2.0 * r_inset).max(0.0) * 0.6) } else { 0.0 };
+    let l_inset = r_inset + l_indent;
+    let wrap_w = (w - l_inset - r_inset).max(size);
+    let lines = wrap_lines(&shp.text, font, size, wrap_w, TextDirection::Auto);
     let block_h = lines.len().min(500) as f32 * size * 1.2;
     let mut yy = match anchor {
-        ShapeTextAnchor::Top => y + 2.0 * b.k,
+        ShapeTextAnchor::Top => y + r_inset,
         ShapeTextAnchor::Middle => y + (h - block_h) / 2.0,
-        ShapeTextAnchor::Bottom => y + h - 2.0 * b.k - block_h,
+        ShapeTextAnchor::Bottom => y + h - r_inset - block_h,
     } + size * 0.8;
+    let needs_clip = angle == 0.0
+        && (block_h + 2.0 * r_inset > h
+            || lines.iter().take(500).any(|l| gridcraft_pdf::text_width_with_direction(font, size, &l.text, l.direction) > w - l_inset - r_inset));
+    if needs_clip {
+        pg.save();
+        pg.clip_rect(x, y, w, h);
+    }
     for l in lines.iter().take(500) {
         let lw = gridcraft_pdf::text_width_with_direction(font, size, &l.text, l.direction);
         let lx = match align {
-            ShapeTextAlign::Left => x + 2.0 * b.k,
-            ShapeTextAlign::Center => x + (w - lw) / 2.0,
-            ShapeTextAlign::Right => x + w - 2.0 * b.k - lw,
+            ShapeTextAlign::Left => x + l_inset,
+            ShapeTextAlign::Center => x + l_inset + ((w - l_inset - r_inset) - lw) / 2.0,
+            ShapeTextAlign::Right => x + w - r_inset - lw,
         };
         // WordArt's drop shadow: the line again, offset, in the shadow colour (under the text).
         if let Some(sc) = fm.text_shadow.and_then(|c| rgb_of(c, wb)) {
@@ -258,5 +384,8 @@ fn draw_shape(pg: &mut Page, wb: &Workbook, shp: &gridcraft_model::Shape, b: &Bl
         let [tx, ty] = turn([lx, yy]);
         pg.text_rotated_with_direction(Baseline { origin: Point::new(tx, ty), angle }, size, font, color, &l.text, l.direction);
         yy += size * 1.2;
+    }
+    if needs_clip {
+        pg.restore();
     }
 }

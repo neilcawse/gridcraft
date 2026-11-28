@@ -590,7 +590,7 @@ fn references_into_linked_workbooks_read_the_saved_values() {
     );
     // Linked sheets print as Excel writes them: quoted only when the sheet name needs it.
     let f = t.wb.sheet(0).unwrap().cells.get(c("A3")).and_then(|x| x.formula.clone()).unwrap();
-    assert_eq!(gridcraft_formula::print(f.expr.as_ref().unwrap()), "SUM('[2]P&L Prices'!B1:B9)+[2]Rates!C3");
+    assert_eq!(gridcraft_formula::print(&f.expr().unwrap()), "SUM('[2]P&L Prices'!B1:B9)+[2]Rates!C3");
 }
 
 #[test]
@@ -2032,6 +2032,43 @@ fn arrays_do_not_spill_in_tables() {
 }
 
 #[test]
+fn one_value_array_in_a_table_is_not_a_spill() {
+    // Excel shows a one-value dynamic-array result in a table column; two or more is #SPILL! (#2335).
+    let table = |range: &str| gridcraft_model::Table {
+        id: 1,
+        uid: Default::default(),
+        name: "Table1".into(),
+        range: gridcraft_core::RangeRef::parse(range).unwrap(),
+        header_row: true,
+        totals_row: false,
+        columns: vec![],
+        style: String::new(),
+        banded_rows: false,
+        banded_cols: false,
+        first_col: false,
+        last_col: false,
+        filter_button: false,
+        filter: vec![],
+        table_type: None,
+        connection_id: None,
+    };
+    let mut t = T::new();
+    t.wb.sheet_mut(0).unwrap().tables.push(table("B3:C6"));
+    t.set("A1", "7");
+    t.set("A2", "8");
+    t.set("C4", "=FILTER(A1:A2,A1:A2>7)");
+    t.set("C5", "=FILTER(A1:A2,A1:A2>0)");
+    t.set("H4", "=FILTER(A1:A2,A1:A2>7)");
+    t.set("D4", "=ROWS(C4#)");
+    assert_eq!((t.num("C4"), t.num("H4"), t.num("D4")), (8.0, 8.0, 1.0));
+    assert_eq!(t.get("C5"), Value::Error(CellError::Spill));
+    // Recalculating again keeps the one-value result.
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!(t.num("C4"), 8.0);
+    assert_eq!(t.num("D4"), 1.0);
+}
+
+#[test]
 fn ifs_and_lazy() {
     let mut t = T::new();
     t.set("A1", "5");
@@ -2362,7 +2399,7 @@ fn builtin_call_spelling_does_not_change_dispatch() {
     t.set("A1", "1");
     // Bypass the parser's uppercasing: a stored AST can already have the old spelling.
     let formula = Formula::from_expr(gridcraft_formula::Expr::Call("IsRef".into(), vec![gridcraft_formula::parse("A1").unwrap()]));
-    assert_eq!(formula.text, "IsRef(A1)");
+    assert_eq!(formula.text(), "IsRef(A1)");
     t.wb.sheet_mut(0).unwrap().cells.set(c("B1"), Cell::formula(formula));
     t.calc.cells_changed(&mut t.wb, &[(0, c("B1"))]);
     assert_eq!(t.get("B1"), Value::Bool(true));
@@ -2593,17 +2630,68 @@ fn a_recursive_lambda_stops_at_the_same_call_on_any_stack_size() {
                     hidden: false,
                     uid: Default::default(),
                 });
-                // F(F,n) has n + 1 calls in progress at its deepest; W adds one more call per step.
+                // W's call to `f` is a tail call, so a wrapped call level costs one call in progress, not two. A tail call reuses its frame, so the tail chain is bounded by `MAX_TAIL_CALLS`, as in Excel
+                // (5,459 ok, 5,460 #NUM!). F(F,n) otherwise has n + 1 calls in progress at its deepest; W adds
+                // one more call per step.
                 let tail = |n: u32| format!("=LET(F,LAMBDA(me,n,IF(n=0,0,me(me,n-1))),F(F,{n}))");
                 let wrapped = |n: u32| format!("=LET(W,LAMBDA(f,k,f(f,k)),F,LAMBDA(me,n,IF(n<=0,0,1+W(me,n-1))),F(F,{n}))");
-                [tail(139), tail(140), wrapped(69), wrapped(70), "=CNT(131)".to_string()].map(|f| crate::evaluate(&wb, 0, c("B1"), &f))
+                [tail(5459), tail(5460), wrapped(69), wrapped(70), "=CNT(131)".to_string()].map(|f| crate::evaluate(&wb, 0, c("B1"), &f))
             })
             .expect("spawn")
             .join()
             .expect("recursion must not overflow the stack")
     };
     let small = run(1 << 20);
-    assert_eq!(small, [Value::Number(0.0), Value::Error(CellError::Num), Value::Number(69.0), Value::Error(CellError::Num), Value::Number(131.0)]);
+    assert_eq!(small, [Value::Number(0.0), Value::Error(CellError::Num), Value::Number(69.0), Value::Number(70.0), Value::Number(131.0)]);
+    assert_eq!(run(64 << 20), small);
+}
+
+#[test]
+fn a_tail_recursive_lambda_reaches_excels_depth_on_a_small_stack() {
+    // Excel (measured): a tail countdown is 0 at 5,000 and 5,459 and #NUM! at 5,460 and 10,000.
+    let run = |stack: usize| {
+        std::thread::Builder::new()
+            .stack_size(stack)
+            .spawn(|| {
+                let mut wb = Workbook::new();
+                wb.names.push(gridcraft_model::DefinedName {
+                    name: "TAILN".into(),
+                    scope: None,
+                    formula: "LAMBDA(n,IF(n=0,0,TAILN(n-1)))".into(),
+                    comment: String::new(),
+                    hidden: false,
+                    uid: Default::default(),
+                });
+                let tail = |n: u32| format!("=LET(F,LAMBDA(me,n,IF(n=0,0,me(me,n-1))),F(F,{n}))");
+                // The same chain through parentheses and an applied lambda, and one that returns the base case's value.
+                let paren = "=LET(F,LAMBDA(me,n,IF(n=0,7,(me(me,n-1)))),F(F,5000))".to_string();
+                let invoke = "=LET(F,LAMBDA(me,n,IF(n=0,7,LAMBDA(a,b,me(me,a))(n-1,0))),F(F,2000))".to_string();
+                let endless = "=LET(f,LAMBDA(g,x,g(g,x)),f(f,1))".to_string();
+                // Each call passes a closure that captures the last, 5,000 deep: releasing them must not recurse.
+                let closures = "=LET(F,LAMBDA(me,n,acc,IF(n=0,0,me(me,n-1,LAMBDA(x,acc)))),F(F,5000,0))".to_string();
+                [tail(5000), tail(5459), tail(5460), tail(10000), paren, invoke, endless, "=TAILN(5000)".to_string(), closures]
+                    .map(|f| crate::evaluate(&wb, 0, c("B1"), &f))
+            })
+            .expect("spawn")
+            .join()
+            .expect("tail recursion must not overflow the stack")
+    };
+    let num = Value::Error(CellError::Num);
+    let small = run(1 << 20);
+    assert_eq!(
+        small,
+        [
+            Value::Number(0.0),
+            Value::Number(0.0),
+            num.clone(),
+            num.clone(),
+            Value::Number(7.0),
+            Value::Number(7.0),
+            num,
+            Value::Number(0.0),
+            Value::Number(0.0)
+        ]
+    );
     assert_eq!(run(64 << 20), small);
 }
 
@@ -3562,6 +3650,65 @@ fn offset_extreme_arguments_return_ref() {
     }
 }
 
+/// Sorting and ranking compare numbers exactly while `=` and COUNTIF compare them at 15
+/// significant digits. Every expectation was observed in Excel 365 with these fixtures
+/// (`=0.1+0.2` is 0.30000000000000004): 0.3 sorts first whatever the input order.
+#[test]
+fn sorts_and_ranks_compare_numbers_exactly() {
+    let mut t = T::new();
+    for (at, input) in [
+        // The noisy value first, then the exact one first.
+        ("A1", "=0.1+0.2"),
+        ("B1", "e"),
+        ("A2", "0.3"),
+        ("B2", "t"),
+        ("D1", "0.3"),
+        ("E1", "t"),
+        ("D2", "=0.1+0.2"),
+        ("E2", "e"),
+        ("G1", "=100+1E-14"),
+        ("H1", "e"),
+        ("G2", "100"),
+        ("H2", "t"),
+    ] {
+        t.set(at, input);
+    }
+    let e = 0.1 + 0.2;
+    let n = Value::Number;
+    let s = |x: &str| Value::from(x);
+    let cases: Vec<(&str, Value)> = vec![
+        ("=A1=A2", Value::Bool(true)),
+        ("=COUNTIF(A1:A2,0.3)", n(2.0)),
+        ("=INDEX(SORT(A1:B2),1,2)", s("t")),
+        ("=INDEX(SORT(D1:E2),1,2)", s("t")),
+        ("=INDEX(SORT(A1:B2,1,-1),1,2)", s("e")),
+        ("=INDEX(SORT(D1:E2,1,-1),1,2)", s("e")),
+        ("=INDEX(SORT(G1:H2),1,2)", s("t")),
+        ("=INDEX(SORT(G1:H2,1,-1),1,2)", s("e")),
+        ("=INDEX(SORTBY(B1:B2,A1:A2),1,1)", s("t")),
+        ("=INDEX(SORTBY(E1:E2,D1:D2),1,1)", s("t")),
+        ("=INDEX(SORTBY(B1:B2,A1:A2,-1),1,1)", s("e")),
+        ("=INDEX(SORTBY(E1:E2,D1:D2,-1),1,1)", s("e")),
+        // Already exact: UNIQUE, RANK, LARGE/SMALL, MODE.
+        ("=ROWS(UNIQUE(A1:A2))", n(2.0)),
+        ("=RANK.EQ(0.3,A1:A2)", n(2.0)),
+        ("=RANK.EQ(0.3,A1:A2,1)", n(1.0)),
+        ("=RANK.AVG(0.3,A1:A2)", n(2.0)),
+        ("=RANK.EQ(0.3,A1)", Value::Error(CellError::NA)),
+        ("=LARGE(A1:A2,1)", n(e)),
+        ("=SMALL(A1:A2,1)", n(0.3)),
+        ("=MODE.SNGL(A1:A2,5)", Value::Error(CellError::NA)),
+    ];
+    let mut wrong = Vec::new();
+    for (formula, expected) in cases {
+        let got = crate::evaluate(&t.wb, 0, c("Z1"), formula);
+        if got != expected {
+            wrong.push(format!("{formula}: got {got:?}, Excel {expected:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 /// `@` intersects a reference with the formula's row (a column range) or column (a row range);
 /// a 2D range both (circular when it includes the formula's cell); a range the formula does not
 /// line up with gives #VALUE!. An array gives its top-left value. Legacy formulas read from files use it where Excel intersects implicitly.
@@ -4130,6 +4277,52 @@ fn sumproduct_reads_a_one_cell_reference_as_an_array() {
 }
 
 #[test]
+fn loan_schedule_residue_keeps_excels_sign() {
+    // A synthetic monthly loan schedule: interest on the opening balance, principal = PMT - interest,
+    // each later period guarded by IF(p - SUM(principal so far) > 0, ...). After the 12th payment
+    // Excel is left with 2^-30 > 0, so it takes a 13th, tiny-interest period. That last bit comes
+    // from PMT; the old (1 + rate)^nper form left -2.8e-8 and returned "" instead.
+    let mut t = T::new();
+    t.set("B1", "4653300");
+    t.set("B2", "1");
+    t.set("B3", "0.141");
+    let col = |i: u8| char::from(b'A' + i).to_string();
+    t.set("C8", "=$B$1*($B$3/12)");
+    t.set("C7", "=PMT($B$3/12,$B$2*12,-$B$1)-C8");
+    t.set("D8", "=($B1-C7)*($B$3/12)");
+    t.set("D7", "=PMT($B$3/12,$B$2*12,-$B$1)-D8");
+    for i in 4..16 {
+        let (c, p) = (col(i), col(i - 1));
+        t.set(&format!("{c}8"), &format!("=IF($B1-SUM($C7:{p}7)>0,($B1-SUM($C7:{p}7))*($B$3/12),\"\")"));
+        t.set(&format!("{c}7"), &format!("=IF($B1-SUM($C7:{p}7)>0,PMT($B$3/12,$B$2*12,-$B$1)-{c}8,\"\")"));
+    }
+    t.set("N4", "=IF($B$1-SUM($C7:N7)>0,$B$1-SUM($C7:N7),\"\")");
+    // Excel's values (Value2) for the same synthetic inputs.
+    // The leftover (2^-30 in Excel) is 12 payments' worth of rounding, so a one-ULP libm difference
+    // moves it by as much as its own size: only its sign is checked, and the 13th period must exist.
+    for cell in ["N4", "O8"] {
+        let value = t.get(cell);
+        assert!(matches!(value, Value::Number(x) if x > 0.0 && x < 1e-6), "{cell}: {value:?}");
+    }
+    let value = t.get("O7");
+    assert!(matches!(value, Value::Number(x) if (x - 418025.37230211904).abs() < 1e-3), "O7: {value:?}");
+    assert_eq!(t.get("P7"), Value::Text("".into()));
+}
+
+#[test]
+fn concat_operator_cuts_at_the_cell_limit() {
+    // Excel: LEN(REPT("x",20000)&REPT("x",20000)) is 32767, and REPT("x",32767)&"y" is 32767.
+    let mut t = T::new();
+    t.set("A1", "=LEN(REPT(\"x\",20000)&REPT(\"x\",20000))");
+    t.set("A2", "=LEN(REPT(\"x\",32767)&\"y\")");
+    t.set("A3", "=LEN(\"é\"&REPT(\"é\",32767))");
+    t.set("A4", "=LEN(REPT(UNICHAR(128512),16383)&\"x\")");
+    t.set("A5", "=LEN(REPT(UNICHAR(128512),16384))");
+    assert_eq!((t.num("A1"), t.num("A2"), t.num("A3"), t.num("A4")), (32767.0, 32767.0, 32767.0, 16384.0));
+    assert_eq!(t.get("A5"), Value::Error(CellError::Value));
+}
+
+#[test]
 fn clearing_a_cell_unblocks_the_arrays_above_and_left_of_it() {
     let mut t = T::new();
     for r in 1..=50 {
@@ -4450,7 +4643,7 @@ fn graph_built_from_text_only_formulas_matches_cached() {
             // E1 does not parse, so it has no tree either way and only covers the `None` branch.
             let mut formula = Formula::new(f);
             if !cached {
-                formula.expr = None;
+                formula.drop_cached_expr();
             }
             t.wb.sheet_mut(0).unwrap().cells.set(c(at), Cell::formula(formula));
         }
@@ -4463,7 +4656,7 @@ fn graph_built_from_text_only_formulas_matches_cached() {
         // A text-only formula that is rewritten through `cells_changed` joins the graph too.
         let mut formula = Formula::new("=A1+100");
         if !cached {
-            formula.expr = None;
+            formula.drop_cached_expr();
         }
         t.wb.sheet_mut(0).unwrap().cells.set(c("F1"), Cell::formula(formula));
         t.calc.cells_changed(&mut t.wb, &[(0, c("F1"))]);
@@ -5212,4 +5405,513 @@ fn single_criterion_aggregates_match_blanks_past_the_used_range() {
     t.set("C2", "=AVERAGEIF(A:A,\"\",Data!B1)");
     assert_eq!(t.get("C1"), Value::Number(16.0));
     assert_eq!(t.get("C2"), Value::Number(8.0));
+}
+
+#[test]
+fn getpivotdata_matches_blank_items_and_numeric_tolerance_and_captions() {
+    use gridcraft_model::{PivotDataCell, PivotField, PivotFunc, PivotItemRef, PivotTable, PivotValue};
+    let mut t = T::new();
+    // Synthetic rendered PivotTable at A3:C6 with an empty intersection cell (B5) and a (blank) row item (A6).
+    t.set("A3", "Row Labels");
+    t.set("B3", "1");
+    t.set("C3", "Grand Total");
+    t.set("A4", "Alpha");
+    t.set("B4", "42");
+    t.set("C4", "42");
+    t.set("A5", "Beta");
+    t.set("C5", "10");
+    t.set("A6", "(blank)");
+    t.set("B6", "7");
+    t.set("C6", "7");
+    let pt = PivotTable {
+        id: 1,
+        name: "Pivot1".into(),
+        anchor: CellRef::parse("A3").unwrap(),
+        last_range: gridcraft_core::RangeRef::parse("A3:C6"),
+        rows: vec![PivotField { source_col: "Group".into(), caption: Some("DisplayGroup".into()), ..Default::default() }],
+        columns: vec![PivotField { source_col: "Bin".into(), ..Default::default() }],
+        values: vec![PivotValue { source_col: "Amt".into(), func: PivotFunc::Sum, name: "Sum of Amt".into(), ..Default::default() }],
+        ..Default::default()
+    };
+    let it = |f: &str, l: &str, v: Value| PivotItemRef { field: f.into(), label: l.into(), value: v };
+    pt.data_index.set_cells(vec![
+        PivotDataCell {
+            data_field: "Sum of Amt".into(),
+            source_col: "Amt".into(),
+            items: vec![it("Group", "Alpha", Value::text("Alpha")), it("Bin", "1", Value::Number(1.0 + 1e-13))],
+            row: 1,
+            col: 1,
+        },
+        PivotDataCell {
+            data_field: "Sum of Amt".into(),
+            source_col: "Amt".into(),
+            items: vec![it("Group", "Beta", Value::text("Beta")), it("Bin", "1", Value::Number(1.0))],
+            row: 2,
+            col: 1,
+        },
+        PivotDataCell {
+            data_field: "Sum of Amt".into(),
+            source_col: "Amt".into(),
+            items: vec![it("Group", "(blank)", Value::Empty), it("Bin", "1", Value::Number(1.0))],
+            row: 3,
+            col: 1,
+        },
+        PivotDataCell {
+            data_field: "Sum of Amt".into(),
+            source_col: "Amt".into(),
+            items: vec![it("Group", "Zero", Value::text("Zero")), it("Bin", "0", Value::Number(0.0))],
+            row: 1,
+            col: 2,
+        },
+    ]);
+    t.wb.sheet_mut(0).unwrap().pivots.push(pt);
+
+    // Omitted item arg `,,` and `""` both match the `(blank)` item.
+    t.set("E1", r#"=GETPIVOTDATA("Sum of Amt",$A$3,"Group",,"Bin",1)"#);
+    t.set("E2", r#"=GETPIVOTDATA("Sum of Amt",$A$3,"Group","","Bin",1)"#);
+    // 1e-12 relative numeric tolerance matches `1` against `1 + 1e-13`, and field caption matches `Group`.
+    t.set("E3", r#"=GETPIVOTDATA("Amt",$A$3,"DisplayGroup","Alpha","Bin",1)"#);
+    // Empty intersection cell in the report returns Empty (coercing to 0 in `<>0`), not `#REF!`.
+    t.set("E4", r#"=IF(GETPIVOTDATA("Amt",$A$3,"Group","Beta","Bin",1)<>0,1,0)"#);
+    // Pure relative tolerance (no 1.0 absolute floor): `0` matches `0`, NOT `1e-13`.
+    t.set("E5", r#"=GETPIVOTDATA("Amt",$A$3,"Group","Zero","Bin",0)"#);
+    t.set("E6", r#"=GETPIVOTDATA("Amt",$A$3,"Group","Zero","Bin",1E-13)"#);
+    assert_eq!((t.num("E1"), t.num("E2"), t.num("E3"), t.num("E4"), t.num("E5")), (7.0, 7.0, 42.0, 0.0, 42.0));
+    assert_eq!(t.get("E6"), Value::Error(CellError::Ref));
+}
+
+#[test]
+fn criteria_range_error_propagates_through_ifs_functions() {
+    let mut t = T::new();
+    for (r, (k, v)) in [("a", "10"), ("a", "20"), ("b", "30")].iter().enumerate() {
+        t.set(&format!("A{}", r + 1), k);
+        t.set(&format!("B{}", r + 1), v);
+    }
+    t.set("D1", "missing");
+    t.set("E1", r#"=AVERAGEIFS(B1:B3,A1:A3,"a",OFFSET(B1:B3,0,MATCH(D1,A1:A3,0)),">0")"#);
+    t.set("E2", r#"=SUMIFS(B1:B3,A1:A3,"a",OFFSET(B1:B3,0,MATCH(D1,A1:A3,0)),">0")"#);
+    t.set("E3", r#"=COUNTIFS(A1:A3,"a",OFFSET(B1:B3,0,MATCH(D1,A1:A3,0)),">0")"#);
+    t.set("E4", r#"=MAXIFS(B1:B3,OFFSET(B1:B3,0,MATCH(D1,A1:A3,0)),">0")"#);
+    t.set("E5", r#"=MINIFS(B1:B3,OFFSET(B1:B3,0,MATCH(D1,A1:A3,0)),">0")"#);
+    for cell in ["E1", "E2", "E3", "E4", "E5"] {
+        assert_eq!(t.get(cell), Value::Error(CellError::NA), "{cell} should propagate #N/A");
+    }
+}
+
+#[test]
+fn array_if_dereferences_selected_blank_cells_to_zero() {
+    let mut t = T::new();
+    // A1:A4 are flags (1, 1, 1, 0); B1:B4 are (10, 20, <blank>, 99).
+    t.set("A1", "1");
+    t.set("A2", "1");
+    t.set("A3", "1");
+    t.set("A4", "0");
+    t.set("B1", "10");
+    t.set("B2", "20");
+    t.set("B4", "99");
+    // Array-mode IF selects {10, 20, 0, FALSE}: COUNT sees 3 numbers (including 0 from blank B3),
+    // AVERAGE is (10 + 20 + 0) / 3 = 10, and STDEV.P is sqrt(((0)^2 + 10^2 + (-10)^2) / 3) = sqrt(200/3).
+    t.set("D1", "=COUNT(IF(A1:A4=1,B1:B4))");
+    t.set("D2", "=AVERAGE(IF(A1:A4=1,B1:B4))");
+    t.set("D3", "=STDEV.P(IF(A1:A4=1,B1:B4))");
+    assert_eq!(t.num("D1"), 3.0);
+    assert_eq!(t.num("D2"), 10.0);
+    assert!((t.num("D3") - (200.0_f64 / 3.0).sqrt()).abs() < 1e-12);
+}
+
+#[test]
+fn binary_arithmetic_coerces_left_operand_before_right_error() {
+    let mut t = T::new();
+    t.set("A1", "no");
+    t.set("B1", "=NA()");
+    t.set("C1", "=A1-#REF!");
+    t.set("C2", "=A1-B1");
+    t.set("C3", "=A1+1/0");
+    t.set("C4", "=(1/0)-#REF!");
+    t.set("C5", "=1-#REF!");
+    assert_eq!(t.get("C1"), Value::Error(CellError::Value));
+    assert_eq!(t.get("C2"), Value::Error(CellError::Value));
+    assert_eq!(t.get("C3"), Value::Error(CellError::Value));
+    assert_eq!(t.get("C4"), Value::Error(CellError::Div0));
+    assert_eq!(t.get("C5"), Value::Error(CellError::Ref));
+}
+
+#[test]
+fn sum_and_average_prioritize_direct_expression_errors_over_range_errors() {
+    let mut t = T::new();
+    t.set("A1", "10");
+    t.set("A2", "=1/0");
+    t.set("B1", "=1/0");
+    t.set("C1", "=#REF!");
+    t.set("C2", "text");
+    t.set("D1", "=SUM(A1:A2,#REF!,B1)");
+    t.set("D2", "=AVERAGE(A1:A2,#REF!)");
+    t.set("D3", "=SUM(C1,-C2)");
+    t.set("D4", "=COUNT(A1:A2,#REF!)");
+    t.set("D5", "=SUM(A1:A2,C1)");
+    assert_eq!(t.get("D1"), Value::Error(CellError::Ref));
+    assert_eq!(t.get("D2"), Value::Error(CellError::Ref));
+    assert_eq!(t.get("D3"), Value::Error(CellError::Value));
+    assert_eq!(t.num("D4"), 1.0);
+    // Two range/cell references (no direct expression error): left-to-right range error wins.
+    assert_eq!(t.get("D5"), Value::Error(CellError::Div0));
+}
+
+#[test]
+fn shared_formula_eval_indexed_countif_and_indexed_filter_match_exact_semantics() {
+    let mut t = T::new();
+    for r in 1..=120u32 {
+        t.set(&format!("A{r}"), &(r % 10).to_string());
+        t.set(&format!("B{r}"), if r % 2 == 0 { "good" } else { "bad" });
+        t.set(&format!("C{r}"), &(r * 10).to_string());
+    }
+    t.set("A121", "'5");
+    t.set("B121", "good");
+    t.set("C121", "9999");
+    let base_cf = std::sync::Arc::new(gridcraft_formula::parse("COUNTIF($A$1:$A$121,A1)").unwrap());
+    let base_flt = std::sync::Arc::new(gridcraft_formula::parse("INDEX(FILTER($C$1:$C$121,($A$1:$A$121=A1)*($B$1:$B$121=\"good\")),1)").unwrap());
+    {
+        let sh = t.wb.sheet_mut(0).unwrap();
+        for r in 0..120u32 {
+            sh.cells.set(CellRef::new(r, 3), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_cf), r as i32, 0)));
+            sh.cells.set(CellRef::new(r, 4), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_flt), r as i32, 0)));
+        }
+    }
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!(t.num("D5"), 13.0);
+    assert_eq!(t.num("D15"), 13.0);
+    assert_eq!(t.num("D2"), 12.0);
+    assert_eq!(t.num("E2"), 20.0);
+    assert_eq!(t.num("E12"), 20.0);
+    assert_eq!(t.get("E5"), Value::Error(CellError::Calc));
+    t.set("F1", "=COUNTIFS($A$1:$A$121,5,$B$1:$B$121,\"good\")");
+    t.set("F2", "=COUNTIFS($A$1:$A$121,2,$B$1:$B$121,\"good\")");
+    assert_eq!(t.num("F1"), 1.0);
+    assert_eq!(t.num("F2"), 12.0);
+}
+
+#[test]
+fn shared_aggregate_filtered_div_applies_shift_identically_to_owned() {
+    let mut t = T::new();
+    for r in 2..=21u32 {
+        t.set(&format!("A{r}"), if r % 5 == 2 { "3" } else { "1" });
+        t.set(&format!("C{r}"), &(r * 10).to_string());
+        t.set(&format!("D{r}"), &(r * 100).to_string());
+        t.set(&format!("E{r}"), &(r * 1000).to_string());
+    }
+    let base = std::sync::Arc::new(gridcraft_formula::parse("AGGREGATE(14,6,C$2:C$21/($A$2:$A$21=3),1)").unwrap());
+    {
+        let sh = t.wb.sheet_mut(0).unwrap();
+        for dc in 0..3i32 {
+            sh.cells.set(CellRef::new(29, 6 + dc as u32), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base), 0, dc)));
+        }
+    }
+    t.set("G31", "=AGGREGATE(14,6,C$2:C$21/($A$2:$A$21=3),1)");
+    t.set("H31", "=AGGREGATE(14,6,D$2:D$21/($A$2:$A$21=3),1)");
+    t.set("I31", "=AGGREGATE(14,6,E$2:E$21/($A$2:$A$21=3),1)");
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!([t.num("G30"), t.num("H30"), t.num("I30")], [170.0, 1700.0, 17000.0]);
+    assert_eq!([t.num("G30"), t.num("H30"), t.num("I30")], [t.num("G31"), t.num("H31"), t.num("I31")]);
+}
+
+#[test]
+fn shared_external_name_ignores_caller_shift() {
+    use gridcraft_model::{ExternalBook, ExternalName, ExternalSheet};
+    let mut t = T::new();
+    let data = ExternalSheet {
+        name: "Data".into(),
+        cells: vec![(c("A1"), Value::Number(10.0)), (c("A2"), Value::Number(20.0)), (c("A3"), Value::Number(30.0))],
+        refresh_error: false,
+        missing: false,
+    };
+    let book2 = ExternalBook {
+        sheets: vec![data],
+        names: vec![ExternalName { name: "RelExt".into(), sheet: None, refers_to: "Data!A1".into() }],
+        ..Default::default()
+    };
+    t.wb.external_books = vec![ExternalBook::default(), book2].into();
+    t.set("B1", "1");
+    t.set("B2", "2");
+    t.set("B3", "3");
+    let base_bare = std::sync::Arc::new(gridcraft_formula::parse("[2]!RelExt").unwrap());
+    let base_plus = std::sync::Arc::new(gridcraft_formula::parse("B1+[2]!RelExt").unwrap());
+    {
+        let sh = t.wb.sheet_mut(0).unwrap();
+        for dr in 0..3i32 {
+            sh.cells.set(CellRef::new(dr as u32, 2), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_bare), dr, 0)));
+            sh.cells.set(CellRef::new(dr as u32, 3), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_plus), dr, 0)));
+        }
+    }
+    t.set("E1", "=[2]!RelExt");
+    t.set("E2", "=[2]!RelExt");
+    t.set("E3", "=[2]!RelExt");
+    t.set("F1", "=B1+[2]!RelExt");
+    t.set("F2", "=B2+[2]!RelExt");
+    t.set("F3", "=B3+[2]!RelExt");
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!([t.num("C1"), t.num("C2"), t.num("C3")], [10.0, 10.0, 10.0]);
+    assert_eq!([t.num("C1"), t.num("C2"), t.num("C3")], [t.num("E1"), t.num("E2"), t.num("E3")]);
+    assert_eq!([t.num("D1"), t.num("D2"), t.num("D3")], [11.0, 12.0, 13.0]);
+    assert_eq!([t.num("D1"), t.num("D2"), t.num("D3")], [t.num("F1"), t.num("F2"), t.num("F3")]);
+}
+
+#[test]
+fn shared_if_family_shifted_off_grid_ref_returns_ref_error() {
+    let mut t = T::new();
+    t.set("A2", "x");
+    t.set("B2", "5");
+    let formulas = [
+        ("C1", "SUMIFS(B2:B5,A2:A5,\"x\")"),
+        ("C2", "COUNTIFS(A2:A5,\"x\")"),
+        ("C3", "MAXIFS(B2:B5,A2:A5,\"x\")"),
+        ("C4", "SUMIF(A2:A5,\"x\",B2:B5)"),
+        ("C5", "COUNTIF(A2:A5,\"x\")"),
+    ];
+    {
+        let sh = t.wb.sheet_mut(0).unwrap();
+        for (at, text) in formulas {
+            let base = std::sync::Arc::new(gridcraft_formula::parse(text).unwrap());
+            sh.cells.set(c(at), Cell::formula(Formula::from_shared(base, -2, 0)));
+        }
+    }
+    t.calc.recalc_all(&mut t.wb);
+    for (at, text) in formulas {
+        assert_eq!(t.get(at), Value::Error(CellError::Ref), "{at}: {text}");
+    }
+}
+
+#[test]
+fn getpivotdata_memoizes_failed_pivot_indexer_per_pass_and_invalidates_across_passes() {
+    use gridcraft_model::{PIVOT_INDEXER, PivotDataCell, PivotField, PivotIndexError, PivotItemRef, PivotTable, PivotValue};
+    use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    // 0 = Stale, 1 = Ok, 2 = Other
+    static MODE: AtomicU8 = AtomicU8::new(0);
+
+    fn test_indexer(_wb: &Workbook, _sheet: usize, pt: &PivotTable) -> Result<Vec<PivotDataCell>, PivotIndexError> {
+        if pt.name != "__w5_memoize_pivot__" {
+            return Err(PivotIndexError::Other("unmatched test pivot".into()));
+        }
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        match MODE.load(Ordering::SeqCst) {
+            0 => Err(PivotIndexError::Stale),
+            1 => Ok(vec![PivotDataCell {
+                row: 1,
+                col: 1,
+                data_field: "Sales".into(),
+                source_col: "Sales".into(),
+                items: vec![PivotItemRef { field: "Region".into(), label: "West".into(), value: Value::text("West") }],
+            }]),
+            _ => Err(PivotIndexError::Other("broken source".into())),
+        }
+    }
+
+    let _ = PIVOT_INDEXER.set(test_indexer);
+    let mut t = T::new();
+    {
+        let sh = t.wb.sheet_mut(0).unwrap();
+        sh.set_value(c("A1"), Value::text("Region"));
+        sh.set_value(c("B1"), Value::text("Sales"));
+        sh.set_value(c("A2"), Value::text("West"));
+        sh.set_value(c("B2"), Value::Number(250.0));
+        let pt = PivotTable {
+            id: 1,
+            name: "__w5_memoize_pivot__".into(),
+            anchor: c("A1"),
+            last_range: Some(gridcraft_core::RangeRef::new(c("A1"), c("B2"))),
+            rows: vec![PivotField { source_col: "Region".into(), ..Default::default() }],
+            values: vec![PivotValue { name: "Sales".into(), source_col: "Sales".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        sh.pivots.push(pt);
+        for r in 0..40u32 {
+            sh.cells.set(CellRef::new(r, 4), Cell::formula(Formula::new(r#"GETPIVOTDATA("Sales",$A$1,"Region","West")"#)));
+        }
+    }
+
+    // Pass 1: Stale error must be memoized across all 40 formulas (1 indexer call, not 40),
+    // leaving `pt.data_index` unpolluted (`None`).
+    MODE.store(0, Ordering::SeqCst);
+    CALLS.store(0, Ordering::SeqCst);
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!(CALLS.load(Ordering::SeqCst), 1, "stale pivot indexer must run at most once per pass");
+    assert!(t.wb.sheet(0).unwrap().pivots[0].data_index.cells().is_none(), "stale failure must not pollute PivotLookup");
+    for r in 0..40u32 {
+        assert_eq!(t.wb.sheet(0).unwrap().value(CellRef::new(r, 4)), Value::Error(CellError::Ref));
+    }
+
+    // Pass 2: Other error must also be memoized once per pass and use sheet-scan fallback.
+    MODE.store(2, Ordering::SeqCst);
+    CALLS.store(0, Ordering::SeqCst);
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!(CALLS.load(Ordering::SeqCst), 1, "Other pivot indexer error must run at most once per pass");
+    assert!(t.wb.sheet(0).unwrap().pivots[0].data_index.cells().is_none());
+    for r in 0..40u32 {
+        assert_eq!(t.wb.sheet(0).unwrap().value(CellRef::new(r, 4)), Value::Number(250.0));
+    }
+
+    // Pass 3: After source/report is fixed, the new pass retries cleanly, populates `data_index`,
+    // and subsequent passes need 0 indexer calls.
+    MODE.store(1, Ordering::SeqCst);
+    CALLS.store(0, Ordering::SeqCst);
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+    assert!(t.wb.sheet(0).unwrap().pivots[0].data_index.cells().is_some());
+    for r in 0..40u32 {
+        assert_eq!(t.wb.sheet(0).unwrap().value(CellRef::new(r, 4)), Value::Number(250.0));
+    }
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!(CALLS.load(Ordering::SeqCst), 1, "populated data_index must skip indexer on later passes");
+}
+
+struct SpFixture {
+    t: T,
+    alice_qty: f64,
+    alice_2026: f64,
+    alice_count_2026: f64,
+    blank_a_qty: f64,
+    zero_a_qty: f64,
+    alice_zero_f: f64,
+    a_eq_zero_rows: f64,
+}
+
+fn build_sp_fixture() -> SpFixture {
+    let mut t = T::new();
+    t.set("A1", "Rep");
+    t.set("B1", "Qty");
+    t.set("C1", "Year1");
+    t.set("D1", "Year2");
+    t.set("E1", "Status");
+    // Anchor used_range to row 120 so rows 101..=120 are trailing empty rows inside A:A / B:B.
+    t.set("M120", "end");
+
+    let mut fx = SpFixture {
+        t,
+        alice_qty: 0.0,
+        alice_2026: 0.0,
+        alice_count_2026: 0.0,
+        blank_a_qty: 0.0,
+        zero_a_qty: 0.0,
+        alice_zero_f: 0.0,
+        a_eq_zero_rows: 20.0, // rows 101..=120 have empty A (equals "" and 0)
+    };
+    for r in 2..=100u32 {
+        let rep = match r % 5 {
+            0 => "Alice",
+            1 => "Bob",
+            2 => "",
+            3 => "0",
+            _ => "Carol",
+        };
+        if !rep.is_empty() {
+            fx.t.set(&format!("A{r}"), rep);
+        }
+        let qty = (r * 3) as f64;
+        fx.t.set(&format!("B{r}"), &qty.to_string());
+        let odd_f = if r % 2 == 1 {
+            fx.t.set(&format!("F{r}"), &qty.to_string());
+            qty
+        } else {
+            0.0
+        };
+        let y1 = if r % 3 == 0 { 2026 } else { 2025 };
+        let y2 = if r % 4 == 0 { 2026 } else { 2024 };
+        fx.t.set(&format!("C{r}"), &y1.to_string());
+        fx.t.set(&format!("D{r}"), &y2.to_string());
+        fx.t.set(&format!("E{r}"), if r % 7 == 0 { "Omitted" } else { "Active" });
+        let yr_weight = f64::from(u8::from(y1 == 2026) + u8::from(y2 == 2026));
+        match rep {
+            "Alice" => {
+                fx.alice_qty += odd_f;
+                fx.alice_2026 += qty * yr_weight;
+                fx.alice_count_2026 += yr_weight;
+                fx.alice_zero_f += f64::from(u8::from(r % 2 == 0));
+            }
+            "" => {
+                fx.blank_a_qty += odd_f;
+                fx.zero_a_qty += odd_f;
+                fx.a_eq_zero_rows += 1.0;
+            }
+            "0" => {
+                fx.zero_a_qty += odd_f;
+                fx.a_eq_zero_rows += 1.0;
+            }
+            _ => {}
+        }
+    }
+    fx
+}
+
+#[test]
+fn sumproduct_full_column_fast_path_preserves_excel_semantics() {
+    let mut fx = build_sp_fixture();
+    let t = &mut fx.t;
+    // Repeat queries so 2nd+ calls build and use TextIndex / CriteriaNumberIndex / empty_eq_index.
+    t.set("H1", r#"=SUMPRODUCT((A:A="Alice")*(F:F))"#);
+    t.set("H2", r#"=SUMPRODUCT((A:A="Alice")*(F:F))"#);
+    t.set("H3", r#"=SUMPRODUCT((A:A="Bob")*(F:F))"#);
+    // Text header in B1 inside `*` must produce #VALUE! even when A1="Rep" != "Alice".
+    t.set("H4", r#"=SUMPRODUCT((A:A="Alice")*(B:B))"#);
+    // Comma-separated value column B:B with text header "Qty" in B1 ignores text as 0 (no #VALUE!).
+    t.set("H5", r#"=SUMPRODUCT(B:B,(A:A="Alice")*((C:C=2026)+(D:D=2026)))"#);
+    t.set("H6", r#"=SUMPRODUCT((A:A="Alice")*((C:C=2026)+(D:D=2026)))"#);
+    // Blank = "" and Blank = 0 must include empty cells (and trailing empty rows for *5!).
+    t.set("H7", r#"=SUMPRODUCT((A:A="")*(F:F))"#);
+    t.set("H8", r#"=SUMPRODUCT((A:A=0)*(F:F))"#);
+    t.set("H9", r#"=SUMPRODUCT((A:A="Alice")*(F:F=0))"#);
+    t.set("H10", r#"=SUMPRODUCT((A:A=0)*5)"#);
+    // Error propagation & mismatched shapes.
+    t.set("H11", r#"=SUMPRODUCT((F:F)*(1/0))"#);
+    t.set("H12", r#"=SUMPRODUCT(A1:A100,B1:B101)"#);
+    // Unary -- coercion.
+    t.set("H13", r#"=SUMPRODUCT(--(A:A="Alice"),F:F)"#);
+    // Unary plus preserves the booleans, which SUMPRODUCT ignores in an array.
+    t.set("H14", r#"=SUMPRODUCT(+(A:A="Alice"),F:F)"#);
+
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!(t.num("H1"), fx.alice_qty);
+    assert_eq!(t.num("H2"), fx.alice_qty);
+    assert_eq!(t.get("H4"), Value::Error(CellError::Value));
+    assert_eq!(t.num("H5"), fx.alice_2026);
+    assert_eq!(t.num("H6"), fx.alice_count_2026);
+    assert_eq!(t.num("H7"), fx.blank_a_qty);
+    assert_eq!(t.num("H8"), fx.zero_a_qty);
+    assert_eq!(t.num("H9"), fx.alice_zero_f);
+    assert_eq!(t.num("H10"), fx.a_eq_zero_rows * 5.0);
+    assert_eq!(t.get("H11"), Value::Error(CellError::Div0));
+    assert_eq!(t.get("H12"), Value::Error(CellError::Value));
+    assert_eq!(t.num("H13"), fx.alice_qty);
+    assert_eq!(t.num("H14"), 0.0);
+
+    // Error cell on a non-matching row (row 3 has A3="0" != "Alice") must still propagate #N/A!
+    t.set("F3", "=NA()");
+    assert_eq!(t.get("H1"), Value::Error(CellError::NA));
+    assert_eq!(t.get("H2"), Value::Error(CellError::NA));
+}
+
+#[test]
+fn filter_full_column_empty_key_fast_path_preserves_excel_semantics() {
+    let mut fx = build_sp_fixture();
+    let t = &mut fx.t;
+    t.set("J1", "ID");
+    t.set("K1", "Flag");
+    t.set("L1", "Out");
+    for r in 2..=120u32 {
+        t.set(&format!("J{r}"), &format!("id{r}"));
+        t.set(&format!("K{r}"), if r % 2 == 0 { "good" } else { "bad" });
+        t.set(&format!("L{r}"), &r.to_string());
+    }
+    // J:J has no empty cells -> FILTER with empty key Z1/Z2 returns #CALC! via empty_eq_positions.
+    t.set("H14", r#"=IFERROR(INDEX(FILTER(L:L,(J:J=Z1)*(K:K="good")),1),"none")"#);
+    t.set("H15", r#"=IFERROR(INDEX(FILTER(L:L,(J:J=Z2)*(K:K="good")),1),"none")"#);
+    // A:A DOES have empty cells (row 2 has A2 empty and E2="Active") -> returns row 2's B2 (6).
+    t.set("H16", r#"=INDEX(FILTER(B:B,(A:A=Z1)*(E:E="Active")),1)"#);
+    t.set("H17", r#"=INDEX(FILTER(B:B,(A:A=Z2)*(E:E="Active")),1)"#);
+
+    t.calc.recalc_all(&mut t.wb);
+    assert_eq!(t.get("H14"), Value::text("none"));
+    assert_eq!(t.get("H15"), Value::text("none"));
+    assert_eq!(t.num("H16"), 6.0);
+    assert_eq!(t.num("H17"), 6.0);
 }

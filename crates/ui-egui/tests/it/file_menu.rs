@@ -114,7 +114,8 @@ fn escape_leaves_file_fields_before_closing_the_view() {
         let copies = h.state().printing.settings.copies;
 
         h.key_press(egui::Key::Escape);
-        h.run_steps(3);
+        // With GridCraft's frame input, as the shells give it: Escape leaves the framework's fields too.
+        crate::support::frames(&mut h, 3);
         assert_eq!(page(&h), Some(page_id), "Esc in {label} keeps File open");
         assert!(!h.ctx.text_edit_focused(), "Esc leaves {label}");
         assert_eq!(h.state().session.active().unwrap().revision, revision, "Esc does not commit {label}");
@@ -125,7 +126,8 @@ fn escape_leaves_file_fields_before_closing_the_view() {
         }
 
         h.key_press(egui::Key::Escape);
-        h.run_steps(3);
+        // With GridCraft's frame input, as the shells give it: Escape leaves the framework's fields too.
+        crate::support::frames(&mut h, 3);
         assert_eq!(page(&h), None, "the next Esc returns to the sheet");
     }
 }
@@ -565,6 +567,21 @@ fn click_commands(h: &mut egui_kittest::Harness<'static, SheetApp>, label: &str)
     step_commands(h)
 }
 
+/// A close the app lets through (`sent` is what it answered). On macOS craft-libs' close path
+/// (`ui-contract` `runtime::windows::logic`) cancels egui's close and quits through
+/// `-[NSApplication terminate:]` instead, to avoid AppKit's Touch Bar crash: the `CancelClose`
+/// is no hold, as nothing is asked and nothing is unsaved. Elsewhere egui closes the window.
+fn assert_close_let_through(h: &egui_kittest::Harness<'static, SheetApp>, sent: &[egui::ViewportCommand], what: &str) {
+    if cfg!(target_os = "macos") {
+        assert!(sent.contains(&egui::ViewportCommand::CancelClose), "{what}: the platform quit takes the close: {sent:?}");
+        let app = h.state();
+        assert!(app.dialog.is_none(), "{what}: nothing is asked");
+        assert!(app.editor.is_none() && !app.session.documents().iter().any(|d| d.is_dirty()), "{what}: nothing is unsaved");
+    } else {
+        assert!(!sent.contains(&egui::ViewportCommand::CancelClose), "{what}: {sent:?}");
+    }
+}
+
 #[test]
 fn closing_the_window_asks_about_every_unsaved_workbook() {
     let mut h = harness(Services::default());
@@ -589,7 +606,7 @@ fn closing_the_window_asks_about_every_unsaved_workbook() {
     let sent = click_commands(&mut h, "Don't Save");
     assert!(sent.contains(&egui::ViewportCommand::Close), "once every workbook is answered the window closes: {sent:?}");
     let sent = request_window_close(&mut h);
-    assert!(!sent.contains(&egui::ViewportCommand::CancelClose), "the close that follows is let through");
+    assert_close_let_through(&h, &sent, "the close that follows is let through");
 }
 
 #[test]
@@ -601,7 +618,7 @@ fn closing_the_window_can_save_first_and_a_saved_workbook_closes_at_once() {
     h.state_mut().run("file.save", serde_json::json!({"path": &path})).unwrap();
     h.run_steps(2);
     let sent = request_window_close(&mut h);
-    assert!(!sent.contains(&egui::ViewportCommand::CancelClose), "nothing unsaved: the window just closes");
+    assert_close_let_through(&h, &sent, "nothing unsaved: the window just closes");
     assert!(h.state().dialog.is_none());
 
     // A cell still being typed is an unsaved change too.

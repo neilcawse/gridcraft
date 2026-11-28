@@ -60,6 +60,29 @@ const MAX_ITEMS: usize = 1_048_576;
 /// Most slicers read from one workbook.
 const MAX_SLICERS: usize = 4096;
 
+/// Whether `ext`, an `<ext>` of a sheet's `<extLst>` (`sheet`) or of the workbook's, is the `x15`
+/// table slicer list that [`SlicerWriter::sheet_part`] or [`SlicerWriter::finish`] writes from the
+/// model: its URI and one list of relationship ids, nothing else, each id naming a slicer part
+/// (sheet) or slicer cache (workbook) relationship of its owner (`names_part`). Those parts are
+/// what the reader reads, so the list is written again for what they hold. Other content in it, or
+/// an id naming no such relationship, is not regenerated; nor is an empty list, which it never
+/// writes.
+pub(crate) fn is_regenerated_ext(ext: &El, sheet: bool, names_part: impl Fn(&str) -> bool) -> bool {
+    let (uri, list, item) =
+        if sheet { (EXT_SHEET_TABLE_SLICERS, "slicerList", "slicer") } else { (EXT_WB_TABLE_SLICER_CACHES, "slicerCaches", "slicerCache") };
+    let blank = |e: &El| e.text.trim().is_empty();
+    let [l] = ext.children.as_slice() else { return false };
+    matches!(ext.attrs.as_slice(), [(k, u)] if k == "uri" && u.trim().eq_ignore_ascii_case(uri))
+        && blank(ext)
+        && l.name == list
+        && l.attrs.is_empty()
+        && blank(l)
+        && !l.children.is_empty()
+        && l.children
+            .iter()
+            .all(|i| i.name == item && i.children.is_empty() && blank(i) && matches!(i.attrs.as_slice(), [(k, id)] if k == "id" && names_part(id)))
+}
+
 // ---------------------------------------------------------------- reading
 
 /// Slicer pieces found while reading sheets.

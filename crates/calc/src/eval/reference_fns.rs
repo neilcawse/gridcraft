@@ -92,12 +92,17 @@ impl<'h> Evaluator<'h> {
         };
         match gridcraft_formula::parse(&text) {
             Ok(Expr::Ref(_)) if !a1_ok => err(CellError::Ref),
-            Ok(e @ (Expr::Ref(_) | Expr::Name(_) | Expr::Struct(_))) => match self.eval(&e) {
-                // INDIRECT reads another workbook only while it is open (Microsoft's INDIRECT
-                // documentation): `#REF!` for a linked one.
-                Ev::R(a) if a.iter().all(|x| linked_parts(x.sheet).is_none()) => Ev::R(a),
-                _ => err(CellError::Ref),
-            },
+            Ok(e @ (Expr::Ref(_) | Expr::Name(_) | Expr::Struct(_))) => {
+                let saved_shift = std::mem::take(&mut self.shift);
+                let res = match self.eval(&e) {
+                    // INDIRECT reads another workbook only while it is open (Microsoft's INDIRECT
+                    // documentation): `#REF!` for a linked one.
+                    Ev::R(a) if a.iter().all(|x| linked_parts(x.sheet).is_none()) => Ev::R(a),
+                    _ => err(CellError::Ref),
+                };
+                self.shift = saved_shift;
+                res
+            }
             _ => err(CellError::Ref),
         }
     }
@@ -302,6 +307,118 @@ impl<'h> Evaluator<'h> {
             return self.builtin_with_pre("XLOOKUP", args, vec![(0, ev0), (1, ev1), (2, ev2)]);
         }
         self.builtin("XLOOKUP", args)
+    }
+
+    /// Indexed fast path for `FILTER(array, include, [if_empty])` when `include` is one or more
+    /// `*`-multiplied equality clauses (`(col1=k1)*(col2=k2)...`) over column ranges: uses the
+    /// cached array's `TextIndex` / `CriteriaNumberIndex` to inspect only matching rows instead of
+    /// allocating and scanning full-column boolean/numeric arrays per row.
+    pub(super) fn filter_call(&mut self, args: &[Expr]) -> Ev {
+        if !(2..=3).contains(&args.len()) {
+            return self.builtin("FILTER", args);
+        }
+        let mut eq_clauses: Vec<(&Expr, &Expr)> = Vec::new();
+        let mut stack: Vec<&Expr> = vec![&args[1]];
+        let mut ok_shape = true;
+        while let Some(mut node) = stack.pop() {
+            while let Expr::Paren(inner) = node {
+                node = inner;
+            }
+            match node {
+                Expr::Binary(gridcraft_formula::BinOp::Mul, a, b) => {
+                    stack.push(b);
+                    stack.push(a);
+                }
+                Expr::Binary(gridcraft_formula::BinOp::Eq, a, b) => {
+                    eq_clauses.push((a, b));
+                }
+                _ => {
+                    ok_shape = false;
+                    break;
+                }
+            }
+        }
+        if !ok_shape || eq_clauses.is_empty() {
+            return self.builtin("FILTER", args);
+        }
+        let ev0 = self.eval(&args[0]);
+        let v0 = self.deref(ev0);
+        let Value::Array(src) = &v0 else {
+            return self.builtin_with_pre("FILTER", args, vec![(0, Ev::V(v0))]);
+        };
+        if src.rows < 64 {
+            return self.builtin_with_pre("FILTER", args, vec![(0, Ev::V(v0))]);
+        }
+        let mut pairs: Vec<(Arc<Array>, Value)> = Vec::with_capacity(eq_clauses.len());
+        for &(lhs_e, rhs_e) in &eq_clauses {
+            let lv = self.value(lhs_e);
+            let rv = self.value(rhs_e);
+            let (col_arr, key) = match (lv, rv) {
+                (Value::Array(arr), key) if !matches!(key, Value::Array(_) | Value::Error(_)) => (arr, key),
+                (key, Value::Array(arr)) if !matches!(key, Value::Array(_) | Value::Error(_)) => (arr, key),
+                _ => return self.builtin_with_pre("FILTER", args, vec![(0, Ev::V(v0))]),
+            };
+            if col_arr.cols != 1 || col_arr.rows != src.rows || col_arr.has_errors() {
+                return self.builtin_with_pre("FILTER", args, vec![(0, Ev::V(v0))]);
+            }
+            pairs.push((col_arr, key));
+        }
+        let mut best: Option<(usize, &[u32], bool)> = None;
+        for (idx, (col_arr, key)) in pairs.iter().enumerate() {
+            let (pos_opt, needs_verify) = match key {
+                Value::Text(t) if !t.is_empty() => (col_arr.text_positions(t), false),
+                Value::Number(n) if *n != 0.0 && n.is_finite() => (col_arr.criteria_number_positions(*n), true),
+                Value::Empty => (col_arr.empty_eq_positions(), false),
+                Value::Text(_) | Value::Number(_) | Value::Bool(false) => (col_arr.empty_eq_positions(), true),
+                _ => (None, false),
+            };
+            if let Some(pos) = pos_opt
+                && best.as_ref().is_none_or(|(_, prev, _)| pos.len() < prev.len())
+            {
+                best = Some((idx, pos, needs_verify));
+                if pos.is_empty() {
+                    break;
+                }
+            }
+        }
+        let Some((best_idx, candidates, best_needs_verify)) = best else {
+            return self.builtin_with_pre("FILTER", args, vec![(0, Ev::V(v0))]);
+        };
+        let mut matched_rows: Vec<usize> = Vec::with_capacity(candidates.len().min(64));
+        'cand: for &pos in candidates {
+            let r = pos as usize;
+            if best_needs_verify {
+                let v = pairs[best_idx].0.data.get(r).unwrap_or(&Value::Empty);
+                if gridcraft_core::compare(v, &pairs[best_idx].1) != std::cmp::Ordering::Equal {
+                    continue 'cand;
+                }
+            }
+            for (pi, (col_arr, key)) in pairs.iter().enumerate() {
+                if pi != best_idx {
+                    let v = col_arr.data.get(r).unwrap_or(&Value::Empty);
+                    if gridcraft_core::compare(v, key) != std::cmp::Ordering::Equal {
+                        continue 'cand;
+                    }
+                }
+            }
+            matched_rows.push(r);
+        }
+        if matched_rows.is_empty() {
+            return match args.get(2) {
+                Some(e) if !matches!(e, Expr::Missing) => Ev::V(self.value(e)),
+                _ => err(CellError::Calc),
+            };
+        }
+        let cols = src.cols;
+        let mut out = Vec::with_capacity(matched_rows.len().saturating_mul(cols));
+        for r in matched_rows {
+            let base = r * cols;
+            if let Some(slice) = src.data.get(base..base + cols) {
+                out.extend_from_slice(slice);
+            }
+        }
+        let rows = out.len() / cols.max(1);
+        Ev::V(Array::new(rows, cols, out).map(Value::from).unwrap_or(Value::Error(CellError::Value)))
     }
 
     /// `VLOOKUP` and `HLOOKUP` over a single-area reference: evaluates only the key column (or
@@ -667,7 +784,7 @@ impl<'h> Evaluator<'h> {
                                 s.is_some_and(|s| if skip_hidden { s.is_row_hidden(c.row) } else { skip_filtered && s.is_row_filtered(c.row) });
                             let nested = skip_nested
                                 && s.and_then(|s| s.cell(c)).and_then(|cell| cell.formula.as_ref()).is_some_and(|f| {
-                                    let u = f.text.to_ascii_uppercase();
+                                    let u = f.text().to_ascii_uppercase();
                                     u.contains("SUBTOTAL(") || u.contains("AGGREGATE(")
                                 });
                             (hidden, nested)

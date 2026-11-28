@@ -300,3 +300,234 @@ fn a_deleted_automatic_title_stays_deleted() {
     let auto = read(&chart_xml(false, &pie, ""));
     assert_eq!(read(&crate::chart::write_chart(&wb, 0, &auto, "")).title, None);
 }
+
+#[test]
+fn dpt_scheme_lum_mod_off_and_outlines_round_trip() {
+    use gridcraft_model::Color;
+
+    let dpts = r#"
+      <c:dPt><c:idx val="0"/><c:spPr>
+        <a:solidFill><a:schemeClr val="accent2"><a:lumMod val="40000"/><a:lumOff val="60000"/></a:schemeClr></a:solidFill>
+        <a:ln w="19050"><a:solidFill><a:schemeClr val="accent2"/></a:solidFill></a:ln>
+      </c:spPr></c:dPt>
+      <c:dPt><c:idx val="1"/><c:spPr>
+        <a:solidFill><a:srgbClr val="804020"><a:shade val="75000"/></a:srgbClr></a:solidFill>
+        <a:ln w="12700"><a:solidFill><a:srgbClr val="112233"/></a:solidFill></a:ln>
+      </c:spPr></c:dPt>
+      <c:dPt><c:idx val="2"/><c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr></c:dPt>
+    "#;
+    let ser_xml = format!(
+        r#"<c:ser><c:idx val="0"/><c:order val="0"/>{dpts}<c:val><c:numLit><c:ptCount val="3"/><c:pt idx="0"><c:v>8</c:v></c:pt><c:pt idx="1"><c:v>7</c:v></c:pt><c:pt idx="2"><c:v>5</c:v></c:pt></c:numLit></c:val></c:ser>"#
+    );
+    let c = read(&chart_xml(false, &format!("<c:doughnutChart>{ser_xml}<c:holeSize val=\"65\"/></c:doughnutChart>"), ""));
+    let pts = &c.series[0].points;
+    assert_eq!(pts.len(), 3);
+    assert_eq!(pts[0].fill, Some(Color::Theme(5, 600)));
+    assert_eq!(pts[0].line_color, Some(Color::Theme(5, 0)));
+    assert_eq!(pts[0].line_width, Some(1.5));
+    assert!(matches!(pts[1].fill, Some(Color::Rgb(v)) if v != 0x804020), "shade applied to srgbClr");
+    assert_eq!(pts[1].line_color, Some(Color::Rgb(0x112233)));
+    assert_eq!(pts[1].line_width, Some(1.0));
+    assert!(pts[2].no_fill && pts[2].no_line);
+
+    let wb = Workbook::new();
+    let written = crate::chart::write_chart(&wb, 0, &c, "Book.xlsx");
+    let back = read(&written);
+    assert_eq!(back.series[0].points.len(), 3);
+    assert_eq!(back.series[0].points[0].line_width, Some(1.5));
+    assert!(back.series[0].points[2].no_fill && back.series[0].points[2].no_line);
+    assert_eq!(back.series[0].points[0].fill.and_then(|x| x.resolve(&wb.theme)), Color::Theme(5, 600).resolve(&wb.theme));
+}
+
+#[test]
+fn dlbls_percent_cat_leader_delete_and_per_point_overrides_round_trip() {
+    use gridcraft_model::DataLabelPos;
+
+    let ser0 = r#"<c:ser><c:idx val="0"/><c:order val="0"/>
+      <c:dLbls>
+        <c:dLbl><c:idx val="1"/><c:delete val="1"/></c:dLbl>
+        <c:dLbl><c:idx val="2"/><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Top</a:t></a:r></a:p></c:rich></c:tx></c:dLbl>
+        <c:numFmt formatCode="[$-409]0.0%;[$-409];[$-409];[$-409]" sourceLinked="0"/>
+        <c:dLblPos val="bestFit"/>
+        <c:showVal val="0"/><c:showCatName val="1"/><c:showPercent val="1"/><c:showLeaderLines val="1"/>
+        <c:separator> | </c:separator>
+      </c:dLbls>
+      <c:val><c:numLit><c:ptCount val="3"/><c:pt idx="0"><c:v>4</c:v></c:pt><c:pt idx="1"><c:v>3</c:v></c:pt><c:pt idx="2"><c:v>3</c:v></c:pt></c:numLit></c:val>
+    </c:ser>"#;
+    let c = read(&chart_xml(false, &format!("<c:pieChart>{ser0}</c:pieChart>"), ""));
+    assert!(c.data_labels);
+    let dl = c.series[0].data_labels.as_ref().unwrap();
+    assert!(!dl.show_val && dl.show_percent && dl.show_cat_name && dl.show_leader_lines);
+    assert_eq!(dl.pos, DataLabelPos::BestFit);
+    assert_eq!(dl.separator.as_deref(), Some(" | "));
+    assert_eq!(dl.num_fmt.as_deref(), Some("[$-409]0.0%;[$-409];[$-409];[$-409]"));
+    assert_eq!(dl.points.len(), 2);
+    assert!(dl.points[0].delete && dl.points[0].idx == 1);
+    assert_eq!(dl.points[1].text.as_deref(), Some("Top"));
+
+    let written = crate::chart::write_chart(&Workbook::new(), 0, &c, "Book.xlsx");
+    let back = read(&written);
+    assert_eq!(back.series[0].data_labels, c.series[0].data_labels);
+
+    // Series-level <c:dLbls><c:delete val="1"/></c:dLbls> overrides group showVal="1".
+    let deleted = r#"<c:doughnutChart>
+      <c:ser><c:idx val="0"/><c:order val="0"/><c:dLbls><c:delete val="1"/></c:dLbls>
+        <c:val><c:numLit><c:ptCount val="2"/><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numLit></c:val>
+      </c:ser>
+      <c:dLbls><c:showVal val="1"/></c:dLbls>
+    </c:doughnutChart>"#;
+    let cd = read(&chart_xml(false, deleted, ""));
+    assert!(!cd.data_labels);
+    assert!(cd.series[0].data_labels.as_ref().unwrap().delete);
+}
+
+#[test]
+fn chart_space_sp_pr_no_fill_and_border_round_trip() {
+    use gridcraft_model::Color;
+
+    let make = |sp: &str| {
+        format!(
+            r#"<c:chartSpace {NS}><c:chart><c:plotArea><c:pieChart><c:ser><c:idx val="0"/><c:order val="0"/><c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>5</c:v></c:pt></c:numLit></c:val></c:ser></c:pieChart></c:plotArea></c:chart>{sp}</c:chartSpace>"#
+        )
+    };
+    let wb = Workbook::new();
+
+    let c_none = read(&make("<c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr>"));
+    assert!(c_none.area_style.no_fill && c_none.area_style.no_line);
+    let back_none = read(&crate::chart::write_chart(&wb, 0, &c_none, ""));
+    assert!(back_none.area_style.no_fill && back_none.area_style.no_line);
+
+    let c_borderless = read(&make("<c:spPr><a:ln><a:noFill/></a:ln></c:spPr>"));
+    assert!(!c_borderless.area_style.no_fill && c_borderless.area_style.no_line);
+
+    let c_styled = read(&make(
+        r#"<c:spPr><a:solidFill><a:srgbClr val="F0F4F8"/></a:solidFill><a:ln w="25400"><a:solidFill><a:srgbClr val="336699"/></a:solidFill></a:ln></c:spPr>"#,
+    ));
+    assert_eq!(c_styled.area_style.fill, Some(Color::Rgb(0xF0F4F8)));
+    assert_eq!(c_styled.area_style.line_color, Some(Color::Rgb(0x336699)));
+    assert_eq!(c_styled.area_style.line_width, Some(2.0));
+    let back_styled = read(&crate::chart::write_chart(&wb, 0, &c_styled, ""));
+    assert_eq!(back_styled.area_style, c_styled.area_style);
+}
+
+#[test]
+fn empty_chart_title_without_tx_does_not_fabricate_placeholder() {
+    // Excel blank chart template: <c:title> carries formatting only (no <c:tx>) with 0 series.
+    let xml = format!(
+        r#"<c:chartSpace {NS}><c:chart>
+          <c:title><c:overlay val="0"/><c:txPr><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr lang="en-US"/></a:p></c:txPr></c:title>
+          <c:autoTitleDeleted val="0"/>
+          <c:plotArea><c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:axId val="1"/><c:axId val="2"/></c:barChart>
+          <c:catAx><c:axId val="1"/><c:scaling/><c:axPos val="b"/><c:crossAx val="2"/></c:catAx>
+          <c:valAx><c:axId val="2"/><c:scaling/><c:axPos val="l"/><c:crossAx val="1"/></c:valAx></c:plotArea>
+        </c:chart><c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr></c:chartSpace>"#
+    );
+    let c = read(&xml);
+    assert_eq!(c.title, None, "empty <c:title> without <c:tx> must not fabricate \"Chart Title\"");
+    assert!(c.series.is_empty());
+    assert!(c.area_style.no_fill && c.area_style.no_line);
+
+    // ChartEx empty <cx:title> without <cx:tx> also yields None rather than "Chart Title".
+    let cx_xml = r#"<cx:chartSpace xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+      <cx:chartData><cx:data id="0"/></cx:chartData>
+      <cx:chart><cx:title/><cx:plotArea><cx:plotAreaRegion><cx:series layoutId="waterfall"><cx:dataId val="0"/></cx:series></cx:plotAreaRegion></cx:plotArea></cx:chart>
+    </cx:chartSpace>"#;
+    let cx = crate::chartex::read_chartex(&crate::xml::parse(cx_xml.as_bytes()).unwrap()).unwrap();
+    assert_eq!(cx.title, None);
+}
+
+#[test]
+fn vary_colors_on_single_series_column_chart_populates_point_palette() {
+    use gridcraft_model::Color;
+
+    let plot = r#"<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:varyColors val="1"/>
+      <c:ser><c:idx val="0"/><c:order val="0"/>
+        <c:val><c:numLit><c:ptCount val="4"/>
+          <c:pt idx="0"><c:v>2</c:v></c:pt><c:pt idx="1"><c:v>4</c:v></c:pt>
+          <c:pt idx="2"><c:v>6</c:v></c:pt><c:pt idx="3"><c:v>8</c:v></c:pt>
+        </c:numLit></c:val>
+      </c:ser>
+      <c:axId val="1"/><c:axId val="2"/>
+    </c:barChart>"#;
+    let c = read(&chart_xml(false, plot, ""));
+    assert_eq!(c.series[0].points.len(), 4);
+    assert_eq!(c.series[0].points[0].fill, Some(Color::Theme(4, 0)));
+    assert_eq!(c.series[0].points[1].fill, Some(Color::Theme(5, 0)));
+    assert_eq!(c.series[0].points[2].fill, Some(Color::Theme(6, 0)));
+    assert_eq!(c.series[0].points[3].fill, Some(Color::Theme(7, 0)));
+}
+
+#[test]
+fn series_dlbls_overlays_group_dlbls_preserving_inherited_fields() {
+    use gridcraft_model::DataLabelPos;
+
+    let plot = r#"<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>
+      <c:ser><c:idx val="0"/><c:order val="0"/>
+        <c:dLbls>
+          <c:numFmt formatCode="0.0%" sourceLinked="0"/>
+          <c:dLbl><c:idx val="1"/><c:delete val="1"/></c:dLbl>
+        </c:dLbls>
+        <c:val><c:numLit><c:ptCount val="2"/><c:pt idx="0"><c:v>0.25</c:v></c:pt><c:pt idx="1"><c:v>0.75</c:v></c:pt></c:numLit></c:val>
+      </c:ser>
+      <c:dLbls><c:dLblPos val="inEnd"/><c:showVal val="1"/><c:showCatName val="1"/></c:dLbls>
+      <c:axId val="1"/><c:axId val="2"/>
+    </c:barChart>"#;
+    let c = read(&chart_xml(false, plot, ""));
+    let dl = c.series[0].data_labels.as_ref().expect("merged data labels");
+    assert!(dl.show_val, "must inherit showVal from group <c:dLbls>");
+    assert!(dl.show_cat_name, "must inherit showCatName from group <c:dLbls>");
+    assert_eq!(dl.pos, DataLabelPos::InsideEnd, "must inherit dLblPos from group <c:dLbls>");
+    assert_eq!(dl.num_fmt.as_deref(), Some("0.0%"), "must overlay series numFmt");
+    assert_eq!(dl.points.len(), 1);
+    assert!(dl.points[0].delete && dl.points[0].idx == 1);
+}
+
+#[test]
+fn drawing_shape_honors_lum_mod_off_left_indent_and_line_breaks() {
+    use gridcraft_model::{Color, Workbook};
+
+    let drawing = r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+      <xdr:twoCellAnchor>
+        <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+        <xdr:to><xdr:col>4</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>5</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+        <xdr:sp>
+          <xdr:nvSpPr><xdr:cNvPr id="2" name="Callout"/><xdr:cNvSpPr txBox="1"/></xdr:nvSpPr>
+          <xdr:spPr>
+            <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+            <a:solidFill><a:schemeClr val="tx2"><a:lumMod val="20000"/><a:lumOff val="80000"/></a:schemeClr></a:solidFill>
+            <a:ln w="9525"><a:solidFill><a:schemeClr val="tx2"/></a:solidFill></a:ln>
+          </xdr:spPr>
+          <xdr:txBody>
+            <a:bodyPr wrap="square" anchor="t"/>
+            <a:p>
+              <a:pPr lvl="1" algn="l"/>
+              <a:r><a:rPr sz="1100"/><a:t>Line A</a:t></a:r>
+              <a:br/>
+              <a:fld id="{1111}" type="TxLink"><a:t>Line B</a:t></a:fld>
+            </a:p>
+          </xdr:txBody>
+        </xdr:sp>
+        <xdr:clientData/>
+      </xdr:twoCellAnchor>
+    </xdr:wsDr>"#;
+    let srels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#;
+    let bytes = super::minimal(
+        r#"<sheetData/><drawing r:id="rId1"/>"#,
+        &[("xl/worksheets/_rels/sheet1.xml.rels", srels), ("xl/drawings/drawing1.xml", drawing)],
+        "",
+        "",
+    );
+    let (wb, _) = crate::read_xlsx(&bytes).unwrap();
+    let sp = &wb.sheets[0].shapes[0];
+    assert_eq!(sp.fill, Color::Theme(3, 800), "tx2 with lumMod=20000 lumOff=80000 must carry +800 tint");
+    assert_eq!(sp.line, Color::Theme(3, 0));
+    assert_eq!(sp.text, "Line A\nLine B", "<a:br/> between <a:r> and <a:fld> must emit newline");
+    assert!((sp.format.left_indent - 27.0).abs() < 0.01, "lvl=1 must set 27pt indent");
+
+    // Round-trip preserves left_indent via marL and tinted fill color.
+    let saved = crate::write_xlsx(&wb).unwrap();
+    let (back, _) = crate::read_xlsx(&saved).unwrap();
+    let sp2 = &back.sheets[0].shapes[0];
+    assert!((sp2.format.left_indent - 27.0).abs() < 0.05);
+    assert_eq!(sp2.fill.resolve(&Workbook::new().theme), sp.fill.resolve(&wb.theme));
+}

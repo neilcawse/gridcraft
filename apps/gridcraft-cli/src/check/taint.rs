@@ -33,11 +33,11 @@ impl Source {
     pub(super) const ALL: [Source; 3] = [Source::Volatile, Source::Solver, Source::Foreign];
 
     /// Why `e` is itself such a source (what it reads is not considered).
-    fn reason(self, e: &Expr, foreign: &Foreign<'_>, defined: &HashSet<String>) -> Option<&'static str> {
+    fn reason(self, e: &Expr, foreign: &Foreign<'_>, defined: &HashSet<String>, shift: (i32, i32)) -> Option<&'static str> {
         match self {
             Source::Volatile => calls_volatile(e).then_some("volatile"),
             Source::Solver => calls(e, |n, _| SOLVERS.contains(&n)).then_some("solver"),
-            Source::Foreign => foreign.reason(e, defined),
+            Source::Foreign => foreign.reason(e, defined, shift),
         }
     }
 }
@@ -301,13 +301,25 @@ impl<'a> Scan<'a> {
         let mut seeds: [Vec<(Key, &'static str)>; Source::ALL.len()] = std::array::from_fn(|_| Vec::new());
         for (si, sh) in wb.sheets.iter().enumerate() {
             for (c, cell) in sh.cells.iter() {
-                let Some(e) = cell.formula.as_ref().and_then(|f| f.expr_arc()) else { continue };
+                let Some(f) = &cell.formula else { continue };
+                let (parsed, dr, dc);
+                let e = if let Some((base, r, col)) = f.expr_shifted() {
+                    (dr, dc) = (r, col);
+                    base.as_ref()
+                } else {
+                    (dr, dc) = (0, 0);
+                    let Some(expr) = f.expr() else { continue };
+                    parsed = expr;
+                    &parsed
+                };
+                // Shifting only changes references, not function names, literal arguments,
+                // or defined names. Foreign sheet references check their shifted bounds.
                 for (s, seed) in Source::ALL.iter().zip(seeds.iter_mut()) {
-                    if let Some(why) = s.reason(&e, &foreign, &names.upper) {
+                    if let Some(why) = s.reason(e, &foreign, &names.upper, (dr, dc)) {
                         seed.push(((si, c), why));
                     }
                 }
-                let used = names.used_by(si, &e);
+                let used = names.used_by(si, e);
                 if !used.is_empty() {
                     uses.insert((si, c), used);
                 }
@@ -367,7 +379,7 @@ impl<'a> Scan<'a> {
         let nodes = &self.names.nodes;
         let mut tainted: Vec<bool> = nodes
             .iter()
-            .map(|n| source.is_some_and(|s| n.expr.as_ref().is_some_and(|e| s.reason(e, &self.foreign, &self.names.upper).is_some())))
+            .map(|n| source.is_some_and(|s| n.expr.as_ref().is_some_and(|e| s.reason(e, &self.foreign, &self.names.upper, (0, 0)).is_some())))
             .collect();
         let mut queue: Vec<usize> = (0..nodes.len()).filter(|&i| tainted.get(i).copied().unwrap_or(false)).collect();
         let mut done = vec![false; nodes.len()];

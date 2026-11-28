@@ -1,9 +1,9 @@
-//! PivotTables whose cache GridCraft can't rebuild from the model (a source in another workbook,
-//! or a defined name holding a formula) go back as the file had them while they are unchanged:
-//! the PivotTable part, the cache definition and records, and the cache's link to the other
-//! workbook. A cache shared by several PivotTables is written once, every `cacheId` and
-//! `x14:pivotCacheId` is unique and agrees, and the number and differential formats they use
-//! are in the written styles under the ids they name.
+//! PivotTables whose cache GridCraft can't rebuild from the model (a defined name holding a
+//! formula, or missing) go back as the file had them while they are unchanged but for their name
+//! and place: the PivotTable part and the cache definition and records. A cache shared by several
+//! PivotTables is written once, every `cacheId` and `x14:pivotCacheId` is unique and agrees, and
+//! the number and differential formats they use are in the written styles under the ids they
+//! name. PivotTables over another workbook are kept unmodelled instead (`ExternalPivot`).
 
 use super::*;
 
@@ -22,18 +22,17 @@ fn cache(source: &str) -> String {
 }
 
 const RECORDS: &str = r#"<?xml version="1.0"?><pivotCacheRecords xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="2"><r><x v="0"/><n v="1"/></r><r><x v="1"/><n v="2"/></r></pivotCacheRecords>"#;
-const OTHER_BOOK: &str = "file:///C:/data/Other.xlsx";
 /// Custom number format 200 (`0.000`); differential formats 0 (italic) and 1 (bold): the tables
 /// use 1.
 const STYLES: &str = r#"<?xml version="1.0"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="200" formatCode="0.000"/></numFmts><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="1"><xf/></cellXfs><dxfs count="2"><dxf><font><i/></font></dxf><dxf><font><b/></font></dxf></dxfs></styleSheet>"#;
 
 /// Sheet "Data" holding K/V in A1:B3 and two PivotTables (D3, G3) sharing one cache whose source
-/// is `source` (a `<worksheetSource>`); `external` gives the cache a link to another workbook.
-fn package(source: &str, external: bool) -> Vec<u8> {
-    package_with_cache(&cache(source), external, "OFFSET(Data!$A$1,0,0,3,2)")
+/// is `source` (a `<worksheetSource>`).
+fn package(source: &str) -> Vec<u8> {
+    package_with_cache(&cache(source), "OFFSET(Data!$A$1,0,0,3,2)")
 }
 
-fn package_with_cache(cache_xml: &str, external: bool, formula: &str) -> Vec<u8> {
+fn package_with_cache(cache_xml: &str, formula: &str) -> Vec<u8> {
     let types = format!(
         r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/xl/workbook.xml" ContentType="{CT_PREFIX}.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="{CT_PREFIX}.worksheet+xml"/><Override PartName="/xl/pivotTables/pivotTable1.xml" ContentType="{CT_PREFIX}.pivotTable+xml"/><Override PartName="/xl/pivotTables/pivotTable2.xml" ContentType="{CT_PREFIX}.pivotTable+xml"/><Override PartName="/xl/pivotCache/pivotCacheDefinition1.xml" ContentType="{CT_PREFIX}.pivotCacheDefinition+xml"/><Override PartName="/xl/pivotCache/pivotCacheRecords1.xml" ContentType="{CT_PREFIX}.pivotCacheRecords+xml"/></Types>"#
     );
@@ -63,11 +62,7 @@ fn package_with_cache(cache_xml: &str, external: bool, formula: &str) -> Vec<u8>
     ]);
     let sheet_rels = rels(&[("rId1", "pivotTable", "../pivotTables/pivotTable1.xml"), ("rId2", "pivotTable", "../pivotTables/pivotTable2.xml")]);
     let table_rels = rels(&[("rId1", "pivotCacheDefinition", "../pivotCache/pivotCacheDefinition1.xml")]);
-    let mut cache_rel = vec![("rId1", "pivotCacheRecords", "pivotCacheRecords1.xml")];
-    if external {
-        cache_rel.push(("rId2", "externalLinkPath", OTHER_BOOK));
-    }
-    let cache_rels = rels(&cache_rel);
+    let cache_rels = rels(&[("rId1", "pivotCacheRecords", "pivotCacheRecords1.xml")]);
     let (t1, t2) = (table("P1", "D3:E6"), table("P2", "G3:H6"));
     make_zip(&[
         ("[Content_Types].xml", types.as_bytes()),
@@ -162,7 +157,7 @@ fn table_part(u: &Unpacked, name: &str) -> String {
 
 #[test]
 fn pivot_tables_on_a_named_formula_source_are_kept() {
-    let (wb, report) = read_xlsx(&package(r#"<worksheetSource name="rData"/>"#, false)).unwrap();
+    let (wb, report) = read_xlsx(&package(r#"<worksheetSource name="rData"/>"#)).unwrap();
     assert_eq!(wb.sheet(0).unwrap().pivots.len(), 2, "{:?}", report.warnings);
     let out = write_xlsx(&wb).unwrap();
     let u = Unpacked::new(&out);
@@ -189,23 +184,9 @@ fn pivot_tables_on_a_named_formula_source_are_kept() {
 }
 
 #[test]
-fn pivot_cache_keeps_its_link_to_another_workbook() {
-    let source = format!(r#"<worksheetSource xmlns:link="{NS_R}" ref="A1:B3" sheet="Data" link:id="rId2"/>"#);
-    let (wb, _) = read_xlsx(&package(&source, true)).unwrap();
-    assert!(wb.sheets[0].pivots.iter().all(|pt| pt.source.contains("[")), "the aliased relationship must resolve as external");
-    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
-    u.assert_valid();
-    let pivots = written_pivots(&u);
-    assert_eq!(pivots.len(), 2);
-    let cache = &pivots[0].1;
-    assert!(u.text(cache).contains(&source), "the source still names the other workbook");
-    assert_eq!(u.target(cache, "rId2"), (format!("{NS_R}/externalLinkPath"), OTHER_BOOK.to_string()));
-}
-
-#[test]
 fn a_changed_pivot_table_is_no_longer_kept() {
-    let (mut wb, _) = read_xlsx(&package(r#"<worksheetSource name="rData"/>"#, false)).unwrap();
-    Arc::make_mut(&mut wb.sheets[0]).pivots[0].name = "Renamed".into();
+    let (mut wb, _) = read_xlsx(&package(r#"<worksheetSource name="rData"/>"#)).unwrap();
+    Arc::make_mut(&mut wb.sheets[0]).pivots[0].rows.clear();
     let u = Unpacked::new(&write_xlsx(&wb).unwrap());
     u.assert_valid();
     // GridCraft can't rebuild a cache over `OFFSET(…)`: the changed table isn't written; the
@@ -214,12 +195,75 @@ fn a_changed_pivot_table_is_no_longer_kept() {
     assert_eq!(pivots.iter().map(|p| p.0.as_str()).collect::<Vec<_>>(), ["P2"]);
 }
 
+/// Excel keeps a PivotTable through a rename and a move (cells inserted above it): the kept part
+/// goes back with its new name and location.
+#[test]
+fn a_renamed_and_moved_pivot_table_is_kept_as_it_is_now() {
+    let (mut wb, _) = read_xlsx(&package(r#"<worksheetSource name="rData"/>"#)).unwrap();
+    let pt = &mut Arc::make_mut(&mut wb.sheets[0]).pivots[0];
+    let down = |c: gridcraft_core::CellRef| gridcraft_core::CellRef::new(c.row + 5, c.col);
+    pt.name = r#"Sales & "Kept""#.into();
+    pt.anchor = down(pt.anchor);
+    pt.last_range = pt.last_range.map(|r| gridcraft_core::RangeRef::new(down(r.start), down(r.end)));
+    let saved = write_xlsx(&wb).unwrap();
+    let u = Unpacked::new(&saved);
+    u.assert_valid();
+    let mut pivots = written_pivots(&u);
+    pivots.sort_unstable();
+    assert_eq!(pivots.iter().map(|p| p.0.as_str()).collect::<Vec<_>>(), ["P2", "Sales &amp; &quot;Kept&quot;"]);
+    assert_eq!(pivots[0].1, pivots[1].1, "the two still share the kept cache");
+    let moved = u.text(&table_part(&u, "Sales &amp; &quot;Kept&quot;"));
+    assert_eq!(attr_of(&moved, "location", "ref"), "D8:E11");
+    let (back, _) = read_xlsx(&saved).unwrap();
+    let pt = back.sheet(0).unwrap().pivots.iter().find(|p| p.name == r#"Sales & "Kept""#).expect("read back");
+    assert_eq!(pt.last_range.map(|r| r.a1()).as_deref(), Some("D8:E11"));
+}
+
+/// A renamed PivotTable isn't written beside a PivotChart that still names it as it was.
+#[test]
+fn a_renamed_pivot_table_a_pivot_chart_names_is_not_kept() {
+    let (mut wb, _) = read_xlsx(&package(r#"<worksheetSource name="rData"/>"#)).unwrap();
+    let sheet = Arc::make_mut(&mut wb.sheets[0]);
+    sheet.charts.push(gridcraft_model::Chart {
+        id: 90,
+        kind: gridcraft_model::ChartKind::BarStacked,
+        anchor: gridcraft_model::Anchor { cell: gridcraft_core::CellRef::new(10, 0), width: 480.0, height: 300.0, ..Default::default() },
+        title: None,
+        series: Vec::new(),
+        legend: gridcraft_model::LegendPos::Bottom,
+        data_labels: false,
+        data_table: None,
+        style: 2,
+        hole_size: 75,
+        first_slice_angle: 0,
+        x_title: None,
+        gridlines: true,
+        source: None,
+        y_title: None,
+        by_rows: false,
+        pivot: Some("Data!P1".into()),
+        axis_number_formats: Default::default(),
+        pivot_label_formats: Vec::new(),
+        area_style: Default::default(),
+        user_shapes: Vec::new(),
+    });
+    sheet.pivots[0].name = "Renamed".into();
+    let (saved, report) = crate::write_xlsx_named_with(&wb, crate::XlsxKind::Workbook, "Book.xlsx", Default::default()).unwrap();
+    let u = Unpacked::new(&saved);
+    u.assert_valid();
+    assert_eq!(written_pivots(&u).iter().map(|p| p.0.as_str()).collect::<Vec<_>>(), ["P2"]);
+    assert!(report.warnings.iter().any(|w| w.contains("a PivotChart still names it \"P1\"")), "{:?}", report.warnings);
+}
+
 #[test]
 fn rebuilt_named_source_uses_only_unique_unqualified_attributes_and_keeps_x14_id() {
     let source = r#"<worksheetSource xmlns:e="urn:example" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="e" e:name="wrong" e:ref="future" e:id="rId2" id="rId3" name="rData" sheet="Data" ref="A1:B3"/>"#;
-    let (mut wb, _) = read_xlsx(&package_with_cache(&cache(source), false, "Data!$A$1:$B$3")).unwrap();
+    let (mut wb, _) = read_xlsx(&package_with_cache(&cache(source), "Data!$A$1:$B$3")).unwrap();
     assert!(wb.sheets[0].pivots.iter().all(|pt| pt.binding.0.is_some()));
-    Arc::make_mut(&mut wb.sheets[0]).pivots[0].name = "Rebuilt".into();
+    // An options edit, which a kept part can't carry: the table is rebuilt from the model.
+    let pt = &mut Arc::make_mut(&mut wb.sheets[0]).pivots[0];
+    pt.name = "Rebuilt".into();
+    pt.enable_show_details = !pt.enable_show_details;
     let out = write_xlsx(&wb).unwrap();
     let u = Unpacked::new(&out);
     u.assert_valid();
@@ -271,9 +315,11 @@ fn rebuilt_named_source_uses_only_unique_unqualified_attributes_and_keeps_x14_id
 fn a_foreign_cache_id_is_neither_rewritten_nor_copied_into_a_rebuild() {
     let fake = r#"<foreign:pivotCacheDefinition xmlns:foreign="urn:example" pivotCacheId="72"/>"#;
     let xml = cache(r#"<worksheetSource name="rData"/>"#).replace(r#"<x14:pivotCacheDefinition pivotCacheId="1"/>"#, fake);
-    let (mut wb, _) = read_xlsx(&package_with_cache(&xml, false, "Data!$A$1:$B$3")).unwrap();
+    let (mut wb, _) = read_xlsx(&package_with_cache(&xml, "Data!$A$1:$B$3")).unwrap();
     assert!(!wb.sheets[0].pivots[0].had_x14_cache_id.0);
-    Arc::make_mut(&mut wb.sheets[0]).pivots[0].name = "Rebuilt".into();
+    let pt = &mut Arc::make_mut(&mut wb.sheets[0]).pivots[0];
+    pt.name = "Rebuilt".into();
+    pt.enable_show_details = !pt.enable_show_details;
     let (u, warnings) = saved(&wb);
     assert!(warnings.is_empty(), "{warnings:?}");
     let xml_of = |name| {
@@ -286,24 +332,11 @@ fn a_foreign_cache_id_is_neither_rewritten_nor_copied_into_a_rebuild() {
 }
 
 #[test]
-fn an_edited_external_pivot_is_not_rebuilt_over_a_local_sheet() {
-    // The source names sheet "Data" of another workbook; this workbook has a sheet "Data" too.
-    let source = r#"<worksheetSource ref="A1:B3" sheet="Data" r:id="rId2"/>"#;
-    let (mut wb, _) = read_xlsx(&package(source, true)).unwrap();
-    Arc::make_mut(&mut wb.sheets[0]).pivots[0].name = "Renamed".into();
-    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
-    u.assert_valid();
-    let pivots = written_pivots(&u);
-    assert_eq!(pivots.iter().map(|p| p.0.as_str()).collect::<Vec<_>>(), ["P2"], "the edited table is not written from local data");
-    assert!(u.text(&pivots[0].1).contains(source));
-}
-
-#[test]
 fn kept_rebuilt_and_slicer_caches_have_distinct_ids() {
     use gridcraft_model::{
         Anchor, AnchorMode, PivotField, PivotFunc, PivotSort, PivotTable, PivotValue, Slicer, SlicerCrossFilter, SlicerPivot, SlicerSource,
     };
-    let (mut wb, _) = read_xlsx(&package(r#"<worksheetSource name="rData"/>"#, false)).unwrap();
+    let (mut wb, _) = read_xlsx(&package(r#"<worksheetSource name="rData"/>"#)).unwrap();
     let at = |s: &str| gridcraft_core::CellRef::parse(s).unwrap();
     let sheet = Arc::make_mut(&mut wb.sheets[0]);
     for (row, (k, v)) in
@@ -375,7 +408,7 @@ fn kept_rebuilt_and_slicer_caches_have_distinct_ids() {
 #[test]
 fn a_pivot_whose_source_was_already_missing_is_kept() {
     // The file's cache names a source that isn't in it: the table and its cache go back as they were.
-    let (wb, _) = read_xlsx(&package(r#"<worksheetSource name="Missing"/>"#, false)).unwrap();
+    let (wb, _) = read_xlsx(&package(r#"<worksheetSource name="Missing"/>"#)).unwrap();
     let u = Unpacked::new(&write_xlsx(&wb).unwrap());
     u.assert_valid();
     assert_eq!(written_pivots(&u).len(), 2);
@@ -383,7 +416,7 @@ fn a_pivot_whose_source_was_already_missing_is_kept() {
 
 #[test]
 fn removing_the_source_name_drops_the_kept_pivots() {
-    let (mut wb, _) = read_xlsx(&package(r#"<worksheetSource name="rData"/>"#, false)).unwrap();
+    let (mut wb, _) = read_xlsx(&package(r#"<worksheetSource name="rData"/>"#)).unwrap();
     wb.names.retain(|n| !n.name.eq_ignore_ascii_case("rData"));
     let u = Unpacked::new(&write_xlsx(&wb).unwrap());
     u.assert_valid();

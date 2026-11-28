@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use egui::{Align2, Color32, FontId, Key, Painter, Pos2, Rect, Stroke, StrokeKind, TextEdit, pos2, vec2};
+use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Stroke, StrokeKind, TextEdit, pos2, vec2};
 use gridcraft_engine::cf::CfCache;
 use gridcraft_engine::cmd::print::{self, HfContext};
 use gridcraft_engine::model::{HfPage, Sheet, SheetViewMode, Workbook};
@@ -468,7 +468,7 @@ pub fn go_to(app: &mut SheetApp, footer: bool) {
 /// Edits a header/footer section across left/center/right, cancels on Esc, switches sections and preserves focus/caret while the page scrolls.
 fn editor(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, pg: &PageGrid) {
     let Some(mut e) = app.grid.hf_edit.take() else { return };
-    if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+    if crate::framework::consume_escape(ui.ctx()) {
         app.grid.hf_edit = Some(e);
         cancel(app);
         return;
@@ -556,11 +556,15 @@ pub(crate) fn paint_rulers(app: &SheetApp, p: &Painter, outer: Rect, geo: &Geo, 
         return;
     }
     let metric = metric(app);
-    // Screen points per unit: an inch is 96 sheet pixels at the print scale.
-    let inch = 96.0 / pg.scale.clamp(0.1, 4.0) * geo.z;
-    let unit = if metric { inch / 2.54 } else { inch };
+    // Screen points per ruler unit along the page's width and height, and how many units apart
+    // their numbers are: an inch is 72 points of paper, each axis converting at its own rate.
+    let scale_of = |horizontal: bool| {
+        let inch = pt_per_unit(&pg, horizontal).map_or(0.0, |k| (72.0 / k) as f32 * geo.z);
+        let unit = if metric { inch / 2.54 } else { inch };
+        (unit, ((22.0 / unit).ceil() as usize).max(1))
+    };
+    let (h_scale, v_scale) = (scale_of(true), scale_of(false));
     let minor = if metric { 2.0 } else { 4.0 };
-    let label_every = ((22.0 / unit).ceil() as usize).max(1);
     let font = theme::ui_font(9.5);
     let (hr, vr) = ruler_rects(outer, geo);
     // Right-to-left sheets: the horizontal ruler is mirrored with the pages (ticks run from the
@@ -583,6 +587,7 @@ pub(crate) fn paint_rulers(app: &SheetApp, p: &Painter, outer: Rect, geo: &Geo, 
         let pc = p.with_clip_rect(area);
         pc.rect_filled(band(from, to), 0.0, t.header_sel_bg);
         pc.rect_filled(band(m0, m1), 0.0, t.header_bg);
+        let (unit, label_every) = if horizontal { h_scale } else { v_scale };
         if unit < 2.0 {
             return;
         }
@@ -755,9 +760,11 @@ pub(crate) fn with_dragged_margin(app: &mut SheetApp, wb: &Workbook, si: usize, 
     g
 }
 
-/// Points per layout unit of the grid (paper size over the layout page size).
-fn pt_per_unit(pg: &PageGrid) -> Option<f64> {
-    let k = f64::from(pg.paper_pt.0) / pg.page_w;
+/// Points per layout unit of the grid along the page's width (`horizontal`) or height: paper size
+/// over the layout page size. The axes differ when rows convert to points at another rate than
+/// columns (the sheet's row pixel-to-point ratio).
+fn pt_per_unit(pg: &PageGrid, horizontal: bool) -> Option<f64> {
+    let k = if horizontal { f64::from(pg.paper_pt.0) / pg.page_w } else { f64::from(pg.paper_pt.1) / pg.page_h };
     (k.is_finite() && k > 0.0).then_some(k)
 }
 
@@ -823,7 +830,7 @@ fn ruler_margins(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, pg: &PageGrid
         ui.ctx().set_cursor_icon(if edge.horizontal() { egui::CursorIcon::ResizeHorizontal } else { egui::CursorIcon::ResizeVertical });
     };
     if let Some(d) = app.grid.ruler_drag.clone() {
-        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+        if crate::framework::consume_escape(ui.ctx()) {
             app.grid.ruler_drag = None;
             return;
         }
@@ -831,7 +838,7 @@ fn ruler_margins(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, pg: &PageGrid
         let down = ui.input(|i| i.pointer.primary_down());
         let pos = ui.input(|i| i.pointer.latest_pos()).map(|p| geo.mirror_pos(p));
         let mut cur = d.clone();
-        if let (Some(pos), Some(k)) = (pos, pt_per_unit(pg)) {
+        if let (Some(pos), Some(k)) = (pos, pt_per_unit(pg, d.edge.horizontal())) {
             let rel = if d.edge.horizontal() {
                 let page_x = pg.page_x(d.page);
                 f64::from(geo.scroll.x) + f64::from((pos.x - geo.cells.left()) / geo.z) - page_x

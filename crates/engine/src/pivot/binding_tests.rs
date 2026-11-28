@@ -86,7 +86,8 @@ fn save(wb: &Workbook) -> Saved {
     let (bytes, warnings) = save_bytes_reported(wb, "t.xlsx", FileKind::Xlsx).unwrap();
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
     // The one cache's parts, by root element: a kept cache keeps names of its own.
-    let names: Vec<String> = zip.file_names().filter(|n| n.starts_with("xl/pivotCache/") && !n.contains("_rels")).map(str::to_string).collect();
+    let names: Vec<String> =
+        zip.file_names().map(|n| n.unwrap().into_owned()).filter(|n| n.starts_with("xl/pivotCache/") && !n.contains("_rels")).collect();
     let parts: Vec<String> = names
         .iter()
         .map(|n| {
@@ -284,7 +285,7 @@ fn tags<'a>(xml: &'a str, el: &str) -> Vec<&'a str> {
 /// The package's parts as text.
 fn parts(bytes: &[u8]) -> std::collections::HashMap<String, String> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
-    let names: Vec<String> = zip.file_names().map(str::to_string).collect();
+    let names: Vec<String> = zip.file_names().map(|n| n.unwrap().into_owned()).collect();
     names
         .into_iter()
         .map(|n| {
@@ -505,7 +506,10 @@ fn a_table_renamed_on_saving_never_takes_the_name_a_source_is_saved_as() {
         assert!(matches!(back.pivot_source(&back.sheets[REPORT].pivots[0], REPORT).map(|s| s.source),
             Ok(gridcraft_model::PivotSource::Name { name, .. }) if name.name == "r_Data" && name.formula == "Data!$A$1:$B$3"));
         assert_eq!(back.table("r_Data_2"), Some((REPORT, 0)));
-        assert_eq!(back.sheets[REPORT].cell(table_formula).and_then(|c| c.formula.as_ref()).map(|f| f.text.as_str()), Some("SUM(r_Data_2[V])"));
+        assert_eq!(
+            back.sheets[REPORT].cell(table_formula).and_then(|c| c.formula.as_ref()).map(|f| f.text().into_owned()).as_deref(),
+            Some("SUM(r_Data_2[V])")
+        );
         assert_eq!(total(&mut back), Ok(FROM_DATA), "after a native reopen: {case}");
     }
 }
@@ -676,7 +680,7 @@ fn table_rename_follows_bound_pivots_and_does_not_capture_let_or_lambda_names() 
     s.execute("table.rename", json!({"sheet": "Data", "table": "Sales", "name": "Renamed"})).unwrap();
     assert_values(&s);
     let formulas = &s.doc().unwrap().wb.sheets[REPORT];
-    assert_eq!(formulas.cells.get(CellRef::parse("M5").unwrap()).unwrap().formula.as_ref().unwrap().text, "ROWS(Data!Renamed)");
+    assert_eq!(formulas.cells.get(CellRef::parse("M5").unwrap()).unwrap().formula.as_ref().unwrap().text(), "ROWS(Data!Renamed)");
     let mut wb = (*s.doc().unwrap().wb).clone();
     assert_eq!(wb.sheets[REPORT].pivots[0].source, "Data!Renamed");
     assert_eq!(total(&mut wb), Ok(FROM_DATA));
@@ -697,7 +701,7 @@ fn table_rename_keeps_builtin_calls_that_share_a_lambda_name() {
     s.execute("table.rename", json!({"sheet": "Data", "table": "Sales", "name": "Renamed"})).unwrap();
     let sh = &s.doc().unwrap().wb.sheets[REPORT];
     assert_eq!(sh.value(at), Value::Bool(true));
-    assert_eq!(sh.cell(at).unwrap().formula.as_ref().unwrap().text, "ISREF(Renamed[V])");
+    assert_eq!(sh.cell(at).unwrap().formula.as_ref().unwrap().text(), "ISREF(Renamed[V])");
 }
 
 fn rename_session(wb: Workbook) -> crate::Session {
@@ -768,6 +772,8 @@ fn table_rename_follows_names_scoped_to_retained_sheets() {
             content_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.chartsheet+xml".into(),
             data: Arc::from(content.as_slice()),
             rels: vec![],
+            dxfs: vec![],
+            num_fmts: vec![],
         }],
         sheets: vec![PreservedSheet {
             name: "KeptChart".into(),

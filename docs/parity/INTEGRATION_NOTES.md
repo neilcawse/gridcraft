@@ -16,7 +16,9 @@ Base: Neil's `origin/integrated` at `2e8dc12384775b61675a918863c79a632773e9cc`.
 - `crates/xlsx/src/read.rs`: retain the incremental sheet-name allocator and Excel's acceptance of spaces-only names.
 - Release the source shared strings and per-index phonetics immediately after worksheet import unless a retained macro sheet needs them. Chart and dialog capture do not read shared-string indexes; macro capture resolves its indexes before releasing the tables.
 
-### Known limitation: typed worksheet ZIP reads
+### Original X01 limitation: typed worksheet ZIP reads
+
+The XLSX worksheet path changed in the [re-sync](#bounded-worksheet-zip-recovery) below. This describes the original X01 integration.
 
 GridCraft's `ZipParts` check does not cover the separate `craft-xlsx` package reader at `a20dfd16`. In XLSX that reader opens root relationships and reads worksheet XML and its relationships, tables, comments and note VML. XLSB detection and import also use the dependency reader, including for workbook metadata, worksheets and table indexing. The parser streams rows from a fully decoded byte buffer, not directly from the ZIP decoder. The bounded ODS mimetype probe is separate and is not a worksheet extraction path.
 
@@ -797,3 +799,133 @@ All 13 merge commits have the published lane head as their second parent. The re
 - **X44 × X47.** X44 gates its outline and marker writes on Format Rows or Format Columns, as whole-line paste already gated line formats; X47 gates direct sizing, including Default Width, on the same permissions. Under Format Rows only, a direct whole-row fill is refused (X47, measured). A whole-row paste still carries the source row's line style and outline level (X25/X44; X47 leaves transfers outside its direct-setter rule). Pinned by `protected_format_rows_refuses_direct_row_fill_but_whole_row_paste_carries_line_format`. Whether Excel lets a whole-row paste change fill under Format Rows only is unmeasured.
 - **X41 × X42.** An index computed by a `_xludf.` call is an index expression, like the unprefixed call of the same LAMBDA, so X41's order applies to it: its error beats a missed key and invalid mode text. Pinned by calc `name_bound_lookup_index_takes_the_x41_expression_order`.
 - **X42 × X46.** Typed entry applies both rules to one formula. `=_xludf.vstack([@Qty])` in a table takes the casing of the sheet-level name and binds to that table; outside every table it is refused. Pinned by `typed_name_call_with_a_bare_structured_ref_binds_or_is_refused`.
+
+## Re-sync with integrated @ b99b4d5d
+
+Parents: `c35907d9cb18ca95f352ca123194a645f2adb562` (parity), then `b99b4d5d5c0c7cc0938843bbb03ca3bdb619937b` (integrated). Merge base: `2e8dc12384775b61675a918863c79a632773e9cc`.
+
+### Calculation, model, and CLI
+
+| Overlap | Resolution and evidence |
+|---|---|
+| `Cargo.toml`, `Cargo.lock`, `crates/xlsx/src/ods.rs` | Adopted the integrated `craft-libs` revision and indexed ZIP API. Retained the X02 ODS/FODS reader: the manifest entry on the integrated side was inherited and the merged reader does not use it. |
+| `crates/model/src/{cell,workbook,sheet,lib,preserved,features}.rs` | Kept compact shared formula storage, canonical edit text and imported presentation spelling separately. Scoped LAMBDA spelling rewrites a shared master once per sheet without materializing follower ASTs. Kept sheet geometry, typed pivot index errors, and lane metadata. |
+| `crates/formula/src/printer.rs` | Combined table qualifier elision with printing shifted references. An off-grid reference prints `#REF!`; intersection operands still retry with a table qualifier if eliding it would make them ambiguous. |
+| `crates/calc/src/{eval.rs,eval/special.rs,recalc/pass_host.rs}` | Kept shifted evaluation and precedent collection, per-pass memoization of pivot index failures, linked-sheet missing/opaque handling, and legacy one-cell reads. Qualified external references use shifted coordinates and report opaque or missing data rather than inventing a value. The shared built-in registry remains the source of canonical function names. |
+| `crates/calc/src/eval/{array,call,sumproduct}.rs` | Retained integrated arithmetic error order and dereferencing of blank `IF` branches. Kept parity unary-plus value identity in both ordinary and fused evaluation, and transition-sheet coercion in the generic evaluator; the fused `SUMPRODUCT` path is used only on ordinary sheets. |
+| `crates/functions/src/{math/criteria,text,financial/tvm}.rs`, `crates/core/src/lib.rs` | Combined numeric *IF indexes with written-shape, trailing-blank, and target-stride rules. Retained nonallocating concatenation and the integrated UTF-16 limits: `CONCAT`/`TEXTJOIN` overflow is `#CALC!`; `&`/`CONCATENATE` truncate. Kept the integrated IRR/XIRR solver and separate XIRR/XNPV input rules, including zero cash flows for blank XIRR entries. |
+| `apps/gridcraft-cli/src/check/{calc,taint,foreign,fidelity}.rs` | Retained the parity producer-specific oracle, locale and legacy retries, and per-cell grades. Borrowed shared ASTs in hot scans; foreign sheet checks honor off-grid shifts. Fidelity compares canonical formulas; identical templates may skip printing only with identical shifts. The formula bar and mismatch diagnostics retain presentation spelling. |
+| `apps/gridcraft-cli/src/check/{package,rels,producer,source}.rs` | Used the indexed ZIP reader so package validation checks every entry and owner-tree traversal follows every reachable relationship entry, even when decoded filenames coincide. Retained the reachable-relationship budget and inconclusive results on exhausted budgets. Avoided a second, package-wide relationship audit that would count orphaned parts as losses. |
+
+The integrated IRR solver removes the parity-only fallback number for the `T1` flows in `an_older_excel_s_irr_gives_up_only_where_a_cache_shows_it`. Both the integrated parent and the re-sync return `#NUM!`, matching Excel 16.115. The fixture still runs under Excel 2007, 2003, and 2002 stamps and now asserts no mismatch at `T1`; the remaining legacy and trusted classifications are unchanged.
+
+Retired and adjusted CLI and function tests:
+
+- Integrated `check::package::tests::relationship_parts_count_against_the_decompression_budget` tested the package-wide `relationship_kinds` audit using orphaned relationship parts. That audit was retired. `check::rels::tests::relationship_parts_count_against_the_decompression_budget` verifies the aggregate decompression limit for reachable relationship parts: each fits the per-part allowance, but the check stops if they exceed its budget together. Orphaned parts are outside the owner-tree audit.
+- Integrated `check::package::tests::relationship_kinds_read_parts_with_the_same_decoded_name` now runs through `relationship_tree` and `lost_relationships`. Both same-name rels entries are still read, and losing either one's relationship is reported.
+- Foreign-sheet shifts: `a_shared_formula_reads_a_missing_sheet_only_where_its_shift_stays_on_the_grid` checks that a shared follower whose missing-sheet reference moves off the grid (`#REF!`) gets no `missingSheet` reason, and that an on-grid follower still gets one.
+- Parity `financial::tests::cash_flows` widens its XIRR tolerance from 1e-9 to 1e-8 for the integrated solver. That solver returns a bisection midpoint about 1e-8 from the exact rate, as the integrated tests already state.
+
+### Engine and UI conflict resolutions
+
+- `a_table_rename_moves_a_pivot_source_a_defined_name_shadows`: seeds a malformed imported name collision, then still checks that the pivot source follows the table rename.
+- `renaming_a_defined_name_leaves_a_table_source_on_its_table`: seeds the collision directly, then still checks that the pivot source stays on the table.
+- `table_rename_keeps_a_workbook_name_reading_a_same_named_name`: seeds the collision directly without bypassing the actual rename being tested.
+- `chart_series_names_follow_names_but_not_labels`: seeds a sheet-scoped collision directly, keeping the chart series/label assertions; public name commands still enforce X17 and X27.
+- `table_rename_renames_every_reference`: retains the other reference assertions while keeping X22's conditional-format rewrite gated pending an Excel measurement.
+- `fit_row_height_uses_stored_width_for_hidden_columns`: compares with a one-line wrapped control under the same geometry profile; still detects ignoring the hidden column's stored width.
+- `slicer_criteria_outside_the_sheet_filters_columns_are_still_applied`: checks that the native table slicer hides rows through Reapply and Clear, while a separate worksheet filter offers its independent choices.
+- `a_header_only_tables_popup_has_no_value_choices`: checks that the native table popup shows no blank or value choices and creates no worksheet AutoFilter.
+
+The worksheet filter command uses the integrated rules for creating a filter at or across a table. When a headered table has its buttons off and there is no worksheet AutoFilter, the cell context menu enables the buttons and applies the criterion to the named table in one undoable action. Tests for overlapping filters now seed the imported state:
+
+- `totals_toggle_leaves_worksheet_filter_over_headerless_table_unchanged`: seeds the overlapping worksheet filter before toggling totals on the headerless table.
+- `context_filter_by_value_with_buttons_off_undoes_and_redoes_as_one_step`: seeds the optional overlapping worksheet filter while retaining the single-step undo/redo assertions.
+- `worksheet_popup_applies_only_to_the_worksheet_filter`: seeds an overlapping worksheet filter and verifies Apply leaves the native slicer criteria alone.
+- `worksheet_popup_clears_only_the_worksheet_filter`: exercises Clear against the same imported overlap and verifies the native slicer criteria still apply.
+
+Vertical ruler ticks and margin dragging use the page-height-to-paper-height conversion, matching the integrated row geometry rather than reusing the horizontal scale. `header_and_footer_margins_are_dragged_on_the_vertical_ruler` passes unchanged. `vertical_ruler_ticks_follow_the_page_height` checks the painted position of the 4.5-inch tick at 50% zoom; it fails with the integrated ruler's fixed vertical scale and passes with the axis-specific conversion. The parity parent uses the same row and column scale and did not have this offset.
+
+Both window-close tests now follow the integrated macOS platform quit in craft-libs `runtime::windows::logic`: AppKit terminates the application as a Touch Bar crash workaround while egui receives `CancelClose`. The tests require that an allowed close have no remaining prompt, editor draft or dirty workbook on macOS, and that no cancel command be sent elsewhere. The unsaved-workbook prompt assertions are unchanged.
+
+Reopening a workbook with table slicers no longer reports the regenerated sheet and workbook lists as lost, so a false warning modal no longer captures the object drag tests' pointer events. Both oversized imported-object drag tests pass unchanged. The two XLSX table-slicer regressions check that the slicer survives two saves, and that unknown or extra content, empty lists and dangling IDs still warn. A referenced part that exists but cannot be parsed may still lack a slicer-specific warning if there is no drawing frame.
+
+`cargo test --workspace --no-fail-fast` finished with 5,653 passed, 5 ignored and 3 failed. All three failures reproduce on both parents with the optional font input unset:
+
+| Test | Parity `c35907d9` | Integrated `b99b4d5d` | Re-sync |
+| --- | --- | --- | --- |
+| `caret_after_typing_arabic_is_drawn_at_its_left_end` | `arabic_editing.rs:70`, caret x=10 in span 0..26.875 | `arabic_editing.rs:73`, same caret and span | `arabic_editing.rs:73`, same caret and span |
+| `interaction::column_autocomplete_folds_case_beyond_ascii` | `epaint/src/text/fonts.rs:846`, missing U+1E9E | `epaint/src/text/fonts.rs:893`, missing U+1E9E | `epaint/src/text/fonts.rs:893`, missing U+1E9E |
+| `interaction::language_switch_renders_the_ribbon_and_persists` | `epaint/src/text/fonts.rs:846`, missing U+1EBB | `epaint/src/text/fonts.rs:893`, missing U+1EF1 | `epaint/src/text/fonts.rs:893`, missing U+1EF1 |
+
+With `craft-fonts` at `b076417b5880bd4154bd22f00695b1d28c6bea83`, both glyph tests pass on the re-sync and on both parents. The Arabic caret test still fails with the same caret position on all three. The tests were not weakened or excluded. The reruns used the documented checkout as `CRAFT_FONTS_DIR`:
+
+```sh
+export CRAFT_FONTS_DIR="$(realpath "$craft_fonts_checkout")" CRAFT_FONTS_REQUIRED=1
+cargo test -p gridcraft-ui-egui --test arabic_editing caret_after_typing_arabic_is_drawn_at_its_left_end
+cargo test -p gridcraft-ui-egui --test it interaction::column_autocomplete_folds_case_beyond_ascii
+cargo test -p gridcraft-ui-egui --test it interaction::language_switch_renders_the_ribbon_and_persists
+```
+
+`cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo xtask layers` (18 crates) and `cargo xtask wasm` (13 crates) passed.
+
+### XLSX chart annotations, drawing links, and external pivots
+
+Chart `userShapes` still import as editable worksheet mirrors. For an unchanged chart, the integrated chart-preservation path writes the annotation part once and suppresses its worksheet mirrors in the saved drawing. Editing a mirrored object or deleting its chart writes the remaining mirrors as worksheet objects without a stale annotation part. This replaces the separate parity annotation snapshot.
+
+Fixed an inherited integrated-branch data-loss bug: a structurally rejected chart snapshot suppressed worksheet mirrors and skipped the annotation graft. One per-chart save decision now drives both writers. A chart regenerated without a model edit gets the intact original annotation part if its mirrors are unchanged; otherwise its surviving mirrors are written on the sheet. Model edits still regenerate the chart without grafting its annotations.
+
+The three chart regressions from `29888522` remain: `chart_shapes_part_goes_back_with_its_chart` checks one saved copy of the annotations; `chart_shapes_become_sheet_shapes_once_the_chart_is_gone` checks the fallback after deletion; `edited_chart_shapes_are_written_as_they_show` checks the fallback after editing. Kept chart and drawing companion IDs are reserved, so replacements cannot inherit the deleted objects' annotations.
+
+`an_svg_companion_goes_under_its_own_picture_beside_a_control_stand_in` verifies that an earlier control stand-in relationship does not shift the SVG companion to the wrong picture. The writer uses the relationship ID assigned to the emitted picture.
+
+`a_new_chart_cannot_take_a_deleted_charts_annotation_part` and `an_equal_replacement_annotation_is_written_as_a_sheet_image` verify replacements do not take over an annotation part or disappear into one. `free_object_ids_skip_deleted_drawing_companion_objects` covers reserved IDs even after the original object is no longer on the sheet; the same reservation applies to pictures with SVG companions.
+
+The integrated representation of external-workbook pivots replaces the parity external-pivot snapshot, so a pivot part has only one preservation owner. The separate defined-name pivot-source path remains.
+
+Retired `pivot_cache_keeps_its_link_to_another_workbook` and `an_edited_external_pivot_is_not_rebuilt_over_a_local_sheet` when adopting the single external-pivot owner from `8732325b`. `pivot_tables_on_another_workbook_survive_a_save` covers both the `r:id` defined-name and aliased `link:id` range cases over two saves; `an_edited_pivot_on_another_workbook_is_not_rebuilt_over_a_same_named_local_sheet` keeps the unchanged external cache, records, link and report topology while saving changes to the local sheet of the same name. `pivot_tables_sharing_a_cache_on_another_workbook_keep_one_cache` checks sharing without duplicate cache registrations.
+
+An external PivotTable cache can name another workbook through `xlExternalLinkPath/xlPathMissing` without an `externalLink` part. `pivot_tables_on_a_missing_path_workbook_survive_a_save` verifies that two report sheets keep one shared cache, its records and its original external relationship over two saves. The missing-path marker does not make a same-named local table the source.
+
+The pivot-source check recognizes `externalLinkPath`, `xlPathMissing`, `xlStartup`, `xlAlternateStartup`, and `xlLibrary` rather than the parity parent's any-external rule. A scan of 49,631 public OOXML files found 87 referenced `externalLinkPath` relationships and 11 `xlPathMissing` relationships, all external, and no other type. Save As rebasing still applies only to `externalLinkPath`.
+
+The named XLSX writer still returns bytes and a `WriteReport`. Save and Save As display its warnings from `file.save`; host save and browser download display them after delivery from `file.saveBytes`. Path-based saves also retain the integrated rebase of relative external workbook links for the destination directory.
+
+The drawing-object hyperlink regressions from `29888522` remain independent of chart annotations and are retained:
+
+- `picture_and_shape_hyperlinks_survive_a_round_trip`
+- `a_deleted_picture_takes_its_hyperlink_with_it`
+- `a_new_object_never_gets_a_deleted_objects_hyperlink`
+- `edited_objects_keep_their_hyperlinks_and_undo_restores_a_deleted_ones`
+- `a_place_link_in_external_mode_is_checked_too`
+- `a_link_to_a_sheets_name_needs_that_sheets_name`
+- `a_click_link_survives_a_hover_link_without_its_relationship`
+- `a_link_to_a_renamed_sheet_is_left_out`
+- `grouped_links_and_click_and_hover_go_back_on_their_own`
+
+### Bounded worksheet ZIP recovery
+
+For XLSX worksheet reads, a directory size above the 512 MiB part limit or the remaining 1 GiB package budget is refused before inflation. Both parents run these checks in `craft-opc`'s `crates/opc/src/read.rs:282–288` (`a20dfd16` and `8fa4db64`). Decode stops at the first byte over the smaller limit and fails the open. A decoder error that stays within both limits (bad CRC, invalid deflate, or a mismatch with the directory size) charges the bytes actually inflated and leaves a worksheet warning.
+
+Both parents spend the remaining package budget on the first such worksheet error (`LazyPackage::read_limited`), so a second nonempty worksheet is refused. Recovering multiple damaged worksheets within the limits intentionally extends the one-sheet recovery already present in both parents. Excel's behavior for these damaged files is unmeasured.
+
+`ZipParts::read_required` reads indexed raw ZIP entries. Stored parts are counted directly; for deflated parts, flate2 retains and counts bytes produced even if decompression fails. CRC is checked separately after enforcing the output cap. A zero declaration does not bypass the cap if a required part has compressed data. Optional reads still charge their attempted allowance on failure.
+
+`a_required_part_is_too_large_only_when_its_output_passes_the_limit` distinguishes a bad checksum at the cap from a decode one byte over it, including a zero declaration. `a_required_part_pays_for_what_it_inflated_and_stops_at_the_limits` checks exact charges and declared-size refusals. `damaged_worksheet_entries_recover_within_the_limits` verifies two worksheet warnings, core property retention across a save, and fatal handling of an oversized worksheet. `zip_bomb_is_rejected` and `partial_sheet_read_retains_rows_and_pre_damage_layout` continue to cover the production limit and recovery from malformed worksheet XML.
+
+`a_worksheet_inflating_past_the_part_limit_is_too_large` and `a_worksheet_inflating_to_the_part_limit_with_a_bad_checksum_opens_with_a_warning` exercise the exact boundary through workbook open with a 4096-byte test limit: 4097 bytes is fatal despite a smaller directory size; 4096 bad-CRC bytes yield one warning without losing the earlier sheet's cell.
+
+### Acceptance exceptions
+
+- `TRAMP.xls`, `Unknown Data Entry`: X15's whole-column `COUNTIF` still counts trailing blanks for criteria such as `"<> 9999"`, following the Excel 365 probe. The Excel 97 cache matches the integrated parent's used-range result, so these mismatches are expected against that parent. This keeps the X38 decision above; neither the current Excel values for this file nor Excel's compatibility-mode grid extent was measured. Calc regression: `whole_column_criteria_ranges_count_the_blanks_past_the_used_range`.
+- Damaged OOXML input `1baf94dcbeeabf28d430fac271eda0490852b42343d9f0b325313c87717d2f20` (`forcepoint-group-range-1.xls`): both parents reject it with a 1 GiB package limit error. The bad-CRC worksheet streams inflate to 323,997 and 632,664 bytes; the second declares 632,636 bytes. The re-sync opens with two worksheet warnings. After conversion, the single root core-properties relationship leads to a part with the same five nonempty namespaced fields and attributes: `created`, `language`, `lastModifiedBy`, `modified`, and `revision`.
+- Damaged OOXML input `150097f203a5d18f29c4799a477e403565c95d16a7f03d9503cba73429f4266a` (`clusterfuzz-testcase-minimized-POIXSSFFuzzer-5937385319563264.xlsx`): both parents reject the package with a 1 GiB limit error. The re-sync opens with a bad-CRC warning for `Exp8` (`sheet8.xml`) and a second warning that controls, embedded objects and custom views were dropped. The warnings identify the unreadable sheet but do not name its printer settings. Following the workbook relationship to `Exp8` and inspecting worksheet relationships after `convert` confirms that only its `printerSettings` relationship is absent; the other eleven survive. The audit retains `lost relationship printerSettings in sheet "Exp8"` as an accepted residual of recovering the rest of this workbook. Excel's behavior was not measured.
+- `PivotTable-AllSources-input.xlsx` and `PivotTable-AllSources-output.xlsx`: the relationship audit exposes two inherited omissions per file, the Scenario and Consolidate PivotTables. Converting each workbook with both parents and the re-sync build and inspecting the saved worksheet relationship parts shows that all three omit both unsupported source types and warn. The re-sync retains the same five of seven PivotTable report sheets as integrated, a superset of parity's four (which also omit the connection PivotTable). The two `59932` input and answer workbooks have zero package differences with the repaired external-pivot reader: the `externalLinkPath` losses from preflight are gone.
+
+### Public corpus acceptance
+
+The final release CLI (source checkpoint `bee6d352`, SHA-256 `eb654645f6876af43e78087dffc9a28266b34df788b725c5e094756b7cb2b4b2`, verified against the runner copy) completed 3,707 of 3,707 public workbooks: 3,028 clean, 200 with issues and 479 open errors; no runner failures. Compared with the parity baseline, 31 improved (28 fixed), 3,676 were unchanged, and none worsened. No guard case regressed. Across the 3,225 workbooks that opened in all three builds, no uncapped checked-cell, mismatch or round-trip count was worse than both parents.
+
+`column-style-autofilter.xlsx` is clean (27 checked cells, no mismatches or round-trip differences). Conversion retains all 17 PivotTable reports and all five cache registrations; the external relationship on each cache keeps its `xlPathMissing` type and target. All ten chart annotation cases completed without annotation relationship loss. The only audit keys new to both parents are the two Consolidate PivotTable keys and the Exp8 printer settings key classified above. The Scenario case remains unsupported but did not contribute a new audit key in this run.
+
+The XLSX unit suite passed all 838 tests. The missing-path regression fails with the old `externalLinkPath`-only predicate and passes with the repaired reader; Save As rebasing remains unchanged. In isolation on the final source, `many_listed_controls_read_in_linear_time` passed in 0.56 s against its 3 s limit.

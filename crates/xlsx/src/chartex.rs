@@ -153,7 +153,13 @@ pub(crate) fn from_dml_chartex(dc: craft_drawingml::chart::Chart, root: Option<&
         id: 0,
         kind,
         anchor: Default::default(),
-        title: dc.title,
+        title: match root {
+            Some(r) => match r.path(&["chart", "title"]) {
+                Some(t) if t.child("tx").is_some() => t.child("tx").and_then(chartex_text),
+                Some(_) | None => None,
+            },
+            None => dc.title,
+        },
         series,
         legend,
         data_labels: dc.data_labels,
@@ -169,6 +175,8 @@ pub(crate) fn from_dml_chartex(dc: craft_drawingml::chart::Chart, root: Option<&
         pivot: None,
         axis_number_formats: Default::default(),
         pivot_label_formats: Vec::new(),
+        area_style: crate::chart::parse_area_style(root),
+        user_shapes: Vec::new(),
     })
 }
 

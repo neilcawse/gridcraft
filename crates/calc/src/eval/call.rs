@@ -5,6 +5,17 @@ use super::{Area, Arg, Array, CellError, Ev, Evaluator, Expr, FnCtx, Lambda, One
 use std::sync::Arc;
 
 impl<'h> Evaluator<'h> {
+    /// `IF` with an array condition: element-wise.
+    pub(super) fn if_elementwise(&mut self, arr: &Array, args: &[Expr]) -> Ev {
+        let t = self.arg_val(args, 1).unwrap_or(Value::Bool(true));
+        let f = if args.len() > 2 { self.arg_val(args, 2).unwrap_or(Value::Bool(false)) } else { Value::Bool(false) };
+        Ev::V(zip3(arr, &t, &f, |c, t, f| match c.to_bool() {
+            Ok(true) => t.clone(),
+            Ok(false) => f.clone(),
+            Err(e) => Value::Error(e),
+        }))
+    }
+
     pub(super) fn call(&mut self, name: &str, args: &[Expr]) -> Ev {
         // The parser normally uppercases calls. An already-stored AST can carry old casing.
         let name = if name.bytes().any(|b| b.is_ascii_lowercase()) {
@@ -75,7 +86,7 @@ impl<'h> Evaluator<'h> {
                     Ev::V(Value::Bool(f.is_some()))
                 } else {
                     match f {
-                        Some(f) if !hidden => Ev::V(Value::text(format!("={}", f.display_text.as_deref().unwrap_or(&f.text)))),
+                        Some(f) if !hidden => Ev::V(Value::text(format!("={}", f.bar_body()))),
                         _ => err(CellError::NA),
                     }
                 }
@@ -84,6 +95,8 @@ impl<'h> Evaluator<'h> {
             "OFFSET" => self.offset(args),
             "INDIRECT" => self.indirect(args),
             "INDEX" => self.index(args),
+            "FILTER" => self.filter_call(args),
+            "SUMPRODUCT" => self.sumproduct_call(args),
             "XLOOKUP" => self.xlookup(args),
             "VLOOKUP" | "HLOOKUP" => self.vh_lookup(name == "VLOOKUP", args),
             "LOOKUP" => self.lookup_call(args),
@@ -126,7 +139,7 @@ impl<'h> Evaluator<'h> {
                     }
                 }
                 let Some(body) = args.last() else { return err(CellError::Value) };
-                Ev::L(Arc::new(Lambda { params, body: body.clone(), env: self.env.clone() }))
+                Ev::L(Arc::new(Lambda { params, body: body.clone(), env: self.env.clone(), shift: self.shift }))
             }
             "ISOMITTED" => {
                 let r = matches!(args.first(), Some(Expr::Name(n)) if self.env.iter().rev().find(|(k, _)| gridcraft_formula::same_name(k, n)).is_some_and(|(_, v)| matches!(v, Ev::V(Value::Empty))));
@@ -163,9 +176,10 @@ impl<'h> Evaluator<'h> {
         if let Value::Array(array) = &condition {
             let when_true = self.arg_val(args, 1).unwrap_or(Value::Bool(true));
             let when_false = if args.len() > 2 { self.arg_val(args, 2).unwrap_or(Value::Bool(false)) } else { Value::Bool(false) };
+            let deref_empty = |v: &Value| if matches!(v, Value::Empty) { Value::Number(0.0) } else { v.clone() };
             return Ev::V(zip3(array, &when_true, &when_false, |condition, when_true, when_false| match condition.to_bool() {
-                Ok(true) => when_true.clone(),
-                Ok(false) => when_false.clone(),
+                Ok(true) => deref_empty(when_true),
+                Ok(false) => deref_empty(when_false),
                 Err(error) => Value::Error(error),
             }));
         }
@@ -374,7 +388,7 @@ impl<'h> Evaluator<'h> {
             // a one-cell range holding the error).
             let linked = matches!(&ev, Ev::R(areas) if areas.iter().any(|x| linked_parts(x.sheet).is_some()));
             if takes_reference(spec.name, i)
-                && (linked || matches!(a, Expr::Error(_) | Expr::LinkedRefError(_)) || matches!(ev, Ev::V(Value::Error(_))))
+                && (linked || matches!(ev, Ev::V(Value::Error(_))) || matches!(a, Expr::Error(_) | Expr::LinkedRefError(_)))
             {
                 return err(match self.deref(ev) {
                     Value::Error(e) => e,
@@ -447,6 +461,7 @@ impl<'h> Evaluator<'h> {
     /// Only `SUM`, `COUNT` and `AVG` are supported currently.
     fn aggregate(&mut self, kind: Agg, args: &[Expr]) -> Ev {
         let mut acc = Acc::default();
+        let mut direct_error = None;
         let mut first_error = None;
         for a in args {
             let mut ev = self.eval(a);
@@ -462,6 +477,12 @@ impl<'h> Evaluator<'h> {
             }
             let steps = match ev {
                 Ev::R(areas) => areas.iter().map(|area| self.aggregate_area(kind, area, &mut acc)).collect(),
+                Ev::V(Value::Error(e)) => {
+                    if kind != Agg::Count && direct_error.is_none() {
+                        direct_error = Some(e);
+                    }
+                    vec![self.aggregate_value(kind, Value::Error(e), false, &mut acc)]
+                }
                 ev => {
                     let value = self.deref(ev);
                     vec![self.aggregate_value(kind, value, false, &mut acc)]
@@ -471,7 +492,7 @@ impl<'h> Evaluator<'h> {
                 first_error = steps.into_iter().find_map(Result::err);
             }
         }
-        first_error.unwrap_or_else(|| Ev::V(acc.finish(kind)))
+        direct_error.map(err).or(first_error).unwrap_or_else(|| Ev::V(acc.finish(kind)))
     }
 
     /// Adds one area to `acc`; `Err` is the result the function ends with.

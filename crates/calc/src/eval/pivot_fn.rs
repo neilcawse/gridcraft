@@ -63,6 +63,7 @@ fn func_prefix(f: PivotFunc) -> &'static str {
         PivotFunc::Min => "Min",
         PivotFunc::Product => "Product",
         PivotFunc::CountNumbers => "Count Numbers",
+        PivotFunc::DistinctCount => "Distinct Count",
         PivotFunc::StdDev => "StdDev",
         PivotFunc::StdDevP => "StdDevp",
         PivotFunc::Var => "Var",

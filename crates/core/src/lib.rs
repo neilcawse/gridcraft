@@ -18,6 +18,6 @@ pub use addr::{
 pub use date::DateSystem;
 pub use region::Region;
 pub use value::{
-    Array, CellError, Value, compare, compare_numbers, compare_text, is_network_link, link_location, link_scheme, number_to_text, sort_compare,
-    text_eq,
+    Array, CellError, MAX_TEXT_CHARS, Value, cap_text, cap_value, compare, compare_numbers, compare_text, is_network_link, link_location,
+    link_scheme, number_to_text, sort_compare, text_eq,
 };

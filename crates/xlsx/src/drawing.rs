@@ -30,20 +30,7 @@ mod ink;
 /// (`passthrough::KeptReader::sheet` keeps the parts behind it).
 #[derive(Default)]
 pub struct DrawingKeptIn {
-    pub chart_shapes: Vec<ChartShapesIn>,
     pub links: Vec<ObjectLinkIn>,
-}
-
-/// A chart's shapes part, read into shapes and pictures of the sheet.
-pub struct ChartShapesIn {
-    /// The chart's model id.
-    pub chart: u32,
-    pub chart_part: String,
-    /// The id of the chart part's relationship to the shapes part.
-    pub rel_id: String,
-    /// The model ids of the shapes and pictures read from the part.
-    pub shapes: Vec<u32>,
-    pub images: Vec<u32>,
 }
 
 /// A hyperlink element (`a:hlinkClick` or `a:hlinkHover`) of a picture or shape read from a
@@ -145,33 +132,17 @@ fn from_craft_el(e: &craft_xml::El) -> El {
     El { name, attrs, children, text }
 }
 
-/// Colour of a DrawingML colour choice inside `e` (e.g. a `solidFill`).
+/// Colour of a DrawingML colour choice inside `e` (e.g. a `solidFill`), honouring `srgbClr`,
+/// `sysClr`, `schemeClr`, and colour modifiers (`lumMod`, `lumOff`, `tint`, `shade`).
 pub fn dml_color(e: &El) -> Option<Color> {
-    if let Some(c) = e.child("srgbClr").and_then(|c| c.attr("val")) {
-        return Color::from_hex(c);
-    }
-    if let Some(c) = e.child("sysClr").and_then(|c| c.attr("lastClr")) {
-        return Color::from_hex(c);
-    }
-    if let Some(c) = e.child("schemeClr").and_then(|c| c.attr("val")) {
-        let i = match c {
-            "bg1" | "lt1" => 0,
-            "tx1" | "dk1" => 1,
-            "bg2" | "lt2" => 2,
-            "tx2" | "dk2" => 3,
-            "accent1" => 4,
-            "accent2" => 5,
-            "accent3" => 6,
-            "accent4" => 7,
-            "accent5" => 8,
-            "accent6" => 9,
-            "hlink" => 10,
-            "folHlink" => 11,
-            _ => return None,
-        };
-        return Some(Color::Theme(i, 0));
-    }
-    None
+    crate::chart::chart_color(e).or_else(|| {
+        let val = e.child("sysClr")?.attr("val")?;
+        match val {
+            "windowText" => Some(Color::Rgb(0x000000)),
+            "window" => Some(Color::Rgb(0xFFFFFF)),
+            _ => None,
+        }
+    })
 }
 
 fn mime_for(name: &str) -> &'static str {
@@ -188,6 +159,11 @@ fn mime_for(name: &str) -> &'static str {
         "webp" => "image/webp",
         _ => "application/octet-stream",
     }
+}
+/// Relationship id of an embedded Office 2016+ SVG companion (`<asvg:svgBlip r:embed="…"/>`)
+/// inside a picture's `<a:blip><a:extLst>`.
+fn blip_svg_rid(blip: &El) -> Option<&str> {
+    blip.child("extLst")?.kids("ext").find_map(|ext| ext.child("svgBlip").and_then(|svg| svg.attr("embed")))
 }
 
 /// A drawing's editable anchor plus the transform and enclosing projection for nested groups.
@@ -406,7 +382,8 @@ fn read_object_inner(
     let anchor = place.anchor;
     match obj.name.as_str() {
         "pic" => {
-            let Some(rid) = obj.path(&["blipFill", "blip"]).and_then(|b| b.attr("embed")) else { return Ok(None) };
+            let Some(blip) = obj.path(&["blipFill", "blip"]) else { return Ok(None) };
+            let Some(rid) = blip.attr("embed") else { return Ok(None) };
             let Some(rel) = rels.iter().find(|r| r.id == rid && !r.external) else {
                 cx.warn("a linked (not embedded) picture was skipped");
                 return Ok(None);
@@ -418,6 +395,16 @@ fn read_object_inner(
             };
             let alt = obj.path(&["nvPicPr", "cNvPr"]).and_then(|c| c.attr("descr")).unwrap_or("").to_string();
             let id = cx.next_object_id();
+            if let Some(svg_rid) = blip_svg_rid(blip)
+                && let Some(svg_rel) = rels.iter().find(|r| r.id == svg_rid && !r.external)
+            {
+                let svg_target = svg_rel.target.clone();
+                match cx.pkg.read_limited(&svg_target, crate::passthrough::MAX_KEPT_PART) {
+                    Ok(Some(svg_data)) => cx.sheet_svg_blips.push((id, svg_target, svg_data)),
+                    Ok(None) => cx.warn(format!("missing SVG picture {svg_target}")),
+                    Err(e) => cx.warn(format!("skipped SVG picture {svg_target}: {e}")),
+                }
+            }
             sheet.images.push(Image { id, anchor, data: data.into(), mime: mime_for(&target).to_string(), alt });
             note_link(cx, part, obj, DrawingRef::Image(id));
             Ok(Some(DrawingRef::Image(id)))
@@ -450,8 +437,11 @@ fn read_object_inner(
                             if !caches.is_empty() {
                                 cx.pivot_charts.push((id, caches));
                             }
+                            if !chartex {
+                                cx.chart_parts.push((id, target.clone()));
+                            }
                             sheet.charts.push(ch);
-                            read_user_shapes(cx, (id, &target), &cx_xml, anchor, sheet)?;
+                            read_user_shapes(cx, (!chartex).then_some(id), &target, &cx_xml, anchor, sheet)?;
                             return Ok(Some(DrawingRef::Chart(id)));
                         }
                         None => cx.warn(format!("chart {target} has no supported plot and was skipped")),
@@ -634,7 +624,8 @@ fn optional_annotation_xml(cx: &mut Ctx<'_>, part: &str) -> Result<Option<El>, I
 }
 fn read_user_shapes(
     cx: &mut Ctx<'_>,
-    (chart, chart_part): (u32, &str),
+    chart_id: Option<u32>,
+    chart_part: &str,
     chart_xml: &El,
     chart_anchor: Anchor,
     sheet: &mut Sheet,
@@ -645,11 +636,12 @@ fn read_user_shapes(
     let us_part = rel.target.clone();
     let Some(us_xml) = optional_annotation_xml(cx, &us_part)? else { return Ok(()) };
     let Some(us_rels) = optional_annotation_rels(cx, &us_part)? else { return Ok(()) };
+    let mut mirrored_images = Vec::new();
+    let mut mirrored_shapes = Vec::new();
     let chart_x = sheet.col_left(chart_anchor.cell.col) + chart_anchor.dx as f64;
     let chart_y = sheet.row_top(chart_anchor.cell.row) + chart_anchor.dy as f64;
     let chart_w = chart_anchor.width.max(0.0) as f64;
     let chart_h = chart_anchor.height.max(0.0) as f64;
-    let mut kept = ChartShapesIn { chart, chart_part: chart_part.to_string(), rel_id: rid.to_string(), shapes: vec![], images: vec![] };
     for a in &us_xml.children {
         let frac = |parent: &str, child: &str, def: f64| {
             a.path(&[parent, child]).and_then(|e| e.text.trim().parse::<f64>().ok()).filter(|v| v.is_finite()).unwrap_or(def).clamp(0.0, 1.0)
@@ -666,16 +658,15 @@ fn read_user_shapes(
         };
         let x = chart_x + fx1 * chart_w;
         let y = chart_y + fy1 * chart_h;
-        let col = sheet.col_at(x);
-        let row = sheet.row_at(y);
-        let sub_anchor = Anchor {
-            cell: CellRef::new(row, col),
-            dx: (x - sheet.col_left(col)).max(0.0) as f32,
-            dy: (y - sheet.row_top(row)).max(0.0) as f32,
-            width,
-            height,
-            mode: chart_anchor.mode,
-        };
+        let (mut col, mut row) = (sheet.col_at(x), sheet.row_at(y));
+        let (mut dx, mut dy) = ((x - sheet.col_left(col)).max(0.0), (y - sheet.row_top(row)).max(0.0));
+        // A point on a cell edge, give or take the rounding of the chart's f32 extents, starts in
+        // the next cell, as `anchor_markers` writes it.
+        if sheet.geometry != gridcraft_model::Geometry::Legacy {
+            (col, dx) = marker_edge(col, dx, f64::from(sheet.col_width(col)), MAX_COLS, chart_w);
+            (row, dy) = marker_edge(row, dy, f64::from(sheet.row_height(row)), MAX_ROWS, chart_h);
+        }
+        let sub_anchor = Anchor { cell: CellRef::new(row, col), dx: dx as f32, dy: dy as f32, width, height, mode: chart_anchor.mode };
         for obj in &a.children {
             match obj.name.as_str() {
                 "pic" => {
@@ -691,21 +682,35 @@ fn read_user_shapes(
                     };
                     let alt = obj.path(&["nvPicPr", "cNvPr"]).and_then(|c| c.attr("descr")).unwrap_or("").to_string();
                     let id = cx.next_object_id();
-                    sheet.images.push(Image { id, anchor: sub_anchor, data: data.into(), mime: mime_for(&target).to_string(), alt });
-                    kept.images.push(id);
+                    let img = Image { id, anchor: sub_anchor, data: data.into(), mime: mime_for(&target).to_string(), alt };
+                    mirrored_images.push((id, crate::passthrough::fingerprint_image(&img)));
+                    sheet.images.push(img);
                 }
                 "sp" | "cxnSp" => {
                     if let Some(s) = read_shape(obj, sub_anchor, false) {
                         let id = cx.next_object_id();
-                        sheet.shapes.push(Shape { id, ..s });
-                        kept.shapes.push(id);
+                        let shape = Shape { id, ..s };
+                        mirrored_shapes.push((id, crate::passthrough::fingerprint_shape(&shape)));
+                        sheet.shapes.push(shape);
                     }
                 }
                 _ => {}
             }
         }
     }
-    cx.drawing_kept.chart_shapes.push(kept);
+    if let Some(chart_id) = chart_id {
+        cx.sheet_chart_user_shapes.push(crate::read::ChartUserShapesIn {
+            chart_id,
+            rel: gridcraft_model::PreservedRel {
+                id: rid.to_string(),
+                rel_type: crate::passthrough::REL_CHART_USER_SHAPES.to_string(),
+                target: us_part,
+                external: false,
+            },
+            mirrored_images,
+            mirrored_shapes,
+        });
+    }
     Ok(())
 }
 
@@ -747,15 +752,19 @@ fn read_shape(obj: &El, anchor: Anchor, grouped: bool) -> Option<Shape> {
     let descr = obj.path(&["nvSpPr", "cNvPr"]).and_then(|c| c.attr("descr")).unwrap_or("");
     let tb = obj.child("txBody");
     let has_math = tb.is_some_and(|tb| crate::omml::find_math(tb, 0).is_some());
+    // The description's source is GridCraft's own only while its marker matches; the saved frame
+    // ink belongs to that body alone, not to Office Math another application rewrote.
+    let mut own = false;
     let source = match (has_math, described_source(descr)) {
         (_, Some((marker, src))) if tb.is_some_and(|tb| crate::omml::body_marker(tb) == marker && (has_math || holds_written_text(tb, src))) => {
+            own = true;
             Some(src.to_string())
         }
         (true, _) => tb.and_then(crate::omml::equation_source),
         (false, _) => None,
     };
     if let Some(text) = source {
-        let ink = obj.child("txBody").and_then(|tb| first_run_color(tb, 0)).unwrap_or_default();
+        let ink = equation_ink(tb, &text, own, has_math);
         return Some(Shape {
             id: 0,
             kind: ShapeKind::Equation,
@@ -768,7 +777,15 @@ fn read_shape(obj: &El, anchor: Anchor, grouped: bool) -> Option<Shape> {
             math: Default::default(),
         });
     }
-    let fill = sp.child("solidFill").and_then(dml_color).unwrap_or_default();
+    let fill = sp
+        .child("solidFill")
+        .and_then(dml_color)
+        .or_else(|| {
+            (sp.child("noFill").is_none())
+                .then(|| obj.path(&["style", "fillRef"]).filter(|r| r.attr_u32("idx").is_some_and(|i| i > 0)).and_then(dml_color))
+                .flatten()
+        })
+        .unwrap_or_default();
     let line = ln.and_then(|l| l.child("solidFill")).and_then(dml_color).unwrap_or_default();
     let text = tb.map(|tb| if has_math { math_body_text(tb) } else { body_text(tb) }).unwrap_or_default();
     let mut format = read_text_format(obj.child("txBody"));
@@ -793,14 +810,23 @@ fn read_text_format(body: Option<&El>) -> ShapeFormat {
         "b" => ShapeTextAnchor::Bottom,
         _ => ShapeTextAnchor::Top,
     });
-    let ppr = body.kids("p").next().and_then(|p| p.child("pPr"));
+    let first_p = body.kids("p").next();
+    let ppr = first_p.and_then(|p| p.child("pPr").or_else(|| p.child("fld").and_then(|fld| fld.child("pPr"))));
     f.align = ppr.and_then(|p| p.attr("algn")).map(|a| match a {
         "ctr" => ShapeTextAlign::Center,
         "r" => ShapeTextAlign::Right,
         _ => ShapeTextAlign::Left,
     });
     f.rtl = ppr.is_some_and(|p| p.flag("rtl", false));
-    let rpr = body.kids("p").flat_map(|p| p.kids("r")).find_map(|r| r.child("rPr"));
+    if let Some(p) = ppr {
+        if let Some(mar_l) = p.attr_f64("marL").filter(|v| v.is_finite() && *v > 0.0) {
+            f.left_indent = (mar_l / 12_700.0).clamp(0.0, 1000.0) as f32;
+        } else if let Some(lvl) = p.attr_u32("lvl").filter(|&v| v > 0) {
+            // ECMA-376 default paragraph indent per outline level is 342,900 EMU (27 pt).
+            f.left_indent = (lvl.min(9) as f32) * 27.0;
+        }
+    }
+    let rpr = body.kids("p").flat_map(|p| p.children.iter().filter(|c| c.name == "r" || c.name == "fld")).find_map(|r| r.child("rPr"));
     if let Some(r) = rpr {
         // `sz` is in hundredths of a point (100..=400000 in the schema).
         f.font_size = r.attr_f64("sz").filter(|v| v.is_finite()).map(|v| (v / 100.0).clamp(1.0, 4000.0) as f32);
@@ -830,6 +856,66 @@ fn described_source(descr: &str) -> Option<(&str, &str)> {
     let rest = descr.strip_prefix(LATEX_DESCR)?;
     let (marker, src) = (rest.get(..16)?, rest.get(17..)?);
     (rest.as_bytes().get(16) == Some(&b':') && marker.bytes().all(|b| b.is_ascii_hexdigit()) && !src.trim().is_empty()).then_some((marker, src))
+}
+
+/// The colour an equation's frame carries (its "ink": the colour of everything the source does
+/// not colour itself). GridCraft saves it on its own Office Math paragraph's `a:endParaRPr`;
+/// another writer's paragraph-end formatting is not that convention, so its first run's colour
+/// stands in, as do the runs of a body without Office Math (one colour throughout: the plain-text
+/// box of an equation outside the subset). The runs of GridCraft's own Office Math cannot stand
+/// in when the source colours some of them (`{\color{green}a}+d` would read back green), so such
+/// a source with no saved ink reads as Automatic, unless every run carries the same colour: that
+/// is how earlier versions saved an explicit ink (on each run, with no paragraph-end fill).
+fn equation_ink(tb: Option<&El>, source: &str, own: bool, has_math: bool) -> Color {
+    let Some(tb) = tb else { return Color::default() };
+    if own && has_math {
+        if let Some(c) = tb.kids("p").find_map(|p| p.child("endParaRPr")).and_then(|e| e.child("solidFill")).and_then(dml_color) {
+            return c;
+        }
+        if source.contains("\\color") || source.contains("\\textcolor") {
+            return uniform_run_color(tb).unwrap_or_default();
+        }
+    }
+    first_run_color(tb, 0).unwrap_or_default()
+}
+
+/// The colour every run under `e` carries, or `None` when there is no run, a run has no fill or
+/// the runs differ.
+fn uniform_run_color(e: &El) -> Option<Color> {
+    let mut found: Option<Color> = None;
+    let mut mixed = false;
+    collect_run_colors(e, 0, &mut found, &mut mixed);
+    if mixed { None } else { found }
+}
+
+fn collect_run_colors(e: &El, depth: usize, found: &mut Option<Color>, mixed: &mut bool) {
+    if depth > 12 || *mixed {
+        return;
+    }
+    if e.name == "rPr" {
+        // Office Math's own run style (`m:rPr`: bold, plain, script) sits beside the DrawingML one
+        // that carries the fill, and the parser drops the prefix that tells them apart
+        if is_math_run_style(e) {
+            return;
+        }
+        match (e.child("solidFill").and_then(dml_color), *found) {
+            (None, _) => *mixed = true,
+            (Some(c), None) => *found = Some(c),
+            (Some(c), Some(f)) if c != f => *mixed = true,
+            _ => {}
+        }
+        return;
+    }
+    for c in &e.children {
+        collect_run_colors(c, depth + 1, found, mixed);
+    }
+}
+
+/// Whether `e` is an Office Math `m:rPr` (only style children such as `m:sty`), not the DrawingML
+/// `a:rPr` of the run, which holds the fill and the font.
+fn is_math_run_style(e: &El) -> bool {
+    const MATH_STYLE: [&str; 6] = ["nor", "sty", "scr", "lit", "aln", "brk"];
+    !e.children.is_empty() && e.children.iter().all(|c| MATH_STYLE.contains(&c.name.as_str()))
 }
 
 /// The colour of the first run (DrawingML `rPr` with a fill) under `e`.
@@ -891,7 +977,7 @@ fn write_equation(s: &mut String, sh: &Shape, (id, name): (usize, &str), theme: 
     match gridcraft_math::to_omml(&sh.text, size_pt, sh.line.resolve(theme)) {
         Ok(omml) => {
             let math = format!(
-                "<a:p><a:pPr algn=\"ctr\"/><a14:m><m:oMathPara xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"><m:oMathParaPr><m:jc m:val=\"centerGroup\"/></m:oMathParaPr>{omml}</m:oMathPara></a14:m><a:endParaRPr lang=\"en-US\" sz=\"{sz}\"/></a:p>"
+                "<a:p><a:pPr algn=\"ctr\"/><a14:m><m:oMathPara xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"><m:oMathParaPr><m:jc m:val=\"centerGroup\"/></m:oMathParaPr>{omml}</m:oMathPara></a14:m><a:endParaRPr lang=\"en-US\" sz=\"{sz}\">{fill}</a:endParaRPr></a:p>"
             );
             let _ = write!(
                 s,
@@ -910,9 +996,27 @@ fn plain_paragraphs(text: &str, rpr: &str) -> String {
     text.split('\n').map(|line| format!("<a:p><a:pPr algn=\"ctr\"/><a:r>{rpr}<a:t>{}</a:t></a:r></a:p>", esc(line))).collect()
 }
 
-/// The text of a text body: the runs of each paragraph, paragraphs joined with newlines.
+/// The text of a text body: the runs, fields, and line breaks (`<a:br>`) of each paragraph,
+/// paragraphs joined with newlines.
 fn body_text(tb: &El) -> String {
-    tb.kids("p").map(|p| p.kids("r").filter_map(|r| r.child("t")).map(|t| t.text.as_str()).collect::<String>()).collect::<Vec<_>>().join("\n")
+    tb.kids("p")
+        .map(|p| {
+            let mut out = String::new();
+            for c in &p.children {
+                match c.name.as_str() {
+                    "r" | "fld" => {
+                        if let Some(t) = c.child("t") {
+                            out.push_str(&t.text);
+                        }
+                    }
+                    "br" => out.push('\n'),
+                    _ => {}
+                }
+            }
+            out
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// A rejected Office Math box still needs its visible run text. Do not reinterpret
@@ -1584,7 +1688,12 @@ fn write_obj(s: &mut String, theme: &Theme, o: &Obj<'_>, id: usize, name: Option
                     Some(ShapeTextAlign::Right) => " algn=\"r\"",
                 };
                 let rtl = if f.rtl { " rtl=\"1\"" } else { "" };
-                let ppr = if algn.is_empty() && rtl.is_empty() { String::new() } else { format!("<a:pPr{algn}{rtl}/>") };
+                let mar_l = if f.left_indent.is_finite() && f.left_indent > 0.0 {
+                    format!(" marL=\"{}\"", (f.left_indent.clamp(0.0, 1000.0) * 12_700.0).round() as u32)
+                } else {
+                    String::new()
+                };
+                let ppr = if algn.is_empty() && rtl.is_empty() && mar_l.is_empty() { String::new() } else { format!("<a:pPr{algn}{rtl}{mar_l}/>") };
                 let (rpr_attrs, rpr_body) = run_props(f, theme);
                 for line in sh.text.split('\n') {
                     if line.is_empty() {
@@ -1758,5 +1867,19 @@ mod math_fallback_tests {
         let text = math_body_text(&tb);
         assert_eq!(text.len(), (1 << 20) - 1);
         assert!(text.starts_with('a') && text.ends_with('λ'));
+    }
+
+    #[test]
+    fn fld_runs_are_read_for_body_text_and_format() {
+        let tb = crate::xml::parse(
+            br#"<txBody><bodyPr anchor="ctr"/><p><pPr algn="ctr"/><fld id="{00000000-0000-0000-0000-000000000001}" type="TxLink"><rPr lang="en-US" sz="1400" b="1"/><t>Linked Title</t></fld></p></txBody>"#,
+        )
+        .unwrap();
+        assert_eq!(body_text(&tb), "Linked Title");
+        let fmt = read_text_format(Some(&tb));
+        assert_eq!(fmt.font_size, Some(14.0));
+        assert!(fmt.bold);
+        assert_eq!(fmt.align, Some(ShapeTextAlign::Center));
+        assert_eq!(fmt.anchor, Some(ShapeTextAnchor::Middle));
     }
 }

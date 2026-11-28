@@ -297,22 +297,39 @@ impl Calc {
         self.graph = Graph::default();
         let mut circ = Vec::new();
         self.spill_errors.clear();
+        // Cache shared formula precedent templates per (sheet, base Expr pointer) so millions of
+        // shared formula cells shift their master's precedents in O(1) without walking ASTs.
+        let mut templates: HashMap<(usize, usize), Option<crate::eval::PrecedentTemplate>> = HashMap::default();
         for (si, sheet) in wb.sheets.iter().enumerate() {
             for (c, cell) in sheet.cells.iter() {
                 if cell.value == Value::Error(CellError::Spill) {
                     self.spill_errors.insert((si, c));
                 }
-                if let Some(f) = &cell.formula
-                    && let Some((areas, dynamic)) = f.with_expr(|e| precedents_at(wb, si, c, e))
-                {
-                    self.graph.insert((si, c), Node { areas, dynamic });
-                    if cell.value == Value::Error(CellError::Circ) {
-                        circ.push((si, c));
+                if let Some(f) = &cell.formula {
+                    let prec = if let Some((base, dr, dc)) = f.expr_shifted() {
+                        if f.is_shared() {
+                            let ptr = std::sync::Arc::as_ptr(base) as usize;
+                            let tmpl = templates.entry((si, ptr)).or_insert_with(|| crate::eval::PrecedentTemplate::build(wb, si, base));
+                            match tmpl {
+                                Some(t) => Some(t.instantiate(dr, dc)),
+                                None => Some(crate::eval::precedents_at_shifted(wb, si, c, base, dr, dc)),
+                            }
+                        } else {
+                            Some(precedents_at(wb, si, c, base))
+                        }
+                    } else {
+                        f.with_expr(|e| precedents_at(wb, si, c, e))
+                    };
+                    if let Some((areas, dynamic)) = prec {
+                        self.graph.insert_fresh((si, c), Node { areas, dynamic });
+                        if cell.value == Value::Error(CellError::Circ) {
+                            circ.push((si, c));
+                        }
                     }
                 } else if cell.py.is_some() {
                     // A Python cell lays out its kept result, so it is calculated like a formula
                     // that reads nothing: its spill is blocked and unblocked like a formula's.
-                    self.graph.insert((si, c), Node { areas: Vec::new(), dynamic: false });
+                    self.graph.insert_fresh((si, c), Node { areas: Vec::new(), dynamic: false });
                 }
             }
         }
@@ -731,10 +748,14 @@ impl Calc {
             }
             // Row-major order is a good topological guess; on-demand evaluation fixes the rest.
             dirty.sort_by_key(|(s, c)| (*s, c.row, c.col));
-            let mut exprs: HashMap<Key, std::sync::Arc<Expr>> = HashMap::with_capacity_and_hasher(dirty.len(), Default::default());
+            let mut exprs: HashMap<Key, (std::sync::Arc<Expr>, i32, i32)> = HashMap::with_capacity_and_hasher(dirty.len(), Default::default());
             for k in &dirty {
-                if let Some(e) = wb.sheet(k.0).and_then(|s| s.cell(k.1)).and_then(|c| c.formula.as_ref()).and_then(|f| f.expr_arc()) {
-                    exprs.insert(*k, e);
+                if let Some(f) = wb.sheet(k.0).and_then(|s| s.cell(k.1)).and_then(|c| c.formula.as_ref()) {
+                    if let Some((e, dr, dc)) = f.expr_shifted() {
+                        exprs.insert(*k, (std::sync::Arc::clone(e), dr, dc));
+                    } else if let Some(e) = f.expr_arc() {
+                        exprs.insert(*k, (e, 0, 0));
+                    }
                 }
             }
             let python: HashMap<Key, Value> = dirty
@@ -866,7 +887,7 @@ impl Calc {
                 } else {
                     Vec::new()
                 };
-                let blocked = spill_is_blocked(sheet, (*key, old), range, end, standing);
+                let blocked = spill_is_blocked(sheet, (*key, old), range, end, standing, array.data.len());
                 if !blocked {
                     for (o, r) in outranked {
                         for c in r.iter() {
@@ -933,6 +954,7 @@ fn spill_is_blocked(
     range: RangeRef,
     end: CellRef,
     standing: &Standing,
+    array_len: usize,
 ) -> bool {
     let outranked = |cell: CellRef| {
         sheet
@@ -944,7 +966,7 @@ fn spill_is_blocked(
         || end.col >= gridcraft_core::MAX_COLS
         || range.iter().any(|cell| cell != anchor.1 && (sheet.cells.has(cell) || (sheet.spill.contains_key(&cell) && !outranked(cell))))
         || sheet.merges.iter().any(|merge| merge.intersects(&range))
-        || sheet.tables.iter().any(|table| table.range.contains(anchor.1))
+        || (array_len > 1 && sheet.tables.iter().any(|table| table.range.contains(anchor.1)))
 }
 
 fn fill_spill(sheet: &mut gridcraft_model::Sheet, anchor: CellRef, range: RangeRef, array: &Array) {
@@ -985,6 +1007,38 @@ pub fn evaluate_expr_as(wb: &Workbook, sheet: usize, at: CellRef, expr: &Expr, r
     host.reading = reading;
     let mut ev = Evaluator::new(&mut host, sheet, at);
     ev.value(expr)
+}
+
+/// What [`evaluate_bounded`] found: the formula's reference (not read), its value, or that it ran
+/// out of work.
+#[derive(Clone, Debug)]
+pub enum Bounded {
+    /// The formula is a reference (`$B$1:$B$9`, a name for one, `OFFSET(…)`): its areas, unread.
+    Areas(Vec<crate::eval::Area>),
+    Value(Value),
+    /// The formula needed more than the work it was given.
+    Exhausted,
+}
+
+/// Evaluates a formula in the context of a cell with at most `work` units of work (one per
+/// expression evaluated, per cell read, …), keeping a reference result as its areas so the caller
+/// can read as much of them as it needs (a validation list's search source).
+pub fn evaluate_bounded(wb: &Workbook, sheet: usize, at: CellRef, formula: &str, work: u64) -> Bounded {
+    let body = formula.strip_prefix('=').unwrap_or(formula);
+    let Ok(expr) = gridcraft_formula::parse(body) else { return Bounded::Value(Value::Error(CellError::Name)) };
+    let exprs = HashMap::default();
+    let mut rng = 0x1234_5678_9ABC_DEF0u64;
+    let mut host = PassHost::new(wb, &exprs, &mut rng, now_serial(), None);
+    let mut ev = Evaluator::new(&mut host, sheet, at).with_work(work);
+    let r = ev.eval(&expr);
+    if ev.is_exhausted() {
+        return Bounded::Exhausted;
+    }
+    match r {
+        crate::eval::Ev::R(areas) => Bounded::Areas(areas),
+        crate::eval::Ev::V(v) => Bounded::Value(v),
+        crate::eval::Ev::L(_) => Bounded::Value(Value::Error(CellError::Calc)),
+    }
 }
 
 fn prof_now() -> f64 {
@@ -1440,7 +1494,7 @@ pub(crate) mod tests {
         let mut put = |wb: &mut Workbook, at: String, text: String| {
             let at = CellRef::parse(&at).unwrap();
             wb.sheet_mut(0).unwrap().cells.set(at, Cell::formula(Formula::new(&text)));
-            exprs.insert((0, at), std::sync::Arc::new(gridcraft_formula::parse(&text[1..]).unwrap()));
+            exprs.insert((0, at), (std::sync::Arc::new(gridcraft_formula::parse(&text[1..]).unwrap()), 0, 0));
         };
         // A1 reads A2, ..., A64 (the 64th formula deep) reads a wide range of formulas.
         for r in 1..64 {
@@ -1466,7 +1520,7 @@ pub(crate) mod tests {
         let mut exprs = HashMap::default();
         for (at, formula) in pending {
             let expr = gridcraft_formula::parse(formula.strip_prefix('=').unwrap_or(formula)).ok()?;
-            exprs.insert((0, CellRef::parse(at)?), std::sync::Arc::new(expr));
+            exprs.insert((0, CellRef::parse(at)?), (std::sync::Arc::new(expr), 0, 0));
         }
 
         // A cell in `pending` is calculated the first time something reads it, which is the state

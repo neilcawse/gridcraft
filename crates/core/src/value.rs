@@ -202,8 +202,26 @@ pub struct NumberIndex {
 }
 
 /// Canonical IEEE-754 bit pattern for exact numeric lookup (`-0.0` normalized to `+0.0`).
+#[inline]
 fn number_bits(n: f64) -> u64 {
     if n == 0.0 { 0.0f64.to_bits() } else { n.to_bits() }
+}
+
+/// Rounds `x` to 15 significant digits identically to [`compare_numbers`], with an O(1) fast path
+/// for exact integers below 1e15 (which already have <= 15 significant digits).
+#[inline]
+fn round15_bits(x: f64) -> u64 {
+    if x == 0.0 {
+        return 0.0f64.to_bits();
+    }
+    if !x.is_finite() {
+        return x.to_bits();
+    }
+    if x.fract() == 0.0 && x.abs() < 1e15 {
+        return x.to_bits();
+    }
+    let r: f64 = format!("{x:.14e}").parse().unwrap_or(x);
+    number_bits(r)
 }
 
 impl NumberIndex {
@@ -226,6 +244,39 @@ impl NumberIndex {
             return &[];
         }
         self.by_bits.get(&number_bits(n)).map_or(&[], Vec::as_slice)
+    }
+}
+
+/// 15-significant-digit numeric equality index for `COUNTIF`/`SUMIF`/`*IFS` criteria matching:
+/// indexes both `Value::Number` and numeric-text `Value::Text` cells (matching Excel's criteria
+/// rule that `"1"` equals `1` and 15-sig-digit rounding).
+#[derive(Default, Debug)]
+#[doc(hidden)]
+pub struct CriteriaNumberIndex {
+    by_round15: std::collections::HashMap<u64, Vec<u32>>,
+}
+
+impl CriteriaNumberIndex {
+    fn build(data: &[Value]) -> Self {
+        let mut by_round15: std::collections::HashMap<u64, Vec<u32>> = std::collections::HashMap::new();
+        for (i, v) in data.iter().enumerate() {
+            let n = match v {
+                Value::Number(x) if x.is_finite() => Some(*x),
+                Value::Text(t) => crate::parse::parse_number_text(t).filter(|x| x.is_finite()),
+                _ => None,
+            };
+            if let Some(n) = n {
+                by_round15.entry(round15_bits(n)).or_default().push(i as u32);
+            }
+        }
+        Self { by_round15 }
+    }
+
+    fn positions(&self, n: f64) -> &[u32] {
+        if !n.is_finite() {
+            return &[];
+        }
+        self.by_round15.get(&round15_bits(n)).map_or(&[], Vec::as_slice)
     }
 }
 
@@ -252,6 +303,25 @@ pub struct Array {
     #[serde(skip)]
     #[doc(hidden)]
     pub number_queries: std::sync::atomic::AtomicU32,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub criteria_number_index: std::sync::OnceLock<CriteriaNumberIndex>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub criteria_number_queries: std::sync::atomic::AtomicU32,
+    /// Cached positions where `compare(v, &Value::Empty) == Ordering::Equal` (`Empty`, `0.0`,
+    /// `""`, `FALSE`), built lazily on the second query for arrays of >= 64 elements.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub empty_eq_index: std::sync::OnceLock<Vec<u32>>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub empty_eq_queries: std::sync::atomic::AtomicU32,
+    /// Cached content scan bitflags: 0 = unknown, bit 0 = scanned, bit 1 = has errors,
+    /// bit 2 = has text.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub error_state: std::sync::atomic::AtomicU8,
 }
 
 impl Default for Array {
@@ -270,10 +340,14 @@ impl Clone for Array {
             text_queries: std::sync::atomic::AtomicU32::new(0),
             number_index: std::sync::OnceLock::new(),
             number_queries: std::sync::atomic::AtomicU32::new(0),
+            criteria_number_index: std::sync::OnceLock::new(),
+            criteria_number_queries: std::sync::atomic::AtomicU32::new(0),
+            empty_eq_index: std::sync::OnceLock::new(),
+            empty_eq_queries: std::sync::atomic::AtomicU32::new(0),
+            error_state: std::sync::atomic::AtomicU8::new(0),
         }
     }
 }
-
 impl PartialEq for Array {
     fn eq(&self, other: &Self) -> bool {
         self.rows == other.rows && self.cols == other.cols && self.data == other.data
@@ -290,6 +364,11 @@ impl Array {
             text_queries: std::sync::atomic::AtomicU32::new(0),
             number_index: std::sync::OnceLock::new(),
             number_queries: std::sync::atomic::AtomicU32::new(0),
+            criteria_number_index: std::sync::OnceLock::new(),
+            criteria_number_queries: std::sync::atomic::AtomicU32::new(0),
+            empty_eq_index: std::sync::OnceLock::new(),
+            empty_eq_queries: std::sync::atomic::AtomicU32::new(0),
+            error_state: std::sync::atomic::AtomicU8::new(0),
         }
     }
     pub fn new(rows: usize, cols: usize, data: Vec<Value>) -> Option<Array> {
@@ -364,9 +443,82 @@ impl Array {
         }
         Some(self.number_index.get_or_init(|| NumberIndex::build(&self.data)).positions(n))
     }
-    /// Whether a text or number lookup index has been built on this array.
+    /// Positions (0-based into `data`, ascending) whose value satisfies Excel numeric criteria
+    /// equality (`COUNTIF`/`SUMIF`/`*IFS`: `Value::Number` or numeric `Value::Text` equal under
+    /// 15-significant-digit [`compare_numbers`]), or `None` when too small or only queried once.
+    pub fn criteria_number_positions(&self, n: f64) -> Option<&[u32]> {
+        if self.data.len() < 64 || !n.is_finite() {
+            return None;
+        }
+        if self.criteria_number_index.get().is_none() && self.criteria_number_queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+            return None;
+        }
+        Some(self.criteria_number_index.get_or_init(|| CriteriaNumberIndex::build(&self.data)).positions(n))
+    }
+    /// Positions (0-based into `data`, ascending) where `compare(v, &Value::Empty) == Equal`
+    /// (`Value::Empty`, `Value::Number(0.0)`, `Value::Text("")`, `Value::Bool(false)`), or `None`
+    /// when the array is too small to index or only queried once. Exact for `Value::Empty` and a
+    /// tight superset for `""`, `0.0`, and `FALSE`.
+    pub fn empty_eq_positions(&self) -> Option<&[u32]> {
+        if self.data.len() < 64 {
+            return None;
+        }
+        if self.empty_eq_index.get().is_none() && self.empty_eq_queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+            return None;
+        }
+        Some(
+            self.empty_eq_index
+                .get_or_init(|| {
+                    self.data
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, v)| {
+                            let is_eq = match v {
+                                Value::Empty | Value::Bool(false) => true,
+                                Value::Number(n) => *n == 0.0,
+                                Value::Text(t) => t.is_empty(),
+                                _ => false,
+                            };
+                            is_eq.then_some(i as u32)
+                        })
+                        .collect()
+                })
+                .as_slice(),
+        )
+    }
+    fn scan_flags(&self) -> u8 {
+        let flags = self.error_state.load(std::sync::atomic::Ordering::Relaxed);
+        if flags != 0 {
+            return flags;
+        }
+        let mut computed = 1u8;
+        for v in &self.data {
+            match v {
+                Value::Error(_) => computed |= 2,
+                Value::Text(_) => computed |= 4,
+                _ => {}
+            }
+            if computed == (1 | 2 | 4) {
+                break;
+            }
+        }
+        self.error_state.store(computed, std::sync::atomic::Ordering::Relaxed);
+        computed
+    }
+    /// Whether any element of `data` is `Value::Error` (cached after first check).
+    pub fn has_errors(&self) -> bool {
+        (self.scan_flags() & 2) != 0
+    }
+    /// Whether any element of `data` is `Value::Text` (cached after first check).
+    pub fn has_text(&self) -> bool {
+        (self.scan_flags() & 4) != 0
+    }
+    /// Whether a text, number, or empty-equality lookup index has been built on this array.
     pub fn has_lookup_index(&self) -> bool {
-        self.text_index.get().is_some_and(|idx| idx.by_text.is_some()) || self.number_index.get().is_some()
+        self.text_index.get().is_some_and(|idx| idx.by_text.is_some())
+            || self.number_index.get().is_some()
+            || self.criteria_number_index.get().is_some()
+            || self.empty_eq_index.get().is_some_and(|v| !v.is_empty())
     }
 }
 
@@ -529,8 +681,20 @@ pub fn compare(a: &Value, b: &Value) -> Ordering {
         (Value::Empty, Value::Empty) => Ordering::Equal,
         (Value::Empty, Value::Number(n)) => compare_numbers(0.0, *n),
         (Value::Number(n), Value::Empty) => compare_numbers(*n, 0.0),
-        (Value::Empty, Value::Text(t)) => "".cmp(&t.to_lowercase() as &str),
-        (Value::Text(t), Value::Empty) => (t.to_lowercase() as String).as_str().cmp(""),
+        (Value::Empty, Value::Text(t)) => {
+            if t.is_empty() {
+                Ordering::Equal
+            } else {
+                Ordering::Less
+            }
+        }
+        (Value::Text(t), Value::Empty) => {
+            if t.is_empty() {
+                Ordering::Equal
+            } else {
+                Ordering::Greater
+            }
+        }
         (Value::Empty, Value::Bool(b)) => false.cmp(b),
         (Value::Bool(b), Value::Empty) => b.cmp(&false),
         (Value::Number(x), Value::Number(y)) => compare_numbers(*x, *y),
@@ -698,12 +862,16 @@ pub fn text_eq(a: &str, b: &str) -> bool {
 }
 
 /// Sorting order used by Sort (ascending): numbers, text, booleans, errors, then blanks last.
+/// Numbers compare exactly, not at the 15 digits of [`compare`]. Observed in Excel 365: SORT,
+/// SORTBY, Data > Sort, the AutoFilter sort and table sort all put 0.3 before `=0.1+0.2`
+/// (0.30000000000000004) ascending and after it descending, whatever the input order.
 pub fn sort_compare(a: &Value, b: &Value) -> Ordering {
     match (a, b) {
         (Value::Empty, Value::Empty) => Ordering::Equal,
         (Value::Empty, _) => Ordering::Greater,
         (_, Value::Empty) => Ordering::Less,
         (Value::Error(_), Value::Error(_)) => Ordering::Equal,
+        (Value::Number(x), Value::Number(y)) => x.partial_cmp(y).unwrap_or(Ordering::Equal),
         _ => compare(a, b),
     }
 }
@@ -754,6 +922,31 @@ pub fn sci_text(n: f64, sig: usize) -> String {
     let mant = trim_decimal(mant);
     let e: i32 = exp.parse().unwrap_or(0);
     format!("{}E{}{:02}", mant, if e < 0 { '-' } else { '+' }, e.abs())
+}
+
+/// Longest text a cell can hold, in UTF-16 code units.
+pub const MAX_TEXT_CHARS: usize = 32_767;
+
+/// `s` cut to [`MAX_TEXT_CHARS`] UTF-16 code units without splitting a Unicode scalar value.
+pub fn cap_text(mut s: String) -> String {
+    if s.len() > MAX_TEXT_CHARS {
+        let mut units = 0;
+        if let Some((i, _)) = s.char_indices().find(|(_, c)| {
+            units += c.len_utf16();
+            units > MAX_TEXT_CHARS
+        }) {
+            s.truncate(i);
+        }
+    }
+    s
+}
+
+/// `v` with text cut to [`MAX_TEXT_CHARS`] UTF-16 code units; other values pass through.
+pub fn cap_value(v: Value) -> Value {
+    match v {
+        Value::Text(t) if t.len() > MAX_TEXT_CHARS => Value::text(cap_text(t.to_string())),
+        v => v,
+    }
 }
 
 #[cfg(test)]
@@ -857,6 +1050,16 @@ mod tests {
         assert_eq!(compare(&Value::from("z"), &Value::Bool(false)), Ordering::Less);
         assert_eq!(compare(&Value::Empty, &Value::Number(0.0)), Ordering::Equal);
         assert_eq!(sort_compare(&Value::Empty, &Value::Number(1.0)), Ordering::Greater);
+    }
+
+    #[test]
+    fn cap_text_uses_utf16_units_without_splitting_surrogate_pairs() {
+        let face = "😀";
+        assert_eq!(cap_text("x".repeat(MAX_TEXT_CHARS)), "x".repeat(MAX_TEXT_CHARS));
+        assert_eq!(cap_text("x".repeat(MAX_TEXT_CHARS + 1)), "x".repeat(MAX_TEXT_CHARS));
+        assert_eq!(cap_text(format!("{}{}", "x".repeat(MAX_TEXT_CHARS - 2), face)), format!("{}{}", "x".repeat(MAX_TEXT_CHARS - 2), face));
+        assert_eq!(cap_text(format!("{}{}", "x".repeat(MAX_TEXT_CHARS - 1), face)), "x".repeat(MAX_TEXT_CHARS - 1));
+        assert_eq!(cap_text(face.repeat(16_384)), face.repeat(16_383));
     }
 
     #[test]
@@ -1052,6 +1255,19 @@ mod tests {
         assert_ne!(compare(&num(0.1 + 0.2), &num(0.3)), Ordering::Greater);
         assert_eq!(compare(&num(1.0), &num(1.00000000000001)), Ordering::Less);
         assert_eq!(compare(&num(1.0), &num(2.0)), Ordering::Less);
+    }
+
+    #[test]
+    fn sort_orders_numbers_exactly() {
+        let num = Value::Number;
+        let e = 0.1 + 0.2;
+        assert_eq!(sort_compare(&num(0.3), &num(e)), Ordering::Less);
+        assert_eq!(sort_compare(&num(e), &num(0.3)), Ordering::Greater);
+        assert_eq!(sort_compare(&num(100.0), &num(100.0 + 1e-14)), Ordering::Less);
+        assert_eq!(sort_compare(&num(0.0), &num(-0.0)), Ordering::Equal);
+        assert_eq!(sort_compare(&num(1.0), &Value::from("a")), Ordering::Less);
+        // `=` keeps its 15-digit comparison.
+        assert_eq!(compare(&num(0.3), &num(e)), Ordering::Equal);
     }
 
     #[test]

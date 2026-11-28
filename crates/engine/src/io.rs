@@ -53,6 +53,10 @@ impl FileKind {
 /// The error for an encrypted workbook opened without a password contains this. The interface
 /// asks for the password when it sees it; programmatic callers pass `password` instead.
 pub const PASSWORD_REQUIRED: &str = "is password-protected. Enter its password to open it.";
+/// The error for a workbook with a password to modify, opened with neither that password
+/// (`modifyPassword`) nor `readOnly`, contains this. The interface asks for the password or a
+/// read-only open when it sees it.
+pub const MODIFY_PASSWORD_REQUIRED: &str = "is reserved by its author. Enter the password to modify it, or open it read-only.";
 /// The error for a wrong password contains this.
 pub const WRONG_PASSWORD: &str = "The password is incorrect.";
 /// The first open warning of a workbook decrypted with its password.
@@ -101,28 +105,40 @@ pub fn open_bytes_with(name: &str, bytes: &[u8], password: Option<&str>, csv_as_
 /// Floating objects are then placed over the fitted rows: the reader placed them over the
 /// heights the file saved.
 fn fit_imported_rows(wb: &mut Workbook) {
+    // Fast path: if no style in the workbook has a larger-than-default font or text wrapping,
+    // every row of a Legacy-geometry sheet is plain and fitting it is an exact no-op (custom and
+    // taller explicit heights are preserved verbatim). Mac-geometry sheets still fit, since row
+    // styles, saved heights and thick edges change their automatic heights.
+    let any_tall_or_wrap = (0..wb.styles.len()).any(|i| {
+        let st = wb.styles.get(gridcraft_model::StyleId(i as u32));
+        st.font.size > gridcraft_model::DEFAULT_FONT_SIZE || st.align.wrap
+    });
     // The whole pass shares one budget of merge comparisons: later sheets keep their heights once it is spent.
     let mut left = crate::cmd::MERGE_FIT_WORK;
     for si in 0..wb.sheets.len() {
         let Some(sh) = wb.sheet(si) else { continue };
-        let read = sh.object_anchors().next().is_some().then(|| sh.line_geometry());
-        let mut rows: Vec<u32> = sh.cells.iter().map(|(c, _)| c.row).collect();
         let mac = sh.geometry != gridcraft_model::Geometry::Legacy;
+        if !mac && !any_tall_or_wrap {
+            continue;
+        }
+        let read = sh.object_anchors().next().is_some().then(|| sh.line_geometry());
+        let mut rows = sh.cells.row_indices();
         if mac {
             // Cell-less row elements also fit: saved heights (H5) and thick edges (H10).
             rows.extend(sh.rows.keys().copied());
+            rows.sort_unstable();
+            rows.dedup();
         }
-        rows.sort_unstable();
-        rows.dedup();
-        // One sweep over the sheet's merges for all of its rows, in ascending order.
+        // One sweep over the sheet's merges and one shared CfCache for all rows on this sheet.
         let mut sweep = crate::cmd::MergeSweep::new(left);
+        let mut cf = crate::cf::CfCache::new();
         for row in rows {
             if mac {
-                crate::cmd::fit_row_height(wb, si, row, &mut sweep);
+                crate::cmd::fit_row_height_with_cf(wb, si, row, &mut sweep, &mut cf);
                 continue;
             }
             let before = wb.sheet(si).and_then(|sh| sh.rows.get(&row)).map(|i| (i.size, i.saved_size));
-            crate::cmd::fit_row_height(wb, si, row, &mut sweep);
+            crate::cmd::fit_row_height_with_cf(wb, si, row, &mut sweep, &mut cf);
             let Some((before, saved)) = before else { continue };
             let after = wb.sheet(si).and_then(|sh| sh.rows.get(&row)).and_then(|i| i.size);
             let keep_before = before.is_some_and(|b| after.is_none_or(|a| b > a + 0.5));
@@ -189,6 +205,7 @@ pub fn adopt_python(wb: &mut Workbook) -> Vec<String> {
     let mut skipped = 0usize;
     for si in 0..wb.sheets.len() {
         let Some(sh) = wb.sheets.get(si) else { continue };
+
         let max = gridcraft_model::python::MAX_RESULT_CELLS as u64;
         let spills: Vec<(CellRef, RangeRef)> = sh
             .spill_ranges
@@ -578,8 +595,10 @@ pub fn save_bytes_reported(wb: &Workbook, path: &str, kind: FileKind) -> Result<
             Err(EngineError::Other("SYLK (.slk) is supported for import only. Save as .xlsx or another supported export format.".into()))
         }
         // A workbook read from CSV keeps the separator it was read with (a `;` file stays `;`).
-        FileKind::Csv => wb.sheet(sheet).map(|sh| csv(wb, sh, wb.csv_delimiter.unwrap_or(b','))).transpose().map(Option::unwrap_or_default),
-        FileKind::Tsv => wb.sheet(sheet).map(|sh| csv(wb, sh, b'\t')).transpose().map(Option::unwrap_or_default),
+        FileKind::Csv => {
+            wb.sheet(sheet).map(|sh| csv(wb, sheet, sh, Some(wb.csv_delimiter.unwrap_or(b',')))).transpose().map(Option::unwrap_or_default)
+        }
+        FileKind::Tsv => wb.sheet(sheet).map(|sh| csv(wb, sheet, sh, None)).transpose().map(Option::unwrap_or_default),
         FileKind::Json => crate::macros::json_bytes(wb),
         FileKind::Html => to_html(wb, sheet).map(String::into_bytes),
     }?;
@@ -614,8 +633,15 @@ pub fn source_path(path: &str) -> Option<std::path::PathBuf> {
 /// `&` converts it (15 significant digits); from 1E+15 as the shortest digits that read back as
 /// the same value (every integer below 1e16 exactly, so long identifiers survive); small numbers
 /// that `&` writes in scientific notation as their 15 digits in full.
-fn csv(wb: &Workbook, sh: &Sheet, delimiter: u8) -> Result<Vec<u8>> {
-    gridcraft_xlsx::write_csv(sh, delimiter, |c| crate::display::value_text(wb, sh, c)).map_err(|e| EngineError::Other(e.to_string()))
+/// `delimiter` `None` writes a tab-separated file (`.tsv`, `.txt`).
+fn csv(wb: &Workbook, sheet: usize, sh: &Sheet, delimiter: Option<u8>) -> Result<Vec<u8>> {
+    let mut cf = crate::cf::CfCache::new();
+    let text = |c| crate::display::value_text_with_cf(wb, sheet, sh, c, &mut cf);
+    match delimiter {
+        Some(d) => gridcraft_xlsx::write_csv(sh, d, text),
+        None => gridcraft_xlsx::write_tsv(sh, text),
+    }
+    .map_err(|e| EngineError::Other(e.to_string()))
 }
 
 /// The active sheet as CSV of raw cell values, for automation: numbers at full precision, dates and
@@ -783,6 +809,7 @@ pub(crate) fn range_html(wb: &Workbook, sheet: usize, r: RangeRef, plain_text: &
     let merges = merge_index(sh, r)?;
     let mut out = ClipboardHtml(String::new());
     write!(out, "<table{} style=\"border-collapse:collapse;font-family:Calibri,Carlito,Arial,sans-serif;font-size:11pt\">", table_dir(sh)).ok()?;
+    let mut cf = crate::cf::CfCache::new();
     for row in r.start.row..=r.end.row {
         if sh.is_row_hidden(row) {
             continue;
@@ -802,7 +829,7 @@ pub(crate) fn range_html(wb: &Workbook, sheet: usize, r: RangeRef, plain_text: &
             };
             // Use the visible selected cell, even when the merge's original anchor
             // is outside the range or hidden. This matches the plain-text copy.
-            let text = crate::display::cell_text(wb, sh, c);
+            let text = crate::display::cell_text_with_cf(wb, sheet, sh, c, &mut cf);
             let dir = CellDir::of(sh, c, &text);
             let css = html_cell_css(wb, sh, c, dir);
             write!(out, "<td style=\"border:1px solid #d4d4d4;padding:2px 4px;white-space:pre-wrap;{css}\"{}{span}>", dir.attr()).ok()?;
@@ -928,6 +955,7 @@ pub fn to_html(wb: &Workbook, sheet: usize) -> Result<String> {
             }
             out.push_str("</colgroup>");
         }
+        let mut cf = crate::cf::CfCache::new();
         for row in r.start.row..=r.end.row {
             if sh.is_row_hidden(row) {
                 continue;
@@ -943,7 +971,7 @@ pub fn to_html(wb: &Workbook, sheet: usize) -> Result<String> {
                 if merge.is_some_and(|m| m.start != c) || (fixed && sh.is_col_hidden(col)) {
                     continue;
                 }
-                let text = crate::display::cell_text(wb, sh, c);
+                let text = crate::display::cell_text_with_cf(wb, sheet, sh, c, &mut cf);
                 let dir = CellDir::of(sh, c, &text);
                 let css = html_cell_css(wb, sh, c, dir);
                 let span = merge
@@ -1194,43 +1222,14 @@ pub fn write_file(path: &str, _bytes: &[u8]) -> Result<()> {
     Err(EngineError::Other(format!("{path}: no file system in the browser")))
 }
 
-const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
 pub fn base64_encode(data: &[u8]) -> String {
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b = [chunk.first().copied().unwrap_or(0), chunk.get(1).copied().unwrap_or(0), chunk.get(2).copied().unwrap_or(0)];
-        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
-        for i in 0..4 {
-            if i <= chunk.len() {
-                out.push(B64[((n >> (18 - 6 * i)) & 63) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
+    gridcraft_model::b64::encode(data)
 }
 
+/// Base64, or a `data:` URL's base64 payload.
 pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
     let s = s.split_once(',').filter(|(h, _)| h.starts_with("data:")).map(|(_, b)| b).unwrap_or(s);
-    let mut out = Vec::with_capacity(s.len() / 4 * 3);
-    let mut buf = 0u32;
-    let mut bits = 0;
-    for c in s.bytes() {
-        if c == b'=' || c.is_ascii_whitespace() {
-            continue;
-        }
-        let v = B64.iter().position(|&x| x == c)? as u32;
-        buf = (buf << 6) | v;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((buf >> bits) as u8);
-            buf &= (1 << bits) - 1;
-        }
-    }
-    Some(out)
+    gridcraft_model::b64::decode(s)
 }
 
 /// Pixel size of a PNG or JPEG from its header.

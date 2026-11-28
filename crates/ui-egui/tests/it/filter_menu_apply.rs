@@ -6,8 +6,8 @@ use crate::common::{self, Harness};
 use egui::{Event, Key, Modifiers, PointerButton, Pos2, vec2};
 use egui_kittest::kittest::Queryable;
 use gridcraft_engine::Session;
-use gridcraft_engine::core::CellRef;
-use gridcraft_engine::model::{FilterCriterion, Sheet};
+use gridcraft_engine::core::{CellRef, RangeRef};
+use gridcraft_engine::model::{AutoFilter, FilterCriterion, Sheet};
 use gridcraft_ui_egui::grid;
 use serde_json::json;
 
@@ -15,6 +15,15 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 fn harness(s: Session) -> Harness {
     common::harness_with(common::builder().with_size(vec2(1200.0, 800.0)), common::app(s), 4)
+}
+
+/// Gives the active sheet a worksheet AutoFilter over `range` with no criteria, as an imported
+/// file can: `data.filter` refuses a new filter range that overlaps a table.
+fn seed_sheet_filter(s: &mut Session, range: &str) -> TestResult {
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut()?.wb);
+    let sh = wb.sheet_mut(wb.active_sheet()).ok_or("active sheet")?;
+    sh.autofilter = Some(AutoFilter { range: RangeRef::parse(range).ok_or("range")?, criteria: vec![] });
+    Ok(())
 }
 
 fn sheet(h: &Harness) -> TestResult<&Sheet> {
@@ -316,7 +325,7 @@ fn context_filter_by_value_with_buttons_off_undoes_and_redoes_as_one_step() -> T
         s.execute("slicer.toggle", json!({"value":"West"}))?;
         if has_worksheet_filter {
             s.execute("selection.set", json!({"range":"F1"}))?;
-            s.execute("data.filter", json!({"range":"A1:B4"}))?;
+            seed_sheet_filter(&mut s, "A1:B4")?;
         }
         let mut h = harness(s);
         let state = |h: &Harness| -> TestResult<_> {
@@ -494,7 +503,7 @@ fn header_only_table_popup_has_no_data_values() -> TestResult {
 }
 
 fn overlapping_worksheet_and_slicer_filters() -> TestResult<Harness> {
-    // An explicit Data > Filter range can be set from a selection outside the table.
+    // An imported workbook can hold a worksheet filter over a table's range.
     let mut s = Session::new();
     s.new_workbook();
     s.execute("range.setValues", json!({"range":"A1", "values":[["Name"], ["Ann"], ["Ben"], ["Cat"]]}))?;
@@ -503,7 +512,7 @@ fn overlapping_worksheet_and_slicer_filters() -> TestResult<Harness> {
     s.execute("insert.slicer", json!({"table":"People", "column":"Name", "at":"J2"}))?;
     s.execute("slicer.toggle", json!({"value":"Ann"}))?;
     s.execute("selection.set", json!({"range":"F1"}))?;
-    s.execute("data.filter", json!({"range":"A1:A4"}))?;
+    seed_sheet_filter(&mut s, "A1:A4")?;
     Ok(harness(s))
 }
 

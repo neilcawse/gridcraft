@@ -53,7 +53,7 @@ impl<'a> Foreign<'a> {
 
     /// Why `e` can't be graded, or `None`. `defined` is the upper-cased names the workbook defines,
     /// which a call may name (`LAMBDA`s).
-    pub(super) fn reason(&self, e: &Expr, defined: &HashSet<String>) -> Option<&'static str> {
+    pub(super) fn reason(&self, e: &Expr, defined: &HashSet<String>, (dr, dc): (i32, i32)) -> Option<&'static str> {
         let mut found: Option<&'static str> = None;
         let mut bound: Option<HashSet<String>> = None;
         e.walk(&mut |x| {
@@ -62,7 +62,9 @@ impl<'a> Foreign<'a> {
             }
             found = match x {
                 Expr::Call(n, _) => self.call(n, defined, e, &mut bound),
-                Expr::Ref(r) => self.missing_sheet(&r.sheet),
+                Expr::Ref(r) => self.missing_sheet(&r.sheet).filter(|_| {
+                    (dr == 0 && dc == 0) || gridcraft_engine::formula::adjust::shift_ref_kind(&r.kind, i64::from(dr), i64::from(dc)).is_some()
+                }),
                 _ => None,
             };
         });

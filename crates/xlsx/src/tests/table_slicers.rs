@@ -20,7 +20,7 @@ fn unzip(bytes: &[u8]) -> Result<BTreeMap<String, String>, Box<dyn std::error::E
         let mut f = archive.by_index(i)?;
         let mut text = String::new();
         if f.read_to_string(&mut text).is_ok() {
-            parts.insert(f.name().to_string(), text);
+            parts.insert(f.name()?.into_owned(), text);
         }
     }
     Ok(parts)
@@ -404,5 +404,90 @@ fn imported_table_slicer_keeps_its_cache() -> TestResult {
     let again = back.sheets[0].slicers.first().ok_or("slicer")?;
     assert_eq!(again.source, sl.source);
     assert_eq!(again.imported_cache.table_items, sl.imported_cache.table_items);
+    Ok(())
+}
+
+const SHEET_TABLE_SLICERS: &str = "{3A4CF648-6AED-40f4-86FF-DC5316D8AED3}";
+const WB_TABLE_SLICER_CACHES: &str = "{46BE6895-7355-4a93-B00E-2C351335B9C9}";
+
+/// The read warnings that name dropped extensions.
+fn dropped_extensions(warnings: &[String]) -> Vec<&String> {
+    warnings.iter().filter(|w| w.contains("Excel extension")).collect()
+}
+
+/// The x15 table slicer lists are written from the model, so opening a file that has them reports
+/// nothing dropped, and the slicer they list survives a save and a second open.
+#[test]
+fn table_slicer_lists_open_without_a_dropped_extension_warning() -> TestResult {
+    let wb = workbook();
+    let (bytes, _) = save(&wb)?;
+    let parts = unzip(&bytes)?;
+    assert!(parts.get("xl/worksheets/sheet2.xml").is_some_and(|x| x.contains(SHEET_TABLE_SLICERS)), "the sheet lists its table slicers");
+    assert!(parts.get("xl/workbook.xml").is_some_and(|x| x.contains(WB_TABLE_SLICER_CACHES)), "the workbook lists the caches");
+    let (back, report) = read_xlsx(&bytes)?;
+    assert!(dropped_extensions(&report.warnings).is_empty(), "{:?}", report.warnings);
+    assert_same_slicer(&wb.sheets[1].slicers[0], &back.sheets[1].slicers[0]);
+    let (again, _) = save(&back)?;
+    let (third, report) = read_xlsx(&again)?;
+    assert!(dropped_extensions(&report.warnings).is_empty(), "{:?}", report.warnings);
+    assert_eq!(third.sheets[1].slicers.len(), 1);
+    assert_same_slicer(&wb.sheets[1].slicers[0], &third.sheets[1].slicers[0]);
+    Ok(())
+}
+
+/// An unknown extension beside the table slicer lists still warns, naming only itself; so does a
+/// table slicer list holding more or less than the slicer writer regenerates (other content,
+/// another attribute, an id naming no slicer part or cache, or no ids), naming the list too.
+#[test]
+fn unknown_extensions_beside_table_slicer_lists_still_warn() -> TestResult {
+    let mut parts = unzip(&save(&workbook())?.0)?;
+    let unknown = "{00000000-1111-2222-3333-444444444444}";
+    let other = format!(r#"<ext uri="{unknown}" xmlns:u="urn:example"><u:thing a="1"/></ext></extLst>"#);
+    for part in ["xl/worksheets/sheet2.xml", "xl/workbook.xml"] {
+        let x = parts.get_mut(part).ok_or(part)?;
+        assert_eq!(x.matches("</extLst>").count(), 1, "{x}");
+        *x = x.replace("</extLst>", &other);
+    }
+    let open = |parts: &BTreeMap<String, String>| read_xlsx(&make_zip(&parts.iter().map(|(k, v)| (k.as_str(), v.as_bytes())).collect::<Vec<_>>()));
+    let (back, report) = open(&parts)?;
+    let dropped = dropped_extensions(&report.warnings);
+    assert_eq!(dropped.len(), 2, "one per owner: {:?}", report.warnings);
+    for owner in ["sheet \"Dash\"", "the workbook"] {
+        let w = format!("{owner}: 1 Excel extension GridCraft does not model was dropped ({unknown})");
+        assert!(dropped.iter().any(|d| **d == w), "{w} in {:?}", report.warnings);
+    }
+    assert_eq!(back.sheets[1].slicers.len(), 1);
+
+    // What the writer doesn't regenerate, in the lists themselves.
+    let list_id = |x: &str, item: &str| -> Result<String, Box<dyn std::error::Error>> {
+        let open = format!("<{item} r:id=\"");
+        let start = x.find(&open).ok_or("list item")? + open.len();
+        let end = start + x[start..].find('"').ok_or("id end")?;
+        Ok(format!("{open}{}\"", &x[start..end]))
+    };
+    for (part, close, item, uri) in [
+        ("xl/worksheets/sheet2.xml", "</x14:slicerList>", "x14:slicer", SHEET_TABLE_SLICERS),
+        ("xl/workbook.xml", "</x15:slicerCaches>", "x14:slicerCache", WB_TABLE_SLICER_CACHES),
+    ] {
+        let x = parts.get(part).ok_or(part)?;
+        let id = list_id(x, item)?;
+        let ext = format!("<ext uri=\"{uri}\"");
+        assert_eq!((x.matches(close).count(), x.matches(&id).count(), x.matches(&ext).count()), (1, 1, 1), "{x}");
+        for changed in [
+            x.replace(close, &format!("<x14:extra/>{close}")),
+            x.replace(&ext, &format!("{ext} extra=\"1\"")),
+            x.replace(&id, &format!("<{item} r:id=\"rIdMissing\"")),
+            x.replace(&format!("{id}/>"), ""),
+        ] {
+            let mut changed_parts = parts.clone();
+            changed_parts.insert(part.to_owned(), changed);
+            let (_, report) = open(&changed_parts)?;
+            assert!(
+                report.warnings.iter().any(|w| w.contains("Excel extensions") && w.contains(uri) && w.contains(unknown)),
+                "{:?}",
+                report.warnings
+            );
+        }
+    }
     Ok(())
 }

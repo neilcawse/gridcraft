@@ -317,6 +317,7 @@ fn check_input(wb: &Workbook, input: &gridcraft_model::NamedInput, place: Place)
     }
     let Some(sh) = wb.sheet(place.sheet) else { return out };
     let mut blanks = Vec::new();
+    let mut cf = crate::cf::CfCache::new();
     for (ci, col) in (r.start.col..=r.end.col).enumerate() {
         let ty = input.col_types.get(ci).copied().unwrap_or_default();
         let mut wrong = Vec::new();
@@ -343,7 +344,7 @@ fn check_input(wb: &Workbook, input: &gridcraft_model::NamedInput, place: Place)
         }
         if !wrong.is_empty() {
             let head = if input.header {
-                Some(crate::display::cell_text(wb, sh, CellRef::new(r.start.row, col))).filter(|h| !h.trim().is_empty())
+                Some(crate::display::cell_text_with_cf(wb, place.sheet, sh, CellRef::new(r.start.row, col), &mut cf)).filter(|h| !h.trim().is_empty())
             } else {
                 None
             };
@@ -1243,7 +1244,7 @@ pub(crate) fn pair_sheets(before: &Workbook, after: &Workbook) -> (Vec<(usize, O
 fn recalculated_only(b: Option<&Cell>, a: Option<&Cell>) -> bool {
     match (b, a) {
         (Some(b), Some(a)) => match (&b.formula, &a.formula) {
-            (Some(x), Some(y)) => x.text == y.text && x.array == y.array && b.style == a.style,
+            (Some(x), Some(y)) => x.text() == y.text() && x.array == y.array && b.style == a.style,
             (None, None) => match (&b.py, &a.py) {
                 (Some(x), Some(y)) => x.code == y.code && x.object == y.object && b.style == a.style,
                 _ => false,
@@ -1265,7 +1266,7 @@ fn has_content(c: &Cell) -> bool {
 fn content_differs(b: Option<&Cell>, a: Option<&Cell>) -> bool {
     match (b, a) {
         (Some(b), Some(a)) => match (&b.formula, &a.formula) {
-            (Some(x), Some(y)) => x.text != y.text,
+            (Some(x), Some(y)) => x.text() != y.text(),
             (None, None) => match (&b.py, &a.py) {
                 (Some(x), Some(y)) => x.code != y.code || x.object != y.object,
                 (None, None) => b.value != a.value,

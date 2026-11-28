@@ -187,13 +187,26 @@ fn as_agreed(fresh: &Workbook, saved: &HashMap<Key, Value>, tolerance: f64) -> W
 /// cells weren't saved as its value). [`unpin_volatile`] puts the formulas back.
 pub(super) fn pin_volatile(wb: &mut Workbook, saved: &HashMap<Key, Value>) -> Vec<(Key, Arc<Formula>)> {
     let mut pinned = Vec::new();
+    let mut shifted = HashMap::new();
     for (si, sh) in wb.sheets.iter_mut().enumerate() {
         let seeds: Vec<CellRef> = sh
             .cells
             .iter()
             .filter(|(c, cell)| {
-                cell.formula.as_ref().is_some_and(|f| f.array.is_none() && !f.dynamic && f.expr_arc().is_some_and(|e| calls_volatile(&e)))
-                    && saved.get(&(si, *c)).is_some_and(|v| !v.is_empty())
+                saved.contains_key(&(si, *c))
+                    && cell.formula.as_ref().is_some_and(|f| {
+                        f.array.is_none()
+                            && !f.dynamic
+                            && if let Some((base, _, _)) = f.expr_shifted() {
+                                if f.is_shared() {
+                                    *shifted.entry(Arc::as_ptr(base)).or_insert_with(|| calls_volatile(base))
+                                } else {
+                                    calls_volatile(base)
+                                }
+                            } else {
+                                f.expr_arc().is_some_and(|e| calls_volatile(&e))
+                            }
+                    })
             })
             .map(|(c, _)| c)
             .collect();
@@ -378,7 +391,7 @@ const MAX_SETTLE_PASSES: usize = 16;
 /// readers' differences.
 #[allow(clippy::too_many_arguments)]
 fn settle_undecided(
-    graded: &mut [(Key, Vec<String>, Grade)],
+    graded: &mut [(Key, usize, Grade)],
     saved: &HashMap<Key, Value>,
     fresh: &Workbook,
     calc: &Calc,
@@ -622,7 +635,7 @@ pub(super) fn oracle(
     let local_oracle = gating && manual && !formula_wb.sheets.iter().any(|s| !s.spill_ranges.is_empty());
     let mut own: Option<Workbook> = None;
 
-    let mut graded: Vec<(Key, Vec<String>, Grade)> = Vec::new();
+    let mut graded: Vec<(Key, usize, Grade)> = Vec::new();
     // `--cells`: every formula cell's bucket, named as the corpus database names them.
     let mut cells: Vec<(Key, String)> = Vec::new();
     let mut note = |k: Key, bucket: &dyn Fn() -> String| {
@@ -630,6 +643,16 @@ pub(super) fn oracle(
             cells.push((k, bucket()));
         }
     };
+    let mut funcs_cache = HashMap::new();
+    let mut funcs_by_id = vec![vec!["(unparsed)".to_string()], vec!["(no function)".to_string()]];
+    fn function_id(names: Vec<String>, by_id: &mut Vec<Vec<String>>) -> usize {
+        if names.is_empty() {
+            return 1;
+        }
+        let id = by_id.len();
+        by_id.push(names);
+        id
+    }
     for (si, sh) in formula_wb.sheets.iter().enumerate() {
         for (c, cell) in sh.cells.iter() {
             let Some(f) = &cell.formula else { continue };
@@ -657,13 +680,15 @@ pub(super) fn oracle(
                 note((si, c), &|| format!("no_oracle:{}", why::DOWNSTREAM));
                 continue;
             }
-            let actual = fresh.sheet(si).and_then(|s| s.cell(c)).map(|x| x.value.scalar()).unwrap_or_default();
-            let funcs = match f.expr_arc() {
-                Some(e) => {
-                    let names = functions_of(&e);
-                    if names.is_empty() { vec!["(no function)".to_string()] } else { names }
+            let actual = cell.value.scalar();
+            let funcs = if let Some((base, _, _)) = f.expr_shifted() {
+                if f.is_shared() {
+                    *funcs_cache.entry(Arc::as_ptr(base)).or_insert_with(|| function_id(functions_of(base), &mut funcs_by_id))
+                } else {
+                    function_id(functions_of(base), &mut funcs_by_id)
                 }
-                None => vec!["(unparsed)".to_string()],
+            } else {
+                f.expr_arc().map_or(0, |e| function_id(functions_of(&e), &mut funcs_by_id))
             };
             let grade = if error_text_cached(producer, expected_val, &actual) {
                 Grade::ErrorDetail
@@ -702,9 +727,10 @@ pub(super) fn oracle(
     let mut bad: Vec<(Key, Vec<String>, CacheTrust)> = Vec::new();
     for (k, funcs, grade) in graded {
         let (si, c) = k;
+        let funcs = &funcs_by_id[funcs];
         r.checked += usize::from(gating);
         if gating {
-            for n in &funcs {
+            for n in funcs {
                 r.functions.entry(n.clone()).or_default().checked += 1;
             }
         }
@@ -728,17 +754,17 @@ pub(super) fn oracle(
         } else if gating && circular.contains(&k) {
             CacheTrust::CircularReference
         } else if gating
-            && (version_explains(formula_wb, saved, k, excel_version, &funcs, &expected_val, &actual, opts.tolerance, &mut budget)
+            && (version_explains(formula_wb, saved, k, excel_version, funcs, &expected_val, &actual, opts.tolerance, &mut budget)
                 || underflow_legacy(formula_wb, k, excel_version, &expected_val, &actual)
                 || typed_text_legacy(formula_wb, k, excel_version, &expected_val, &actual)
-                || one_cell_reading_legacy(formula_wb, saved, k, excel_version, &funcs, opts.tolerance)
-                || old_answer_legacy(formula_wb, saved, k, excel_version, &funcs, opts.tolerance))
+                || one_cell_reading_legacy(formula_wb, saved, k, excel_version, funcs, opts.tolerance)
+                || old_answer_legacy(formula_wb, saved, k, excel_version, funcs, opts.tolerance))
         {
             CacheTrust::LegacyExcelVersion
         } else {
             trust
         };
-        bad.push((k, funcs, class));
+        bad.push((k, funcs.clone(), class));
     }
     if bad.iter().any(|(_, _, class)| *class == CacheTrust::LegacyExcelVersion) {
         spread_legacy(&mut bad, calc, &scan, formula_wb, saved, excel_version, opts.tolerance);

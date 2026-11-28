@@ -88,9 +88,9 @@ fn first_page_number_is_read_and_written_back() {
     // In the schema's order with the other attributes: after the scale, before Fit To.
     let mut wb = back;
     wb.sheet_mut(0).unwrap().print.scale = 80;
-    wb.sheet_mut(0).unwrap().print.fit_to = Some((1, 2));
+    wb.sheet_mut(0).unwrap().print.fit_to = Some((2, 3));
     let xml = sheet_xml(&write_xlsx(&wb).unwrap());
-    assert!(page_setup(&xml).contains(r#"scale="80" firstPageNumber="7" fitToWidth="1""#), "{xml}");
+    assert!(page_setup(&xml).contains(r#"scale="80" firstPageNumber="7" fitToWidth="2""#), "{xml}");
     // Automatic: no number, a number Excel keeps without using it, and `useFirstPageNumber="0"`.
     for body in [
         r#"<sheetData/><pageSetup paperSize="9" orientation="portrait"/>"#,
@@ -108,4 +108,36 @@ fn first_page_number_is_read_and_written_back() {
     wb.sheet_mut(0).unwrap().print.first_page_number = Some(1);
     let xml = sheet_xml(&write_xlsx(&wb).unwrap());
     assert!(xml.contains(r#"firstPageNumber="1""#) && xml.contains(r#"useFirstPageNumber="1""#), "{xml}");
+}
+
+#[test]
+fn scale_and_default_fit_to_do_not_inject_fit_to_width_or_height() {
+    // Explicit scale without fitToPage must not emit fitToWidth / fitToHeight or fitToPage.
+    let body_scale = r#"<sheetFormatPr defaultRowHeight="12.75"/><sheetData/><pageSetup scale="50" orientation="landscape"/>"#;
+    let (wb, _) = read_xlsx(&minimal(body_scale, &[], "", "")).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().print.scale, 50);
+    assert_eq!(wb.sheet(0).unwrap().print.fit_to, None);
+    let xml = sheet_xml(&write_xlsx(&wb).unwrap());
+    let ps = page_setup(&xml);
+    assert!(ps.contains(r#"scale="50""#), "{ps}");
+    assert!(!ps.contains("fitToWidth") && !ps.contains("fitToHeight"), "{ps}");
+    assert!(!xml.contains("fitToPage"), "{xml}");
+    assert!(!xml.contains(r#"customHeight="1""#), "non-custom defaultRowHeight must not inject customHeight: {xml}");
+
+    // fitToPage="1" with schema-default 1x1 (omitted fitToWidth/fitToHeight) and explicit scale
+    // preserves fitToPage and scale without injecting fitToWidth="1" fitToHeight="1".
+    let body_fit = r#"<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr><sheetFormatPr defaultRowHeight="21.95" customHeight="1"/><sheetData/><pageSetup scale="48" orientation="portrait"/>"#;
+    let (wb, _) = read_xlsx(&minimal(body_fit, &[], "", "")).unwrap();
+    assert_eq!(wb.sheet(0).unwrap().print.scale, 48);
+    assert_eq!(wb.sheet(0).unwrap().print.fit_to, Some((1, 1)));
+    let bytes = write_xlsx(&wb).unwrap();
+    let xml = sheet_xml(&bytes);
+    let ps = page_setup(&xml);
+    assert!(xml.contains(r#"<pageSetUpPr fitToPage="1"/>"#), "{xml}");
+    assert!(ps.contains(r#"scale="48""#), "{ps}");
+    assert!(!ps.contains("fitToWidth") && !ps.contains("fitToHeight"), "{ps}");
+    assert!(xml.contains(r#"defaultRowHeight="21.95" customHeight="1""#), "{xml}");
+    let (back, _) = read_xlsx(&bytes).unwrap();
+    assert_eq!(back.sheet(0).unwrap().print.scale, 48);
+    assert_eq!(back.sheet(0).unwrap().print.fit_to, Some((1, 1)));
 }

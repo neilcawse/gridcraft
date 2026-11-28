@@ -218,16 +218,13 @@ pub(super) fn operator_compare(a: &Value, b: &Value, transition: bool) -> std::c
     compare(a, b)
 }
 
-fn binary_scalar(op: BinOp, a: &Value, b: &Value, sys: gridcraft_core::DateSystem, transition: bool) -> Value {
-    if let Value::Error(e) = a {
-        return Value::Error(*e);
-    }
-    if let Value::Error(e) = b {
-        return Value::Error(*e);
-    }
-    let num = |f: fn(f64, f64) -> Value| match (operator_number(a, sys, transition), operator_number(b, sys, transition)) {
-        (Ok(x), Ok(y)) => f(x, y),
-        (Err(e), _) | (_, Err(e)) => Value::Error(e),
+pub(super) fn binary_scalar(op: BinOp, a: &Value, b: &Value, sys: gridcraft_core::DateSystem, transition: bool) -> Value {
+    let num = |f: fn(f64, f64) -> Value| match operator_number(a, sys, transition) {
+        Err(e) => Value::Error(e),
+        Ok(x) => match operator_number(b, sys, transition) {
+            Err(e) => Value::Error(e),
+            Ok(y) => f(x, y),
+        },
     };
     use std::cmp::Ordering::*;
     match op {
@@ -244,23 +241,35 @@ fn binary_scalar(op: BinOp, a: &Value, b: &Value, sys: gridcraft_core::DateSyste
                 Value::number(x.powf(y))
             }
         }),
-        BinOp::Concat if transition && (matches!(a, Value::Empty) || matches!(b, Value::Empty)) => Value::Error(CellError::Value),
-        BinOp::Concat => match (a.to_text(), b.to_text()) {
-            (Ok(x), Ok(y)) => {
-                if x.len() + y.len() > 32767 * 4 {
-                    Value::Error(CellError::Value)
-                } else {
-                    Value::text(x + &y)
-                }
-            }
-            (Err(e), _) | (_, Err(e)) => Value::Error(e),
+        BinOp::Concat => match a.to_text() {
+            Err(e) => Value::Error(e),
+            Ok(x) => match b.to_text() {
+                Err(e) => Value::Error(e),
+                Ok(_) if transition && (matches!(a, Value::Empty) || matches!(b, Value::Empty)) => Value::Error(CellError::Value),
+                Ok(y) => Value::text(gridcraft_core::cap_text(x + &y)),
+            },
         },
-        BinOp::Eq => Value::Bool(operator_compare(a, b, transition) == Equal),
-        BinOp::Ne => Value::Bool(operator_compare(a, b, transition) != Equal),
-        BinOp::Lt => Value::Bool(operator_compare(a, b, transition) == Less),
-        BinOp::Gt => Value::Bool(operator_compare(a, b, transition) == Greater),
-        BinOp::Le => Value::Bool(operator_compare(a, b, transition) != Greater),
-        BinOp::Ge => Value::Bool(operator_compare(a, b, transition) != Less),
+        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
+            if let Value::Error(e) = a {
+                return Value::Error(*e);
+            }
+            if let Value::Error(e) = b {
+                return Value::Error(*e);
+            }
+            let ord = operator_compare(a, b, transition);
+            let matched = match op {
+                BinOp::Eq => ord == Equal,
+                BinOp::Ne => ord != Equal,
+                BinOp::Lt => ord == Less,
+                BinOp::Gt => ord == Greater,
+                BinOp::Le => ord != Greater,
+                BinOp::Ge => ord != Less,
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Pow | BinOp::Concat | BinOp::Range | BinOp::Union | BinOp::Intersect => {
+                    false
+                }
+            };
+            Value::Bool(matched)
+        }
         BinOp::Range | BinOp::Union | BinOp::Intersect => Value::Error(CellError::Value),
     }
 }

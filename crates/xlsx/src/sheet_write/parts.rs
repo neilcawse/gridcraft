@@ -99,7 +99,42 @@ pub(super) fn table_column_id(bound: Option<&TableBinding<'_>>, i: usize) -> u32
     bound.and_then(|b| b.column_id(i)).unwrap_or_else(|| u32::try_from(i).unwrap_or(u32::MAX).saturating_add(1))
 }
 
-pub(super) fn table_xml(t: &Table, cols: &[String], name: &str, id: u32, bound: Option<&TableBinding<'_>>, out: &mut Out) -> String {
+/// The criteria saved in a table's `<autoFilter>`: its own, plus those of a sheet AutoFilter
+/// that starts on the table's header row. GridCraft filters a table through the sheet
+/// AutoFilter, but a file can't hold a sheet AutoFilter that overlaps a table (the sheet element
+/// is left out), so without this the criteria would be lost and the rows they hide would reopen
+/// as rows hidden by hand, which SUBTOTAL 1-11 counts.
+pub(super) fn table_filter(sheet: &Sheet, t: &Table) -> Vec<(u32, FilterCriterion)> {
+    let mut criteria = t.filter.clone();
+    let Some(af) = sheet.autofilter.as_ref().filter(|af| {
+        t.header_row
+            && t.filter_button
+            && af.range.start.row == t.range.start.row
+            && af.range.intersects(&t.range)
+            && t.data_range().is_some_and(|d| af.range.end.row >= d.end.row)
+    }) else {
+        return criteria;
+    };
+    for (off, c) in &af.criteria {
+        let Some(col) = af.range.start.col.checked_add(*off).and_then(|abs| abs.checked_sub(t.range.start.col)) else { continue };
+        if col < t.range.width() {
+            criteria.retain(|(o, _)| *o != col);
+            criteria.push((col, c.clone()));
+        }
+    }
+    criteria.sort_by_key(|(o, _)| *o);
+    criteria
+}
+
+pub(super) fn table_xml(
+    t: &Table,
+    cols: &[String],
+    name: &str,
+    id: u32,
+    filter: &[(u32, FilterCriterion)],
+    bound: Option<&TableBinding<'_>>,
+    out: &mut Out,
+) -> String {
     let mut s =
         format!("{XML_DECL}<table xmlns=\"{NS_MAIN}\" id=\"{id}\" name=\"{0}\" displayName=\"{0}\" ref=\"{1}\"", esc_attr(name), t.range.a1());
     if !t.header_row {
@@ -120,7 +155,7 @@ pub(super) fn table_xml(t: &Table, cols: &[String], name: &str, id: u32, bound: 
     if t.filter_button
         && let Some(r) = t.autofilter_range()
     {
-        s.push_str(&autofilter_xml(r, &t.filter, out));
+        s.push_str(&autofilter_xml(r, filter, out));
     }
     let _ = write!(s, "<tableColumns count=\"{}\">", cols.len());
     for (i, name) in cols.iter().enumerate() {
@@ -310,7 +345,11 @@ pub(super) fn threaded_xml(sheet: &Sheet, ids: &BTreeMap<CellRef, Vec<String>>, 
 /// [`crate::sheet_read::read_password`]).
 pub(crate) fn password_attrs(h: &gridcraft_model::PasswordHash, prefix: &str) -> String {
     let name = |base: &str| crate::sheet_read::password_attr(prefix, base);
+    // A SHA-256 digest alone (OpenDocument's form) has no Excel form: the protection is kept
+    // without its password. A password set in GridCraft writes its Excel form.
+    let Some(h) = h.excel() else { return String::new() };
     match h {
+        gridcraft_model::PasswordHash::Sha256Digest(_) | gridcraft_model::PasswordHash::Both { .. } => String::new(),
         gridcraft_model::PasswordHash::Legacy(h) => format!(" {}=\"{h:04X}\"", name("password")),
         gridcraft_model::PasswordHash::Iterated { algorithm, hash, salt, spin_count } => format!(
             " {}=\"{}\" {}=\"{}\" {}=\"{}\" {}=\"{spin_count}\"",

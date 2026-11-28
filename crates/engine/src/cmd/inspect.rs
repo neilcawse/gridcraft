@@ -97,6 +97,7 @@ fn read(s: &mut Session, p: &Json) -> Result<Json> {
     }
     let formulas = bool_param(p, "formulas").unwrap_or(false);
     let formatted = bool_param(p, "formatted").unwrap_or(false);
+    let mut cf = crate::cf::CfCache::new();
     let mut rows = Vec::with_capacity(r.height() as usize);
     for row in r.start.row..=r.end.row {
         let mut cols = Vec::with_capacity(r.width() as usize);
@@ -105,7 +106,7 @@ fn read(s: &mut Session, p: &Json) -> Result<Json> {
             let v = if formulas && let Some(f) = sh.cell(c).and_then(|x| x.formula.as_ref()) {
                 json!(crate::display::formula_text(&d.wb, sh, c, f))
             } else if formatted {
-                json!(crate::display::cell_text(&d.wb, sh, c))
+                json!(crate::display::cell_text_with_cf(&d.wb, sheet, sh, c, &mut cf))
             } else {
                 value_json(&sh.value(c))
             };
@@ -126,12 +127,13 @@ fn cell_get(s: &mut Session, p: &Json) -> Result<Json> {
     let formula = cell.and_then(|x| x.formula.as_ref()).map(|f| crate::display::formula_text(&d.wb, sh, c, f));
     let input = formula.as_deref().filter(|_| !sh.cell_pictures.contains_key(&c) && cell.is_some_and(|x| x.py.is_none()));
     let input = input.map_or_else(|| std::borrow::Cow::Owned(sh.input_text(c)), std::borrow::Cow::Borrowed);
+    let mut cf = crate::cf::CfCache::new();
     Ok(json!({
         "cell": c.a1(),
         "value": value_json(&sh.value(c)),
         "type": if sh.cell_pictures.contains_key(&c) { "picture" } else { match sh.value(c) { Value::Empty => "empty", Value::Number(_) => "number", Value::Text(_) => "text", Value::Bool(_) => "boolean", Value::Error(_) => "error", Value::Array(_) => "array" } },
         "formula": formula,
-        "text": crate::display::cell_text(&d.wb, sh, c),
+        "text": crate::display::cell_text_with_cf(&d.wb, sheet, sh, c, &mut cf),
         "input": input,
         "picture": sh.cell_pictures.get(&c).map(|picture| json!({"mime": picture.mime, "alt": picture.alt, "bytes": picture.data.len()})),
         "spilledFrom": sh.spill_anchor(c).map(|a| a.a1()),
@@ -139,7 +141,7 @@ fn cell_get(s: &mut Session, p: &Json) -> Result<Json> {
         "style": style,
         "merge": sh.merge_at(c).map(|m| m.a1()),
         "comment": sh.comments.get(&c),
-        "hyperlink": sh.hyperlinks.get(&c),
+        "hyperlink": crate::links::cell_link(&d.wb, sheet, c),
         "python": cell.and_then(|x| x.py.as_deref()).map(|py| json!({
             "code": py.code,
             "output": if py.object { "object" } else { "value" },

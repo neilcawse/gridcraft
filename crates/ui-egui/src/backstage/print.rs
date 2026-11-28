@@ -1,5 +1,6 @@
 use super::{
-    Align2, Backstage, Icon, Json, Outcome, Rect, Sense, SheetApp, Stroke, StrokeKind, Tokens, Ui, dim, json, pos2, square_button, theme, vec2,
+    Align2, Backstage, Icon, Json, Outcome, PrintScope, Rect, Sense, SheetApp, Stroke, StrokeKind, Tokens, Ui, dim, json, pos2, square_button, theme,
+    vec2,
 };
 
 /// Builds the print scope and fit-to-page parameters, caches `file.printPreview` per document revision/options, and draws page thumbnails with navigation plus the print settings and Print action.
@@ -10,11 +11,19 @@ pub(super) fn print(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &m
         dim(ui, lang.tr("No workbook is open."));
         return;
     };
-    let mut params = json!({"sheets": if bs.print_all { "all" } else { "active" }});
+    let mut params = json!({"sheets": if bs.print_scope == PrintScope::EntireWorkbook { "all" } else { "active" }});
+    // The selection is not part of the document revision, so it goes in the preview's key.
+    let mut selection = String::new();
+    if bs.print_scope == PrintScope::Selection
+        && let Some(d) = app.session.active()
+    {
+        selection = d.selection.a1();
+        params["range"] = json!(selection);
+    }
     if bs.fit_to_page {
         params["fitToPage"] = json!(true);
     }
-    let key = (uid, revision, bs.print_all, bs.fit_to_page);
+    let key = (uid, revision, bs.print_scope, selection, bs.fit_to_page);
     if bs.preview.as_ref().is_none_or(|(k, _)| *k != key) {
         let preview = app.session.run("file.printPreview", params.clone()).unwrap_or(Json::Null);
         bs.preview = Some((key, preview));
@@ -22,7 +31,7 @@ pub(super) fn print(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &m
     let pages: Vec<Json> = bs.preview.as_ref().and_then(|(_, p)| p.get("pageList")).and_then(Json::as_array).cloned().unwrap_or_default();
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
-            ui.set_width(250.0);
+            ui.set_width(340.0);
             if let Some(discover) = &app.services.printers {
                 crate::printing::show(&mut app.printing, ui, discover, |label| lang.tr(label).to_owned());
             }
@@ -34,14 +43,13 @@ pub(super) fn print(app: &mut SheetApp, ui: &mut Ui, bs: &mut Backstage, out: &m
                 out.close = app.services.print_native.is_none();
             }
             ui.add_space(16.0);
-            let scope = if bs.print_all { "Print Entire Workbook" } else { "Print Active Sheets" };
-            craft_ui::ComboBox::from_id_salt("backstage_print_scope")
+            egui::ComboBox::from_id_salt("backstage_print_scope")
                 .width(230.0)
-                .selected_text(lang.tr(scope))
+                .selected_text(lang.tr(bs.print_scope.label()))
                 .show_ui(ui, |ui| {
-                    for (all, label) in [(false, "Print Active Sheets"), (true, "Print Entire Workbook")] {
-                        if ui.selectable_label(bs.print_all == all, lang.tr(label)).clicked() {
-                            bs.print_all = all;
+                    for scope in PrintScope::ALL {
+                        if ui.selectable_label(bs.print_scope == scope, lang.tr(scope.label())).clicked() {
+                            bs.print_scope = scope;
                             bs.preview_page = 0;
                         }
                     }
@@ -109,7 +117,8 @@ const PREVIEW_COLS: u32 = 60;
 /// inside the sheet's margins. `paper_w` is the page width in points.
 fn paint_page(p: &egui::Painter, rect: Rect, paper_w: f32, page: &Json, wb: &gridcraft_engine::model::Workbook, t: &Tokens) {
     let Some(range) = page.get("range").and_then(Json::as_str).and_then(gridcraft_engine::core::RangeRef::parse) else { return };
-    let Some(sh) = page.get("sheet").and_then(Json::as_str).and_then(|n| wb.sheet_index(n)).and_then(|i| wb.sheets.get(i)) else { return };
+    let Some(si) = page.get("sheet").and_then(Json::as_str).and_then(|n| wb.sheet_index(n)) else { return };
+    let Some(sh) = wb.sheets.get(si) else { return };
     // Preview pixels per point, and per sheet pixel (sheet geometry is 96 dpi: 0.75 pt per pixel).
     let per_pt = rect.width() / paper_w;
     let print_scale =
@@ -127,6 +136,7 @@ fn paint_page(p: &egui::Painter, rect: Rect, paper_w: f32, page: &Json, wb: &gri
     let font = theme::ui_font((11.0 * per_pt * print_scale).clamp(3.0, 14.0));
     let last_row = range.end.row.min(range.start.row.saturating_add(PREVIEW_ROWS));
     let last_col = range.end.col.min(range.start.col.saturating_add(PREVIEW_COLS));
+    let mut cf = gridcraft_engine::cf::CfCache::new();
     let mut y = body.top();
     for row in range.start.row..=last_row {
         let h = sh.row_height(row) * per_px;
@@ -146,7 +156,7 @@ fn paint_page(p: &egui::Painter, rect: Rect, paper_w: f32, page: &Json, wb: &gri
                 break;
             }
             let cell = gridcraft_engine::core::CellRef::new(row, col);
-            let text = gridcraft_engine::display::cell_text(wb, sh, cell);
+            let text = gridcraft_engine::display::cell_text_with_cf(wb, si, sh, cell, &mut cf);
             if !text.is_empty() {
                 let numeric = sh.value(cell).as_f64().is_some();
                 // Text runs on over empty neighbours, as on the sheet; numbers stay in their cell.

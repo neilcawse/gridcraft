@@ -14,6 +14,17 @@ use crate::styles::{StylesIn, read_styles};
 use crate::xml::{self, El};
 use crate::{IoError, ReadReport};
 
+/// A chart's `userShapes` drawing collected while reading a sheet, with the model object ids
+/// and deterministic import fingerprints mirrored from it for display so saving can keep the
+/// chart drawing without duplicating them — and drop passthrough if any mirrored object is
+/// deleted or edited.
+pub struct ChartUserShapesIn {
+    pub chart_id: u32,
+    pub rel: gridcraft_model::PreservedRel,
+    pub mirrored_images: Vec<(u32, u128)>,
+    pub mirrored_shapes: Vec<(u32, u128)>,
+}
+
 /// State shared while reading one package.
 pub struct Ctx<'a> {
     pub pkg: Package<'a>,
@@ -57,6 +68,10 @@ pub struct Ctx<'a> {
     pub pivot_parts: Vec<crate::pivot::PivotPartsIn>,
     /// Slicer pieces collected from sheets, joined once sheets are read.
     pub slicers: crate::slicer::SlicersIn,
+    /// Kept extensions of the current sheet's `<extLst>` (URI, rebuilt XML), until attached.
+    pub sheet_exts: Vec<(String, String)>,
+    /// URIs of the current sheet's extensions that were dropped.
+    pub sheet_exts_dropped: Vec<String>,
     /// Cells of the worksheet being read whose formulas lack dynamic-array metadata (legacy
     /// formulas, evaluated with implicit intersection), collected per sheet.
     pub legacy_formulas: Vec<gridcraft_core::CellRef>,
@@ -74,8 +89,15 @@ pub struct Ctx<'a> {
     pub python: crate::python_part::ScriptsIn,
     /// Table file id → (model table id, column file id → header), for resolving slicers.
     pub file_tables: HashMap<u32, (u32, HashMap<u32, String>)>,
+    /// The current sheet's charts read from chart parts: (model chart id, chart part name). Their
+    /// original XML is kept for saving (see `passthrough`).
+    pub chart_parts: Vec<(u32, String)>,
     /// Cell elements read so far, across every sheet (capped by `sheet_read::MAX_CELLS`).
     pub cells: u64,
+    /// Current sheet's picture SVG companions (`asvg:svgBlip`): `(image_id, target_part, bytes)`.
+    pub sheet_svg_blips: Vec<(u32, String, Vec<u8>)>,
+    /// Current sheet's chart `userShapes` drawings, to be preserved alongside their charts.
+    pub sheet_chart_user_shapes: Vec<ChartUserShapesIn>,
 }
 
 /// The most worksheets read from one workbook (as the XLS reader allows).
@@ -354,6 +376,14 @@ fn read_workbook_properties(cx: &mut Ctx<'_>, wb: &mut Workbook, xml: &El) {
         wb.protected_structure = p.flag("lockStructure", false);
         wb.structure_password = if wb.protected_structure { crate::sheet_read::read_password(p, "workbook") } else { None };
     }
+    if let Some(f) = xml.child("fileSharing") {
+        // The iterated hash has bare attribute names; the legacy one is `reservationPassword`.
+        wb.write_reservation = Some(gridcraft_model::WriteReservation {
+            user_name: f.attr("userName").unwrap_or("").to_string(),
+            read_only_recommended: f.flag("readOnlyRecommended", false),
+            password: crate::sheet_read::read_password(f, "").or_else(|| crate::sheet_read::read_password(f, "reservation")),
+        });
+    }
 }
 
 pub(crate) fn is_special_defined_name(lower: &str) -> bool {
@@ -460,13 +490,18 @@ pub fn read_xlsx<'a>(
         drawing_kept: Default::default(),
         pivot_parts: vec![],
         slicers: Default::default(),
+        sheet_exts: vec![],
+        sheet_exts_dropped: vec![],
         legacy_formulas: vec![],
         shared_formula_bytes: 0,
         known_function,
         name_calls: HashSet::new(),
         python: Default::default(),
         file_tables: Default::default(),
+        chart_parts: vec![],
         cells: 0,
+        sheet_svg_blips: vec![],
+        sheet_chart_user_shapes: vec![],
     };
     let root_rels = cx.pkg.rels("")?;
     let wb_part = find_rel(&root_rels, "officeDocument").map(|r| r.target.clone()).unwrap_or_else(|| "xl/workbook.xml".into());
@@ -523,6 +558,8 @@ pub fn read_xlsx<'a>(
     // Legacy formula cells per model sheet, rewritten once names and tables are known.
     let mut legacy_formulas: Vec<(usize, Vec<gridcraft_core::CellRef>)> = vec![];
     let mut pivot_caches = crate::pivot::CachesIn::new(&wb_xml, &wb_rels);
+    let mut pending_pivot_sources: Vec<(usize, crate::pivot::ReadPivotSource)> = vec![];
+    pivot_caches.read_connections(&mut cx, &wb_rels);
     let sheet_els: Vec<&El> = wb_xml.child("sheets").map(|s| s.kids("sheet").collect()).unwrap_or_default();
     if sheet_els.len() > MAX_SHEETS {
         return Err(IoError::TooLarge(format!("the workbook has more than {MAX_SHEETS} sheets")));
@@ -571,6 +608,8 @@ pub fn read_xlsx<'a>(
         if let Some(local) = local {
             cx.name_calls.extend(local.iter().filter(|(_, is_lambda)| **is_lambda).map(|(n, _)| n.clone()));
         }
+        cx.sheet_svg_blips.clear();
+        cx.sheet_chart_user_shapes.clear();
         let (mut sheet, read_controls) = match crate::sheet_read::read_sheet(&mut cx, &rel.target, &name) {
             Ok(s) => s,
             Err(IoError::TooLarge(m)) => return Err(IoError::TooLarge(m)),
@@ -578,18 +617,28 @@ pub fn read_xlsx<'a>(
                 cx.warn(format!("sheet \"{name}\" could not be read: {e}"));
                 cx.legacy_formulas.clear();
                 cx.value_meta.clear();
+                cx.sheet_svg_blips.clear();
+                cx.sheet_chart_user_shapes.clear();
                 (Sheet::new(name.clone()), Default::default())
             }
         };
+        let mut external_pivots = vec![];
         legacy_formulas.push((wb.sheets.len(), std::mem::take(&mut cx.legacy_formulas)));
-        match crate::pivot::read_pivots(&mut cx, &mut pivot_caches, &rel.target, &name) {
-            Ok(p) => sheet.pivots = p,
+        let mut sheet_pivot_sources = vec![];
+        match crate::pivot::read_pivots(&mut cx, &mut pivot_caches, &rel.target, &name, &mut sheet_pivot_sources) {
+            Ok(p) => {
+                sheet.pivots = p.tables;
+                external_pivots = p.external;
+                let si = wb.sheets.len();
+                pending_pivot_sources.extend(sheet_pivot_sources.into_iter().map(|s| (si, s)));
+            }
             Err(IoError::TooLarge(m)) => return Err(IoError::TooLarge(m)),
             Err(e) => cx.warn(format!("PivotTables on sheet \"{name}\" could not be read: {e}")),
         }
-        let value_meta = std::mem::take(&mut cx.value_meta);
-        sheet.preserved = kept.sheet(&mut cx, &rel.target, &name, &sheet, value_meta, &read_controls);
+        sheet.preserved = kept.sheet(&mut cx, &rel.target, &name, &sheet, &external_pivots, &read_controls);
+        sheet.preserved = crate::extlist::keep_sheet(&mut cx, &name, sheet.preserved.take(), kept.keeps());
         sheet.file_id = se.attr_u32("sheetId").unwrap_or(0);
+        kept.charts(&mut cx, &mut sheet);
         sheet.visibility = match se.attr("state") {
             Some("hidden") => Visibility::Hidden,
             Some("veryHidden") => Visibility::VeryHidden,
@@ -663,6 +712,7 @@ pub fn read_xlsx<'a>(
             Err(e) => cx.warn(format!("macros (VBA project) could not be read and were dropped: {e}")),
         }
     }
+    preserve_unresolvable_pivots(&mut cx, &mut kept, &mut wb, pending_pivot_sources);
     // The kept macro sheets name their text by shared-string index: they are resolved here.
     wb.preserved = kept.workbook(&mut cx, &wb_part, &wb_xml, &file_to_model);
     crate::pivot::bind_sources(&mut wb, &pivot_caches);
@@ -690,6 +740,28 @@ pub fn read_xlsx<'a>(
     wb.styles = cx.styles;
     wb.phonetics = cx.phonetics;
     Ok((wb, cx.report))
+}
+
+fn preserve_unresolvable_pivots(
+    cx: &mut Ctx<'_>,
+    kept: &mut crate::passthrough::KeptReader,
+    wb: &mut Workbook,
+    sources: Vec<(usize, crate::pivot::ReadPivotSource)>,
+) {
+    for (si, src) in sources {
+        let Some((sheet_name, pt_source)) =
+            wb.sheet(si).and_then(|s| s.pivots.iter().find(|p| p.id == src.pivot_id).map(|p| (s.name.clone(), p.source.clone())))
+        else {
+            continue;
+        };
+        if src.external_source || crate::pivot::resolve_source(wb, wb, &pt_source, si, 0).is_none() {
+            let mut preserved = wb.sheet(si).and_then(|s| s.preserved.clone());
+            kept.keep_pivot_passthrough(cx, &mut preserved, &sheet_name, &src, &pt_source);
+            if let Some(sheet) = wb.sheet_mut(si) {
+                sheet.preserved = preserved;
+            }
+        }
+    }
 }
 
 /// Strips a sheet qualifier (`'My Sheet'!$A$1` → `$A$1`).

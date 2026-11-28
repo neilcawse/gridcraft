@@ -89,7 +89,7 @@ fn nonspilling_formulas_preserve_array_evaluation_and_metadata() {
     for (address, text, value) in cases {
         let c = results.cell(at(address)).unwrap();
         let f = c.formula.as_ref().unwrap();
-        assert_eq!(f.text, text);
+        assert_eq!(f.text(), text);
         assert_eq!(f.array, None, "dynamic formula must not become legacy CSE");
         assert_eq!(c.value, Value::Number(value));
     }
@@ -295,7 +295,7 @@ fn this_row_references_are_written_in_long_form() {
     let (back, _) = read_xlsx(&bytes).unwrap();
     let sh = back.sheet(0).unwrap();
     assert_eq!(sh.tables[0].columns[1].formula.as_deref(), Some("[@Input]*2"));
-    assert_eq!(sh.cell(at("B2")).unwrap().formula.as_ref().unwrap().text, "Data[@Input]*2");
+    assert_eq!(sh.cell(at("B2")).unwrap().formula.as_ref().unwrap().text(), "Data[@Input]*2");
 }
 
 /// Compare both cell and formula metadata, collecting all boundaries in the group on failure.
@@ -484,7 +484,7 @@ fn implicit_intersection_metadata_distinguishes_table_rows_and_columns() {
 fn legacy_formulas_into_linked_workbooks_read_with_implicit_intersection() {
     let body = r#"<sheetData><row r="6"><c r="D6"><f>[1]Data!B:B</f><v>14</v></c><c r="E6" cm="1"><f t="array" ref="E6:E8">[1]Data!B2:B4</f><v>1</v></c><c r="G6"><f>SUM('[1]Data'!$S$3:$S$255+1)</f><v>2</v></c></row></sheetData>"#;
     let (mut wb, _) = read_xlsx(&super::minimal(body, &[], "", "")).unwrap();
-    let text = |wb: &Workbook, a: &str| wb.sheet(0).unwrap().cell(at(a)).unwrap().formula.as_ref().unwrap().text.clone();
+    let text = |wb: &Workbook, a: &str| wb.sheet(0).unwrap().cell(at(a)).unwrap().formula.as_ref().unwrap().text().into_owned();
     assert_eq!(text(&wb, "D6"), "@[1]Data!B:B");
     assert_eq!(text(&wb, "G6"), "SUM(@[1]Data!$S$3:$S$255+1)");
     let sh = wb.sheet_mut(0).unwrap();
@@ -535,7 +535,7 @@ fn legacy_external_range_names_intersect_only_in_value_positions() {
     for (address, file, evaluated) in cases {
         for book in [&wb, &reopened] {
             let formula = book.sheet(0).and_then(|s| s.cell(at(address))).and_then(|c| c.formula.as_ref()).unwrap();
-            assert_eq!(formula.text, evaluated, "{address}");
+            assert_eq!(formula.text(), evaluated, "{address}");
         }
         assert_scalar(&xml, address);
         assert_eq!(cell(&xml, address).child("f").unwrap().text, file);
@@ -560,10 +560,10 @@ fn unreadable_external_name_ignores_same_named_host_range() {
     let (wb, _) = read_xlsx(&bytes).unwrap();
     let sheet = wb.sheet(0).unwrap();
     let linked = sheet.cell(at("B2")).unwrap();
-    assert_eq!(linked.formula.as_ref().unwrap().text, "[1]!Rates");
+    assert_eq!(linked.formula.as_ref().unwrap().text(), "[1]!Rates");
     assert_eq!(linked.value, Value::Number(17.0));
-    assert_eq!(sheet.cell(at("C2")).unwrap().formula.as_ref().unwrap().text, "@Rates");
-    assert_eq!(sheet.cell(at("D2")).unwrap().formula.as_ref().unwrap().text, "[18446744073709551616]!Rates");
+    assert_eq!(sheet.cell(at("C2")).unwrap().formula.as_ref().unwrap().text(), "@Rates");
+    assert_eq!(sheet.cell(at("D2")).unwrap().formula.as_ref().unwrap().text(), "[18446744073709551616]!Rates");
 }
 
 /// How `export` saved a formula, as comparable text.
@@ -573,6 +573,7 @@ fn export_text(wb: &Workbook, at: CellRef, text: &str, names: &mut crate::array_
         Export::Unchanged => "unchanged".into(),
         Export::Dynamic => "dynamic".into(),
         Export::Legacy(e) => format!("legacy {}", gridcraft_formula::print(&e)),
+        Export::LegacyShared(e) => format!("legacy {}", gridcraft_formula::print(&e)),
     }
 }
 

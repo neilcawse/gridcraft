@@ -39,7 +39,7 @@ fn imported_formulatext_keeps_layout_and_displays_compatibility_operators() {
         let f = sheet.cell(CellRef::parse(cell).unwrap()).unwrap().formula.as_deref().unwrap();
         assert_eq!(f.display_text.as_deref().map(String::as_str), display, "{cell}");
     }
-    assert_eq!(sheet.cell(CellRef::new(0, 0)).unwrap().formula.as_deref().unwrap().text, "A2*2");
+    assert_eq!(sheet.cell(CellRef::new(0, 0)).unwrap().formula.as_deref().unwrap().text(), "A2*2");
 }
 
 #[test]
@@ -89,11 +89,11 @@ fn imported_formulatext_distinguishes_file_tokens_from_user_spellings() -> Resul
     ] {
         let at = CellRef::parse(cell).ok_or("invalid test address")?;
         let f = sheet.cell(at).and_then(|c| c.formula.as_deref()).ok_or("missing imported formula")?;
-        let actual = f.display_text.as_deref().unwrap_or(&f.text);
+        let actual = f.bar_body().into_owned();
         if actual != expected {
-            mismatches.push((cell, actual.as_str(), expected));
+            mismatches.push((cell, actual, expected));
         }
-        assert_eq!(f.expr.is_none(), cell == "G1", "{cell}");
+        assert_eq!(f.expr().is_none(), cell == "G1", "{cell}");
     }
     assert!(mismatches.is_empty(), "(cell, actual, expected): {mismatches:?}");
     Ok(())
@@ -115,14 +115,14 @@ fn trim_file_tokens_and_defined_name_calls_stay_distinct_on_write() -> Result<()
     let (saved, _) = crate::read_xlsx(&crate::write_xlsx(&wb)?)?;
     for row in [0, 1] {
         let trim = formula(&wb, row)?;
-        assert_eq!(trim.text, "A1.:.E10");
+        assert_eq!(trim.text(), "A1.:.E10");
         assert_eq!(trim.display_text, None);
-        assert_eq!(formula(&saved, row)?.text, "TRIMRANGE(A1:E10,3,3)");
+        assert_eq!(formula(&saved, row)?.text(), "TRIMRANGE(A1:E10,3,3)");
     }
     for row in [2, 3] {
         let user_call = formula(&wb, row)?;
-        assert_eq!(user_call.display_text.as_deref().unwrap_or(&user_call.text), "_Tro_All( 41 )");
-        assert_eq!(formula(&saved, row)?.text, "_TRO_ALL(41)");
+        assert_eq!(user_call.bar_body(), "_Tro_All( 41 )");
+        assert_eq!(formula(&saved, row)?.text(), "_TRO_ALL(41)");
     }
     Ok(())
 }

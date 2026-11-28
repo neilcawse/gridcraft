@@ -77,6 +77,8 @@ pub(super) fn insert_pivot_chart(s: &mut Session, p: &Json) -> Result<Json> {
         pivot: Some(link),
         axis_number_formats: Default::default(),
         pivot_label_formats: Vec::new(),
+        area_style: Default::default(),
+        user_shapes: Vec::new(),
     };
     edit(s, |cx| {
         cx.sheet_mut(si)?.charts.push(chart);

@@ -142,7 +142,7 @@ impl Unpacked {
             let mut f = z.by_index(i).unwrap();
             let mut v = vec![];
             f.read_to_end(&mut v).unwrap();
-            parts.insert(f.name().to_string(), v);
+            parts.insert(f.name().unwrap().to_string(), v);
         }
         Unpacked { parts }
     }
@@ -610,6 +610,7 @@ fn rebased(target: &str, from: &str, to: &str) -> String {
         content_type: String::new(),
         data: Arc::from(&b""[..]),
         rels: vec![link("externalLinkPath"), link("hyperlink")],
+        ..Default::default()
     };
     let mut wb = gridcraft_model::Workbook::new();
     wb.preserved = Some(Arc::new(gridcraft_model::Preserved { parts: vec![part], ..Default::default() }));
@@ -738,7 +739,7 @@ fn chart_sheet_entries_sharing_a_graph_are_checked_once() {
         let mut f = z.by_index(i).unwrap();
         let mut data = Vec::new();
         f.read_to_end(&mut data).unwrap();
-        parts.push((f.name().to_string(), data));
+        parts.push((f.name().unwrap().to_string(), data));
     }
     let extra: String = (0..3_000).map(|i| format!(r#"<sheet name="Copy{i}" sheetId="{}" r:id="rId2"/>"#, 100 + i)).collect();
     for (name, data) in &mut parts {
@@ -987,7 +988,9 @@ fn file_version_and_calc_features_survive_a_save() {
         assert_eq!(root.children.first().map(|e| e.name.as_str()), Some("fileVersion"), "{text}");
         assert_eq!(root.children.last().map(|e| e.name.as_str()), Some("extLst"), "{text}");
         assert!(text.contains(r#"<fileVersion appName="xl" lastEdited="7" lowestEdited="7" rupBuild="11008"/>"#), "{text}");
-        assert!(text.contains(&format!("<extLst>{calc_features}</extLst>")), "{text}");
+        // The x15 workbook properties are kept too, in source order (see tests::extlist).
+        let x15 = r#"<ext uri="{140A7094-0E35-4892-8432-C4D2E57EDEB5}" xmlns:x15="http://schemas.microsoft.com/office/spreadsheetml/2010/11/main"><x15:workbookPr chartTrackingRefBase="1"/></ext>"#;
+        assert!(text.contains(&format!("<extLst>{x15}{calc_features}</extLst>")), "{text}");
     }
 
     // A workbook that had neither gets a <fileVersion> naming GridCraft (#1699), kept on the next
@@ -1101,6 +1104,611 @@ fn notes_take_shape_blocks_the_header_pictures_dont_use() {
     assert!(notes_ids.iter().all(|b| notes_map.contains(b)), "note ids outside their drawing's blocks");
 }
 
+// ---------------------------------------------------------------- PivotTables on another workbook
+
+/// The source range names sheet "More", as a local sheet is also named (with a list in that very
+/// range), and links to the other workbook under a prefix other than `r:`: the cache must still be
+/// read as external, never rebound to the local sheet.
+const EXT_CACHE_RANGE: &str =
+    r#"<worksheetSource ref="A1:B2" sheet="More" xmlns:link="http://schemas.openxmlformats.org/officeDocument/2006/relationships" link:id="rId2"/>"#;
+const EXT_CACHE_NAME: &str = r#"<worksheetSource name="SrcData" r:id="rId2"/>"#;
+const EXT_LINK_TARGET: &str = "file:///C:/data/source.xlsx";
+const EXT_RECORDS: &str = r#"<?xml version="1.0"?><pivotCacheRecords xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="1"><r><x v="0"/><n v="5"/></r></pivotCacheRecords>"#;
+/// Source styles: custom number format 170 and two differential formats (the second blue).
+const EXT_STYLES: &str = r#"<?xml version="1.0"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="170" formatCode="0.0%"/></numFmts><fonts count="1"><font/></fonts><fills count="1"><fill/></fills><borders count="1"><border/></borders><cellXfs count="1"><xf/></cellXfs><dxfs count="2"><dxf><font><b/></font></dxf><dxf><font><color rgb="FF0000FF"/></font></dxf></dxfs></styleSheet>"#;
+
+fn ext_cache(source: &str) -> String {
+    format!(
+        r#"<?xml version="1.0"?><pivotCacheDefinition xmlns="{NS_MAIN}" xmlns:r="{NS_R}" r:id="rId1" recordCount="1"><cacheSource type="worksheet">{source}</cacheSource><cacheFields count="2"><cacheField name="K" numFmtId="0"><sharedItems count="1"><s v="x"/></sharedItems></cacheField><cacheField name="V" numFmtId="0"><sharedItems containsNumber="1"/></cacheField></cacheFields></pivotCacheDefinition>"#
+    )
+}
+
+fn ext_table(name: &str, cache_id: u32) -> String {
+    format!(
+        r#"<?xml version="1.0"?><pivotTableDefinition xmlns="{NS_MAIN}" name="{name}" cacheId="{cache_id}" dataCaption="Values"><location ref="A3:B5" firstHeaderRow="1" firstDataRow="1" firstDataCol="1"/><pivotFields count="2"><pivotField axis="axisRow" showAll="0"><items count="2"><item x="0"/><item t="default"/></items></pivotField><pivotField dataField="1" showAll="0"/></pivotFields><rowFields count="1"><field x="0"/></rowFields><dataFields count="1"><dataField name="Sum of V" fld="1" baseField="0" baseItem="0" numFmtId="170"/></dataFields><formats count="1"><format dxfId="1"><pivotArea grandRow="1" outline="0" fieldPosition="0"/></format></formats></pivotTableDefinition>"#
+    )
+}
+
+/// Sheets "Report" and "More", each with a PivotTable on cache 1, whose source (a range, or a
+/// name with `by_name`) is in another workbook; with `shared` both use one cache, otherwise only
+/// "Report" has a PivotTable. `link_kind` is the type of the cache's relationship to the source.
+fn ext_pivot_package(by_name: bool, shared: bool, link_kind: &str) -> Vec<u8> {
+    let workbook = format!(
+        r#"<?xml version="1.0"?><workbook xmlns="{NS_MAIN}" xmlns:r="{NS_R}"><sheets><sheet name="Report" sheetId="1" r:id="rId1"/><sheet name="More" sheetId="2" r:id="rId2"/></sheets><pivotCaches><pivotCache cacheId="1" r:id="rId3"/></pivotCaches></workbook>"#
+    );
+    let ct = |part: &str, ty: &str| format!(r#"<Override PartName="/{part}" ContentType="{CT_PREFIX}.spreadsheetml.{ty}+xml"/>"#);
+    let content_types = format!(
+        r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>{}{}{}{}{}{}{}{}</Types>"#,
+        ct("xl/workbook.xml", "sheet.main"),
+        ct("xl/worksheets/sheet1.xml", "worksheet"),
+        ct("xl/worksheets/sheet2.xml", "worksheet"),
+        ct("xl/styles.xml", "styles"),
+        ct("xl/pivotTables/pivotTable1.xml", "pivotTable"),
+        ct("xl/pivotTables/pivotTable2.xml", "pivotTable"),
+        ct("xl/pivotCache/pivotCacheDefinition1.xml", "pivotCacheDefinition"),
+        ct("xl/pivotCache/pivotCacheRecords1.xml", "pivotCacheRecords"),
+    );
+    let sheet = |head: &str, v: &str| {
+        format!(
+            r#"<?xml version="1.0"?><worksheet xmlns="{NS_MAIN}"><sheetData>{head}<row r="4"><c r="A4" t="inlineStr"><is><t>x</t></is></c><c r="B4"><v>{v}</v></c></row></sheetData></worksheet>"#
+        )
+    };
+    // "More" holds a local list at A1:B2, the same sheet name and range the cache's source names.
+    let local = r#"<row r="1"><c r="A1" t="inlineStr"><is><t>K</t></is></c><c r="B1" t="inlineStr"><is><t>V</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>local</t></is></c><c r="B2"><v>7</v></c></row>"#;
+    let (s1, s2) = (sheet("", "5"), sheet(local, "6"));
+    let cache = ext_cache(if by_name { EXT_CACHE_NAME } else { EXT_CACHE_RANGE });
+    let (t1, t2) = (ext_table("Ext1", 1), ext_table("Ext2", 1));
+    let link = if link_kind.starts_with("http") { link_kind.to_string() } else { format!("{NS_R}/{link_kind}") };
+    let cache_rels = rels(&[("rId1", "pivotCacheRecords", "pivotCacheRecords1.xml"), ("rId2", &link, EXT_LINK_TARGET)]);
+    let table_rels = rels(&[("rId1", "pivotCacheDefinition", "../pivotCache/pivotCacheDefinition1.xml")]);
+    let wb_rels = rels(&[
+        ("rId1", "worksheet", "worksheets/sheet1.xml"),
+        ("rId2", "worksheet", "worksheets/sheet2.xml"),
+        ("rId3", "pivotCacheDefinition", "pivotCache/pivotCacheDefinition1.xml"),
+        ("rId4", "styles", "styles.xml"),
+    ]);
+    let s1_rels = rels(&[("rId1", "pivotTable", "../pivotTables/pivotTable1.xml")]);
+    let s2_rels = rels(&[("rId1", "pivotTable", "../pivotTables/pivotTable2.xml")]);
+    let mut parts: Vec<(&str, &[u8])> = vec![
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", super::ROOT_RELS.as_bytes()),
+        ("xl/workbook.xml", workbook.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", wb_rels.as_bytes()),
+        ("xl/styles.xml", EXT_STYLES.as_bytes()),
+        ("xl/worksheets/sheet1.xml", s1.as_bytes()),
+        ("xl/worksheets/sheet2.xml", s2.as_bytes()),
+        ("xl/worksheets/_rels/sheet1.xml.rels", s1_rels.as_bytes()),
+        ("xl/pivotTables/pivotTable1.xml", t1.as_bytes()),
+        ("xl/pivotTables/_rels/pivotTable1.xml.rels", table_rels.as_bytes()),
+        ("xl/pivotCache/pivotCacheDefinition1.xml", cache.as_bytes()),
+        ("xl/pivotCache/_rels/pivotCacheDefinition1.xml.rels", cache_rels.as_bytes()),
+        ("xl/pivotCache/pivotCacheRecords1.xml", EXT_RECORDS.as_bytes()),
+    ];
+    if shared {
+        parts.push(("xl/worksheets/_rels/sheet2.xml.rels", s2_rels.as_bytes()));
+        parts.push(("xl/pivotTables/pivotTable2.xml", t2.as_bytes()));
+        parts.push(("xl/pivotTables/_rels/pivotTable2.xml.rels", table_rels.as_bytes()));
+    }
+    make_zip(&parts)
+}
+
+/// The written PivotTable parts of a sheet, through its relationships.
+fn written_pivot_tables(u: &Unpacked, sheet: &str) -> Vec<String> {
+    u.rels(&sheet_part(u, sheet)).into_iter().filter(|r| r.1.ends_with("/pivotTable")).map(|r| r.2).collect()
+}
+
+/// `<pivotCache>` entries of a written workbook: (cacheId, cache part).
+fn written_pivot_caches(u: &Unpacked) -> Vec<(String, String)> {
+    let wb = xml::parse(u.parts.get("xl/workbook.xml").unwrap()).unwrap();
+    wb.child("pivotCaches")
+        .map(|c| {
+            c.kids("pivotCache").map(|e| (e.attr("cacheId").unwrap().to_string(), u.target("xl/workbook.xml", e.attr("id").unwrap()).1)).collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The font colour of `<dxf>` number `dxf` and the code of number format `fmt` in written styles.
+fn written_style(u: &Unpacked, dxf: &str, fmt: &str) -> (String, String) {
+    let st = xml::parse(u.parts.get("xl/styles.xml").unwrap()).unwrap();
+    let d = st.child("dxfs").unwrap().kids("dxf").nth(dxf.parse().unwrap()).unwrap();
+    let color = d.child("font").and_then(|f| f.child("color")).and_then(|c| c.attr("rgb")).unwrap_or("").to_string();
+    let code = st.child("numFmts").unwrap().kids("numFmt").find(|n| n.attr("numFmtId") == Some(fmt)).unwrap().attr("formatCode").unwrap().to_string();
+    (color, code)
+}
+
+#[test]
+fn pivot_tables_on_another_workbook_survive_a_save() {
+    for by_name in [false, true] {
+        let src = ext_pivot_package(by_name, false, "externalLinkPath");
+        let (wb, rep) = read_xlsx(&src).unwrap();
+        // Not modelled (GridCraft can't refresh it), but said so.
+        assert!(wb.sheets.iter().all(|s| s.pivots.is_empty()));
+        assert!(rep.warnings.iter().any(|w| w.contains("Ext1") && w.contains("another workbook")), "{:?}", rep.warnings);
+        assert!(!rep.warnings.iter().any(|w| w.contains("dropped")), "{:?}", rep.warnings);
+        let cache_src = ext_cache(if by_name { EXT_CACHE_NAME } else { EXT_CACHE_RANGE });
+        // Twice: what the first save kept is read back and kept again.
+        let first = write_xlsx(&wb).unwrap();
+        let (again, _) = read_xlsx(&first).unwrap();
+        for saved in [first, write_xlsx(&again).unwrap()] {
+            let u = Unpacked::new(&saved);
+            u.assert_valid();
+            let caches = written_pivot_caches(&u);
+            assert_eq!(caches.len(), 1, "{caches:?}");
+            let (id, cache_part) = &caches[0];
+            assert_eq!(id, "1", "the kept table refers to its cache by this id");
+            assert_eq!(u.text(cache_part), cache_src);
+            let cache_rels = u.rels(cache_part);
+            let records = cache_rels.iter().find(|r| r.1.ends_with("/pivotCacheRecords")).unwrap();
+            assert_eq!(u.text(&records.2), EXT_RECORDS);
+            assert!(
+                cache_rels.iter().any(|r| r.0 == "rId2" && r.1.ends_with("/externalLinkPath") && r.2 == EXT_LINK_TARGET && r.3),
+                "{cache_rels:?}"
+            );
+            let tables = written_pivot_tables(&u, "Report");
+            assert_eq!(tables.len(), 1);
+            assert!(written_pivot_tables(&u, "More").is_empty());
+            let t = u.text(&tables[0]);
+            assert_eq!(u.rels(&tables[0]).iter().find(|r| r.1.ends_with("/pivotCacheDefinition")).unwrap().2, *cache_part);
+            // Style ids follow the rewritten styles part.
+            let (color, code) = written_style(&u, &attr_of(&t, "format", "dxfId"), &attr_of(&t, "dataField", "numFmtId"));
+            assert_eq!((color.as_str(), code.as_str()), ("FF0000FF", "0.0%"), "{t}");
+            assert!(t.contains(r#"name="Ext1" cacheId="1""#), "{t}");
+            // The report cells are plain cells and stay.
+            assert!(u.text(&sheet_part(&u, "Report")).contains("<v>5</v>"));
+            // The local list on "More" stays as it was: the cache wasn't rebound to it.
+            let more = u.text(&sheet_part(&u, "More"));
+            assert!(more.contains(r#"<c r="B2"><v>7</v></c>"#), "{more}");
+        }
+    }
+}
+
+/// Carries over the retired `an_edited_external_pivot_is_not_rebuilt_over_a_local_sheet`: the
+/// cache's source names "More", as the local sheet holding a list in that very range is named.
+/// Editing the PivotTable's sheet and that local list never rebuilds the PivotTable from the local
+/// cells: its cache, records and link to the other workbook are written as they were read.
+#[test]
+fn an_edited_pivot_on_another_workbook_is_not_rebuilt_over_a_same_named_local_sheet() {
+    use gridcraft_core::{CellRef, Value};
+    let (mut wb, _) = read_xlsx(&ext_pivot_package(false, false, "externalLinkPath")).unwrap();
+    assert!(wb.sheets.iter().all(|s| s.pivots.is_empty()));
+    Arc::make_mut(&mut wb.sheets[0]).set_value(CellRef::new(9, 0), Value::text("note"));
+    Arc::make_mut(&mut wb.sheets[1]).set_value(CellRef::new(1, 1), Value::Number(8.0));
+    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    u.assert_valid();
+    let caches = written_pivot_caches(&u);
+    assert_eq!(caches.len(), 1, "{caches:?}");
+    assert_eq!(u.text(&caches[0].1), ext_cache(EXT_CACHE_RANGE), "the cache is not rebuilt");
+    let cache_rels = u.rels(&caches[0].1);
+    assert_eq!(u.text(&cache_rels.iter().find(|r| r.1.ends_with("/pivotCacheRecords")).unwrap().2), EXT_RECORDS);
+    assert!(cache_rels.iter().any(|r| r.0 == "rId2" && r.2 == EXT_LINK_TARGET && r.3), "{cache_rels:?}");
+    assert_eq!(written_pivot_tables(&u, "Report").len(), 1);
+    assert!(written_pivot_tables(&u, "More").is_empty());
+    assert!(u.text(&sheet_part(&u, "More")).contains(r#"<c r="B2"><v>8</v></c>"#), "the local edit is saved");
+}
+
+/// The cache's link to the other workbook as Excel writes it when that workbook's path was
+/// missing (`xlExternalLinkPath/xlPathMissing`, no externalLink part): the source, a name there,
+/// is still another workbook's, and the PivotTables, their shared cache, its records and the link
+/// survive two saves as they were.
+#[test]
+fn pivot_tables_on_a_missing_path_workbook_survive_a_save() {
+    const PATH_MISSING: &str = "http://schemas.microsoft.com/office/2006/relationships/xlExternalLinkPath/xlPathMissing";
+    let (wb, rep) = read_xlsx(&ext_pivot_package(true, true, PATH_MISSING)).unwrap();
+    assert!(wb.sheets.iter().all(|s| s.pivots.is_empty()));
+    assert!(!rep.warnings.iter().any(|w| w.contains("doesn't name") || w.contains("plain cells")), "{:?}", rep.warnings);
+    let first = write_xlsx(&wb).unwrap();
+    let (again, _) = read_xlsx(&first).unwrap();
+    for saved in [first, write_xlsx(&again).unwrap()] {
+        let u = Unpacked::new(&saved);
+        u.assert_valid();
+        let caches = written_pivot_caches(&u);
+        assert_eq!(caches.len(), 1, "{caches:?}");
+        let cache_part = &caches[0].1;
+        assert_eq!(u.text(cache_part), ext_cache(EXT_CACHE_NAME));
+        let cache_rels = u.rels(cache_part);
+        assert_eq!(u.text(&cache_rels.iter().find(|r| r.1.ends_with("/pivotCacheRecords")).unwrap().2), EXT_RECORDS);
+        assert!(cache_rels.iter().any(|r| r.0 == "rId2" && r.1 == PATH_MISSING && r.2 == EXT_LINK_TARGET && r.3), "{cache_rels:?}");
+        for sheet in ["Report", "More"] {
+            let t = written_pivot_tables(&u, sheet);
+            assert_eq!(t.len(), 1, "{sheet}");
+            assert_eq!(u.rels(&t[0]).iter().find(|r| r.1.ends_with("/pivotCacheDefinition")).unwrap().2, *cache_part, "{sheet}");
+        }
+    }
+}
+
+#[test]
+fn pivot_tables_sharing_a_cache_on_another_workbook_keep_one_cache() {
+    let (wb, _) = read_xlsx(&ext_pivot_package(false, true, "externalLinkPath")).unwrap();
+    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    u.assert_valid();
+    let caches = written_pivot_caches(&u);
+    assert_eq!(caches.len(), 1, "{caches:?}");
+    assert_eq!(u.find(ext_cache(EXT_CACHE_RANGE).as_bytes()).len(), 1, "the cache is written once");
+    for sheet in ["Report", "More"] {
+        let t = written_pivot_tables(&u, sheet);
+        assert_eq!(t.len(), 1, "{sheet}");
+        assert_eq!(u.rels(&t[0])[0].2, caches[0].1, "{sheet}");
+    }
+
+    // Deleting one sheet keeps the cache for the other; when no kept table is left, it goes.
+    let mut one = wb.clone();
+    one.sheets.remove(1);
+    let u = Unpacked::new(&write_xlsx(&one).unwrap());
+    u.assert_valid();
+    assert_eq!(written_pivot_caches(&u).len(), 1);
+    let mut none = wb.clone();
+    none.sheets.iter_mut().for_each(|s| Arc::make_mut(s).preserved = None);
+    let u = Unpacked::new(&write_xlsx(&none).unwrap());
+    u.assert_valid();
+    assert!(written_pivot_caches(&u).is_empty());
+    assert!(u.find(ext_cache(EXT_CACHE_RANGE).as_bytes()).is_empty() && u.find(EXT_RECORDS.as_bytes()).is_empty());
+    assert!(!u.text("xl/workbook.xml").contains("pivotCaches"));
+}
+
+#[test]
+fn written_pivot_caches_do_not_reuse_kept_cache_ids() {
+    use gridcraft_core::{CellRef, Value};
+    use gridcraft_model::{Cell, PivotField, PivotTable, PivotValue};
+    let (mut wb, _) = read_xlsx(&ext_pivot_package(false, false, "externalLinkPath")).unwrap();
+    // A PivotTable GridCraft models, on a list on "More".
+    {
+        let more = wb.sheet_mut(1).unwrap();
+        for (a, v) in [("D1", Value::text("K")), ("E1", Value::text("V")), ("D2", Value::text("a")), ("E2", Value::number(2.0))] {
+            more.cells.set(CellRef::parse(a).unwrap(), Cell::value(v));
+        }
+        more.pivots.push(PivotTable {
+            name: "Ours".into(),
+            source: "More!$D$1:$E$2".into(),
+            anchor: CellRef::parse("H3").unwrap(),
+            rows: vec![PivotField { source_col: "K".into(), ..Default::default() }],
+            values: vec![PivotValue { source_col: "V".into(), name: "Sum of V".into(), ..Default::default() }],
+            ..Default::default()
+        });
+    }
+    let saved = write_xlsx(&wb).unwrap();
+    let u = Unpacked::new(&saved);
+    u.assert_valid();
+    let caches = written_pivot_caches(&u);
+    assert_eq!(caches.len(), 2, "{caches:?}");
+    assert_ne!(caches[0].0, caches[1].0, "{caches:?}");
+    let ours = written_pivot_tables(&u, "More");
+    assert_eq!(ours.len(), 1);
+    let id = attr_of(&u.text(&ours[0]), "pivotTableDefinition", "cacheId");
+    assert_ne!(id, "1");
+    assert!(caches.iter().any(|(i, part)| *i == id && *part == u.rels(&ours[0])[0].2), "{caches:?}");
+    let (back, _) = read_xlsx(&saved).unwrap();
+    assert_eq!(back.sheet(1).unwrap().pivots.len(), 1);
+    assert_eq!(written_pivot_tables(&Unpacked::new(&write_xlsx(&back).unwrap()), "Report").len(), 1);
+}
+
+#[test]
+fn a_pivot_cache_naming_no_linked_workbook_is_not_kept() {
+    // The source `r:id` resolves to something other than a link to a workbook's path.
+    for kind in ["hyperlink", "http://example.com/unknown"] {
+        let (wb, rep) = read_xlsx(&ext_pivot_package(false, false, kind)).unwrap();
+        assert!(wb.sheets.iter().all(|s| s.pivots.is_empty()));
+        assert!(rep.warnings.iter().any(|w| w.contains("another workbook") && w.contains("plain cells")), "{:?}", rep.warnings);
+        let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+        u.assert_valid();
+        assert!(written_pivot_caches(&u).is_empty() && written_pivot_tables(&u, "Report").is_empty());
+    }
+}
+
+#[test]
+fn a_kept_pivot_table_whose_cache_is_not_listed_is_dropped() {
+    // The workbook doesn't list the cache: the table can't be written back without it.
+    let src = ext_pivot_package(false, false, "externalLinkPath");
+    let mut parts = Unpacked::new(&src).parts;
+    let wbx = String::from_utf8(parts.remove("xl/workbook.xml").unwrap()).unwrap().replace(r#"<pivotCache cacheId="1" r:id="rId3"/>"#, "");
+    parts.insert("xl/workbook.xml".into(), wbx.into_bytes());
+    let list: Vec<(&str, &[u8])> = parts.iter().map(|(n, d)| (n.as_str(), d.as_slice())).collect();
+    let (wb, rep) = read_xlsx(&make_zip(&list)).unwrap();
+    assert!(rep.warnings.iter().any(|w| w.contains("dropped")), "{:?}", rep.warnings);
+    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    u.assert_valid();
+    assert!(written_pivot_tables(&u, "Report").is_empty());
+    assert!(written_pivot_caches(&u).is_empty());
+}
+
+#[test]
+fn a_kept_pivot_table_with_an_unlisted_cache_id_is_dropped_even_with_a_cache_relationship() {
+    let src = ext_pivot_package(false, false, "externalLinkPath");
+    let mut parts = Unpacked::new(&src).parts;
+    let table = String::from_utf8(parts.remove("xl/pivotTables/pivotTable1.xml").unwrap()).unwrap().replace(r#"cacheId="1""#, r#"cacheId="99""#);
+    parts.insert("xl/pivotTables/pivotTable1.xml".into(), table.into_bytes());
+    let list: Vec<(&str, &[u8])> = parts.iter().map(|(n, d)| (n.as_str(), d.as_slice())).collect();
+    let (wb, _) = read_xlsx(&make_zip(&list)).unwrap();
+    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    u.assert_valid();
+    assert!(written_pivot_tables(&u, "Report").is_empty());
+}
+
+// ---------------------------------------------------------------- PivotTables on a data connection or the Data Model
+
+/// Bytes standing in for the Data Model (Excel's `xl/model/item.data`).
+const MODEL_DATA: &[u8] = b"\x00\x01model bytes, not really a model\xFE\xFF";
+/// A larger stand-in, for running out of room to keep it.
+static BIG_MODEL: [u8; 64 * 1024] = [7; 64 * 1024];
+const CT_MODEL: &str = "application/vnd.openxmlformats-officedocument.model+data";
+/// The model connection (id 1, as Excel writes it), a plain OLE DB connection (id 2) and a
+/// worksheet connection loading a range into the model (id 3).
+const MODEL_CONNECTIONS: &str = r#"<?xml version="1.0"?><connections xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><connection id="1" keepAlive="1" name="ThisWorkbookDataModel" description="Data Model" type="5" refreshedVersion="8" minRefreshableVersion="5"><dbPr connection="Data Model Connection" command="Model" commandType="1"/><olapPr sendLocale="1" rowDrillCount="1000"/><extLst><ext uri="{DE250136-89BD-433C-8126-D09CA5730AF9}" xmlns:x15="http://schemas.microsoft.com/office/spreadsheetml/2010/11/main"><x15:connection id="" model="1"/></ext></extLst></connection><connection id="2" name="Source" type="5" refreshedVersion="8"><dbPr connection="Provider=Example;Data Source=source.xlsx" command="Data$" commandType="3"/></connection><connection id="3" name="WorksheetConnection_T" type="102" refreshedVersion="8" minRefreshableVersion="5"><extLst><ext uri="{DE250136-89BD-433C-8126-D09CA5730AF9}" xmlns:x15="http://schemas.microsoft.com/office/spreadsheetml/2010/11/main"><x15:connection id="T"><x15:rangePr sourceName="_xlcn.WorksheetConnection_T"/></x15:connection></ext></extLst></connection></connections>"#;
+const CONN_RECORDS: &str = r#"<?xml version="1.0"?><pivotCacheRecords xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="1"><r><x v="0"/><n v="6"/></r></pivotCacheRecords>"#;
+
+/// An OLAP cache on the Data Model (no records: `saveData="0"`), on connection `id`.
+fn model_cache(id: u32) -> String {
+    format!(
+        r#"<?xml version="1.0"?><pivotCacheDefinition xmlns="{NS_MAIN}" xmlns:r="{NS_R}" saveData="0" createdVersion="6" refreshedVersion="8" minRefreshableVersion="3" recordCount="0"><cacheSource type="external" connectionId="{id}"/><cacheFields count="2"><cacheField name="[T].[K].[K]" caption="K" numFmtId="0" level="1"><sharedItems count="1"><s v="x"/></sharedItems></cacheField><cacheField name="[Measures].[Sum of V]" caption="Sum of V" numFmtId="0" hierarchy="1" level="32767"/></cacheFields><cacheHierarchies count="2"><cacheHierarchy uniqueName="[T].[K]" caption="K" attribute="1" defaultMemberUniqueName="[T].[K].[All]" allUniqueName="[T].[K].[All]" dimensionUniqueName="[T]" displayFolder="" count="2" memberValueDatatype="130" unbalanced="0"><fieldsUsage count="2"><fieldUsage x="-1"/><fieldUsage x="0"/></fieldsUsage></cacheHierarchy><cacheHierarchy uniqueName="[Measures].[Sum of V]" caption="Sum of V" measure="1" displayFolder="" measureGroup="T" count="0" oneField="1" hidden="1"><fieldsUsage count="1"><fieldUsage x="1"/></fieldsUsage></cacheHierarchy></cacheHierarchies><kpis count="0"/><dimensions count="2"><dimension measure="1" name="Measures" uniqueName="[Measures]" caption="Measures"/><dimension name="T" uniqueName="[T]" caption="T"/></dimensions><measureGroups count="1"><measureGroup name="T" caption="T"/></measureGroups><maps count="1"><map measureGroup="0" dimension="1"/></maps></pivotCacheDefinition>"#
+    )
+}
+
+/// A relational cache on connection `id`, with records.
+fn conn_cache(id: u32) -> String {
+    format!(
+        r#"<?xml version="1.0"?><pivotCacheDefinition xmlns="{NS_MAIN}" xmlns:r="{NS_R}" r:id="rId1" refreshedVersion="8" recordCount="1"><cacheSource type="external" connectionId="{id}"/><cacheFields count="2"><cacheField name="K" numFmtId="0"><sharedItems count="1"><s v="x"/></sharedItems></cacheField><cacheField name="V" numFmtId="0"><sharedItems containsNumber="1"/></cacheField></cacheFields></pivotCacheDefinition>"#
+    )
+}
+
+/// What a data-connection test package holds.
+#[derive(Clone, Copy)]
+struct ConnPkg {
+    /// The Data Model part and its workbook relationship.
+    model_part: bool,
+    /// The larger model stand-in.
+    big_model: bool,
+    /// `xl/connections.xml` and its workbook relationship.
+    connections: bool,
+    /// The connections part has a relationship to content GridCraft rewrites (so it can't be kept).
+    connections_blocked: bool,
+    /// The connection the Data Model cache names.
+    model_connection: u32,
+    /// The PivotTables have relationships to their caches (otherwise they name them by `cacheId`).
+    table_rels: bool,
+}
+
+const CONN_PKG: ConnPkg =
+    ConnPkg { model_part: true, big_model: false, connections: true, connections_blocked: false, model_connection: 1, table_rels: true };
+
+/// Sheet "Report" with a PivotTable on the Data Model (cache 3) and sheet "More" with one on the
+/// plain connection (cache 4, with records), plus the hidden name a worksheet connection uses.
+fn conn_pivot_package(o: ConnPkg) -> Vec<u8> {
+    let workbook = format!(
+        r#"<?xml version="1.0"?><workbook xmlns="{NS_MAIN}" xmlns:r="{NS_R}"><sheets><sheet name="Report" sheetId="1" r:id="rId1"/><sheet name="More" sheetId="2" r:id="rId2"/></sheets><definedNames><definedName name="_xlcn.WorksheetConnection_T" hidden="1">More!$D$1:$E$2</definedName></definedNames><pivotCaches><pivotCache cacheId="3" r:id="rId3"/><pivotCache cacheId="4" r:id="rId7"/></pivotCaches></workbook>"#
+    );
+    let ct = |part: &str, ty: &str| format!(r#"<Override PartName="/{part}" ContentType="{CT_PREFIX}.spreadsheetml.{ty}+xml"/>"#);
+    let content_types = format!(
+        r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="data" ContentType="{CT_MODEL}"/>{}{}{}{}{}{}{}{}{}{}</Types>"#,
+        ct("xl/workbook.xml", "sheet.main"),
+        ct("xl/worksheets/sheet1.xml", "worksheet"),
+        ct("xl/worksheets/sheet2.xml", "worksheet"),
+        ct("xl/styles.xml", "styles"),
+        ct("xl/connections.xml", "connections"),
+        ct("xl/pivotTables/pivotTable1.xml", "pivotTable"),
+        ct("xl/pivotTables/pivotTable2.xml", "pivotTable"),
+        ct("xl/pivotCache/pivotCacheDefinition1.xml", "pivotCacheDefinition"),
+        ct("xl/pivotCache/pivotCacheDefinition2.xml", "pivotCacheDefinition"),
+        ct("xl/pivotCache/pivotCacheRecords2.xml", "pivotCacheRecords"),
+    );
+    let sheet = |v: &str| {
+        format!(
+            r#"<?xml version="1.0"?><worksheet xmlns="{NS_MAIN}"><sheetData><row r="4"><c r="A4" t="inlineStr"><is><t>x</t></is></c><c r="B4"><v>{v}</v></c></row></sheetData></worksheet>"#
+        )
+    };
+    let (s1, s2) = (sheet("5"), sheet("6"));
+    let (c1, c2) = (model_cache(o.model_connection), conn_cache(2));
+    let (t1, t2) = (ext_table("OnModel", 3), ext_table("OnConnection", 4));
+    let mut wb_rels = vec![
+        ("rId1", "worksheet", "worksheets/sheet1.xml"),
+        ("rId2", "worksheet", "worksheets/sheet2.xml"),
+        ("rId3", "pivotCacheDefinition", "pivotCache/pivotCacheDefinition1.xml"),
+        ("rId4", "styles", "styles.xml"),
+        ("rId7", "pivotCacheDefinition", "pivotCache/pivotCacheDefinition2.xml"),
+    ];
+    if o.connections {
+        wb_rels.push(("rId5", "connections", "connections.xml"));
+    }
+    if o.model_part {
+        wb_rels.push(("rId6", "powerPivotData", "model/item.data"));
+    }
+    let wb_rels = rels(&wb_rels);
+    let t1_rels = rels(&[("rId1", "pivotCacheDefinition", "../pivotCache/pivotCacheDefinition1.xml")]);
+    let t2_rels = rels(&[("rId1", "pivotCacheDefinition", "../pivotCache/pivotCacheDefinition2.xml")]);
+    let c2_rels = rels(&[("rId1", "pivotCacheRecords", "pivotCacheRecords2.xml")]);
+    let s1_rels = rels(&[("rId1", "pivotTable", "../pivotTables/pivotTable1.xml")]);
+    let s2_rels = rels(&[("rId1", "pivotTable", "../pivotTables/pivotTable2.xml")]);
+    let conn_rels = rels(&[("rId1", "worksheet", "worksheets/sheet1.xml")]);
+    let mut parts: Vec<(&str, &[u8])> = vec![
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", super::ROOT_RELS.as_bytes()),
+        ("xl/workbook.xml", workbook.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", wb_rels.as_bytes()),
+        ("xl/styles.xml", EXT_STYLES.as_bytes()),
+        ("xl/worksheets/sheet1.xml", s1.as_bytes()),
+        ("xl/worksheets/sheet2.xml", s2.as_bytes()),
+        ("xl/worksheets/_rels/sheet1.xml.rels", s1_rels.as_bytes()),
+        ("xl/worksheets/_rels/sheet2.xml.rels", s2_rels.as_bytes()),
+        ("xl/pivotTables/pivotTable1.xml", t1.as_bytes()),
+        ("xl/pivotTables/_rels/pivotTable1.xml.rels", t1_rels.as_bytes()),
+        ("xl/pivotTables/pivotTable2.xml", t2.as_bytes()),
+        ("xl/pivotTables/_rels/pivotTable2.xml.rels", t2_rels.as_bytes()),
+        ("xl/pivotCache/pivotCacheDefinition1.xml", c1.as_bytes()),
+        ("xl/pivotCache/pivotCacheDefinition2.xml", c2.as_bytes()),
+        ("xl/pivotCache/_rels/pivotCacheDefinition2.xml.rels", c2_rels.as_bytes()),
+        ("xl/pivotCache/pivotCacheRecords2.xml", CONN_RECORDS.as_bytes()),
+    ];
+    if !o.table_rels {
+        parts.retain(|(name, _)| !name.starts_with("xl/pivotTables/_rels/"));
+    }
+    if o.connections {
+        parts.push(("xl/connections.xml", MODEL_CONNECTIONS.as_bytes()));
+    }
+    if o.connections_blocked {
+        parts.push(("xl/_rels/connections.xml.rels", conn_rels.as_bytes()));
+    }
+    if o.model_part {
+        parts.push(("xl/model/item.data", if o.big_model { &BIG_MODEL[..] } else { MODEL_DATA }));
+    }
+    make_zip(&parts)
+}
+
+/// The content type a written package gives a part.
+fn content_type_of(u: &Unpacked, part: &str) -> String {
+    let types = xml::parse(u.parts.get("[Content_Types].xml").unwrap()).unwrap();
+    if let Some(o) = types.kids("Override").find(|o| normalize(o.attr("PartName").unwrap()) == normalize(part)) {
+        return o.attr("ContentType").unwrap().to_string();
+    }
+    let ext = part.rsplit('.').next().unwrap().to_ascii_lowercase();
+    types.kids("Default").find(|d| d.attr("Extension").unwrap().eq_ignore_ascii_case(&ext)).unwrap().attr("ContentType").unwrap().to_string()
+}
+
+/// Bytes kept by a read workbook.
+fn kept_bytes(wb: &gridcraft_model::Workbook) -> usize {
+    wb.preserved.as_ref().map_or(0, |p| p.byte_len()) + wb.sheets.iter().filter_map(|s| s.preserved.as_ref()).map(|p| p.byte_len()).sum::<usize>()
+}
+
+#[test]
+fn pivot_tables_on_the_data_model_and_a_connection_survive_a_save() {
+    let (wb, rep) = read_xlsx(&conn_pivot_package(CONN_PKG)).unwrap();
+    assert!(wb.sheets.iter().all(|s| s.pivots.is_empty()), "not modelled: GridCraft can't refresh them");
+    assert!(rep.warnings.iter().any(|w| w.contains("OnModel") && w.contains("Data Model")), "{:?}", rep.warnings);
+    assert!(rep.warnings.iter().any(|w| w.contains("OnConnection") && w.contains("a data connection")), "{:?}", rep.warnings);
+    assert!(rep.warnings.iter().any(|w| w.contains("Data Model is kept")), "{:?}", rep.warnings);
+    assert!(!rep.warnings.iter().any(|w| w.contains("dropped") || w.contains("plain cells")), "{:?}", rep.warnings);
+    // Twice: what the first save kept is read back and kept again.
+    let first = write_xlsx(&wb).unwrap();
+    let (again, rep2) = read_xlsx(&first).unwrap();
+    assert!(!rep2.warnings.iter().any(|w| w.contains("dropped") || w.contains("plain cells")), "{:?}", rep2.warnings);
+    for saved in [first, write_xlsx(&again).unwrap()] {
+        let u = Unpacked::new(&saved);
+        u.assert_valid();
+        // The Data Model: same bytes, name and content type, related from the workbook.
+        assert_eq!(u.parts.get("xl/model/item.data").map(Vec::as_slice), Some(MODEL_DATA));
+        assert_eq!(content_type_of(&u, "xl/model/item.data"), CT_MODEL);
+        let wb_rels = u.rels("xl/workbook.xml");
+        assert!(wb_rels.iter().any(|r| r.1.ends_with("/powerPivotData") && r.2 == "xl/model/item.data"), "{wb_rels:?}");
+        // The connections the caches name by id, and the hidden name a worksheet connection uses.
+        let conn = wb_rels.iter().find(|r| r.1.ends_with("/connections")).unwrap();
+        assert_eq!(u.text(&conn.2), MODEL_CONNECTIONS);
+        assert!(u.text("xl/workbook.xml").contains("_xlcn.WorksheetConnection_T"));
+        let caches = written_pivot_caches(&u);
+        assert_eq!(caches.len(), 2, "{caches:?}");
+        let cache = |id: &str| caches.iter().find(|c| c.0 == id).unwrap_or_else(|| panic!("{caches:?}")).1.clone();
+        assert_eq!(u.text(&cache("3")), model_cache(1));
+        assert!(u.rels(&cache("3")).is_empty());
+        assert_eq!(u.text(&cache("4")), conn_cache(2));
+        let records = u.rels(&cache("4")).into_iter().find(|r| r.1.ends_with("/pivotCacheRecords")).unwrap();
+        assert_eq!(u.text(&records.2), CONN_RECORDS);
+        for (sheet, name, id) in [("Report", "OnModel", "3"), ("More", "OnConnection", "4")] {
+            let t = written_pivot_tables(&u, sheet);
+            assert_eq!(t.len(), 1, "{sheet}");
+            assert_eq!(u.rels(&t[0])[0].2, cache(id), "{sheet}");
+            let x = u.text(&t[0]);
+            assert!(x.contains(&format!(r#"name="{name}" cacheId="{id}""#)), "{x}");
+            let (color, code) = written_style(&u, &attr_of(&x, "format", "dxfId"), &attr_of(&x, "dataField", "numFmtId"));
+            assert_eq!((color.as_str(), code.as_str()), ("FF0000FF", "0.0%"), "{x}");
+        }
+    }
+}
+
+#[test]
+fn the_data_model_is_kept_without_pivot_tables() {
+    let (mut wb, _) = read_xlsx(&conn_pivot_package(CONN_PKG)).unwrap();
+    wb.sheets.iter_mut().for_each(|s| Arc::make_mut(s).preserved = None);
+    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    u.assert_valid();
+    assert_eq!(u.parts.get("xl/model/item.data").map(Vec::as_slice), Some(MODEL_DATA));
+    // No kept table uses the caches any more: they go.
+    assert!(written_pivot_caches(&u).is_empty());
+    assert!(u.find(model_cache(1).as_bytes()).is_empty() && u.find(CONN_RECORDS.as_bytes()).is_empty());
+}
+
+#[test]
+fn data_model_pivot_tables_without_the_model_are_kept_as_plain_cells() {
+    // No model part, or no room left to keep it: the PivotTable on the model couldn't be
+    // refreshed and is dropped (its cells stay); the one on a plain connection is kept.
+    for too_large in [false, true] {
+        let pkg = ConnPkg { model_part: too_large, big_model: too_large, ..CONN_PKG };
+        let src = conn_pivot_package(pkg);
+        let (wb, rep) = if too_large {
+            // Room for everything but the model: the caches are kept after it.
+            let all = kept_bytes(&read_xlsx(&src).unwrap().0);
+            crate::passthrough::KEPT_TOTAL_FOR_TEST.with(|c| c.set(all - BIG_MODEL.len()));
+            let read = read_xlsx(&src);
+            crate::passthrough::KEPT_TOTAL_FOR_TEST.with(|c| c.set(crate::passthrough::MAX_KEPT_TOTAL));
+            let r = read.unwrap();
+            assert!(r.1.warnings.iter().any(|w| w.contains("Data Model was dropped") && w.contains("too large")), "{:?}", r.1.warnings);
+            r
+        } else {
+            read_xlsx(&src).unwrap()
+        };
+        let w = &rep.warnings;
+        assert!(
+            w.iter().any(|w| w.contains("1 PivotTable cache(s) on the workbook's Data Model were dropped") && w.contains("plain cells")),
+            "{w:?}"
+        );
+        let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+        u.assert_valid();
+        assert!(!u.parts.contains_key("xl/model/item.data"));
+        assert!(written_pivot_tables(&u, "Report").is_empty());
+        assert!(u.find(model_cache(1).as_bytes()).is_empty());
+        assert!(u.text(&sheet_part(&u, "Report")).contains("<v>5</v>"), "the report cells stay");
+        let caches = written_pivot_caches(&u);
+        assert_eq!(caches.iter().map(|c| c.0.as_str()).collect::<Vec<_>>(), ["4"], "{caches:?}");
+        assert_eq!(written_pivot_tables(&u, "More").len(), 1);
+    }
+}
+
+#[test]
+fn pivot_tables_naming_their_cache_by_id_go_with_a_dropped_cache() {
+    // No connections part: both caches are dropped, and the tables that name them only by
+    // `cacheId` must not stay behind with an id the workbook no longer lists.
+    let (wb, _) = read_xlsx(&conn_pivot_package(ConnPkg { connections: false, table_rels: false, ..CONN_PKG })).unwrap();
+    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    u.assert_valid();
+    for sheet in ["Report", "More"] {
+        assert!(written_pivot_tables(&u, sheet).is_empty(), "{sheet}");
+    }
+    assert!(written_pivot_caches(&u).is_empty());
+}
+
+#[test]
+fn pivot_tables_naming_their_cache_by_id_keep_it() {
+    let (wb, _) = read_xlsx(&conn_pivot_package(ConnPkg { table_rels: false, ..CONN_PKG })).unwrap();
+    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    u.assert_valid();
+    for sheet in ["Report", "More"] {
+        assert_eq!(written_pivot_tables(&u, sheet).len(), 1, "{sheet}");
+    }
+    let caches = written_pivot_caches(&u);
+    assert_eq!(caches.iter().map(|c| c.0.as_str()).collect::<Vec<_>>(), ["3", "4"], "{caches:?}");
+}
+
+#[test]
+fn connection_pivot_tables_need_their_connections() {
+    // No connections part: the caches name connections that aren't there.
+    let (none, rep) = read_xlsx(&conn_pivot_package(ConnPkg { connections: false, ..CONN_PKG })).unwrap();
+    assert!(rep.warnings.iter().any(|w| w.contains("data connection is not in the workbook")), "{:?}", rep.warnings);
+    // A cache naming a connection id the part doesn't have; the other cache is unaffected.
+    let (missing, rep) = read_xlsx(&conn_pivot_package(ConnPkg { model_connection: 9, ..CONN_PKG })).unwrap();
+    assert!(rep.warnings.iter().any(|w| w.contains("data connection is not in the workbook")), "{:?}", rep.warnings);
+    // A connections part that can't be kept: the model and every connection cache go with it.
+    let (blocked, rep) = read_xlsx(&conn_pivot_package(ConnPkg { connections_blocked: true, ..CONN_PKG })).unwrap();
+    assert!(rep.warnings.iter().any(|w| w.contains("Data Model was dropped")), "{:?}", rep.warnings);
+    assert!(rep.warnings.iter().any(|w| w.contains("2 PivotTable cache(s)") && w.contains("connections were not kept")), "{:?}", rep.warnings);
+    for (wb, all_gone) in [(none, true), (blocked, true), (missing, false)] {
+        let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+        u.assert_valid();
+        assert!(written_pivot_tables(&u, "Report").is_empty());
+        assert!(u.text(&sheet_part(&u, "Report")).contains("<v>5</v>"));
+        if all_gone {
+            assert!(written_pivot_tables(&u, "More").is_empty());
+            assert!(written_pivot_caches(&u).is_empty());
+            assert!(!u.parts.contains_key("xl/model/item.data"));
+        } else {
+            assert_eq!(written_pivot_tables(&u, "More").len(), 1);
+        }
+    }
+}
 #[test]
 fn modelled_form_controls_join_kept_ones_in_one_controls_element() {
     use gridcraft_model::{Anchor, ControlKind, FormControl};
@@ -1209,4 +1817,582 @@ fn sheet_document_tasks_survive_a_save() {
     u.assert_valid();
     let sheet = sheet_part(&u, "TasksSheet");
     assert!(u.rels(&sheet).iter().any(|r| r.1.ends_with("/documenttask") && u.parts.get(&r.2).is_some_and(|b| b == task_xml.as_bytes())));
+}
+
+#[test]
+fn svg_blip_picture_round_trips_both_raster_and_svg() {
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\nfake-png-fallback";
+    const SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><circle cx="12" cy="12" r="10"/></svg>"#;
+    let ct = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="png" ContentType="image/png"/>
+  <Default Extension="svg" ContentType="image/svg+xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>
+</Types>"#;
+    let root_rels = rels(&[("rId1", "officeDocument", "xl/workbook.xml")]);
+    let wb_xml = format!(
+        r#"<?xml version="1.0"?><workbook xmlns="{NS_MAIN}" xmlns:r="{NS_R}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#
+    );
+    let wb_rels = rels(&[("rId1", "worksheet", "worksheets/sheet1.xml")]);
+    let sheet_xml = format!(r#"<?xml version="1.0"?><worksheet xmlns="{NS_MAIN}" xmlns:r="{NS_R}"><sheetData/><drawing r:id="rId1"/></worksheet>"#);
+    let sheet_rels = rels(&[("rId1", "drawing", "../drawings/drawing1.xml")]);
+    let drawing_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <xdr:twoCellAnchor>
+    <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+    <xdr:to><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+    <xdr:pic>
+      <xdr:nvPicPr><xdr:cNvPr id="2" name="Graphic 1" descr="VectorGauge"/><xdr:cNvPicPr/></xdr:nvPicPr>
+      <xdr:blipFill>
+        <a:blip r:embed="rId1">
+          <a:extLst>
+            <a:ext uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}">
+              <asvg:svgBlip xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main" r:embed="rId2"/>
+            </a:ext>
+          </a:extLst>
+        </a:blip>
+        <a:stretch><a:fillRect/></a:stretch>
+      </xdr:blipFill>
+      <xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100000" cy="100000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>
+    </xdr:pic>
+    <xdr:clientData/>
+  </xdr:twoCellAnchor>
+</xdr:wsDr>"#;
+    let drawing_rels = rels(&[("rId1", "image", "../media/image1.png"), ("rId2", "image", "../media/image2.svg")]);
+    let bytes = make_zip(&[
+        ("[Content_Types].xml", ct.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("xl/workbook.xml", wb_xml.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", wb_rels.as_bytes()),
+        ("xl/worksheets/sheet1.xml", sheet_xml.as_bytes()),
+        ("xl/worksheets/_rels/sheet1.xml.rels", sheet_rels.as_bytes()),
+        ("xl/drawings/drawing1.xml", drawing_xml.as_bytes()),
+        ("xl/drawings/_rels/drawing1.xml.rels", drawing_rels.as_bytes()),
+        ("xl/media/image1.png", PNG),
+        ("xl/media/image2.svg", SVG),
+    ]);
+    // Double round-trip: read -> write -> read -> write.
+    let (wb1, rep1) = read_xlsx(&bytes).unwrap();
+    assert!(!rep1.warnings.iter().any(|w| w.contains("SVG")), "{:?}", rep1.warnings);
+    let saved1 = write_xlsx(&wb1).unwrap();
+    let (wb2, _) = read_xlsx(&saved1).unwrap();
+    let saved2 = write_xlsx(&wb2).unwrap();
+    for saved in [&saved1, &saved2] {
+        let u = Unpacked::new(saved);
+        u.assert_valid();
+        let media: Vec<&String> = u.parts.keys().filter(|k| k.starts_with("xl/media/")).collect();
+        assert_eq!(media.len(), 2, "expected PNG + SVG media parts, got {media:?}");
+        let svg_part = media.iter().find(|k| k.ends_with(".svg")).expect("SVG part missing");
+        assert_eq!(u.parts[*svg_part], SVG);
+        let png_part = media.iter().find(|k| k.ends_with(".png")).expect("PNG part missing");
+        assert_eq!(u.parts[*png_part], PNG);
+        let dxml = String::from_utf8_lossy(&u.parts["xl/drawings/drawing1.xml"]);
+        assert!(dxml.contains("asvg:svgBlip"), "drawing XML missing svgBlip: {dxml}");
+        let drels = u.rels("xl/drawings/drawing1.xml");
+        assert_eq!(drels.len(), 2, "expected 2 drawing image rels, got {drels:?}");
+    }
+}
+
+#[test]
+fn chart_user_shapes_round_trips_without_duplicating_shapes_or_media() {
+    const BADGE_PNG: &[u8] = b"\x89PNG\r\n\x1a\nfake-badge";
+    let ct = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="png" ContentType="image/png"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>
+  <Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>
+  <Override PartName="/xl/drawings/drawing2.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chartshapes+xml"/>
+</Types>"#;
+    let root_rels = rels(&[("rId1", "officeDocument", "xl/workbook.xml")]);
+    let wb_xml = format!(
+        r#"<?xml version="1.0"?><workbook xmlns="{NS_MAIN}" xmlns:r="{NS_R}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#
+    );
+    let wb_rels = rels(&[("rId1", "worksheet", "worksheets/sheet1.xml")]);
+    let sheet_xml = format!(
+        r#"<?xml version="1.0"?><worksheet xmlns="{NS_MAIN}" xmlns:r="{NS_R}"><sheetData><row r="1"><c r="A1"><v>10</v></c></row></sheetData><drawing r:id="rId1"/></worksheet>"#
+    );
+    let sheet_rels = rels(&[("rId1", "drawing", "../drawings/drawing1.xml")]);
+    let drawing1 = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <xdr:twoCellAnchor>
+    <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+    <xdr:to><xdr:col>6</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>12</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+    <xdr:graphicFrame>
+      <xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="Chart 1"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>
+      <xdr:xfrm/>
+      <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rId1"/></a:graphicData></a:graphic>
+    </xdr:graphicFrame>
+    <xdr:clientData/>
+  </xdr:twoCellAnchor>
+</xdr:wsDr>"#;
+    let drawing1_rels = rels(&[("rId1", "chart", "../charts/chart1.xml")]);
+    let chart1 = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <c:chart><c:plotArea><c:lineChart><c:grouping val="standard"/><c:ser><c:idx val="0"/><c:val><c:numRef><c:f>Sheet1!$A$1:$A$1</c:f></c:numRef></c:val></c:ser></c:lineChart></c:plotArea></c:chart>
+  <c:userShapes r:id="rId1"/>
+</c:chartSpace>"#;
+    let chart1_rels = rels(&[("rId1", "chartUserShapes", "../drawings/drawing2.xml")]);
+    let drawing2 = r#"<c:userShapes xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:cdr="http://schemas.openxmlformats.org/drawingml/2006/chartDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <cdr:relSizeAnchor>
+    <cdr:from><cdr:x>0.2</cdr:x><cdr:y>0.2</cdr:y></cdr:from>
+    <cdr:to><cdr:x>0.8</cdr:x><cdr:y>0.8</cdr:y></cdr:to>
+    <cdr:sp macro="" textlink=""><cdr:nvSpPr><cdr:cNvPr id="2" name="TextBox 1"/><cdr:cNvSpPr txBox="1"/></cdr:nvSpPr><cdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></cdr:spPr><cdr:txBody><a:bodyPr/><a:p><a:r><a:t>OverlayNote</a:t></a:r></a:p></cdr:txBody></cdr:sp>
+    <cdr:pic><cdr:nvPicPr><cdr:cNvPr id="3" name="Badge" descr="ChartBadge"/><cdr:cNvPicPr/></cdr:nvPicPr><cdr:blipFill><a:blip r:embed="rId1"/></cdr:blipFill><cdr:spPr/></cdr:pic>
+  </cdr:relSizeAnchor>
+</c:userShapes>"#;
+    let drawing2_rels = rels(&[("rId1", "image", "../media/badge.png")]);
+    let bytes = make_zip(&[
+        ("[Content_Types].xml", ct.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("xl/workbook.xml", wb_xml.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", wb_rels.as_bytes()),
+        ("xl/worksheets/sheet1.xml", sheet_xml.as_bytes()),
+        ("xl/worksheets/_rels/sheet1.xml.rels", sheet_rels.as_bytes()),
+        ("xl/drawings/drawing1.xml", drawing1.as_bytes()),
+        ("xl/drawings/_rels/drawing1.xml.rels", drawing1_rels.as_bytes()),
+        ("xl/charts/chart1.xml", chart1.as_bytes()),
+        ("xl/charts/_rels/chart1.xml.rels", chart1_rels.as_bytes()),
+        ("xl/drawings/drawing2.xml", drawing2.as_bytes()),
+        ("xl/drawings/_rels/drawing2.xml.rels", drawing2_rels.as_bytes()),
+        ("xl/media/badge.png", BADGE_PNG),
+    ]);
+    let (wb1, rep1) = read_xlsx(&bytes).unwrap();
+    assert!(!rep1.warnings.iter().any(|w| w.contains("dropped")), "{:?}", rep1.warnings);
+    let sh1 = wb1.sheet(0).unwrap();
+    assert_eq!(sh1.charts.len(), 1);
+    assert_eq!(sh1.shapes.len(), 1);
+    assert_eq!(sh1.images.len(), 1);
+
+    let saved1 = write_xlsx(&wb1).unwrap();
+    let (wb2, _) = read_xlsx(&saved1).unwrap();
+    let sh2 = wb2.sheet(0).unwrap();
+    assert_eq!(sh2.charts.len(), 1, "chart count after round-trip");
+    assert_eq!(sh2.shapes.len(), 1, "overlay shape must not duplicate on round-trip");
+    assert_eq!(sh2.images.len(), 1, "overlay image must not duplicate on round-trip");
+    let saved2 = write_xlsx(&wb2).unwrap();
+
+    for saved in [&saved1, &saved2] {
+        let u = Unpacked::new(saved);
+        u.assert_valid();
+        let drawings: Vec<&String> = u.parts.keys().filter(|k| k.starts_with("xl/drawings/") && k.ends_with(".xml")).collect();
+        assert_eq!(drawings.len(), 2, "expected sheet drawing + chart userShapes drawing, got {drawings:?}");
+        let media: Vec<&String> = u.parts.keys().filter(|k| k.starts_with("xl/media/")).collect();
+        assert_eq!(media.len(), 1, "expected 1 deduplicated media part, got {media:?}");
+        assert_eq!(u.parts[media[0]], BADGE_PNG);
+        let d1 = String::from_utf8_lossy(&u.parts["xl/drawings/drawing1.xml"]);
+        assert!(!d1.contains("<xdr:sp"), "sheet drawing must not duplicate chart userShapes shape");
+        assert!(!d1.contains("<xdr:pic"), "sheet drawing must not duplicate chart userShapes picture");
+        let cxml = String::from_utf8_lossy(&u.parts["xl/charts/chart1.xml"]);
+        assert!(cxml.contains("<c:userShapes r:id=\"rId1\"/>"), "chart XML missing userShapes ref: {cxml}");
+        let crels = u.rels("xl/charts/chart1.xml");
+        assert!(
+            crels.iter().any(|r| r.1.ends_with("/chartUserShapes") && r.2.starts_with("xl/drawings/") && u.parts.contains_key(&r.2)),
+            "{crels:?}"
+        );
+    }
+
+    // Deleting the chart drops its chartUserShapes drawing cleanly.
+    let mut wb_del = wb1.clone();
+    Arc::make_mut(&mut wb_del.sheets[0]).charts.clear();
+    let saved_del = write_xlsx(&wb_del).unwrap();
+    let u_del = Unpacked::new(&saved_del);
+    u_del.assert_valid();
+    let d_del: Vec<&String> = u_del.parts.keys().filter(|k| k.starts_with("xl/drawings/") && k.ends_with(".xml")).collect();
+    assert_eq!(d_del.len(), 1, "deleting chart should drop its userShapes part, got {d_del:?}");
+}
+
+#[test]
+fn chart_user_shapes_drops_passthrough_when_mirrored_object_modified_or_deleted() {
+    const BADGE_PNG: &[u8] = b"\x89PNG\r\n\x1a\nfake-badge-h2";
+    let ct = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="png" ContentType="image/png"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>
+  <Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>
+  <Override PartName="/xl/drawings/drawing2.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chartshapes+xml"/>
+</Types>"#;
+    let root_rels = rels(&[("rId1", "officeDocument", "xl/workbook.xml")]);
+    let wb_xml = format!(
+        r#"<?xml version="1.0"?><workbook xmlns="{NS_MAIN}" xmlns:r="{NS_R}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#
+    );
+    let wb_rels = rels(&[("rId1", "worksheet", "worksheets/sheet1.xml")]);
+    let sheet_xml = format!(
+        r#"<?xml version="1.0"?><worksheet xmlns="{NS_MAIN}" xmlns:r="{NS_R}"><sheetData><row r="1"><c r="A1"><v>42</v></c></row></sheetData><drawing r:id="rId1"/></worksheet>"#
+    );
+    let sheet_rels = rels(&[("rId1", "drawing", "../drawings/drawing1.xml")]);
+    let drawing1 = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <xdr:twoCellAnchor>
+    <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+    <xdr:to><xdr:col>6</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>12</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+    <xdr:graphicFrame>
+      <xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="Chart 1"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>
+      <xdr:xfrm/>
+      <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rId1"/></a:graphicData></a:graphic>
+    </xdr:graphicFrame>
+    <xdr:clientData/>
+  </xdr:twoCellAnchor>
+</xdr:wsDr>"#;
+    let drawing1_rels = rels(&[("rId1", "chart", "../charts/chart1.xml")]);
+    let chart1 = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <c:chart><c:plotArea><c:lineChart><c:grouping val="standard"/><c:ser><c:idx val="0"/><c:val><c:numRef><c:f>Sheet1!$A$1:$A$1</c:f></c:numRef></c:val></c:ser></c:lineChart></c:plotArea></c:chart>
+  <c:userShapes r:id="rId1"/>
+</c:chartSpace>"#;
+    let chart1_rels = rels(&[("rId1", "chartUserShapes", "../drawings/drawing2.xml")]);
+    let drawing2 = r#"<c:userShapes xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:cdr="http://schemas.openxmlformats.org/drawingml/2006/chartDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <cdr:relSizeAnchor>
+    <cdr:from><cdr:x>0.2</cdr:x><cdr:y>0.2</cdr:y></cdr:from>
+    <cdr:to><cdr:x>0.8</cdr:x><cdr:y>0.8</cdr:y></cdr:to>
+    <cdr:sp macro="" textlink=""><cdr:nvSpPr><cdr:cNvPr id="2" name="Callout 1"/><cdr:cNvSpPr txBox="1"/></cdr:nvSpPr><cdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></cdr:spPr><cdr:txBody><a:bodyPr/><a:p><a:r><a:t>OriginalCallout</a:t></a:r></a:p></cdr:txBody></cdr:sp>
+    <cdr:pic><cdr:nvPicPr><cdr:cNvPr id="3" name="Badge" descr="OriginalBadge"/><cdr:cNvPicPr/></cdr:nvPicPr><cdr:blipFill><a:blip r:embed="rId1"/></cdr:blipFill><cdr:spPr/></cdr:pic>
+  </cdr:relSizeAnchor>
+</c:userShapes>"#;
+    let drawing2_rels = rels(&[("rId1", "image", "../media/badge.png")]);
+    let bytes = make_zip(&[
+        ("[Content_Types].xml", ct.as_bytes()),
+        ("_rels/.rels", root_rels.as_bytes()),
+        ("xl/workbook.xml", wb_xml.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", wb_rels.as_bytes()),
+        ("xl/worksheets/sheet1.xml", sheet_xml.as_bytes()),
+        ("xl/worksheets/_rels/sheet1.xml.rels", sheet_rels.as_bytes()),
+        ("xl/drawings/drawing1.xml", drawing1.as_bytes()),
+        ("xl/drawings/_rels/drawing1.xml.rels", drawing1_rels.as_bytes()),
+        ("xl/charts/chart1.xml", chart1.as_bytes()),
+        ("xl/charts/_rels/chart1.xml.rels", chart1_rels.as_bytes()),
+        ("xl/drawings/drawing2.xml", drawing2.as_bytes()),
+        ("xl/drawings/_rels/drawing2.xml.rels", drawing2_rels.as_bytes()),
+        ("xl/media/badge.png", BADGE_PNG),
+    ]);
+    let (wb_orig, _) = read_xlsx(&bytes).unwrap();
+
+    // (a) Unmodified workbook keeps chartUserShapes passthrough without duplicating shapes/media.
+    let saved_unmod = write_xlsx(&wb_orig).unwrap();
+    let u_unmod = Unpacked::new(&saved_unmod);
+    u_unmod.assert_valid();
+    let unmod_drawings: Vec<&String> = u_unmod.parts.keys().filter(|k| k.starts_with("xl/drawings/") && k.ends_with(".xml")).collect();
+    assert_eq!(unmod_drawings.len(), 2, "unmodified chartUserShapes should stay active: {unmod_drawings:?}");
+    assert!(String::from_utf8_lossy(&u_unmod.parts["xl/charts/chart1.xml"]).contains("<c:userShapes"));
+    let (wb_unmod_reopen, _) = read_xlsx(&saved_unmod).unwrap();
+    assert_eq!(wb_unmod_reopen.sheet(0).unwrap().shapes.len(), 1);
+    assert_eq!(wb_unmod_reopen.sheet(0).unwrap().images.len(), 1);
+    assert_eq!(wb_unmod_reopen.sheet(0).unwrap().shapes[0].text, "OriginalCallout");
+
+    let assert_passthrough_dropped = |saved: &[u8], label: &str| {
+        let u = Unpacked::new(saved);
+        u.assert_valid();
+        let drawings: Vec<&String> = u.parts.keys().filter(|k| k.starts_with("xl/drawings/") && k.ends_with(".xml")).collect();
+        assert_eq!(drawings.len(), 1, "{label}: stale chartUserShapes part must be dropped, got {drawings:?}");
+        let cxml = String::from_utf8_lossy(&u.parts["xl/charts/chart1.xml"]);
+        assert!(!cxml.contains("<c:userShapes"), "{label}: chart XML must not reference dropped userShapes: {cxml}");
+    };
+
+    // (b) Editing mirrored shape text drops passthrough and persists the edited text on reopen.
+    let mut wb_text = wb_orig.clone();
+    Arc::make_mut(&mut wb_text.sheets[0]).shapes[0].text = "EditedCallout".to_string();
+    let saved_text = write_xlsx(&wb_text).unwrap();
+    assert_passthrough_dropped(&saved_text, "text edit");
+    let (wb_text_reopen, _) = read_xlsx(&saved_text).unwrap();
+    let sh_text = wb_text_reopen.sheet(0).unwrap();
+    assert_eq!(sh_text.shapes.len(), 1);
+    assert_eq!(sh_text.images.len(), 1);
+    assert_eq!(sh_text.shapes[0].text, "EditedCallout");
+    assert_eq!(&*sh_text.images[0].data, BADGE_PNG);
+
+    // (c) Moving/resizing a mirrored shape drops passthrough and persists the new anchor.
+    let mut wb_anchor = wb_orig.clone();
+    {
+        let sh = &mut Arc::make_mut(&mut wb_anchor.sheets[0]).shapes[0];
+        sh.anchor.cell = gridcraft_core::CellRef::new(15, 8);
+        sh.anchor.width = 180.0;
+        sh.anchor.height = 72.0;
+    }
+    let saved_anchor = write_xlsx(&wb_anchor).unwrap();
+    assert_passthrough_dropped(&saved_anchor, "anchor edit");
+    let (wb_anchor_reopen, _) = read_xlsx(&saved_anchor).unwrap();
+    let sh_anchor = wb_anchor_reopen.sheet(0).unwrap();
+    assert_eq!(sh_anchor.shapes.len(), 1);
+    assert_eq!(sh_anchor.shapes[0].anchor.cell, gridcraft_core::CellRef::new(15, 8));
+    assert!((sh_anchor.shapes[0].anchor.width - 180.0).abs() < 1.0, "width={}", sh_anchor.shapes[0].anchor.width);
+
+    // (d) Recoloring a mirrored shape fill drops passthrough and persists the new fill.
+    let mut wb_fill = wb_orig.clone();
+    Arc::make_mut(&mut wb_fill.sheets[0]).shapes[0].fill = gridcraft_model::Color::Rgb(0x3366CC);
+    let saved_fill = write_xlsx(&wb_fill).unwrap();
+    assert_passthrough_dropped(&saved_fill, "fill edit");
+    let (wb_fill_reopen, _) = read_xlsx(&saved_fill).unwrap();
+    let sh_fill = wb_fill_reopen.sheet(0).unwrap();
+    assert_eq!(sh_fill.shapes.len(), 1);
+    assert_eq!(sh_fill.shapes[0].fill, gridcraft_model::Color::Rgb(0x3366CC));
+
+    // (e) Editing a mirrored image drops passthrough and persists the edited image metadata.
+    let mut wb_img = wb_orig.clone();
+    Arc::make_mut(&mut wb_img.sheets[0]).images[0].alt = "UpdatedBadge".to_string();
+    let saved_img = write_xlsx(&wb_img).unwrap();
+    assert_passthrough_dropped(&saved_img, "image edit");
+    let (wb_img_reopen, _) = read_xlsx(&saved_img).unwrap();
+    let sh_img = wb_img_reopen.sheet(0).unwrap();
+    assert_eq!(sh_img.shapes.len(), 1);
+    assert_eq!(sh_img.images.len(), 1);
+    assert_eq!(sh_img.images[0].alt, "UpdatedBadge");
+
+    // (f) Deleting a mirrored shape drops passthrough, keeps it deleted, and retains the sibling image.
+    let mut wb_del_shape = wb_orig.clone();
+    Arc::make_mut(&mut wb_del_shape.sheets[0]).shapes.clear();
+    let saved_del_shape = write_xlsx(&wb_del_shape).unwrap();
+    assert_passthrough_dropped(&saved_del_shape, "shape delete");
+    let (wb_del_reopen, _) = read_xlsx(&saved_del_shape).unwrap();
+    let sh_del = wb_del_reopen.sheet(0).unwrap();
+    assert!(sh_del.shapes.is_empty());
+    assert_eq!(sh_del.images.len(), 1);
+    assert_eq!(&*sh_del.images[0].data, BADGE_PNG);
+}
+
+// ------------------------------------------------------------------ embedded charts (#1668)
+
+const NS_A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+const CHART_STYLE: &str = r#"<?xml version="1.0"?><cs:chartStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle" id="201"><!-- kept style --></cs:chartStyle>"#;
+const CHART_COLORS: &str = r#"<?xml version="1.0"?><cs:colorStyle xmlns:cs="http://schemas.microsoft.com/office/drawing/2012/chartStyle" meth="cycle" id="10"><!-- kept colours --></cs:colorStyle>"#;
+const CHART_SHAPES: &str =
+    r#"<?xml version="1.0"?><c:userShapes xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><!-- kept text box --></c:userShapes>"#;
+/// The chart's relationships to its style, colour and user-shape parts.
+const CHART_RELS: &[(&str, &str, &str)] = &[
+    ("rId1", crate::chartex::REL_STYLE, "style1.xml"),
+    ("rId2", crate::chartex::REL_COLORS, "colors1.xml"),
+    ("rId3", "chartUserShapes", "../drawings/drawing2.xml"),
+];
+
+/// A column chart with what GridCraft's chart model doesn't hold: a title taken from a cell on
+/// another sheet, a title and a chart-wide font size, a series line dash, one point's colour, gap
+/// width and overlap, axis bounds and an axis number format.
+fn formatted_chart_xml() -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<c:chartSpace xmlns:c="{NS_C}" xmlns:a="{NS_A}" xmlns:r="{NS_R}"><c:roundedCorners val="0"/><c:chart><c:title><c:tx><c:strRef><c:f>Notes!$A$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>Quarterly</c:v></c:pt></c:strCache></c:strRef></c:tx><c:overlay val="0"/><c:txPr><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="1800" b="1"/></a:pPr><a:endParaRPr lang="en-US"/></a:p></c:txPr></c:title><c:autoTitleDeleted val="0"/><c:plotArea><c:layout/><c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:varyColors val="0"/><c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:strRef><c:f>Data!$B$1</c:f></c:strRef></c:tx><c:spPr><a:solidFill><a:srgbClr val="4472C4"/></a:solidFill><a:ln w="19050"><a:solidFill><a:srgbClr val="203864"/></a:solidFill><a:prstDash val="dash"/></a:ln></c:spPr><c:invertIfNegative val="0"/><c:dPt><c:idx val="1"/><c:invertIfNegative val="0"/><c:bubble3D val="0"/><c:spPr><a:solidFill><a:srgbClr val="C00000"/></a:solidFill></c:spPr></c:dPt><c:cat><c:strRef><c:f>Data!$A$2:$A$4</c:f></c:strRef></c:cat><c:val><c:numRef><c:f>Data!$B$2:$B$4</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="3"/><c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="1"><c:v>20</c:v></c:pt><c:pt idx="2"><c:v>30</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser><c:gapWidth val="40"/><c:overlap val="-20"/><c:axId val="111"/><c:axId val="222"/></c:barChart><c:catAx><c:axId val="111"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="b"/><c:crossAx val="222"/></c:catAx><c:valAx><c:axId val="222"/><c:scaling><c:orientation val="minMax"/><c:max val="50"/><c:min val="0"/></c:scaling><c:delete val="0"/><c:axPos val="l"/><c:majorGridlines/><c:numFmt formatCode="0.0" sourceLinked="0"/><c:crossAx val="111"/></c:valAx></c:plotArea><c:legend><c:legendPos val="r"/><c:overlay val="0"/></c:legend><c:plotVisOnly val="1"/></c:chart><c:txPr><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="1400"/></a:pPr><a:endParaRPr lang="en-US"/></a:p></c:txPr><c:userShapes r:id="rId3"/></c:chartSpace>"#
+    )
+}
+
+/// Sheets "Data" (with the chart in its drawing) and "Notes" (the cell the chart's title shows).
+/// `chart_rels` are the chart part's relationships.
+fn embedded_chart_package(chart: &str, chart_rels: &[(&str, &str, &str)]) -> Vec<u8> {
+    let workbook = format!(
+        r#"<?xml version="1.0"?><workbook xmlns="{NS_MAIN}" xmlns:r="{NS_R}"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Notes" sheetId="2" r:id="rId2"/></sheets></workbook>"#
+    );
+    let content_types = format!(
+        r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/xl/workbook.xml" ContentType="{CT_PREFIX}.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="{CT_PREFIX}.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="{CT_PREFIX}.spreadsheetml.worksheet+xml"/><Override PartName="/xl/drawings/drawing1.xml" ContentType="{CT_PREFIX}.drawing+xml"/><Override PartName="/xl/drawings/drawing2.xml" ContentType="{CT_PREFIX}.drawingml.chartshapes+xml"/><Override PartName="/xl/charts/chart1.xml" ContentType="{CT_PREFIX}.drawingml.chart+xml"/><Override PartName="/xl/charts/style1.xml" ContentType="{}"/><Override PartName="/xl/charts/colors1.xml" ContentType="{}"/></Types>"#,
+        crate::chartex::CT_STYLE,
+        crate::chartex::CT_COLORS
+    );
+    let data = format!(
+        r#"<?xml version="1.0"?><worksheet xmlns="{NS_MAIN}" xmlns:r="{NS_R}"><sheetData><row r="1"><c r="B1" t="inlineStr"><is><t>Sales</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Q1</t></is></c><c r="B2"><v>10</v></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Q2</t></is></c><c r="B3"><v>20</v></c></row><row r="4"><c r="A4" t="inlineStr"><is><t>Q3</t></is></c><c r="B4"><v>30</v></c></row></sheetData><drawing r:id="rId1"/></worksheet>"#
+    );
+    let drawing = format!(
+        r#"<?xml version="1.0"?><xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="{NS_A}" xmlns:r="{NS_R}" xmlns:c="{NS_C}"><xdr:twoCellAnchor><xdr:from><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>9</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>15</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="Chart 1"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm><a:graphic><a:graphicData uri="{NS_C}"><c:chart r:id="rId1"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#
+    );
+    make_zip(&[
+        ("[Content_Types].xml", content_types.as_bytes()),
+        ("_rels/.rels", rels(&[("rId1", "officeDocument", "xl/workbook.xml")]).as_bytes()),
+        ("xl/workbook.xml", workbook.as_bytes()),
+        (
+            "xl/_rels/workbook.xml.rels",
+            rels(&[("rId1", "worksheet", "worksheets/sheet1.xml"), ("rId2", "worksheet", "worksheets/sheet2.xml")]).as_bytes(),
+        ),
+        ("xl/worksheets/sheet1.xml", data.as_bytes()),
+        ("xl/worksheets/sheet2.xml", worksheet_xml("Quarterly").as_bytes()),
+        ("xl/worksheets/_rels/sheet1.xml.rels", rels(&[("rId1", "drawing", "../drawings/drawing1.xml")]).as_bytes()),
+        ("xl/drawings/drawing1.xml", drawing.as_bytes()),
+        ("xl/drawings/_rels/drawing1.xml.rels", rels(&[("rId1", "chart", "../charts/chart1.xml")]).as_bytes()),
+        ("xl/charts/chart1.xml", chart.as_bytes()),
+        ("xl/charts/_rels/chart1.xml.rels", rels(chart_rels).as_bytes()),
+        ("xl/charts/style1.xml", CHART_STYLE.as_bytes()),
+        ("xl/charts/colors1.xml", CHART_COLORS.as_bytes()),
+        ("xl/drawings/drawing2.xml", CHART_SHAPES.as_bytes()),
+    ])
+}
+
+/// The chart part the first written sheet shows, found through the sheet's drawing.
+fn written_chart(u: &Unpacked) -> String {
+    let (_, sheet) = u.target("xl/workbook.xml", &attr_of(&u.text("xl/workbook.xml"), "sheet", "r:id"));
+    let drawing = u.rels(&sheet).into_iter().find(|r| r.1.ends_with("/drawing")).unwrap().2;
+    let charts: Vec<String> = u.rels(&drawing).into_iter().filter(|r| r.1.ends_with("/chart")).map(|r| r.2).collect();
+    assert_eq!(charts.len(), 1, "{charts:?}");
+    charts.into_iter().next().unwrap()
+}
+
+/// Two charts are the same apart from their id and position.
+fn same_chart(a: &gridcraft_model::Chart, b: &gridcraft_model::Chart) -> bool {
+    gridcraft_model::Chart { id: b.id, anchor: b.anchor, ..a.clone() } == *b
+}
+
+#[test]
+fn an_unedited_embedded_chart_keeps_its_xml_and_parts_on_save() {
+    let chart = formatted_chart_xml();
+    let (wb, rep) = read_xlsx(&embedded_chart_package(&chart, CHART_RELS)).unwrap();
+    assert!(!rep.warnings.iter().any(|w| w.contains("chart") || w.contains("dropped")), "{:?}", rep.warnings);
+    assert_eq!(wb.sheet(0).unwrap().charts.len(), 1);
+
+    let out = write_xlsx(&wb).unwrap();
+    let u = Unpacked::new(&out);
+    u.assert_valid();
+    // The chart part, byte for byte, and its style, colour and user-shape parts behind the same
+    // relationship ids.
+    let part = written_chart(&u);
+    assert_eq!(u.text(&part), chart);
+    let crels = u.rels(&part);
+    for (id, body) in [("rId1", CHART_STYLE), ("rId2", CHART_COLORS), ("rId3", CHART_SHAPES)] {
+        let r = crels.iter().find(|r| r.0 == id).unwrap_or_else(|| panic!("no {id} in {crels:?}"));
+        assert_eq!(u.text(&r.2), body, "{id}");
+    }
+    // Reading the output gives the same chart, and a second save keeps it again.
+    let (wb2, rep2) = read_xlsx(&out).unwrap();
+    assert!(!rep2.warnings.iter().any(|w| w.contains("chart") || w.contains("dropped")), "{:?}", rep2.warnings);
+    assert!(same_chart(&wb2.sheet(0).unwrap().charts[0], &wb.sheet(0).unwrap().charts[0]));
+    let again = Unpacked::new(&write_xlsx(&wb2).unwrap());
+    again.assert_valid();
+    assert_eq!(again.text(&written_chart(&again)), chart);
+}
+
+#[test]
+fn a_moved_and_resized_kept_chart_keeps_its_xml() {
+    let chart = formatted_chart_xml();
+    let (mut wb, _) = read_xlsx(&embedded_chart_package(&chart, CHART_RELS)).unwrap();
+    let ch = &mut wb.sheet_mut(0).unwrap().charts[0];
+    ch.anchor.cell = gridcraft_core::CellRef::new(20, 6);
+    ch.anchor.width += 120.0;
+    ch.anchor.height /= 2.0;
+    let moved = ch.anchor;
+    let out = write_xlsx(&wb).unwrap();
+    let u = Unpacked::new(&out);
+    u.assert_valid();
+    assert_eq!(u.text(&written_chart(&u)), chart);
+    // The drawing, which GridCraft writes, has the new position.
+    let (wb2, _) = read_xlsx(&out).unwrap();
+    let a = wb2.sheet(0).unwrap().charts[0].anchor;
+    assert_eq!(a.cell, moved.cell);
+    assert!((a.width - moved.width).abs() < 1.0 && (a.height - moved.height).abs() < 1.0, "{a:?} vs {moved:?}");
+}
+
+#[test]
+fn an_edited_kept_chart_is_written_from_the_model() {
+    use gridcraft_model::{Chart, ChartKind};
+    type Edit = fn(&mut Chart);
+    let chart = formatted_chart_xml();
+    let edits: [(&str, Edit); 4] = [
+        ("title", |c| c.title = Some("Renamed".into())),
+        ("series range", |c| c.series[0].values = "Data!$B$2:$B$3".into()),
+        ("kind", |c| c.kind = ChartKind::Line),
+        ("legend", |c| c.legend = gridcraft_model::LegendPos::Bottom),
+    ];
+    for (what, edit) in edits {
+        let (mut wb, _) = read_xlsx(&embedded_chart_package(&chart, CHART_RELS)).unwrap();
+        edit(&mut wb.sheet_mut(0).unwrap().charts[0]);
+        let edited = wb.sheet(0).unwrap().charts[0].clone();
+        let out = write_xlsx(&wb).unwrap();
+        let u = Unpacked::new(&out);
+        u.assert_valid();
+        let written = u.text(&written_chart(&u));
+        assert!(!written.contains("prstDash") && !written.contains("Notes!"), "{what}: {written}");
+        assert!(u.find(CHART_STYLE.as_bytes()).is_empty() && u.find(CHART_SHAPES.as_bytes()).is_empty(), "{what}");
+        let (wb2, _) = read_xlsx(&out).unwrap();
+        let back = &wb2.sheet(0).unwrap().charts[0];
+        assert_eq!(
+            (&back.title, &back.series[0].values, back.kind, back.legend),
+            (&edited.title, &edited.series[0].values, edited.kind, edited.legend),
+            "{what}"
+        );
+    }
+    // A deleted chart takes its kept parts with it.
+    let (mut wb, _) = read_xlsx(&embedded_chart_package(&chart, CHART_RELS)).unwrap();
+    wb.sheet_mut(0).unwrap().charts.clear();
+    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    u.assert_valid();
+    assert!(u.find(chart.as_bytes()).is_empty() && u.find(CHART_STYLE.as_bytes()).is_empty());
+}
+
+#[test]
+fn a_kept_chart_naming_a_renamed_or_deleted_sheet_is_written_from_the_model() {
+    let chart = formatted_chart_xml();
+    // "Data" renamed: the kept series still say Data!…, so the model writes the chart.
+    let (mut wb, _) = read_xlsx(&embedded_chart_package(&chart, CHART_RELS)).unwrap();
+    wb.sheet_mut(0).unwrap().name = "Renamed".into();
+    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    u.assert_valid();
+    assert_ne!(u.text(&written_chart(&u)), chart);
+    assert!(u.find(CHART_STYLE.as_bytes()).is_empty());
+    // "Notes" deleted: only the title, a reference the model doesn't hold, named it.
+    let (mut wb, _) = read_xlsx(&embedded_chart_package(&chart, CHART_RELS)).unwrap();
+    wb.sheets.remove(1);
+    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    u.assert_valid();
+    assert!(!u.text(&written_chart(&u)).contains("Notes!"));
+    // A rename undone before saving keeps it.
+    let (mut wb, _) = read_xlsx(&embedded_chart_package(&chart, CHART_RELS)).unwrap();
+    wb.sheet_mut(1).unwrap().name = "Other".into();
+    wb.sheet_mut(1).unwrap().name = "NOTES".into();
+    let u = Unpacked::new(&write_xlsx(&wb).unwrap());
+    assert_eq!(u.text(&written_chart(&u)), chart, "sheet names compare as Excel does, ignoring case");
+}
+
+#[test]
+fn damaged_or_oversized_kept_charts_fall_back_to_the_model() {
+    let chart = formatted_chart_xml();
+    let check = |wb: &gridcraft_model::Workbook, what: &str| {
+        let u = Unpacked::new(&write_xlsx(wb).unwrap());
+        u.assert_valid();
+        let written = u.text(&written_chart(&u));
+        assert!(!written.contains("prstDash"), "{what}: {written}");
+        assert!(u.find(CHART_STYLE.as_bytes()).is_empty(), "{what}");
+    };
+    let kept = |wb: &gridcraft_model::Workbook| wb.sheet(0).unwrap().preserved.as_ref().is_some_and(|p| !p.charts.is_empty());
+    // A missing style part, and a graph that reaches a worksheet: read as before, nothing kept.
+    let missing: Vec<(&str, &str, &str)> = vec![("rId1", crate::chartex::REL_STYLE, "style9.xml")];
+    let worksheet: Vec<(&str, &str, &str)> = vec![("rId1", "worksheet", "../worksheets/sheet2.xml")];
+    for (what, chart_rels) in [("missing part", missing), ("reaches a worksheet", worksheet)] {
+        let (wb, _) = read_xlsx(&embedded_chart_package(&chart, &chart_rels)).unwrap();
+        assert_eq!(wb.sheet(0).unwrap().charts.len(), 1, "{what}");
+        assert!(!kept(&wb), "{what}");
+        check(&wb, what);
+    }
+    // Over the kept-bytes allowance.
+    crate::passthrough::KEPT_TOTAL_FOR_TEST.with(|c| c.set(chart.len() / 2));
+    let read = read_xlsx(&embedded_chart_package(&chart, CHART_RELS));
+    crate::passthrough::KEPT_TOTAL_FOR_TEST.with(|c| c.set(crate::passthrough::MAX_KEPT_TOTAL));
+    let (wb, _) = read.unwrap();
+    assert!(!kept(&wb));
+    check(&wb, "too large");
+    // Kept XML that no longer parses, or a kept chart without its chart part: the model writes it.
+    type Damage = fn(&mut gridcraft_model::PreservedChart);
+    let damages: [(&str, Damage); 2] = [
+        ("damaged XML", |k| {
+            let part = k.part.clone();
+            if let Some(q) = k.parts.iter_mut().find(|q| q.name == part) {
+                q.data = Arc::from("<c:chart>".repeat(crate::xml::MAX_DEPTH + 1).into_bytes());
+            }
+        }),
+        ("no chart part", |k| {
+            let part = k.part.clone();
+            k.parts.retain(|q| q.name != part);
+        }),
+    ];
+    for (what, damage) in damages {
+        let (mut wb, _) = read_xlsx(&embedded_chart_package(&chart, CHART_RELS)).unwrap();
+        assert!(kept(&wb));
+        let sheet = wb.sheet_mut(0).unwrap();
+        let mut p = sheet.preserved.as_deref().cloned().unwrap();
+        damage(&mut p.charts[0]);
+        sheet.preserved = Some(Arc::new(p));
+        check(&wb, what);
+    }
 }

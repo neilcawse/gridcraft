@@ -1,7 +1,7 @@
 //! Reference adjustment: copying formulas, inserting/deleting rows and columns, moving cells,
 //! renaming and deleting sheets.
 
-use gridcraft_core::{CellError, MAX_COLS, MAX_ROWS, RangeRef};
+use gridcraft_core::{CellError, CellRef, MAX_COLS, MAX_ROWS, RangeRef};
 
 use crate::ast::{Anchor, Expr, RefKind, Reference, SheetSel, clamp_anchor};
 
@@ -36,6 +36,68 @@ pub fn shift_relative_wrapping(e: Expr, dr: i64, dc: i64) -> Expr {
     })
 }
 
+/// Paste Special ▸ Transpose: the cell holding the formula moves from `src` to `dest`, so every
+/// reference turns a quarter turn with it — its row offset becomes its column offset and the other
+/// way round, `(r, c)` → `dest + (c − src.col, r − src.row)`.
+///
+/// As Excel writes it out: a reference that pins a row or a column with `$` is left exactly as it
+/// stands, a whole-row or whole-column reference comes back as a cell range whose open side runs
+/// from the transposed far edge of the sheet, and a result that falls off the grid becomes `#REF!`.
+pub fn transpose_relative(e: Expr, src: CellRef, dest: CellRef) -> Expr {
+    e.map(&mut |x| match x {
+        Expr::Ref(r) if !has_absolute(&r) => match transpose_ref(&r, src, dest) {
+            Some(r) => Expr::Ref(r),
+            None => Expr::Error(CellError::Ref),
+        },
+        other => other,
+    })
+}
+
+/// Whether any end of the reference pins a row or a column with `$`.
+fn has_absolute(r: &Reference) -> bool {
+    let abs = |a: &Anchor| a.row_abs || a.col_abs;
+    match &r.kind {
+        RefKind::Cell(a) => abs(a),
+        RefKind::Range(a, b) => abs(a) || abs(b),
+        RefKind::Rows(_, a0, _, a1) | RefKind::Cols(_, a0, _, a1) => *a0 || *a1,
+    }
+}
+
+/// Where an end lands after the turn: its column drives the new row, its row the new column.
+fn transpose_anchor(a: &Anchor, src: CellRef, dest: CellRef) -> Option<(u32, u32)> {
+    clamp_anchor(dest.row as i64 + a.col as i64 - src.col as i64, dest.col as i64 + a.row as i64 - src.row as i64)
+}
+
+/// Turns one reference with `src` → `dest`: `None` when an end falls outside the sheet, which
+/// the caller turns into `#REF!`.
+fn transpose_ref(r: &Reference, src: CellRef, dest: CellRef) -> Option<Reference> {
+    let kind = match &r.kind {
+        RefKind::Cell(a) => {
+            let (row, col) = transpose_anchor(a, src, dest)?;
+            RefKind::Cell(Anchor { row, col, ..*a })
+        }
+        RefKind::Range(a, b) => {
+            let (row, col) = transpose_anchor(a, src, dest)?;
+            let (row2, col2) = transpose_anchor(b, src, dest)?;
+            RefKind::Range(Anchor { row, col, ..*a }, Anchor { row: row2, col: col2, ..*b })
+        }
+        // A whole row turns into a cell range: its rows become columns, while its open columns
+        // become rows pinned with `$` — from the transposed first column down to the last row.
+        RefKind::Rows(r0, _, r1, _) => {
+            let (row, col) = clamp_anchor(dest.row as i64 - src.col as i64, dest.col as i64 + *r0 as i64 - src.row as i64)?;
+            let (row2, col2) = clamp_anchor(MAX_ROWS as i64 - 1, dest.col as i64 + *r1 as i64 - src.row as i64)?;
+            RefKind::Range(Anchor { row, col, row_abs: true, col_abs: false }, Anchor { row: row2, col: col2, row_abs: true, col_abs: false })
+        }
+        // A whole column likewise: its columns become rows, its open rows become columns up to XFD.
+        RefKind::Cols(c0, _, c1, _) => {
+            let (row, col) = clamp_anchor(dest.row as i64 + *c0 as i64 - src.col as i64, dest.col as i64 - src.row as i64)?;
+            let (row2, col2) = clamp_anchor(dest.row as i64 + *c1 as i64 - src.col as i64, MAX_COLS as i64 - 1)?;
+            RefKind::Range(Anchor { row, col, row_abs: false, col_abs: true }, Anchor { row: row2, col: col2, row_abs: false, col_abs: true })
+        }
+    };
+    Some(Reference { sheet: r.sheet.clone(), kind })
+}
+
 /// Whether the formula has a relative (no `$`) row or column anywhere.
 pub fn has_relative_refs(e: &Expr) -> bool {
     e.references().iter().any(|r| match r.kind {
@@ -60,14 +122,19 @@ fn shift_line(v: u32, abs: bool, d: i64, max: u32) -> Option<u32> {
     if (0..max as i64).contains(&n) { Some(n as u32) } else { None }
 }
 
-fn shift_ref(r: Reference, dr: i64, dc: i64) -> Option<Reference> {
-    let kind = match &r.kind {
+/// Shifts a [`RefKind`]'s relative coordinates by `(dr, dc)` without cloning sheet names.
+/// Returns `None` if any relative coordinate leaves the worksheet grid (`#REF!`).
+pub fn shift_ref_kind(kind: &RefKind, dr: i64, dc: i64) -> Option<RefKind> {
+    Some(match kind {
         RefKind::Cell(a) => RefKind::Cell(shift_anchor(a, dr, dc)?),
         RefKind::Range(a, b) => RefKind::Range(shift_anchor(a, dr, dc)?, shift_anchor(b, dr, dc)?),
         RefKind::Rows(r0, a0, r1, a1) => RefKind::Rows(shift_line(*r0, *a0, dr, MAX_ROWS)?, *a0, shift_line(*r1, *a1, dr, MAX_ROWS)?, *a1),
         RefKind::Cols(c0, a0, c1, a1) => RefKind::Cols(shift_line(*c0, *a0, dc, MAX_COLS)?, *a0, shift_line(*c1, *a1, dc, MAX_COLS)?, *a1),
-    };
-    Some(Reference { sheet: r.sheet, kind })
+    })
+}
+
+fn shift_ref(r: Reference, dr: i64, dc: i64) -> Option<Reference> {
+    Some(Reference { sheet: r.sheet, kind: shift_ref_kind(&r.kind, dr, dc)? })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -294,8 +361,9 @@ pub fn rename_sheet(e: Expr, old: &str, new: &str) -> Expr {
         }
         // Sheet-qualified defined name `Old!MyName` is stored as one string, with the bare sheet name as the parser
         // stores it (the printer adds the quotes).
-        Expr::Name(n) => match n.split_at_checked(old.len()) {
-            Some((head, rest)) if head.eq_ignore_ascii_case(old) && rest.starts_with('!') => Expr::Name(format!("{new}{rest}")),
+        // A sheet name may itself hold a '!', so the name splits at its last one.
+        Expr::Name(n) => match n.rsplit_once('!') {
+            Some((sheet, rest)) if sheet.eq_ignore_ascii_case(old) => Expr::Name(format!("{new}!{rest}")),
             _ => Expr::Name(n),
         },
         other => other,

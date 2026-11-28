@@ -196,8 +196,9 @@ fn a_pass_through_controls_stand_in_keeps_its_original_id_and_extension() {
     assert!(kept.contains("shapeId=\"1026\""), "the list box is kept: {kept}");
 }
 
-#[test]
-fn direct_opaque_proxy_keeps_drawing_relationships_separate_from_sheet_relationships() {
+/// A drop-down whose stand-in is a direct (not `mc:AlternateContent`) anchor with a hyperlink
+/// relationship of the drawing's own.
+fn direct_proxy_package() -> Vec<u8> {
     let wrapped = drawing("_x0000_s1026", false);
     let (head, wrapper) = wrapped.split_once("<mc:AlternateContent").unwrap();
     let (_, anchor) = wrapper.split_once("<xdr:twoCellAnchor").unwrap();
@@ -209,8 +210,12 @@ fn direct_opaque_proxy_keeps_drawing_relationships_separate_from_sheet_relations
     let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId8" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.invalid/" TargetMode="External"/></Relationships>"#;
     let v = vml("Drop", "2");
     let prop = ctrl_prop("widthMin=\"35\"");
-    let bytes = drop_package(2, Some(&prop), Some(&v), Some(&d), &[("xl/drawings/_rels/drawing1.xml.rels", rels)]);
-    let (wb, _) = read_xlsx(&bytes).unwrap();
+    drop_package(2, Some(&prop), Some(&v), Some(&d), &[("xl/drawings/_rels/drawing1.xml.rels", rels)])
+}
+
+#[test]
+fn direct_opaque_proxy_keeps_drawing_relationships_separate_from_sheet_relationships() {
+    let (wb, _) = read_xlsx(&direct_proxy_package()).unwrap();
     let saved = write_xlsx(&wb).unwrap();
     let mut pkg = Package::open(&saved).unwrap();
     let part = "xl/drawings/drawing1.xml";
@@ -221,6 +226,45 @@ fn direct_opaque_proxy_keeps_drawing_relationships_separate_from_sheet_relations
     let draw = text(&mut pkg, part);
     assert!(!draw.contains("AlternateContent"));
     assert!(draw.contains(&format!("<a:hlinkClick r:id=\"{}\"/>", rel.id)), "{draw}");
+}
+
+/// A picture with a kept SVG companion beside a control stand-in, whose relationships are written
+/// first: the SVG goes under the picture's own raster blip, by the id that blip was written with.
+#[test]
+fn an_svg_companion_goes_under_its_own_picture_beside_a_control_stand_in() {
+    use gridcraft_model::{Anchor, Image, PreservedPart, PreservedXml};
+    const SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"/>"#;
+    let (mut wb, _) = read_xlsx(&direct_proxy_package()).unwrap();
+    let sh = wb.sheet_mut(0).unwrap();
+    let png = b"\x89PNG\r\n\x1a\nfake-png".to_vec();
+    sh.images.push(Image {
+        id: 900,
+        anchor: Anchor { width: 40.0, height: 40.0, ..Default::default() },
+        data: std::sync::Arc::new(png),
+        mime: "image/png".into(),
+        alt: String::new(),
+    });
+    let p = std::sync::Arc::make_mut(sh.preserved.as_mut().expect("the stand-in is kept"));
+    assert!(p.control_proxies.is_some(), "the fixture has a control stand-in");
+    p.elements.push(PreservedXml { slot: crate::passthrough::SLOT_DRAWING_SVG_BLIP.into(), xml: "900\txl/media/image9.svg".into() });
+    p.parts.push(PreservedPart { name: "xl/media/image9.svg".into(), content_type: "image/svg+xml".into(), data: SVG.into(), ..Default::default() });
+    let saved = write_xlsx(&wb).unwrap();
+    let mut pkg = Package::open(&saved).unwrap();
+    let part = "xl/drawings/drawing1.xml";
+    let rels = pkg.rels(part).unwrap();
+    let num = |id: &str| id.trim_start_matches("rId").parse::<u32>().unwrap();
+    let link = rels.iter().find(|r| r.kind == "hyperlink").unwrap();
+    let raster = rels.iter().find(|r| r.kind == "image" && r.target.ends_with(".png")).unwrap();
+    let svg = rels.iter().find(|r| r.kind == "image" && r.target.ends_with(".svg")).unwrap();
+    assert!(num(&link.id) < num(&raster.id), "the stand-in's relationship comes first: {rels:?}");
+    assert_eq!(pkg.read(&svg.target).unwrap().as_deref(), Some(SVG));
+    let draw = text(&mut pkg, part);
+    let blip = format!(
+        "<a:blip r:embed=\"{}\"><a:extLst><a:ext uri=\"{{96DAC541-7B7A-43D3-8B79-37D633B846F1}}\"><asvg:svgBlip xmlns:asvg=\"http://schemas.microsoft.com/office/drawing/2016/SVG/main\" r:embed=\"{}\"/></a:ext></a:extLst></a:blip>",
+        raster.id, svg.id
+    );
+    assert!(draw.contains(&blip), "{draw}");
+    assert_eq!(draw.matches("svgBlip").count(), 1, "{draw}");
 }
 
 /// A drop-down with its own item list (`itemLst`, VML `ListItem`) or a macro holds more than the

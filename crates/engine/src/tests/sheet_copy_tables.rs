@@ -15,7 +15,7 @@ fn wb(s: &Session) -> &Workbook {
 fn formula(s: &Session, sheet: &str, a1: &str) -> String {
     let wb = wb(s);
     let si = wb.sheet_index(sheet).unwrap_or_else(|| panic!("no sheet {sheet}"));
-    wb.sheets[si].cell(CellRef::parse(a1).unwrap()).and_then(|c| c.formula.clone()).map(|f| f.text.clone()).unwrap_or_default()
+    wb.sheets[si].cell(CellRef::parse(a1).unwrap()).and_then(|c| c.formula.clone()).map(|f| f.text().into_owned()).unwrap_or_default()
 }
 
 fn name_formula(s: &Session, name: &str, scope: Option<&str>) -> String {

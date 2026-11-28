@@ -117,11 +117,10 @@ fn scatter_axes_are_the_groups_own_and_x_comes_first() {
 }
 
 #[test]
-fn a_100_percent_line_axis_keeps_no_typed_format_while_area_keeps_it() {
-    // The model reads 100% stacked line as plain stacked and draws absolute values, so a `0.0%`
-    // typed for the 0%–100% axis would label them "2000000.0%". A 100% stacked area group is
-    // modelled (`AreaStacked100`), so its axis keeps its typed format.
-    for (group, y2, alone) in [("lineChart", None, None), ("areaChart", Some("0.0%".into()), Some("0.0%".into()))] {
+fn a_100_percent_line_and_area_axis_both_keep_their_typed_format() {
+    // Both 100% stacked line (`LineStacked100`) and 100% stacked area (`AreaStacked100`) are
+    // modelled on a 0%–100% axis, so both keep their typed axis number format.
+    for (group, y2, alone) in [("lineChart", Some("0.0%".into()), Some("0.0%".into())), ("areaChart", Some("0.0%".into()), Some("0.0%".into()))] {
         let ch = read(&format!(
             "<c:barChart><c:barDir val=\"col\"/><c:grouping val=\"clustered\"/>\
              <c:ser><c:idx val=\"0\"/><c:order val=\"0\"/><c:val><c:numRef><c:f>Data!$B$2:$B$5</c:f></c:numRef></c:val></c:ser>\
@@ -177,6 +176,8 @@ fn chart(id: u32, kind: ChartKind, series: Vec<Series>, axes: AxisNumberFormats)
         pivot: None,
         axis_number_formats: axes,
         pivot_label_formats: Vec::new(),
+        area_style: Default::default(),
+        user_shapes: Vec::new(),
     }
 }
 
@@ -210,4 +211,23 @@ fn typed_formats_round_trip() {
         let fmts = |c: &Chart| c.series.iter().map(|s| s.label_number_format.clone()).collect::<Vec<_>>();
         assert_eq!(fmts(a), fmts(b), "chart {}", b.id);
     }
+}
+
+#[test]
+fn series_dlbls_without_num_fmt_inherits_group_dlbls_num_fmt() {
+    let ch = read(
+        "<c:barChart><c:barDir val=\"col\"/><c:grouping val=\"clustered\"/>\
+         <c:ser><c:idx val=\"0\"/><c:order val=\"0\"/>\
+         <c:dLbls><c:dLblPos val=\"outEnd\"/></c:dLbls>\
+         <c:val><c:numRef><c:f>Data!$B$2:$B$5</c:f></c:numRef></c:val></c:ser>\
+         <c:ser><c:idx val=\"1\"/><c:order val=\"1\"/>\
+         <c:dLbls><c:numFmt formatCode=\"0.00\" sourceLinked=\"1\"/></c:dLbls>\
+         <c:val><c:numRef><c:f>Data!$C$2:$C$5</c:f></c:numRef></c:val></c:ser>\
+         <c:dLbls><c:numFmt formatCode=\"$#,##0\" sourceLinked=\"0\"/><c:showVal val=\"1\"/></c:dLbls>\
+         <c:axId val=\"1\"/><c:axId val=\"2\"/></c:barChart>",
+    );
+    assert_eq!(ch.series[0].label_number_format.as_deref(), Some("$#,##0"));
+    assert_eq!(ch.series[0].data_labels.as_ref().and_then(|d| d.num_fmt.as_deref()), Some("$#,##0"));
+    assert_eq!(ch.series[1].label_number_format, None);
+    assert_eq!(ch.series[1].data_labels.as_ref().and_then(|d| d.num_fmt.as_deref()), None);
 }

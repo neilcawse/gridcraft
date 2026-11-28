@@ -182,17 +182,21 @@ fn empty_for_overflow(sh: &Sheet, c: CellRef, merges: &[RangeRef]) -> bool {
     sh.value_ref(c).is_none_or(|v| v.is_empty()) && !merges.iter().any(|m| m.contains(c))
 }
 
-fn extend_text_bounds(sh: &Sheet, c: CellRef, merges: &[RangeRef], k: f32, need: f32, align: HAlign, bounds: (f32, f32)) -> (f32, f32) {
+fn extend_text_bounds(sh: &Sheet, c: CellRef, merges: &[RangeRef], kx: f32, need: f32, align: HAlign, bounds: (f32, f32)) -> (f32, f32) {
     let (mut clip_l, mut clip_r) = bounds;
     let grow = |dir: i64, mut remaining: f32| -> f32 {
         let mut ext = 0.0;
         let mut col = c.col as i64 + dir;
         while remaining > 0.0 && col >= 0 && col < MAX_COLS as i64 {
             let nc = CellRef::new(c.row, col as u32);
+            if sh.is_col_hidden(nc.col) {
+                col += dir;
+                continue;
+            }
             if !empty_for_overflow(sh, nc, merges) {
                 break;
             }
-            let width = sh.col_width(nc.col) * k;
+            let width = sh.col_width(nc.col) * kx;
             ext += width;
             remaining -= width;
             col += dir;
@@ -263,8 +267,11 @@ pub(super) fn draw_text(pg: &mut Page, b: &Block, placement: TextPlacement<'_>) 
     }
     let is_num = matches!(v, Value::Number(_));
     let wrap = st.align.wrap;
-    let mut text = if sh.show_formulas {
-        crate::display::cell_text(wb, sh, c)
+    let mut text = if sh.show_formulas
+        && let Some(f) = sh.cell(c).and_then(|x| x.formula.as_ref())
+        && !crate::display::formula_hidden(wb, sh, c)
+    {
+        format!("={}", f.text())
     } else if code == "General"
         && let Value::Number(n) = v
     {
@@ -325,11 +332,11 @@ pub(super) fn draw_text(pg: &mut Page, b: &Block, placement: TextPlacement<'_>) 
     // Overflow into empty neighbours (single-line text, not merged).
     // Center Across Selection spans the empty Center Across cells to its right; the text stays within that run.
     let spans = st.align.h == HAlign::CenterAcross && !wrap && !merged && rot == 0;
-    let across = if spans { center_across_width(&wb.styles, sh, c, merges) * b.k } else { 0.0 };
+    let across = if spans { center_across_width(&wb.styles, sh, c, merges) * b.kx } else { 0.0 };
     let (mut clip_l, mut clip_r) = (x, x + w + across);
-    if !wrap && !merged && !is_num && rot.abs() != 90 && across <= 0.0 && tw + 2.0 * pad + indent > w {
+    if !wrap && !merged && !is_num && st.align.h != HAlign::Fill && rot.abs() != 90 && across <= 0.0 && tw + 2.0 * pad + indent > w {
         let need = tw + 2.0 * pad + indent - w;
-        (clip_l, clip_r) = extend_text_bounds(sh, c, merges, b.k, need, h_align, (clip_l, clip_r));
+        (clip_l, clip_r) = extend_text_bounds(sh, c, merges, b.kx, need, h_align, (clip_l, clip_r));
     }
     let clip_l = clip_l.max(limits.0);
     let clip_r = clip_r.min(limits.1);

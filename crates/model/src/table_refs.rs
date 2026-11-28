@@ -7,7 +7,7 @@ use gridcraft_core::{CellRef, link_location, quote_sheet, split_sheet};
 use gridcraft_formula::{Expr, StructRef, same_name};
 
 use crate::workbook::rewrite_table_tokens;
-use crate::{CfRule, CfValueKind, Formula, PivotSource, PivotTable, Sheet, SlicerSource, TotalsFn, Workbook};
+use crate::{CfRule, CfValueKind, PivotSource, PivotTable, Sheet, SlicerSource, TotalsFn, Workbook};
 
 pub type TablePosition = (usize, usize);
 
@@ -231,7 +231,7 @@ pub fn apply(rewrite: &impl TableRefRewrite, wb: &mut Workbook, formula_objects:
                         return None;
                     }
                     let mut expr = expr.clone();
-                    expression(rewrite, &mut expr, si, owner).then(|| (c, Formula { array: f.array, ..f.rewritten(expr) }))
+                    expression(rewrite, &mut expr, si, owner).then(|| (c, f.rewritten(expr).with_array(f.array)))
                 })?
             })
             .collect();
@@ -431,7 +431,7 @@ mod tests {
     use gridcraft_core::RangeRef;
 
     use super::*;
-    use crate::{Cell, CondFormat, DefinedName, Table, TableColumn, Validation};
+    use crate::{Cell, CondFormat, DefinedName, Formula, Table, TableColumn, Validation};
 
     fn book() -> Workbook {
         let mut wb = Workbook::new();
@@ -507,7 +507,7 @@ mod tests {
         // Defining a global Double later does not change the cell's existing local call.
         wb.names.push(name("Double", "LAMBDA(x,x*2)"));
         wb.rename_table(0, 0, "Renamed");
-        let text = &wb.sheets[0].cell(at).unwrap().formula.as_ref().unwrap().text;
+        let text = wb.sheets[0].cell(at).unwrap().formula.as_ref().unwrap().text();
         assert_eq!(text, "LET(double,LAMBDA(x,x+1),DOUBLE(SUM(Renamed[V])))");
     }
 
@@ -520,7 +520,7 @@ mod tests {
         let formula: Formula = serde_json::from_str(r#"{"text":"Double(SUM(Sales[V]))","array":null}"#).unwrap();
         wb.sheet_mut(0).unwrap().set_cell(at, Cell::formula(formula));
         wb.rename_table(0, 0, "Renamed");
-        let text = &wb.sheets[0].cell(at).unwrap().formula.as_ref().unwrap().text;
+        let text = wb.sheets[0].cell(at).unwrap().formula.as_ref().unwrap().text();
         assert_eq!(text, "Double(SUM(Renamed[V]))");
     }
 
@@ -541,7 +541,7 @@ mod tests {
         sh.validations.push(Validation { f1: "SUM(Sales[V])".into(), ..Default::default() });
         wb.rename_table(0, 0, "Renamed");
         let sh = &wb.sheets[0];
-        assert_eq!(sh.cell(at).and_then(|c| c.formula.as_ref()).map(|f| f.text.as_str()), Some("SUM(Renamed[V])"));
+        assert_eq!(sh.cell(at).and_then(|c| c.formula.as_ref()).map(|f| f.text()).as_deref(), Some("SUM(Renamed[V])"));
         assert!(matches!(&sh.cond_formats[0].rule, CfRule::Expression { formula, .. } if formula == "SUM(Sales[V])>0"));
         assert_eq!(sh.validations[0].f1, "SUM(Sales[V])");
     }

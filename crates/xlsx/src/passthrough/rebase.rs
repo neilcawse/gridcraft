@@ -1,5 +1,5 @@
 use super::read::{apply_note_fills, first_free_block, merge_vml, relids_in};
-use super::write::{NameMap, attach, part_rels_xml, reachable_in, remap, write_parts};
+use super::write::{NameMap, attach, part_rels_xml, reachable_in, remap, sheet_owned_parts, write_parts};
 use super::*;
 
 /// A sheet's kept content being written.
@@ -13,8 +13,33 @@ impl<'a> SheetKept<'a> {
     /// Writes the sheet's kept parts and adds their relationships to the sheet's.
     pub fn write(sheet: &'a Sheet, rels: &mut Rels, out: &mut Out) -> SheetKept<'a> {
         let Some(p) = sheet.preserved.as_deref() else { return SheetKept { p: None, names: NameMap::new(), ids: HashMap::new() } };
-        let names = write_parts(out, &p.parts);
-        let ids = attach(rels, &p.rels, &names);
+        let owned = sheet_owned_parts(p);
+        // A kept PivotTable whose cache wasn't kept with the workbook is left out.
+        let (wb_names, cache_ids) = (&out.kept.wb_names, &out.kept.cache_ids);
+        let orphan: HashSet<String> = owned
+            .iter()
+            .filter(|q| {
+                let direct = q.rels.iter().filter(|r| !r.external && is_kind(r, &["pivotCacheDefinition"]));
+                // A table with no relationship to its cache names it by `cacheId` instead.
+                let by_id = || {
+                    q.content_type == CT_PIVOT_TABLE
+                        && crate::xml::parse(&q.data).ok().and_then(|x| x.attr_u32("cacheId")).is_some_and(|id| !cache_ids.contains(&id))
+                };
+                let direct_is_orphan = direct.into_iter().any(|r| !wb_names.contains_key(&normalize(&r.target)));
+                direct_is_orphan || by_id()
+            })
+            .map(|q| normalize(&q.name))
+            .collect();
+        let (parts, sheet_rels): (Cow<'_, [PreservedPart]>, Cow<'_, [PreservedRel]>) = if orphan.is_empty() {
+            (Cow::Borrowed(&owned), Cow::Borrowed(&p.rels))
+        } else {
+            (
+                owned.into_iter().filter(|q| !orphan.contains(&normalize(&q.name))).collect(),
+                p.rels.iter().filter(|r| r.external || !orphan.contains(&normalize(&r.target))).cloned().collect(),
+            )
+        };
+        let names = write_parts(out, parts.iter());
+        let ids = attach(rels, &sheet_rels, &names);
         SheetKept { p: Some(p), names, ids }
     }
 

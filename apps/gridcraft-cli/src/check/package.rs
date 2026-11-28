@@ -112,12 +112,20 @@ pub(super) fn resolve_target(source_dir: &str, target: &str) -> String {
 
 pub(super) type Zip<'a> = zip::ZipArchive<Cursor<&'a [u8]>>;
 
-pub(super) fn zip_names(zip: &mut Zip<'_>) -> Vec<String> {
-    (0..zip.len().min(MAX_ENTRIES)).filter_map(|i| zip.by_index_raw(i).ok().filter(|f| !f.is_dir()).map(|f| f.name().to_string())).collect()
+/// `(index, name)` of every file entry. Parts are read by index: two entries can decode to the
+/// same name, and looking up a CP437 name scans the whole archive.
+pub(super) fn zip_names(zip: &mut Zip<'_>) -> Vec<(usize, String)> {
+    (0..zip.len().min(MAX_ENTRIES)).filter_map(|i| zip.by_index_raw(i).ok().filter(|f| !f.is_dir()).map(|f| (i, entry_name(&f)))).collect()
 }
 
-pub(super) fn read_zip_part(zip: &mut Zip<'_>, name: &str) -> Result<Vec<u8>, String> {
-    let f = zip.by_name(name).map_err(|e| format!("{name}: {e}"))?;
+/// An entry's name: UTF-8, or CP437 when the entry isn't flagged UTF-8. A name that doesn't decode
+/// is listed with its raw bytes made lossy, so the entry is still checked and reported.
+fn entry_name<R: std::io::Read>(f: &zip::read::ZipFile<'_, R>) -> String {
+    f.name().map(|n| n.into_owned()).unwrap_or_else(|_| String::from_utf8_lossy(f.name_raw()).into_owned())
+}
+
+pub(super) fn read_zip_part(zip: &mut Zip<'_>, index: usize, name: &str) -> Result<Vec<u8>, String> {
+    let f = zip.by_index(index).map_err(|e| format!("{name}: {e}"))?;
     let mut buf = Vec::new();
     f.take(MAX_XML_PART).read_to_end(&mut buf).map_err(|e| format!("{name}: {e}"))?;
     Ok(buf)
@@ -131,8 +139,8 @@ pub(super) enum PartError {
 
 /// Reads a part like [`read_zip_part`], charging the decompressed bytes to `budget`. A part larger
 /// than the budget left or than [`MAX_XML_PART`] isn't returned cut short: it is `OverBudget`.
-pub(super) fn read_zip_part_within(zip: &mut Zip<'_>, name: &str, budget: &mut u64) -> Result<Vec<u8>, PartError> {
-    let f = zip.by_name(name).map_err(|_| PartError::Unreadable)?;
+pub(super) fn read_zip_part_within(zip: &mut Zip<'_>, index: usize, budget: &mut u64) -> Result<Vec<u8>, PartError> {
+    let f = zip.by_index(index).map_err(|_| PartError::Unreadable)?;
     // One byte past what is allowed shows that the part doesn't fit.
     let allowed = MAX_XML_PART.min(*budget);
     let mut buf = Vec::new();
@@ -150,11 +158,11 @@ pub(super) fn read_zip_part_within(zip: &mut Zip<'_>, name: &str, budget: &mut u
 
 /// The zip entry holding the workbook part: the target of the package's `officeDocument`
 /// relationship, `xl/workbook.xml` when the package doesn't say.
-pub(super) fn workbook_entry(zip: &mut Zip<'_>, names: &[String]) -> Option<String> {
-    let find = |key: &str| names.iter().find(|n| part_key(n) == key).cloned();
+pub(super) fn workbook_entry<'n>(zip: &mut Zip<'_>, names: &'n [(usize, String)]) -> Option<&'n (usize, String)> {
+    let find = |key: &str| names.iter().find(|(_, n)| part_key(n) == key);
     let mut workbook = "xl/workbook.xml".to_string();
-    if let Some(rels) = find("_rels/.rels")
-        && let Ok(xml) = read_zip_part(zip, &rels)
+    if let Some((i, rels)) = find("_rels/.rels")
+        && let Ok(xml) = read_zip_part(zip, *i, rels)
         && let Ok(els) = xml_elements(&xml)
         && let Some(target) = els
             .iter()
@@ -182,8 +190,8 @@ pub(super) fn calc_props(bytes: &[u8]) -> CalcProps {
     let mut props = CalcProps::default();
     let Some(mut zip) = zip_package(bytes) else { return props };
     let names = zip_names(&mut zip);
-    let Some(name) = workbook_entry(&mut zip, &names) else { return props };
-    let Ok(xml) = read_zip_part(&mut zip, &name) else { return props };
+    let Some((i, name)) = workbook_entry(&mut zip, &names) else { return props };
+    let Ok(xml) = read_zip_part(&mut zip, *i, name) else { return props };
     let Some((_, a)) = xml_elements(&xml).ok().into_iter().flatten().find(|(e, _)| e == "calcPr") else { return props };
     props.mode = match attr(&a, "calcMode").map(|m| m.trim().to_ascii_lowercase()).as_deref() {
         Some("manual") => CalcMode::Manual,
@@ -203,15 +211,15 @@ pub(super) fn calc_props(bytes: &[u8]) -> CalcProps {
 pub fn validate_package(bytes: &[u8]) -> Result<Vec<String>, String> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("not a zip package: {e}"))?;
     let names = zip_names(&mut zip);
-    let parts: HashSet<String> = names.iter().map(|n| part_key(n)).collect();
-    let mut read_part = |name: &str| read_zip_part(&mut zip, name);
+    let parts: HashSet<String> = names.iter().map(|(_, n)| part_key(n)).collect();
+    let mut read_part = |index: usize, name: &str| read_zip_part(&mut zip, index, name);
     let mut issues = Vec::new();
-    let ct_name = names.iter().find(|n| part_key(n) == "[content_types].xml").cloned();
+    let ct_name = names.iter().find(|(_, n)| part_key(n) == "[content_types].xml").cloned();
     let (mut defaults, mut overrides) = (HashSet::new(), HashSet::new());
     match ct_name {
         None => issues.push("no [Content_Types].xml".to_string()),
-        Some(n) => {
-            for (el, attrs) in xml_elements(&read_part(&n)?).map_err(|e| format!("[Content_Types].xml: {e}"))? {
+        Some((i, n)) => {
+            for (el, attrs) in xml_elements(&read_part(i, &n)?).map_err(|e| format!("[Content_Types].xml: {e}"))? {
                 match el.as_str() {
                     "Default" => {
                         if let Some(x) = attr(&attrs, "Extension") {
@@ -228,9 +236,9 @@ pub fn validate_package(bytes: &[u8]) -> Result<Vec<String>, String> {
             }
         }
     }
-    let mut sorted: Vec<&String> = names.iter().collect();
-    sorted.sort();
-    for n in &sorted {
+    let mut sorted: Vec<&(usize, String)> = names.iter().collect();
+    sorted.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+    for (_, n) in &sorted {
         let key = part_key(n);
         if key == "[content_types].xml" {
             continue;
@@ -245,7 +253,7 @@ pub fn validate_package(bytes: &[u8]) -> Result<Vec<String>, String> {
     for p in missing_overrides {
         issues.push(format!("content type override for missing part /{p}"));
     }
-    for n in sorted {
+    for (i, n) in sorted {
         let key = part_key(n);
         let Some(rels_file) = key.strip_suffix(".rels") else { continue };
         // `dir/_rels/name.rels` describes `dir/name`; `_rels/.rels` the package itself.
@@ -259,7 +267,7 @@ pub fn validate_package(bytes: &[u8]) -> Result<Vec<String>, String> {
             issues.push(format!("{n} describes missing part {source}"));
         }
         let mut ids = HashSet::new();
-        for (el, attrs) in xml_elements(&read_part(n)?).map_err(|e| format!("{n}: {e}"))? {
+        for (el, attrs) in xml_elements(&read_part(*i, n)?).map_err(|e| format!("{n}: {e}"))? {
             if el != "Relationship" {
                 continue;
             }
@@ -299,9 +307,9 @@ pub fn validate_package(bytes: &[u8]) -> Result<Vec<String>, String> {
 /// unknown, which is neither holding something nor holding nothing.
 pub(super) fn holds_something(
     zip: &mut Zip<'_>,
-    name: &str,
+    index: usize,
     kind: &str,
-    verdicts: &mut HashMap<(String, &'static str), bool>,
+    verdicts: &mut HashMap<(usize, &'static str), bool>,
     budget: &mut u64,
 ) -> Option<bool> {
     let marker = match kind.to_ascii_lowercase().as_str() {
@@ -310,16 +318,16 @@ pub(super) fn holds_something(
         "refreshonload" => "refreshonload",
         _ => "any",
     };
-    if let Some(v) = verdicts.get(&(name.to_ascii_lowercase(), marker)) {
+    if let Some(v) = verdicts.get(&(index, marker)) {
         return Some(*v);
     }
-    let v = holds_something_uncached(zip, name, marker, budget)?;
-    verdicts.insert((name.to_ascii_lowercase(), marker), v);
+    let v = holds_something_uncached(zip, index, marker, budget)?;
+    verdicts.insert((index, marker), v);
     Some(v)
 }
 
-fn holds_something_uncached(zip: &mut Zip<'_>, name: &str, marker: &'static str, budget: &mut u64) -> Option<bool> {
-    let Ok(f) = zip.by_name(name) else { return Some(marker != "refreshonload") };
+fn holds_something_uncached(zip: &mut Zip<'_>, index: usize, marker: &'static str, budget: &mut u64) -> Option<bool> {
+    let Ok(f) = zip.by_index(index) else { return Some(marker != "refreshonload") };
     // The directory says the part has no bytes: it is empty, whatever its (possibly missing)
     // compressed stream looks like. Some producers write an empty file as a deflate entry with no
     // stream at all, which can't be decoded and must not be mistaken for an unreadable part.
@@ -385,5 +393,76 @@ fn has_content(mut input: impl std::io::BufRead, marker: &str) -> bool {
             Err(_) => return marker != "refreshonload",
         }
         buf.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write as _;
+
+    use super::*;
+
+    /// A package with two relationship parts whose names both read `xl/_rels/é.xml.rels`: the first
+    /// stored as UTF-8 holding `first`, the second stored as CP437 (byte 0x82) holding `second`.
+    fn same_name_rels(first: &str, second: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        const PLACEHOLDER: &str = "xl/_rels/Q.xml.rels";
+        let mut z = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        z.start_file("_rels/.rels", opts)?;
+        z.write_all(r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml" Target="xl/é.xml"/></Relationships>"#.as_bytes())?;
+        z.start_file("xl/é.xml", opts)?;
+        z.write_all(b"<custom><item/></custom>")?;
+        z.start_file("xl/_rels/é.xml.rels", opts)?;
+        z.write_all(first.as_bytes())?;
+        z.start_file(PLACEHOLDER, opts)?;
+        z.write_all(second.as_bytes())?;
+        let mut bytes = z.finish()?.into_inner();
+        // The name sits in the local header and in the central directory; both get the CP437 byte.
+        let mut at = 0;
+        let mut patched = 0;
+        while let Some(i) = bytes.get(at..).and_then(|rest| rest.windows(PLACEHOLDER.len()).position(|w| w == PLACEHOLDER.as_bytes())) {
+            at += i;
+            let name = bytes.get_mut(at..).and_then(|rest| rest.get_mut("xl/_rels/".len())).ok_or("missing CP437 filename byte")?;
+            *name = 0x82;
+            at += PLACEHOLDER.len();
+            patched += 1;
+        }
+        assert_eq!(patched, 2);
+        Ok(bytes)
+    }
+
+    fn rels_xml(rels: &[(&str, &str)]) -> String {
+        let body: String = rels
+            .iter()
+            .map(|(id, kind)| {
+                format!(
+                    r#"<Relationship Id="{id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}" Target="https://example.com" TargetMode="External"/>"#
+                )
+            })
+            .collect();
+        format!(r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{body}</Relationships>"#)
+    }
+
+    #[test]
+    fn parts_with_the_same_decoded_name_are_each_validated() -> Result<(), Box<dyn std::error::Error>> {
+        let bytes = same_name_rels(&rels_xml(&[("rId1", "custom")]), &rels_xml(&[("rId1", "custom"), ("rId1", "custom")]))?;
+        let issues = validate_package(&bytes)?;
+        let duplicates = issues.iter().filter(|i| i.ends_with("duplicate relationship id rId1")).count();
+        assert_eq!(duplicates, 1, "{issues:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn relationship_kinds_read_parts_with_the_same_decoded_name() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::check::rels::{Limits, relationship_tree};
+
+        let bytes = same_name_rels(&rels_xml(&[("rId1", "custom")]), &rels_xml(&[("rId1", "audio")]))?;
+        let empty = same_name_rels(&rels_xml(&[]), &rels_xml(&[]))?;
+        let tree = relationship_tree(&bytes, Limits::default())?;
+        let without = relationship_tree(&empty, Limits::default())?;
+        let losses = crate::check::rels::lost_relationships(&tree, &without);
+        assert!(losses.iter().any(|loss| loss.contains("custom")), "{losses:?}");
+        assert!(losses.iter().any(|loss| loss.contains("audio")), "{losses:?}");
+        Ok(())
     }
 }

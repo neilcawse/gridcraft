@@ -51,14 +51,17 @@ pub struct CellLook {
     pub conditional: Option<crate::cf::CfLook>,
 }
 
-/// Resolves the base, table and conditional styles in the order used by the grid.
+/// Resolves the base, table or PivotTable, and conditional styles in the order used by the grid.
 /// Use a separate conditional-format cache for each sheet.
 pub fn cell_look(wb: &Workbook, si: usize, sh: &Sheet, c: CellRef, cf: &mut crate::cf::CfCache) -> CellLook {
     use gridcraft_model::{Color, PatternType, Underline};
 
-    let mut style = match sh.table_at(c) {
-        Some(t) => crate::tables::table_cell_shown_style(wb, si, t, cf.table_edges(sh, t), c),
-        None => wb.styles.get(sh.style_id(c)).clone(),
+    let mut style = if let Some(t) = sh.table_at(c) {
+        crate::tables::table_cell_shown_style(wb, si, t, cf.table_edges(sh, t), c)
+    } else if let Some(pt) = sh.pivot_at(c) {
+        crate::pivot::pivot_cell_style(wb, sh, pt, c)
+    } else {
+        wb.styles.get(sh.style_id(c)).clone()
     };
     let conditional = cf.look(wb, si, c);
     if let Some(st) = conditional.as_ref().and_then(|l| l.style.as_ref()) {
@@ -74,8 +77,8 @@ pub fn cell_look(wb: &Workbook, si: usize, sh: &Sheet, c: CellRef, cf: &mut crat
             style.font.underline = st.font.underline;
         }
         style.font.strike |= st.font.strike;
-        // In a differential style General means "not set" (#1163).
-        if st.num_fmt.as_str() != "General" {
+        // In a differential style General means "not set" (#1163), unless explicitly stated.
+        if st.num_fmt.as_str() != "General" || st.dxf_stated.num_fmt {
             style.num_fmt = st.num_fmt.clone();
         }
         if st.align.reading_order.is_some() {
@@ -131,19 +134,23 @@ pub fn grid_text(wb: &Workbook, sh: &Sheet, c: CellRef, v: &Value, code: &str, w
 /// as a number, boolean, error, date or formula, or lose a leading apostrophe). Such text is shown
 /// for editing with a leading `'`, as Excel does for text carrying a quote prefix, so that
 /// committing the editor unchanged keeps the cell as text.
-fn text_needs_quote_prefix(t: &str, sys: gridcraft_core::date::DateSystem) -> bool {
+fn text_needs_quote_prefix(t: &str, wb: &Workbook, sheet: usize) -> bool {
     if t.is_empty() {
         return false;
     }
-    let mut chars = t.chars();
-    let (first, second) = (chars.next(), chars.next());
+    let first = t.chars().next();
     if matches!(first, Some('=' | '\'')) {
         return true;
     }
-    if matches!(first, Some('+' | '-')) && second.is_some_and(|c| c.is_ascii_alphabetic() || c == '(') {
+    // A `+` or `-` entry that reads as a formula becomes one (`+5+4`, `-abc`); one that doesn't
+    // stays text (`--`, `+49 170 1234567`), as `input_to_cell` decides it.
+    if matches!(first, Some('+' | '-'))
+        && gridcraft_core::parse::starts_formula(t)
+        && crate::cmd::edit::parse_typed_formula(t, wb, sheet).is_ok_and(|e| crate::cmd::edit::check_arg_counts(&e).is_ok())
+    {
         return true;
     }
-    !matches!(gridcraft_core::parse::parse_input(t, sys).value, Value::Text(ref x) if x.as_ref() == t)
+    !matches!(&gridcraft_core::parse::parse_input(t, wb.date_system).value, Value::Text(x) if x.as_ref() == t)
 }
 
 /// The table holding `c`, when that table's name finds it: a structured reference without a
@@ -154,18 +161,33 @@ pub(crate) fn containing_table<'a>(wb: &Workbook, sheet: &'a Sheet, c: CellRef) 
 }
 
 /// The A1 formula `f` as shown for cell `c` (its own cell, or the cell it is about to be entered
-/// in), without changing the stored text or expression: references to the table holding `c` omit
-/// the table name.
+/// in), without changing the stored text or expression: an imported formula-bar spelling is kept
+/// as written, and otherwise references to the table holding `c` omit the table name.
 pub fn formula_text(wb: &Workbook, sheet: &Sheet, c: CellRef, f: &gridcraft_model::Formula) -> String {
-    let mut text = String::with_capacity(f.text.len() + 1);
+    if f.display_text.is_some() {
+        return format!("={}", f.bar_body());
+    }
+    // A shared follower prints straight from its template, never materializing a shifted tree.
+    if f.is_shared()
+        && let Some((expr, dr, dc)) = f.expr_shifted()
+    {
+        let mut text = String::from("=");
+        match containing_table(wb, sheet, c) {
+            Some(t) => gridcraft_formula::printer::write_shifted_in_table(&mut text, expr, i64::from(dr), i64::from(dc), &t.name),
+            None => gridcraft_formula::printer::write_shifted_into(&mut text, expr, i64::from(dr), i64::from(dc)),
+        }
+        return text;
+    }
+    let body = f.text();
+    let mut text = String::with_capacity(body.len() + 1);
     text.push('=');
-    if f.text.contains('[')
+    if body.contains('[')
         && let Some(table) = containing_table(wb, sheet, c)
         && f.with_expr(|expr| gridcraft_formula::printer::write_in_table(&mut text, expr, &table.name)).is_some()
     {
         return text;
     }
-    text.push_str(&f.text);
+    text.push_str(&body);
     text
 }
 
@@ -185,7 +207,7 @@ pub fn edit_text(wb: &Workbook, sheet: &Sheet, c: CellRef) -> String {
     if let Value::Text(t) = &cell.value
         && cell.formula.is_none()
         && wb.styles.get(cell.style).num_fmt.as_str() != "@"
-        && text_needs_quote_prefix(t, wb.date_system)
+        && text_needs_quote_prefix(t, wb, wb.sheet_index(&sheet.name).unwrap_or_else(|| wb.active_sheet()))
     {
         return format!("'{raw}");
     }
@@ -240,6 +262,32 @@ pub fn cell_text(wb: &Workbook, sheet: &Sheet, c: CellRef) -> String {
     shown_text(wb, sheet, c)
 }
 
+/// Like [`cell_text`], reusing a caller-owned [`crate::cf::CfCache`] across a range so conditional
+/// formatting `<dxf><numFmt>` overrides are evaluated efficiently.
+pub fn cell_text_with_cf(wb: &Workbook, sheet: usize, sh: &Sheet, c: CellRef, cf: &mut crate::cf::CfCache) -> String {
+    if sh.show_formulas
+        && let Some(f) = sh.cell(c).and_then(|x| x.formula.as_ref())
+        && !formula_hidden(wb, sh, c)
+    {
+        return formula_text(wb, sh, c, f);
+    }
+    let code = cf.effective_num_fmt(wb, sheet, sh, c);
+    value_text_as(wb, &sh.value(c), &code)
+}
+
+/// Effective number format code of `c` on `sheet`, resolving any matching conditional formatting
+/// `<dxf><numFmt>` override when `sheet` belongs to `wb`.
+fn effective_code<'a>(wb: &'a Workbook, sheet: &'a Sheet, c: CellRef) -> std::borrow::Cow<'a, str> {
+    let base = wb.styles.get(sheet.style_id(c)).num_fmt.as_str();
+    if crate::cf::has_num_fmt_rule(sheet, c)
+        && let Some(si) = wb.sheets.iter().position(|s| std::ptr::eq(s.as_ref(), sheet))
+    {
+        let mut cf = crate::cf::CfCache::new();
+        return cf.effective_num_fmt(wb, si, sheet, c);
+    }
+    std::borrow::Cow::Borrowed(base)
+}
+
 /// A cell's value with its number format applied, independent of column width: no `#####`
 /// and no General narrowing (Save As CSV/Text writes this). Formulas give their result. A number
 /// shown as General (also through a coloured or sectioned General, or a Text format) is written
@@ -247,14 +295,21 @@ pub fn cell_text(wb: &Workbook, sheet: &Sheet, c: CellRef) -> String {
 /// 1E+15 (`124412140710`, not `1.24412E+11`), the shortest round-trip digits from 1E+15 (every
 /// integer below 1e16 exactly). Excel writes the cell display.
 pub fn value_text(wb: &Workbook, sheet: &Sheet, c: CellRef) -> String {
-    let style = wb.styles.get(sheet.style_id(c));
-    with_fill_space(format_value_full(&sheet.value(c), &parsed(style.num_fmt.as_str()), wb.date_system))
+    let code = effective_code(wb, sheet, c);
+    with_fill_space(format_value_full(&sheet.value(c), &parsed(&code), wb.date_system))
+}
+
+/// Like [`value_text`], reusing a caller-owned [`crate::cf::CfCache`] across a range so conditional
+/// formatting `<dxf><numFmt>` overrides are evaluated efficiently.
+pub fn value_text_with_cf(wb: &Workbook, sheet: usize, sh: &Sheet, c: CellRef, cf: &mut crate::cf::CfCache) -> String {
+    let code = cf.effective_num_fmt(wb, sheet, sh, c);
+    with_fill_space(format_value_full(&sh.value(c), &parsed(&code), wb.date_system))
 }
 
 /// A cell's value through its number format, General at the 11-character cell width.
 fn shown_text(wb: &Workbook, sheet: &Sheet, c: CellRef) -> String {
-    let style = wb.styles.get(sheet.style_id(c));
-    value_text_as(wb, &sheet.value(c), style.num_fmt.as_str())
+    let code = effective_code(wb, sheet, c);
+    value_text_as(wb, &sheet.value(c), &code)
 }
 
 /// A value through a format code given apart from a cell, as a cell shows it (General at the
@@ -282,6 +337,7 @@ fn with_fill_space(f: Formatted) -> String {
 pub fn range_text(wb: &Workbook, sheet: usize, r: RangeRef) -> String {
     let Some(sh) = wb.sheet(sheet) else { return String::new() };
     let mut out = String::new();
+    let mut cf = crate::cf::CfCache::new();
     let r = clipboard_range(r);
     for row in r.start.row..=r.end.row {
         if sh.is_row_hidden(row) {
@@ -293,7 +349,7 @@ pub fn range_text(wb: &Workbook, sheet: usize, r: RangeRef) -> String {
                 out.push('\t');
             }
             first = false;
-            let t = cell_text(wb, sh, CellRef::new(row, col));
+            let t = cell_text_with_cf(wb, sheet, sh, CellRef::new(row, col), &mut cf);
             // Like Excel, only text with a tab or line break is quoted (its quotes doubled);
             // `say "hi"` is copied as it is (#2225).
             if t.contains(['\t', '\n', '\r']) {
@@ -392,5 +448,113 @@ mod tests {
         assert!(f.is_general());
         assert_eq!(f.code(), code);
         assert_ne!(f, number_format("General"));
+    }
+
+    #[test]
+    fn conditional_format_dxf_num_fmt_overrides_display_and_range_text() {
+        use gridcraft_model::{CfOperator, CfRule, CondFormat, NumFmt, Style};
+
+        let mut wb = Workbook::new();
+        let base_style = wb.styles.intern(Style { num_fmt: NumFmt::new("0.0000"), ..Style::default() });
+        let sh = wb.sheet_mut(0).unwrap();
+        // Duration serials: 30s, 15m, 2h 10m, and a value overriding back to General.
+        for (row, val) in [(0, 30.0 / 86_400.0), (1, 15.0 / 1440.0), (2, (2.0 * 60.0 + 10.0) / 1440.0), (3, 5.0)] {
+            let c = CellRef::new(row, 0);
+            sh.set_value(c, Value::Number(val));
+            sh.set_style(c, base_style);
+        }
+        let r_dur = vec![RangeRef::new(CellRef::new(0, 0), CellRef::new(2, 0))];
+        sh.cond_formats.push(CondFormat {
+            ranges: r_dur.clone(),
+            priority: 1,
+            stop_if_true: true,
+            rule: CfRule::CellIs {
+                op: CfOperator::Less,
+                a: "0.0006944".into(),
+                b: None,
+                style: Box::new(Style { num_fmt: NumFmt::new("s\"s\""), ..Style::default() }),
+            },
+        });
+        sh.cond_formats.push(CondFormat {
+            ranges: r_dur.clone(),
+            priority: 2,
+            stop_if_true: true,
+            rule: CfRule::CellIs {
+                op: CfOperator::Less,
+                a: "0.04166".into(),
+                b: None,
+                style: Box::new(Style { num_fmt: NumFmt::new("[m]\"m\""), ..Style::default() }),
+            },
+        });
+        sh.cond_formats.push(CondFormat {
+            ranges: r_dur,
+            priority: 3,
+            stop_if_true: true,
+            rule: CfRule::CellIs {
+                op: CfOperator::GreaterOrEqual,
+                a: "0.04166".into(),
+                b: None,
+                style: Box::new(Style { num_fmt: NumFmt::new("[h]\"h, \"m\"m\""), ..Style::default() }),
+            },
+        });
+        let mut gen_style = Style::default();
+        gen_style.dxf_stated.num_fmt = true;
+        sh.cond_formats.push(CondFormat {
+            ranges: vec![RangeRef::cell(CellRef::new(3, 0))],
+            priority: 4,
+            stop_if_true: true,
+            rule: CfRule::CellIs { op: CfOperator::Equal, a: "5".into(), b: None, style: Box::new(gen_style) },
+        });
+
+        let sh = wb.sheet(0).unwrap();
+        assert_eq!(cell_text(&wb, sh, CellRef::new(0, 0)), "30s");
+        assert_eq!(cell_text(&wb, sh, CellRef::new(1, 0)), "15m");
+        assert_eq!(cell_text(&wb, sh, CellRef::new(2, 0)), "2h, 10m");
+        assert_eq!(cell_text(&wb, sh, CellRef::new(3, 0)), "5");
+        assert_eq!(value_text(&wb, sh, CellRef::new(2, 0)), "2h, 10m");
+        assert_eq!(range_text(&wb, 0, RangeRef::new(CellRef::new(0, 0), CellRef::new(3, 0))), "30s\n15m\n2h, 10m\n5\n");
+    }
+
+    #[test]
+    fn shared_cf_cache_scans_rule_stats_once_across_loops() {
+        use gridcraft_model::{CfRule, CondFormat, NumFmt, Style};
+        let mut wb = Workbook::new();
+        let sh = wb.sheet_mut(0).unwrap();
+        for row in 0..40 {
+            sh.set_value(CellRef::new(row, 0), Value::Number((row + 1) as f64));
+        }
+        sh.cond_formats.push(CondFormat {
+            ranges: vec![RangeRef::new(CellRef::new(0, 0), CellRef::new(39, 0))],
+            priority: 1,
+            stop_if_true: false,
+            rule: CfRule::Top10 {
+                bottom: false,
+                percent: false,
+                rank: 5,
+                style: Box::new(Style { num_fmt: NumFmt::new("0.00"), ..Style::default() }),
+            },
+        });
+        sh.autofilter = Some(gridcraft_model::AutoFilter { range: RangeRef::new(CellRef::new(0, 0), CellRef::new(39, 0)), criteria: vec![] });
+
+        let sh_ref = wb.sheet(0).unwrap();
+        crate::cf::reset_scanned();
+        let mut cf = crate::cf::CfCache::new();
+        for row in 0..40 {
+            let c = CellRef::new(row, 0);
+            let t = cell_text_with_cf(&wb, 0, sh_ref, c, &mut cf);
+            let v = value_text_with_cf(&wb, 0, sh_ref, c, &mut cf);
+            if row >= 35 {
+                assert_eq!(t, format!("{}.00", row + 1));
+                assert_eq!(v, format!("{}.00", row + 1));
+            } else {
+                assert_eq!(t, format!("{}", row + 1));
+            }
+        }
+        assert_eq!(crate::cf::scanned_count(), 40, "shared CfCache must build Top10 stats once");
+
+        crate::cf::reset_scanned();
+        let vals = crate::cmd::data::filter_values(&wb, 0, 0);
+        assert_eq!(vals.len(), 39);
+        assert_eq!(crate::cf::scanned_count(), 40, "filter_values must reuse one CfCache across all rows");
     }
 }

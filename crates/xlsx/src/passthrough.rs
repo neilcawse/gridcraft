@@ -14,7 +14,8 @@
 //! of `<pageSetup>`, every shape of the legacy VML drawing that isn't a note or a modelled
 //! control (controls, buttons, pictures: GridCraft writes the notes and the controls it models)
 //! and the pictures of the headers and
-//! footers, `&G`, with their `<legacyDrawingHF>`). The workbook also keeps its
+//! footers, `&G`, with their `<legacyDrawingHF>`). The workbook's Data Model (`xl/model/item.data`)
+//! is kept with its data connections. The workbook also keeps its
 //! `<fileVersion>` and the calcFeatures extension, which Excel needs to trust the saved values.
 //! The core and extended document properties are written from the few properties the document
 //! models (title, author, company…); the other elements of those two parts (`cp:revision`,
@@ -34,13 +35,17 @@
 //! It moves with the note when the note's cell does (rows or columns inserted or deleted, a sort,
 //! a cut), as far as the note's sheet; a note that is gone leaves its picture behind.
 //!
-//! A sheet's drawing holds more than the model does ([`objects`]): the shapes part of a chart
-//! (`c:userShapes`), read into shapes and pictures of the sheet, goes back with its chart while
-//! the chart is there and those shapes are as they were read
-//! ([`gridcraft_model::PreservedChartShapes`]); the hyperlink of a picture or shape goes back on
-//! it while it is there ([`gridcraft_model::PreservedObjectLinks`]).
-//! A PivotTable whose cache GridCraft can't rebuild (a source in another workbook, or a defined
-//! name) goes back as the file had it, with its cache, while it is as it was read ([`pivots`]).
+//! A sheet's drawing holds more than the model does ([`objects`]): the hyperlink of a picture or
+//! shape goes back on it while it is there ([`gridcraft_model::PreservedObjectLinks`]). Each
+//! embedded chart GridCraft reads keeps its original chart part with the style, colour and shape
+//! parts behind it, together with the chart as it was read ([`gridcraft_model::PreservedChart`]).
+//! A PivotTable whose cache GridCraft can't rebuild (a defined name) goes back as the file had
+//! it, with its cache, while it is as it was read ([`pivots`]). PivotTables whose source is in
+//! another workbook, a data connection or the Data Model are kept too: the PivotTable parts with
+//! their sheet, the cache definition and records parts (with the cache's link to the other
+//! workbook's path) with the workbook and its `<pivotCache>` entry, its `cacheId` unchanged; a
+//! cache on a connection only when the connections are kept, and on the Data Model only when the
+//! model is kept.
 //!
 //! Sheets GridCraft does not model (chart sheets, Excel 5.0 dialog sheets, Excel 4.0 macro
 //! sheets) are kept whole, at their place among the worksheets: the sheet part and everything
@@ -63,9 +68,13 @@
 //!   opened, followed or refreshed. A relative path to a linked workbook is rewritten when the
 //!   workbook is saved into another folder ([`rebase_links`]), so it still names the same file.
 //! - Sheet content lives on the sheet: deleting the sheet drops it, Copy Sheet doesn't copy it.
+//!   A kept pivot cache no kept PivotTable uses any more is dropped with it.
 //!   Cell references inside kept parts (a control's linked cell, a query table's range, a cell
 //!   mapped to an XML element, a macro sheet's formulas) are kept as they were, not adjusted to
 //!   inserted or deleted rows or to a renamed sheet.
+//! - An embedded chart's original XML is written back only while the model's chart still equals
+//!   what was read from it (its position aside) and every sheet its formulas name still exists;
+//!   otherwise GridCraft writes the chart from the model, as it does for charts it created.
 //! - Strict Open XML files are passed through like the others: the names of their XML namespaces
 //!   and relationship types are renamed to the Transitional ones GridCraft writes ([`strict`]).
 //! - Sizes are bounded: per part and per workbook.
@@ -78,9 +87,9 @@ use std::sync::Arc;
 
 use gridcraft_core::{CellRef, MAX_COLS, MAX_ROWS};
 use gridcraft_model::{
-    Cell, Preserved, PreservedCellMeta, PreservedControlProxies, PreservedIndex, PreservedIndexed, PreservedMetadata, PreservedName,
-    PreservedNoteFill, PreservedNoteFills, PreservedPart, PreservedRel, PreservedSheet, PreservedSheetKind, PreservedTable, PreservedTableColumn,
-    PreservedTheme, PreservedXml, Sheet, Table, Visibility, Workbook,
+    Anchor, Cell, Chart, Preserved, PreservedCellMeta, PreservedChart, PreservedControlProxies, PreservedIndex, PreservedIndexed, PreservedMetadata,
+    PreservedName, PreservedNoteFill, PreservedNoteFills, PreservedPart, PreservedRel, PreservedSheet, PreservedSheetKind, PreservedTable,
+    PreservedTableColumn, PreservedTheme, PreservedXml, Sheet, Table, Visibility, Workbook,
 };
 use quick_xml::events::attributes::Attribute;
 use quick_xml::events::{BytesStart, Event};
@@ -89,6 +98,7 @@ use quick_xml::{Reader, Writer};
 
 use crate::IoError;
 use crate::package::{self, normalize};
+use crate::pivot::{CT_PIVOT_CACHE_DEF, CT_PIVOT_TABLE, ExternalPivot, KeptSource};
 use crate::read::Ctx;
 use crate::write::{NS_REL, Out, Rels, XML_DECL};
 use crate::xml::{self, esc_attr};
@@ -107,11 +117,25 @@ pub use read::{KeptReader, drawing_fragments, seal_cell_meta};
 pub use rebase::{SheetKept, TableBinding, rebase_links};
 #[cfg(test)]
 pub(crate) use write::sheet_names_in;
+pub(crate) use write::{ChartSave, attach_chart_user_shapes, attach_svg_blips, chart_save_plans};
 pub use write::{
-    KeptOut, SheetIds, WorkbookKept, cell_meta_holds, cell_meta_index, metadata_fits_dynamic_arrays, workbook_elements, write_metadata,
-    write_package_rels, write_rich_types, write_theme, write_workbook,
+    KeptOut, SheetIds, WorkbookKept, cell_meta_holds, cell_meta_index, finish_style_ids, metadata_fits_dynamic_arrays, workbook_elements,
+    write_kept_chart, write_metadata, write_package_rels, write_rich_types, write_theme, write_workbook,
 };
+pub(crate) use write::{fingerprint_image, fingerprint_shape};
 
+/// Slot for a picture's preserved Office 2016+ SVG companion (`asvg:svgBlip`).
+pub(crate) const SLOT_DRAWING_SVG_BLIP: &str = "drawingSvgBlip";
+/// Slot for a chart's preserved `chartUserShapes` drawing part.
+pub(crate) const SLOT_CHART_USER_SHAPES: &str = "chartUserShapes";
+/// Slot for a PivotTable whose source is external or unresolvable, kept as raw XML parts.
+pub(crate) const SLOT_PIVOT_PASSTHROUGH: &str = "pivotPassthrough";
+/// Relationship URI of a chart's user shapes drawing part.
+pub(crate) const REL_CHART_USER_SHAPES: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartUserShapes";
+/// Extension URI for `<asvg:svgBlip>` inside `<a:blip><a:extLst>`.
+pub(crate) const SVG_BLIP_EXT_URI: &str = "{96DAC541-7B7A-43D3-8B79-37D633B846F1}";
+/// Namespace URI of `<asvg:svgBlip>`.
+pub(crate) const NS_ASVG: &str = "http://schemas.microsoft.com/office/drawing/2016/SVG/main";
 /// Most bytes kept for one workbook.
 pub const MAX_KEPT_TOTAL: usize = 256 * 1024 * 1024;
 /// Largest single kept part.
@@ -155,8 +179,9 @@ const CT_VML: &str = "application/vnd.openxmlformats-officedocument.vmlDrawing";
 
 /// Workbook relationship kinds that an element of the workbook XML takes care of: the links to
 /// external workbooks are kept all together (formulas address them by position in
-/// `<externalReferences>`), and GridCraft writes the feature property bag itself.
-const WORKBOOK_ELEMENT_KINDS: &[&str] = &["externalLink", "featurePropertyBag"];
+/// `<externalReferences>`), GridCraft writes the feature property bag itself, and the Data Model
+/// is kept only with the workbook's data connections (`KeptReader::workbook`).
+const WORKBOOK_ELEMENT_KINDS: &[&str] = &["externalLink", "featurePropertyBag", "powerPivotData"];
 /// Sheet relationship kinds that mean the sheet XML may hold elements worth keeping, and that
 /// those elements take care of (`<pageSetup r:id>`, `<oleObjects>`, `<controls>`, `<picture>`,
 /// `<customProperties>`): kept through them, not as plain roots.
@@ -166,9 +191,6 @@ const SHEET_ELEMENT_KINDS: &[&str] = &["oleObject", "ctrlProp", "control", "imag
 const SHEET_WRITTEN: &[&str] = &["hyperlink"];
 /// Attributes of `<fileVersion>` (CT_FileVersion).
 const FILE_VERSION_ATTRS: &[&str] = &["appName", "lastEdited", "lowestEdited", "rupBuild", "codeName"];
-/// The workbook extension listing the calculation features the saved values were computed with.
-const CALC_FEATURES_URI: &str = "{B58B0392-4F1F-4190-BB64-5DF3571DCE5F}";
-const NS_CALC_FEATURES: &str = "http://schemas.microsoft.com/office/spreadsheetml/2018/calcfeatures";
 /// Kept sheet elements that go right after `<legacyDrawing>`, in schema order (before
 /// `<tableParts>`).
 const SHEET_SLOTS: &[&str] = &["legacyDrawingHF", "picture", "oleObjects", "controls"];
@@ -239,6 +261,13 @@ const MAX_PROPERTY_ELEMENTS: usize = 256;
 fn is_sheet_slot(slot: &str) -> bool {
     SHEET_SLOTS.contains(&slot) || slot == SLOT_CUSTOM_PROPERTIES || slot == SLOT_CUSTOM_SHEET_VIEWS
 }
+/// Rewritten kinds a kept PivotTable (source in another workbook) reaches: the table, from the
+/// sheet, and its cache, which the workbook keeps (several tables can share one cache).
+const PIVOT_TABLE_GRAPH: &[&str] = &["pivotTable", "pivotCacheDefinition"];
+/// Rewritten kinds a kept pivot cache reaches.
+const PIVOT_CACHE_GRAPH: &[&str] = &["pivotCacheDefinition", "pivotCacheRecords"];
+/// The workbook's Data Model part (Power Pivot), kept byte for byte when its connections are.
+const DATA_MODEL_GRAPH: &[&str] = &["powerPivotData"];
 
 /// Relationship kinds GridCraft reads and rewrites, or that depend on content it rewrites:
 /// kept content whose graph reaches one of them is dropped.
@@ -307,6 +336,10 @@ const KEPT_SHEET_GRAPH: &[&str] = &[
     "chartcolorstyle",
     "chartusershapes",
 ];
+
+/// Relationship kinds an embedded chart part reaches that are otherwise rewritten: its style,
+/// colour and user-shape parts are kept with it. A drawing or worksheet is never reached.
+const CHART_GRAPH: &[&str] = &["chart", "chartstyle", "chartcolorstyle", "chartusershapes"];
 
 /// Part-name prefixes (lower case) GridCraft's writer never produces: kept parts there keep their
 /// original names. Anything else is renamed so it can't collide with written parts.
@@ -401,6 +434,11 @@ fn is_root(owner: Owner, r: &PreservedRel) -> bool {
             Owner::Workbook => !listed(WORKBOOK_ELEMENT_KINDS),
             Owner::Sheet => !listed(SHEET_ELEMENT_KINDS) && !listed(SHEET_WRITTEN),
         }
+}
+
+/// A chart without its id and position: what a kept chart is compared on.
+fn unplaced(ch: &Chart) -> Chart {
+    Chart { id: 0, anchor: Anchor::default(), ..ch.clone() }
 }
 
 fn rels_part_name(part: &str) -> String {

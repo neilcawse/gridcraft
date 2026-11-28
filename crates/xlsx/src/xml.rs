@@ -180,7 +180,12 @@ fn local(name: &[u8]) -> String {
     String::from_utf8_lossy(n).into_owned()
 }
 
-fn start_el(e: &BytesStart<'_>, namespaces: Option<&quick_xml::name::NamespaceResolver>) -> El {
+pub(crate) fn start_el(e: &BytesStart<'_>) -> El {
+    start_el_ns(e, None)
+}
+
+/// [`start_el`] that also recognises the namespaced pivot cache names `namespaces` resolves.
+fn start_el_ns(e: &BytesStart<'_>, namespaces: Option<&quick_xml::name::NamespaceResolver>) -> El {
     use quick_xml::name::ResolveResult::Bound;
 
     let mut el = El { name: local(e.name().as_ref()), ..Default::default() };
@@ -220,7 +225,7 @@ fn start_el(e: &BytesStart<'_>, namespaces: Option<&quick_xml::name::NamespaceRe
     el
 }
 
-fn named_entity(name: &str) -> Option<char> {
+pub(crate) fn named_entity(name: &str) -> Option<char> {
     Some(match name {
         "amp" => '&',
         "lt" => '<',
@@ -251,7 +256,7 @@ pub fn first_start(xml: &[u8], local_name: &str) -> Option<El> {
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf).ok()? {
-            Event::Start(e) | Event::Empty(e) if local(e.name().as_ref()) == local_name => return Some(start_el(&e, None)),
+            Event::Start(e) | Event::Empty(e) if local(e.name().as_ref()) == local_name => return Some(start_el(&e)),
             Event::Eof => return None,
             _ => {}
         }
@@ -345,14 +350,14 @@ pub fn parse_streaming_partial(xml: &[u8], split: &[&str], cb: &mut dyn FnMut(El
                     if let Some(ns) = &mut namespaces {
                         ns.push(&e).map_err(|e| IoError::Xml(e.to_string()))?;
                     }
-                    stack.push(start_el(&e, namespaces.as_ref()));
+                    stack.push(start_el_ns(&e, namespaces.as_ref()));
                     kept_at_start.push(kept);
                 }
                 Event::Empty(e) => {
                     if let Some(ns) = &mut namespaces {
                         ns.push(&e).map_err(|e| IoError::Xml(e.to_string()))?;
                     }
-                    let el = start_el(&e, namespaces.as_ref());
+                    let el = start_el_ns(&e, namespaces.as_ref());
                     if let Some(ns) = &mut namespaces {
                         ns.pop();
                     }
@@ -418,10 +423,9 @@ pub fn parse_streaming_partial(xml: &[u8], split: &[&str], cb: &mut dyn FnMut(El
 // ---------------------------------------------------------------- writing helpers
 
 // XML escaping and SpreadsheetML strings are shared; phonetic/model mapping stays here.
-pub use craft_xml::{esc, esc_attr};
 #[cfg(test)]
-use craft_xml::{is_xml_char, push_esc};
-
+use craft_xml::is_xml_char;
+pub use craft_xml::{esc, esc_attr, push_esc};
 /// Appends `n` in decimal.
 pub fn push_u64(o: &mut String, mut n: u64) {
     let mut buf = [0u8; 20];
@@ -442,8 +446,7 @@ pub fn push_u64(o: &mut String, mut n: u64) {
 }
 
 /// Appends the `A1`-style text of `c` ([`gridcraft_core::CellRef::a1`]).
-#[cfg(test)]
-fn push_a1(o: &mut String, c: gridcraft_core::CellRef) {
+pub fn push_a1(o: &mut String, c: gridcraft_core::CellRef) {
     let mut letters = [0u8; 8];
     let mut i = letters.len();
     let mut n = u64::from(c.col) + 1;

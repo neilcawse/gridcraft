@@ -14,9 +14,9 @@ pub(super) fn preserved_space(bytes: &[u8], wb: &Workbook) -> HashSet<Key> {
     let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(bytes)) else { return out };
     let names = zip_names(&mut zip);
     let Some(workbook) = workbook_entry(&mut zip, &names) else { return out };
-    for (sheet, part) in sheet_parts(&mut zip, &names, &workbook) {
+    for (sheet, (index, part)) in sheet_parts(&mut zip, &names, workbook) {
         let Some(si) = wb.sheet_index(&sheet) else { continue };
-        if let Ok(xml) = read_zip_part(&mut zip, &part) {
+        if let Ok(xml) = read_zip_part(&mut zip, *index, part) {
             scan_preserved(&xml, si, &mut out);
         }
     }

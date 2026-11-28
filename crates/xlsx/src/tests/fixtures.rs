@@ -23,13 +23,13 @@ fn shared_formulas_and_value_types() {
     let (wb, rep) = read_xlsx(&minimal(body, &[], "", "")).unwrap();
     let s = wb.sheet(0).unwrap();
     assert_eq!(s.name, "Data");
-    assert_eq!(s.cell(at("B2")).unwrap().formula.as_ref().unwrap().text, "A2*2+$A$1");
-    assert_eq!(s.cell(at("B3")).unwrap().formula.as_ref().unwrap().text, "A3*2+$A$1");
+    assert_eq!(s.cell(at("B2")).unwrap().formula.as_ref().unwrap().text(), "A2*2+$A$1");
+    assert_eq!(s.cell(at("B3")).unwrap().formula.as_ref().unwrap().text(), "A3*2+$A$1");
     assert_eq!(s.value(at("B2")), Value::Number(5.0));
     assert_eq!(s.value(at("A3")), Value::text("rich text"));
     assert_eq!(s.value(at("A4")), Value::Bool(true));
     assert_eq!(s.value(at("B4")), Value::Error(CellError::Div0));
-    assert_eq!(s.cell(at("C4")).unwrap().formula.as_ref().unwrap().text, "CONCAT(\"a\",\"b\")");
+    assert_eq!(s.cell(at("C4")).unwrap().formula.as_ref().unwrap().text(), "CONCAT(\"a\",\"b\")");
     assert_eq!(s.value(at("C4")), Value::text("ab"));
     assert_eq!(s.value(at("D4")), Value::Number(45292.5));
     let a5 = s.cell(at("A5")).unwrap().formula.clone().unwrap();
@@ -37,7 +37,7 @@ fn shared_formulas_and_value_types() {
     assert!(s.cell(at("B5")).is_none() && s.cell(at("A6")).is_none(), "a legacy array's cached values are dropped too");
     let c5 = s.cell(at("C5")).unwrap().formula.clone().unwrap();
     assert_eq!(c5.array, None, "dynamic arrays are not legacy CSE arrays");
-    assert_eq!(c5.text, "SEQUENCE(3)");
+    assert_eq!(c5.text(), "SEQUENCE(3)");
     assert!(s.cell(at("C6")).is_none(), "spilled cached values are dropped so the formula can spill");
     // Rows/cells without r continue from the previous position.
     assert_eq!(s.value(at("A7")), Value::Number(9.0));
@@ -180,7 +180,9 @@ fn assert_sheet_settings(s: &gridcraft_model::Sheet) {
     assert!(s.cols.get(&2).unwrap().hidden);
     assert_eq!(s.cols.get(&2).unwrap().size, Some(145.0));
     assert_eq!(s.cols.get(&2).unwrap().outline, 1);
+    assert!(s.cols.get(&2).unwrap().custom, "customWidth: a width set by hand");
     assert_ne!(s.cols.get(&3).unwrap().style, None);
+    assert!(!s.cols.get(&3).unwrap().custom, "no customWidth: not set by hand");
     assert_eq!(s.rows.get(&0).unwrap().size, Some(40.0));
     let r2 = s.rows.get(&1).unwrap();
     assert!(r2.hidden);
@@ -235,6 +237,38 @@ fn dxf_font_and_parts_stated_at_their_defaults_survive_save() {
     assert_eq!(written, Some(format!(r#" count="4">{dxfs}"#).as_str()));
 }
 
+/// Differential fonts that turn outlined letters on, or state them off (alone, or after strike),
+/// keep it on save, like strike.
+#[test]
+fn dxf_outline_font_survives_save() {
+    let dxfs = concat!(
+        r#"<dxf><font><outline/></font></dxf>"#,
+        r#"<dxf><font><strike val="0"/><outline val="0"/></font></dxf>"#,
+        r#"<dxf><font><outline val="0"/></font></dxf>"#,
+    );
+    let styles = format!(
+        r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+      <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
+      <fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
+      <borders count="1"><border/></borders>
+      <cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellXfs>
+      <dxfs count="3">{dxfs}</dxfs>
+    </styleSheet>"#
+    );
+    let rels = r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>"#;
+    let body = r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>
+      <conditionalFormatting sqref="A1"><cfRule type="cellIs" dxfId="0" priority="1" operator="greaterThan"><formula>0</formula></cfRule></conditionalFormatting>
+      <conditionalFormatting sqref="A2"><cfRule type="cellIs" dxfId="1" priority="2" operator="greaterThan"><formula>0</formula></cfRule></conditionalFormatting>
+      <conditionalFormatting sqref="A3"><cfRule type="cellIs" dxfId="2" priority="3" operator="greaterThan"><formula>0</formula></cfRule></conditionalFormatting>"#;
+    let bytes = minimal(body, &[("xl/styles.xml", &styles)], rels, "");
+    let (wb, _) = read_xlsx(&bytes).unwrap();
+    let out = crate::write_xlsx(&wb).unwrap();
+    let st = crate::package::Package::open(&out).unwrap().read("xl/styles.xml").unwrap().unwrap();
+    let st = String::from_utf8(st).unwrap();
+    let written = st.split_once("<dxfs").and_then(|(_, r)| r.split_once("</dxfs>")).map(|(d, _)| d);
+    assert_eq!(written, Some(format!(r#" count="3">{dxfs}"#).as_str()));
+}
+
 /// A dxf writes its parts in schema order: the border comes before the protection.
 #[test]
 fn dxf_border_is_written_before_protection() {
@@ -259,6 +293,27 @@ fn dxf_border_is_written_before_protection() {
     let dx = st.split_once("<dxfs").and_then(|(_, r)| r.split_once("</dxfs>")).map(|(d, _)| d).unwrap_or_default();
     let (b, p) = (dx.find("<border"), dx.find("<protection"));
     assert!(b.is_some() && p.is_some() && b < p, "{dx}");
+}
+
+/// Which stored widths were set by hand, as Excel 16.0 treats them when a number format makes a
+/// number wider (#1077): only customWidth without bestFit keeps its width; the others widen.
+#[test]
+fn column_widths_set_by_hand() {
+    let body = r#"<cols><col min="1" max="1" width="15"/><col min="2" max="2" width="15" customWidth="1"/>
+      <col min="3" max="3" width="15" bestFit="1"/><col min="4" max="4" width="15" bestFit="1" customWidth="1"/>
+      <col min="5" max="5" width="9.140625" customWidth="1"/></cols><sheetData/>"#;
+    let (wb, _) = read_xlsx(&minimal(body, &[], "", "")).unwrap();
+    let s = wb.sheet(0).unwrap();
+    let custom: Vec<bool> = (0..5).map(|c| s.cols.get(&c).is_some_and(|i| i.custom)).collect();
+    assert_eq!(custom, [false, true, false, false, true]);
+    assert_eq!(s.col_width(4), s.default_col_width, "E: the default width, but set by hand");
+    // Written back the way Excel writes them.
+    let bytes = crate::write_xlsx(&wb).unwrap();
+    let mut pkg = crate::package::Package::open(&bytes).unwrap();
+    let sheet = pkg.read_xml("xl/worksheets/sheet1.xml").unwrap().unwrap();
+    let flags: Vec<(bool, bool)> =
+        sheet.child("cols").unwrap().kids("col").map(|c| (c.flag("customWidth", false), c.flag("bestFit", false))).collect();
+    assert_eq!(flags, [(true, true), (true, false), (true, true), (true, false)], "C and D are one run");
 }
 
 #[test]
@@ -534,7 +589,7 @@ fn drawing_with_picture_and_chart() {
             let mut f = z.by_index(i).unwrap();
             let mut d = vec![];
             std::io::Read::read_to_end(&mut f, &mut d).unwrap();
-            parts.push((f.name().to_string(), d));
+            parts.push((f.name().unwrap().to_string(), d));
         }
         parts.push(("xl/media/image1.png".into(), png.to_vec()));
         let refs: Vec<(&str, &[u8])> = parts.iter().map(|(n, d)| (n.as_str(), d.as_slice())).collect();
@@ -1282,6 +1337,8 @@ fn chartex_parts_as_excel_expects_them() {
         pivot: None,
         axis_number_formats: Default::default(),
         pivot_label_formats: Vec::new(),
+        area_style: Default::default(),
+        user_shapes: Vec::new(),
     });
     wb.sheets = vec![std::sync::Arc::new(sheet)];
     let bytes = crate::write_xlsx(&wb).unwrap();
@@ -1343,6 +1400,8 @@ fn doughnut_writes_every_series_as_a_ring_with_hole_and_angle() {
         pivot: None,
         axis_number_formats: Default::default(),
         pivot_label_formats: Vec::new(),
+        area_style: Default::default(),
+        user_shapes: Vec::new(),
     });
     wb.sheets = vec![std::sync::Arc::new(sheet)];
     let bytes = crate::write_xlsx(&wb).unwrap();
@@ -1443,7 +1502,7 @@ fn user_defined_function_prefix_round_trips() {
     let (wb, _) = read_xlsx(&minimal(&format!("<sheetData>{rows}</sheetData>"), &[], "", "")).unwrap();
     let s = wb.sheet(0).unwrap();
     for (a, f) in cases {
-        assert_eq!(s.cell(at(a)).unwrap().formula.as_ref().unwrap().text, f, "read {a}");
+        assert_eq!(s.cell(at(a)).unwrap().formula.as_ref().unwrap().text(), f, "read {a}");
     }
     let bytes = crate::write_xlsx(&wb).unwrap();
     let mut pkg = crate::package::Package::open(&bytes).unwrap();
@@ -1470,7 +1529,7 @@ fn legacy_formulas_read_with_implicit_intersection() {
     let names = r#"<definedNames><definedName name="Vals">Data!$A$1:$A$3</definedName></definedNames>"#;
     let (wb, _) = read_xlsx(&minimal(body, &[], "", names)).unwrap();
     let s = wb.sheet(0).unwrap();
-    let f = |a: &str| s.cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| (f.text.clone(), f.array)).unwrap();
+    let f = |a: &str| s.cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| (f.text().into_owned(), f.array)).unwrap();
     let cases = [
         ("B2", "TANH(@A1:A3)"),
         ("C2", "TANH(A1:A3)"),
@@ -1504,8 +1563,9 @@ fn legacy_formulas_use_the_callers_function_facts() {
     </sheetData>"#;
     let bytes = minimal(body, &[], "", "");
     let library = crate::FunctionInfo { is_builtin: |n| n != "MYUDF", is_scalar_arg: |n, _| n != "TANH" };
-    let text =
-        |wb: &gridcraft_model::Workbook, a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone()).unwrap();
+    let text = |wb: &gridcraft_model::Workbook, a: &str| {
+        wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text().into_owned()).unwrap()
+    };
     let (plain, _) = read_xlsx(&bytes).unwrap();
     assert_eq!(text(&plain, "B2"), "MYUDF(@A1:A3)", "without facts every function is built in");
     assert_eq!(text(&plain, "C2"), "TANH(@A1:A3)");
@@ -1534,7 +1594,7 @@ fn legacy_if_and_iferror_arguments_are_intersected_inside_array_functions() {
       <row r="4"><c r="D4"><f>SUMPRODUCT(IF(A1:A3&gt;1,1,0))</f></c><c r="E4"><f>SUMPRODUCT(IF(A1&gt;1,A1:A3,0))</f></c></row>
     </sheetData>"#;
     let (wb, _) = read_xlsx(&minimal(body, &[], "", "")).unwrap();
-    let text = |a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone()).unwrap();
+    let text = |a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text().into_owned()).unwrap();
     assert_eq!(text("D2"), "SUMPRODUCT(IFERROR(@A1:A3/@A1:A3,0))");
     assert_eq!(text("E2"), "SUMPRODUCT(IFNA(@A1:A3,0),A1:A3)");
     assert_eq!(text("D4"), "SUMPRODUCT(IF(@A1:A3>1,1,0))");
@@ -1642,18 +1702,17 @@ fn two_column_groups_on_different_axes_preserve_secondary_and_kind() {
     );
     let (wb, _) = read_xlsx(&bytes).unwrap();
     let ch = &wb.sheet(0).unwrap().charts[0];
-    assert_eq!(ch.kind, gridcraft_model::ChartKind::Combo);
+    // Series of one kind are one chart, a column chart with a secondary-axis series.
+    assert_eq!(ch.kind, gridcraft_model::ChartKind::ColumnClustered);
     assert!(!ch.series[0].secondary);
     assert!(ch.series[1].secondary);
-    assert_eq!(ch.series[0].kind, Some(gridcraft_model::ChartKind::ColumnClustered));
-    assert_eq!(ch.series[1].kind, Some(gridcraft_model::ChartKind::ColumnClustered));
+    assert_eq!(ch.series_kinds(), vec![gridcraft_model::ChartKind::ColumnClustered; 2]);
 
     let out = crate::write_xlsx(&wb).unwrap();
     let (wb2, _) = read_xlsx(&out).unwrap();
     let ch2 = &wb2.sheet(0).unwrap().charts[0];
-    assert_eq!(ch2.kind, gridcraft_model::ChartKind::Combo);
+    assert_eq!(ch2.kind, gridcraft_model::ChartKind::ColumnClustered);
     assert!(!ch2.series[0].secondary);
     assert!(ch2.series[1].secondary);
-    assert_eq!(ch2.series[0].kind, Some(gridcraft_model::ChartKind::ColumnClustered));
-    assert_eq!(ch2.series[1].kind, Some(gridcraft_model::ChartKind::ColumnClustered));
+    assert_eq!(ch2.series_kinds(), vec![gridcraft_model::ChartKind::ColumnClustered; 2]);
 }

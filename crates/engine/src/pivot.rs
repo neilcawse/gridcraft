@@ -12,9 +12,9 @@ use gridcraft_core::date::datetime_from_serial;
 pub use gridcraft_core::quote_sheet;
 use gridcraft_core::{CellError, CellRef, MAX_COLS, MAX_ROWS, RangeRef, Value, number_to_text, split_sheet};
 use gridcraft_model::{
-    BorderLine, BorderStyle, Cell, Chart, Color, Fill, HAlign, NumFmt, PivotDataCell, PivotDateGroup, PivotField, PivotFilter, PivotFunc,
-    PivotItemRef, PivotLayout, PivotLookup, PivotShowAs, PivotSort, PivotSource, PivotTable, PivotValue, Series, SlicerCrossFilter, Style, StyleId,
-    Workbook,
+    Cell, Chart, Color, HAlign, NumFmt, PivotDataCell, PivotDateGroup, PivotField, PivotFilter, PivotFunc, PivotIndexError, PivotItemRef,
+    PivotLayout, PivotLookup, PivotRowRole, PivotShowAs, PivotSort, PivotSource, PivotStyleGrid, PivotStyleLayout, PivotTable, PivotValue, Series,
+    SlicerCrossFilter, Style, StyleId, Workbook,
 };
 
 use crate::pivot_calc::CalcSet;
@@ -25,15 +25,17 @@ mod charts;
 mod compute;
 mod items;
 mod output;
+mod style;
 
 pub use charts::{chart_link, chart_series, clear_output, links_to, parse_chart_link};
 use compute::compute_from;
 pub use compute::{NOT_A_VALUE_CELL, detail_cells, detail_records};
 pub use items::{SlicerTile, distinct_labels, func_caption, item_label, slicer_tiles};
+use output::cell_style;
 #[cfg(test)]
 use output::data_cols_exceed_sheet;
 pub use output::{CellKind, OutCell, Output, RowKind};
-use output::{cell_style, look};
+pub use style::{BuiltinPivotLook, builtin_look, parse_pivot_style_name, pivot_cell_style};
 /// Largest source block read (cells).
 pub const MAX_SOURCE_CELLS: u64 = 10_000_000;
 /// Largest report written (cells).
@@ -221,8 +223,9 @@ fn read_range(wb: &Workbook, (si, r): (usize, RangeRef)) -> Result<Source, Strin
     let mut taken: HashSet<String> = HashSet::new();
     let mut next_suffix: HashMap<String, usize> = HashMap::new();
     let mut formats = Vec::new();
+    let mut cf = crate::cf::CfCache::new();
     for c in r.start.col..=r.end.col {
-        let h = crate::display::cell_text(wb, sh, CellRef::new(r.start.row, c)).trim().to_string();
+        let h = crate::display::cell_text_with_cf(wb, si, sh, CellRef::new(r.start.row, c), &mut cf).trim().to_string();
         if h.is_empty() {
             return Err(FIELD_NAME_ERR.into());
         }
@@ -336,8 +339,6 @@ pub fn refresh(wb: &mut Workbook, sheet: usize, idx: usize, replace: bool) -> Re
         }
     }
     // Styles first (the style table is workbook-wide).
-    let lk = look(&pt.style);
-    let header_last = out.row_kinds.iter().rposition(|k| *k == RowKind::Header);
     let mut cache: HashMap<Style, StyleId> = HashMap::new();
     let mut cells: Vec<(CellRef, Cell)> = Vec::new();
     for (ri, row) in out.grid.iter().enumerate() {
@@ -352,12 +353,7 @@ pub fn refresh(wb: &mut Workbook, sheet: usize, idx: usize, replace: bool) -> Re
             if rk == RowKind::Placeholder && oc.value.is_empty() {
                 continue;
             }
-            let flag = match rk {
-                RowKind::Header => Some(ri) == header_last,
-                RowKind::Filter => ci == 0,
-                _ => false,
-            };
-            let st = cell_style(&lk, rk, oc, flag);
+            let st = cell_style(rk, oc);
             let id = match cache.get(&st) {
                 Some(id) => *id,
                 None => {
@@ -405,8 +401,10 @@ pub fn refresh(wb: &mut Workbook, sheet: usize, idx: usize, replace: bool) -> Re
             shm.cols.entry(col).or_default().size = Some(wpt);
         }
     }
+    let style_layout = style_layout_from_output(origin, area, k, &out);
     if let Some(p) = shm.pivots.get_mut(idx) {
         p.last_range = Some(area);
+        p.style_grid = PivotStyleGrid(Some(std::sync::Arc::new(style_layout)));
     }
     charts::rebind_charts(wb, &pt, &sheet_name, sheet, origin, &out, label_formats);
     // The index of the new report; its lookup hash is built on the first GETPIVOTDATA.
@@ -418,27 +416,72 @@ pub fn refresh(wb: &mut Workbook, sheet: usize, idx: usize, replace: bool) -> Re
     Ok(area)
 }
 
+fn style_layout_from_output(origin: CellRef, area: RangeRef, body_offset: u32, out: &Output) -> PivotStyleLayout {
+    let body_start_row = origin.row.saturating_add(body_offset).min(area.end.row);
+    let body_range = RangeRef::new(CellRef::new(body_start_row, area.start.col), area.end);
+    let body_kinds = out.row_kinds.get(body_offset as usize..).unwrap_or(&[]);
+    let first_data_row = body_kinds.iter().take_while(|k| **k == RowKind::Header).count() as u32;
+    let mut row_roles = Vec::new();
+    let mut row_subheading = Vec::new();
+    for rk in body_kinds.get(first_data_row as usize..).unwrap_or(&[]) {
+        match *rk {
+            RowKind::Subtotal => {
+                row_roles.push(PivotRowRole::Subtotal(0));
+                row_subheading.push(None);
+            }
+            RowKind::Grand => {
+                row_roles.push(PivotRowRole::GrandTotal);
+                row_subheading.push(None);
+            }
+            RowKind::Blank => {
+                row_roles.push(PivotRowRole::Blank);
+                row_subheading.push(None);
+            }
+            RowKind::Item(parent) => {
+                row_roles.push(PivotRowRole::Data);
+                row_subheading.push(parent.then_some(0));
+            }
+            _ => {
+                row_roles.push(PivotRowRole::Data);
+                row_subheading.push(None);
+            }
+        }
+    }
+    let page_rows = body_offset.saturating_sub(1);
+    PivotStyleLayout {
+        body_range: Some(body_range),
+        first_header_row: 0,
+        first_data_row,
+        first_data_col: out.row_label_cols,
+        page_rows,
+        page_cols: 1,
+        row_roles,
+        row_subheading,
+        col_roles: vec![],
+        col_subheading: vec![],
+    }
+}
+
 /// The value cells of a PivotTable's report, for GETPIVOTDATA when a refresh did not set the
 /// index (a workbook just opened from XLSX). The positions must describe the report as it is
 /// stored on the sheet, not as the current source would render it: the source is recomputed only
 /// to learn the layout, and the result is accepted when every label and header cell of that
 /// layout equals the stored cell at the same place. A source changed since the last refresh gives
 /// a different layout, so there is no trustworthy index and the lookup fails until a refresh.
-pub fn index_cells(wb: &Workbook, sheet: usize, pt: &PivotTable) -> Result<Vec<PivotDataCell>, String> {
-    const STALE: &str = "The stored report no longer matches the source. Refresh the PivotTable.";
-    let report = pt.last_range.ok_or("The PivotTable has no report.")?;
-    let out = compute(wb, pt, sheet)?;
-    let sh = wb.sheet(sheet).ok_or("There's no such sheet.")?;
+pub fn index_cells(wb: &Workbook, sheet: usize, pt: &PivotTable) -> Result<Vec<PivotDataCell>, PivotIndexError> {
+    let report = pt.last_range.ok_or_else(|| PivotIndexError::Other("The PivotTable has no report.".into()))?;
+    let out = compute(wb, pt, sheet).map_err(PivotIndexError::Other)?;
+    let sh = wb.sheet(sheet).ok_or_else(|| PivotIndexError::Other("There's no such sheet.".into()))?;
     let rows = u64::from(report.end.row) - u64::from(report.start.row) + 1;
     let cols = u64::from(report.end.col) - u64::from(report.start.col) + 1;
     if rows != u64::from(out.height().max(1)) || cols != u64::from(out.width.max(1)) {
-        return Err(STALE.into());
+        return Err(PivotIndexError::Stale);
     }
     let labels = [CellKind::Header, CellKind::RowLabel, CellKind::ColLabel, CellKind::Filter];
     for (r, row) in out.grid.iter().enumerate() {
         for (c, oc) in row.iter().enumerate() {
             if labels.contains(&oc.kind) && sh.value(CellRef::new(report.start.row + r as u32, report.start.col + c as u32)) != oc.value {
-                return Err(STALE.into());
+                return Err(PivotIndexError::Stale);
             }
         }
     }
@@ -501,6 +544,50 @@ mod fit_tests {
         let set = rebuilt_item_set(items);
         assert!(set.contains(first.as_slice()));
         assert!(!set.contains([String::from("C")].as_slice()));
+    }
+    #[test]
+    fn style_layout_carries_tabular_and_outline_row_label_cols_with_zero_data_fields() {
+        use super::*;
+
+        for layout_mode in [PivotLayout::Tabular, PivotLayout::Outline] {
+            let mut wb = Workbook::new();
+            let sh = wb.sheet_mut(0).unwrap();
+            for (r, row) in [
+                [Value::text("Region"), Value::text("Item")],
+                [Value::text("North"), Value::text("Widget")],
+                [Value::text("South"), Value::text("Gadget")],
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                for (c, v) in row.into_iter().enumerate() {
+                    sh.set_value(CellRef::new(r as u32, c as u32), v);
+                }
+            }
+            let pt = PivotTable {
+                id: 1,
+                name: "Pivot1".into(),
+                source: "Sheet1!$A$1:$B$3".into(),
+                anchor: CellRef::new(0, 3),
+                layout: layout_mode,
+                rows: vec![
+                    PivotField { source_col: "Region".into(), ..Default::default() },
+                    PivotField { source_col: "Item".into(), ..Default::default() },
+                ],
+                ..Default::default()
+            };
+            sh.pivots.push(pt);
+
+            let area = refresh(&mut wb, 0, 0, true).unwrap();
+            let sh = wb.sheet(0).unwrap();
+            let pt = &sh.pivots[0];
+            let sl = pt.style_grid.0.as_ref().expect("refresh populates style_grid");
+            let body = sl.body_range.unwrap();
+            let body_cols = body.end.col - body.start.col + 1;
+            assert_eq!(body_cols, 2, "{layout_mode:?}: 2 row fields and 0 data fields => 2 body cols (area={area})");
+            assert_eq!(sl.first_data_col, 2, "{layout_mode:?}: first_data_col must equal row-label column count (2)");
+            assert!(!(sl.first_data_col < body_cols), "{layout_mode:?}: has_data_cols must be false");
+        }
     }
 }
 

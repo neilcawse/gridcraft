@@ -67,7 +67,7 @@ fn malformed_tables_keep_their_reference_identity_through_three_saves() -> Resul
             (a, CellRef::new(3, 2), "TRANSPOSE(Items_2[Value])", 2.0),
             (b, CellRef::new(3, 1), "SUM(Items_2[Value])+ITEMS", 2.0),
         ] {
-            assert_eq!(sheet.cell(at).and_then(|c| c.formula.as_ref()).map(|f| f.text.as_str()), Some(formula), "cycle {cycle}");
+            assert_eq!(sheet.cell(at).and_then(|c| c.formula.as_ref()).map(|f| f.text()).as_deref(), Some(formula), "cycle {cycle}");
             assert_eq!(sheet.value(at), Value::Number(cache));
         }
         assert_eq!(a.cell(CellRef::new(3, 2)).and_then(|c| c.formula.as_ref()).and_then(|f| f.array), RangeRef::parse("C4:D4"));
@@ -112,7 +112,7 @@ fn imported_tables_with_reserved_prefixes_get_free_numbered_names() -> Result<()
     let mut parts = Vec::new();
     for i in 0..package.len() {
         let mut part = package.by_index(i)?;
-        let path = part.name().to_owned();
+        let path = part.name()?.into_owned();
         let mut data = Vec::new();
         part.read_to_end(&mut data)?;
         if let Some((original, injected)) = match path.as_str() {
@@ -243,6 +243,8 @@ fn direct_model_repairs_formula_objects_without_rewriting_literals() -> Result<(
         pivot: None,
         axis_number_formats: Default::default(),
         pivot_label_formats: vec![],
+        area_style: Default::default(),
+        user_shapes: Default::default(),
     });
     let mut extended = sh.charts[0].clone();
     extended.id = 10;
@@ -296,7 +298,7 @@ fn direct_model_repairs_formula_objects_without_rewriting_literals() -> Result<(
         (4, "LET(Data_Tbl_2,7,SUM(Data_Tbl_2[])+Data_Tbl_2)"),
         (5, "LAMBDA(Data_Tbl_2,SUM(Data_Tbl_2[])+Data_Tbl_2)(7)"),
     ] {
-        assert_eq!(back.sheets[0].cell(at(row, 7)).and_then(|c| c.formula.as_ref()).map(|f| f.text.as_str()), Some(f));
+        assert_eq!(back.sheets[0].cell(at(row, 7)).and_then(|c| c.formula.as_ref()).map(|f| f.text()).as_deref(), Some(f));
     }
     assert_eq!(back.sheets[0].value(at(6, 7)), Value::text("Data?Tbl[Value]"));
     assert_eq!(wb.sheets[0].tables[0].name, "Data?Tbl");
@@ -422,7 +424,7 @@ fn a_tables_own_cells_follow_it_like_its_column_formula() -> Result<(), Box<dyn 
     ]);
     let (mut wb, _) = read_xlsx(&malformed)?;
     for cycle in 0..2 {
-        let formula = |si: usize, row, col| wb.sheets[si].cell(CellRef::new(row, col)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone());
+        let formula = |si: usize, row, col| wb.sheets[si].cell(CellRef::new(row, col)).and_then(|c| c.formula.as_ref()).map(|f| f.text().clone());
         assert_eq!(wb.sheets[0].tables[0].name, "Items", "cycle {cycle}");
         assert_eq!(wb.sheets[1].tables[0].name, "ITEMS_2", "cycle {cycle}");
         assert_eq!(wb.sheets[1].tables[0].columns[1].formula.as_deref(), Some("ITEMS_2[@Value]*2"), "cycle {cycle}");
@@ -456,6 +458,8 @@ fn chart(id: u32, kind: ChartKind, series: Series) -> Chart {
         pivot: None,
         axis_number_formats: Default::default(),
         pivot_label_formats: vec![],
+        area_style: Default::default(),
+        user_shapes: Default::default(),
     }
 }
 
@@ -541,7 +545,7 @@ fn sheet_scoped_names_reserve_table_names() -> Result<(), Box<dyn std::error::Er
         let reopened = read_xlsx(&saved)?;
         assert!(!reopened.1.warnings.iter().any(|w| w.contains("was renamed")));
         back = reopened.0;
-        let formula = |si: usize, at: CellRef| back.sheets[si].cell(at).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone());
+        let formula = |si: usize, at: CellRef| back.sheets[si].cell(at).and_then(|c| c.formula.as_ref()).map(|f| f.text().clone());
         let names: Vec<_> = back.sheets[0].tables.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, ["Foo_2", "LocalRef_2"], "cycle {cycle}");
         assert_eq!(formula(0, CellRef::new(5, 0)).as_deref(), Some("FOO+SUM(Foo_2[Value])"), "cycle {cycle}");
@@ -609,7 +613,7 @@ fn headers_and_overlaps_do_not_claim_formula_ownership() {
     crate::table_names::repair(&mut repaired, [], &mut Vec::new());
     for (at, _, expected) in cases {
         let formula = repaired.sheets[1].cell(at).and_then(|c| c.formula.as_ref());
-        assert_eq!(formula.map(|f| f.text.as_str()), Some(expected), "{at:?}");
+        assert_eq!(formula.map(|f| f.text()).as_deref(), Some(expected), "{at:?}");
     }
 }
 
@@ -680,8 +684,8 @@ fn a_reference_to_no_table_is_not_captured_by_a_repaired_name() -> Result<(), Bo
         for (row, f) in
             [(6, "SUM(#REF!)"), (7, "COUNT(#NAME?)"), (8, "SUM(Sale_[Value])"), (9, "LET(Sale__2,7,Sale__2)"), (10, "LAMBDA(Sale__2,Sale__2)(7)")]
         {
-            let text = back.sheets[0].cell(CellRef::new(row, 0)).and_then(|c| c.formula.as_ref()).map(|f| f.text.as_str());
-            assert_eq!(text, Some(f), "cycle {cycle}");
+            let text = back.sheets[0].cell(CellRef::new(row, 0)).and_then(|c| c.formula.as_ref()).map(|f| f.text().into_owned());
+            assert_eq!(text.as_deref(), Some(f), "cycle {cycle}");
         }
         let sh = &back.sheets[0];
         for (row, target) in [(6, "#REF!"), (7, "#NAME?"), (8, "Sale_[Value]")] {

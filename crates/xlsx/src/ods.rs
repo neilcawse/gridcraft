@@ -1476,7 +1476,7 @@ impl Import {
     /// without `_xlpm.`).
     fn importable(&self, text: &str, sheet: usize, known: &dyn Fn(&str) -> bool) -> Result<Formula, Unsupported> {
         let f = Formula::new(text);
-        let expr = f.expr.as_deref().ok_or(Unsupported("syntax GridCraft can't parse yet"))?;
+        let expr = &f.expr().ok_or(Unsupported("syntax GridCraft can't parse yet"))?;
         if let Some(why) = self.refusal(expr) {
             return Err(Unsupported(why));
         }

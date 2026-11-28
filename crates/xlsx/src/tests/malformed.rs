@@ -136,6 +136,90 @@ fn zip_bomb_is_rejected() {
     assert!(matches!(read_xlsx(&bytes), Err(IoError::TooLarge(_))));
 }
 
+/// Worksheet entries damaged within the size limits (a wrong checksum; one inflating a few bytes
+/// past the size it declares) are charged what they inflated, so they open with a warning each and
+/// the intact parts around them (the document properties) are still read and saved. A worksheet
+/// over the part limit makes the file too large to open, whatever follows it.
+#[test]
+fn damaged_worksheet_entries_recover_within_the_limits() {
+    use crate::testing::{Entry, damaged_zip};
+    let wb = r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="A" sheetId="1" r:id="rId1"/><sheet name="B" sheetId="2" r:id="rId2"/></sheets></workbook>"#;
+    let rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#;
+    let root = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/></Relationships>"#;
+    let core = r#"<?xml version="1.0"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:creator>Someone</dc:creator></cp:coreProperties>"#;
+    let sheet = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>"#;
+    let package = |first: Entry<'static>, second: Entry<'static>| {
+        damaged_zip(&[
+            Entry::Intact("[Content_Types].xml", super::CT.as_bytes()),
+            Entry::Intact("_rels/.rels", root.as_bytes()),
+            Entry::Intact("xl/workbook.xml", wb.as_bytes()),
+            Entry::Intact("xl/_rels/workbook.xml.rels", rels.as_bytes()),
+            first,
+            second,
+            Entry::Intact("docProps/core.xml", core.as_bytes()),
+        ])
+    };
+    let bad = |part: &'static str| Entry::BadChecksum(part, sheet);
+    let overrun = Entry::BadChecksumAndSize("xl/worksheets/sheet2.xml", sheet, sheet.len() as u32 - 5);
+    let (wb, report) = read_xlsx(&package(bad("xl/worksheets/sheet1.xml"), overrun)).unwrap();
+    assert_eq!(wb.sheets.len(), 2);
+    for name in ["A", "B"] {
+        assert_eq!(report.warnings.iter().filter(|w| w.contains(&format!("sheet \"{name}\""))).count(), 1, "{:?}", report.warnings);
+    }
+    assert_eq!(wb.props.author, "Someone", "the intact document properties are read");
+    let (back, _) = read_xlsx(&write_xlsx(&wb).unwrap()).unwrap();
+    assert_eq!((back.props.author.as_str(), back.props.created.as_str()), ("Someone", ""), "and saved as they were");
+    // Over the part limit: too large to open, though the next sheet is only damaged.
+    let huge = Entry::BadStream("xl/worksheets/sheet1.xml", (crate::package::MAX_PART + 1) as u32);
+    let err = read_xlsx(&package(huge, bad("xl/worksheets/sheet2.xml"))).unwrap_err();
+    assert!(matches!(&err, IoError::TooLarge(m) if m.contains("sheet1.xml")), "{err:?}");
+}
+
+/// A two-sheet workbook under a part limit of `LIMIT` bytes (above every other part's size): sheet
+/// "A" intact, sheet "B" the entry `second` makes.
+fn limited_two_sheets(second: crate::testing::Entry<'_>) -> Result<(gridcraft_model::Workbook, crate::ReadReport), IoError> {
+    use crate::testing::{Entry, damaged_zip};
+    let wb = r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="A" sheetId="1" r:id="rId1"/><sheet name="B" sheetId="2" r:id="rId2"/></sheets></workbook>"#;
+    let rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#;
+    let intact = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>42</v></c></row></sheetData></worksheet>"#;
+    let bytes = damaged_zip(&[
+        Entry::Intact("[Content_Types].xml", super::CT.as_bytes()),
+        Entry::Intact("_rels/.rels", super::ROOT_RELS.as_bytes()),
+        Entry::Intact("xl/workbook.xml", wb.as_bytes()),
+        Entry::Intact("xl/_rels/workbook.xml.rels", rels.as_bytes()),
+        Entry::Intact("xl/worksheets/sheet1.xml", intact),
+        second,
+    ]);
+    crate::package::PART_LIMIT_FOR_TEST.with(|c| c.set(LIMIT));
+    let read = read_xlsx(&bytes);
+    crate::package::PART_LIMIT_FOR_TEST.with(|c| c.set(crate::package::MAX_PART));
+    read
+}
+
+const LIMIT: u64 = 4096;
+
+/// A worksheet whose output runs one byte past the part limit (and past the size it declares)
+/// makes the file too large to open, though its entry declares less.
+#[test]
+fn a_worksheet_inflating_past_the_part_limit_is_too_large() {
+    let data = vec![b' '; LIMIT as usize + 1];
+    let second = crate::testing::Entry::BadChecksumAndSize("xl/worksheets/sheet2.xml", &data, LIMIT as u32 - 10);
+    let err = limited_two_sheets(second).unwrap_err();
+    assert!(matches!(&err, IoError::TooLarge(m) if m.contains("sheet2.xml")), "{err:?}");
+}
+
+/// A worksheet that inflates to exactly the part limit with a wrong checksum is damaged, not too
+/// large: the file opens with a warning for it, and the intact sheet before it keeps its contents.
+#[test]
+fn a_worksheet_inflating_to_the_part_limit_with_a_bad_checksum_opens_with_a_warning() {
+    use gridcraft_core::{CellRef, Value};
+    let data = vec![b' '; LIMIT as usize];
+    let (wb, report) = limited_two_sheets(crate::testing::Entry::BadChecksum("xl/worksheets/sheet2.xml", &data)).unwrap();
+    assert_eq!(report.warnings.iter().filter(|w| w.contains("sheet \"B\"")).count(), 1, "{:?}", report.warnings);
+    let a = wb.sheet(0).unwrap();
+    assert_eq!(a.cells.get(CellRef::new(0, 0)).map(|c| c.value.clone()), Some(Value::Number(42.0)));
+}
+
 /// Threaded comments, persons and note VML from a hostile file: odd links and values are dropped,
 /// broken parts are skipped, nothing panics.
 #[test]
@@ -163,7 +247,7 @@ fn hostile_threaded_comments_persons_and_note_vml() {
         let mut f = z.by_index(i).unwrap();
         let mut d = vec![];
         std::io::Read::read_to_end(&mut f, &mut d).unwrap();
-        parts.push((f.name().to_string(), d));
+        parts.push((f.name().unwrap().to_string(), d));
     }
     let ns = r#"xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments""#;
     let deep = "<v:group>".repeat(300) + &"</v:group>".repeat(300);
@@ -267,7 +351,7 @@ fn hostile_formula_text_does_not_overflow_the_stack() {
             let s = wb.sheet(0).expect("sheet");
             let a1 = s.cell(gridcraft_core::CellRef::new(0, 0)).and_then(|c| c.formula.clone()).expect("formula kept");
             let b1 = s.cell(gridcraft_core::CellRef::new(0, 1)).and_then(|c| c.formula.clone()).expect("formula kept");
-            let kept = (a1.expr.is_none(), b1.expr.is_none(), a1.text.len(), s.value(gridcraft_core::CellRef::new(0, 0)));
+            let kept = (!a1.has_cached_expr(), !b1.has_cached_expr(), a1.text().len(), s.value(gridcraft_core::CellRef::new(0, 0)));
             assert_eq!(wb.names.first().map(|n| n.formula.len()), Some(1_000_001));
             let out = write_xlsx(&wb).expect("writable");
             drop(wb);
@@ -441,8 +525,8 @@ fn hyperlink_copies_are_bounded() {
     assert_eq!(wb.sheets[0].hyperlinks.len(), 10_000);
 }
 
-/// #2173: every rule of a conditional-format block copies the block's ranges; the kept range
-/// cells (ranges x rules) are capped per sheet.
+/// #2173: every rule of a conditional-format block copies the block's deduplicated ranges; the
+/// total kept distinct range entries (ranges x rules) are capped per sheet.
 #[test]
 fn conditional_format_range_copies_are_bounded() {
     let sq = (1..=10_000).map(|r| format!("A{r}")).collect::<Vec<_>>().join(" ");
@@ -450,38 +534,76 @@ fn conditional_format_range_copies_are_bounded() {
     let body = format!(r#"<sheetData/><conditionalFormatting sqref="{sq}">{rules}</conditionalFormatting>"#);
     let (wb, rep) = read_xlsx(&minimal(&body, &[], "", "")).unwrap();
     let cfs = &wb.sheets[0].cond_formats;
-    // 400 rules of 10,000 one-cell ranges reach the 4,000,000 kept-cell cap.
-    assert_eq!(cfs.len(), 400);
+    // 10 rules of 10,000 distinct one-cell ranges reach the 100,000 kept-range-entry cap.
+    assert_eq!(cfs.len(), 10);
     assert!(cfs.iter().all(|c| c.ranges.len() == 10_000));
-    assert!(rep.warnings.iter().any(|w| w.contains("kept range cells")), "{:?}", rep.warnings);
+    assert!(rep.warnings.iter().any(|w| w.contains("kept range entries")), "{:?}", rep.warnings);
 }
 
-/// #2173: the kept-range-cell cap counts every block of the sheet. A large block that fills the
-/// cap leaves no room for a later one-cell block.
+/// #2173: the kept-range cap counts every block of the sheet. Blocks that fill the cap leave no
+/// room for a later block, while single full-column ranges like `F13:J1048576` cost one entry each.
 #[test]
 fn conditional_format_cap_holds_across_blocks() {
+    let sq = (1..=10_000).map(|r| format!("A{r}")).collect::<Vec<_>>().join(" ");
     let block = |sq: &str, n: usize| {
         format!(r#"<conditionalFormatting sqref="{sq}">{}</conditionalFormatting>"#, r#"<cfRule type="containsBlanks" priority="1"/>"#.repeat(n))
     };
-    let body = format!("<sheetData/>{}{}", block("A1:D1000000", 1), block("E1", 1));
+    let body = format!("<sheetData/>{}{}", block(&sq, 400), block("E1", 1));
     let (wb, rep) = read_xlsx(&minimal(&body, &[], "", "")).unwrap();
     let cfs = &wb.sheets[0].cond_formats;
-    assert_eq!(cfs.len(), 1, "4,000,000 cells fill the cap; the one-cell block would exceed it");
-    assert_eq!(cfs[0].ranges, vec![gridcraft_core::RangeRef::parse("A1:D1000000").unwrap()]);
-    assert!(rep.warnings.iter().any(|w| w.contains("kept range cells")), "{:?}", rep.warnings);
+    assert_eq!(cfs.len(), 10, "100,000 range entries fill the cap; the extra block would exceed it");
+    assert!(rep.warnings.iter().any(|w| w.contains("kept range entries")), "{:?}", rep.warnings);
 }
 
-/// #2173: earlier blocks are charged their own cells, not the later block's size times the rule
-/// count, so a large block after a few small rules still fits under the cap.
+/// #2173: earlier blocks are charged their own range entries, not the later block's size times the
+/// rule count, and legitimate multi-column full-sheet ranges (e.g. `F13:J1048576`) are retained.
 #[test]
 fn conditional_format_cap_admits_a_large_block_after_small_ones() {
     let block = |sq: &str, n: usize| {
         format!(r#"<conditionalFormatting sqref="{sq}">{}</conditionalFormatting>"#, r#"<cfRule type="containsBlanks" priority="1"/>"#.repeat(n))
     };
-    let body = format!("<sheetData/>{}{}", block("E1", 3), block("A1:C1000000", 1));
+    let body = format!("<sheetData/>{}{}", block("E1", 3), block("F13:J1048576", 3));
     let (wb, rep) = read_xlsx(&minimal(&body, &[], "", "")).unwrap();
-    assert_eq!(wb.sheets[0].cond_formats.len(), 4, "3 + 3,000,000 kept cells are under the cap");
-    assert!(!rep.warnings.iter().any(|w| w.contains("kept range cells")), "{:?}", rep.warnings);
+    assert_eq!(wb.sheets[0].cond_formats.len(), 6, "full-column sqref rules should all be kept");
+    assert!(!rep.warnings.iter().any(|w| w.contains("kept range entries")), "{:?}", rep.warnings);
+}
+
+#[test]
+fn conditional_format_dedups_sqref_and_keeps_all_full_column_rules_on_large_sheet() {
+    let styles = r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellXfs count="1"><xf/></cellXfs></styleSheet>"#;
+    let style_rel =
+        r#"<Relationship Id="rIdStyle" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>"#;
+    let parts = [("xl/styles.xml", styles)];
+
+    // (a) Legitimate 50,000x20 sheet (A1:T50000) with 5 full-column A:T cellIs rules:
+    // each rule costs 1 distinct RangeRef entry (5 total), so all 5/5 rules stay with 0 warnings.
+    let rows: String = (1..=50_000).map(|r| format!(r#"<row r="{r}"><c r="A{r}"><v>{r}</v></c><c r="T{r}"><v>{r}</v></c></row>"#)).collect();
+    let five_rules = (1..=5)
+        .map(|i| format!(r#"<cfRule type="cellIs" operator="greaterThan" priority="{i}"><formula>{}</formula></cfRule>"#, i * 100))
+        .collect::<String>();
+    let full_col = format!(r#"<conditionalFormatting sqref="A:T">{five_rules}</conditionalFormatting>"#);
+    let (wb_ok, rep_ok) = read_xlsx(&minimal(&format!("<sheetData>{rows}</sheetData>{full_col}"), &parts, style_rel, "")).unwrap();
+    assert_eq!(wb_ok.sheets[0].cond_formats.len(), 5, "all 5/5 A:T rules on a 50,000x20 sheet must be kept");
+    assert!(rep_ok.warnings.is_empty(), "expected zero warnings, got {:?}", rep_ok.warnings);
+
+    // (b) Repeated sqref entries are deduplicated on parse while preserving first-seen order.
+    let repeated_sq = vec!["A1:Y2000"; 2_000].join(" ");
+    let dedup_body = format!(
+        r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData><conditionalFormatting sqref="{repeated_sq}"><cfRule type="cellIs" operator="equal" priority="1"><formula>999</formula></cfRule></conditionalFormatting><conditionalFormatting sqref="C3 A1 C3 B2 A1"><cfRule type="containsBlanks" priority="2"/></conditionalFormatting>"#
+    );
+    let (wb_dedup, rep_dedup) = read_xlsx(&minimal(&dedup_body, &parts, style_rel, "")).unwrap();
+    assert_eq!(wb_dedup.sheets[0].cond_formats.len(), 2);
+    assert_eq!(wb_dedup.sheets[0].cond_formats[0].ranges.len(), 1, "2,000 duplicate A1:Y2000 entries must deduplicate to 1");
+    assert_eq!(
+        wb_dedup.sheets[0].cond_formats[1].ranges,
+        vec![
+            gridcraft_core::RangeRef::parse("C3").unwrap(),
+            gridcraft_core::RangeRef::parse("A1").unwrap(),
+            gridcraft_core::RangeRef::parse("B2").unwrap(),
+        ],
+        "sqref deduplication must preserve first-seen order"
+    );
+    assert!(rep_dedup.warnings.is_empty(), "{:?}", rep_dedup.warnings);
 }
 
 /// #2173: cell formats share one copy of each custom number format (even an over-long one, which

@@ -439,8 +439,9 @@ fn with_xlsx_parts(xlsx: Vec<u8>, replacements: &[(&str, &str)]) -> Vec<u8> {
     let mut dst = ZipWriter::new(Cursor::new(Vec::new()));
     for entry in 0..src.len() {
         let mut part = src.by_index(entry).unwrap();
-        dst.start_file(part.name(), SimpleFileOptions::default()).unwrap();
-        if let Some((_, xml)) = replacements.iter().find(|(name, _)| *name == part.name()) {
+        let part_name = part.name().unwrap().to_string();
+        dst.start_file(part_name.as_str(), SimpleFileOptions::default()).unwrap();
+        if let Some((_, xml)) = replacements.iter().find(|(name, _)| *name == part_name) {
             dst.write_all(xml.as_bytes()).unwrap();
         } else {
             let mut bytes = Vec::new();
@@ -1345,16 +1346,19 @@ fn full_sync_tolerates_only_unsupported_errors() {
 }
 
 /// Apple's ENOTSUP is 45 (EOPNOTSUPP is 102), and std maps only the latter to
-/// `ErrorKind::Unsupported`: F_FULLFSYNC refused with ENOTSUP must still save. Elsewhere 45 is
-/// another error (EL2NSYNC on Linux) and stays a failed save.
+/// `ErrorKind::Unsupported`: F_FULLFSYNC refused with ENOTSUP must still save. On Linux, 45 is
+/// EL2NSYNC and stays a failed save. On FreeBSD and other BSDs, 45 is ENOTSUP (the same value as
+/// EOPNOTSUPP), so this host's std reports `ErrorKind::Unsupported` and the flush is tolerated
+/// even when the `apple` flag is false — which is the real helper's behaviour on those systems.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn full_sync_tolerates_apple_enotsup() {
-    use std::io::Error;
+    use std::io::{Error, ErrorKind};
     let enotsup = Error::from_raw_os_error(45);
     assert!(flush_unsupported_on(&enotsup, true, true), "ENOTSUP on Apple");
-    assert!(!flush_unsupported_on(&enotsup, true, false), "45 on other Unix");
-    assert!(!flush_unsupported_on(&enotsup, false, false), "45 on Windows");
+    let host_maps_45_unsupported = enotsup.kind() == ErrorKind::Unsupported;
+    assert_eq!(flush_unsupported_on(&enotsup, true, false), host_maps_45_unsupported, "45 on other Unix");
+    assert_eq!(flush_unsupported_on(&enotsup, false, false), host_maps_45_unsupported, "45 on Windows");
     assert!(flush_unsupported_on(&Error::from_raw_os_error(25), true, true), "ENOTTY on Apple");
     assert!(!flush_unsupported_on(&Error::from_raw_os_error(5), true, true), "EIO on Apple");
     assert!(!flush_unsupported_on(&Error::from_raw_os_error(28), true, true), "ENOSPC on Apple");
@@ -1449,6 +1453,64 @@ fn csv_save_keeps_the_separator_it_was_opened_with() {
     let tabs = "a\tb\r\n1\t2\r\n";
     let (wb, _) = open_bytes("tabs.csv", tabs.as_bytes()).unwrap();
     assert_eq!(String::from_utf8(save_bytes(&wb, "tabs.csv").unwrap()).unwrap(), tabs);
+}
+
+/// #1446: File › Open honours Excel's `sep=` first line; saved again, the file opens in the same
+/// columns. A `.txt` file is read with tabs, so its `sep=` line stays data.
+#[test]
+fn csv_open_honours_a_sep_line_and_saves_a_file_that_reopens_in_columns() {
+    let (wb, _) = open_bytes("parts.csv", b"sep=|\r\nPart|Note\r\n1|a,b\r\n").unwrap();
+    let sh = wb.sheet(0).unwrap();
+    let text = |a: &str| sh.value(CellRef::parse(a).unwrap()).as_text().map(str::to_string);
+    assert_eq!((text("A1"), text("B1"), text("B2")), (Some("Part".into()), Some("Note".into()), Some("a,b".into())));
+    let saved = save_bytes(&wb, "parts.csv").unwrap();
+    assert_eq!(String::from_utf8(saved.clone()).unwrap(), "Part,Note\r\n1,\"a,b\"\r\n");
+    let (again, _) = open_bytes("parts.csv", &saved).unwrap();
+    assert_eq!(again.sheet(0).unwrap().value(CellRef::parse("B2").unwrap()).as_text(), Some("a,b"));
+    // `sep=;` keeps its semicolons, as a semicolon file does.
+    let (semi, _) = open_bytes("semi.csv", b"sep=;\r\na;b\r\n").unwrap();
+    assert_eq!(save_bytes(&semi, "semi.csv").unwrap(), b"a;b\r\n");
+    let (txt, _) = open_bytes("list.txt", b"sep=|\r\na\tb\r\n").unwrap();
+    assert_eq!(txt.sheet(0).unwrap().value(CellRef::new(0, 0)).as_text(), Some("sep=|"));
+}
+
+/// A first cell that reads like a `sep=` line needs one of its own only in a CSV. A `.tsv` is read
+/// with tabs given, so a `sep=` line there would come back as an extra row above the data.
+#[test]
+fn csv_save_names_its_delimiter_when_reopening_would_pick_another() {
+    let cells = |wb: &Workbook| {
+        let sh = wb.sheet(0).unwrap();
+        (0..2).map(|c| sh.value(CellRef::new(0, c)).as_text().map(str::to_string)).collect::<Vec<_>>()
+    };
+    // Read with `;`; saved, `a,b` loses its quotes and the line has one comma and one semicolon,
+    // which detection alone would read as comma-separated.
+    let (wb, _) = open_bytes("tie.csv", b"sep=;\r\n\"a,b\";x\r\n").unwrap();
+    let saved = save_bytes(&wb, "tie.csv").unwrap();
+    assert_eq!(saved, b"sep=;\r\na,b;x\r\n");
+    assert_eq!(cells(&open_bytes("tie.csv", &saved).unwrap().0), [Some("a,b".into()), Some("x".into())]);
+    // `|` is saved as commas; semicolons in the values would make detection pick `;`.
+    let (wb, _) = open_bytes("pipe.csv", b"sep=|\r\na;b;c|d;e;f\r\n").unwrap();
+    let saved = save_bytes(&wb, "pipe.csv").unwrap();
+    assert_eq!(saved, b"sep=,\r\na;b;c,d;e;f\r\n");
+    assert_eq!(cells(&open_bytes("pipe.csv", &saved).unwrap().0), [Some("a;b;c".into()), Some("d;e;f".into())]);
+}
+
+#[test]
+fn tsv_save_writes_no_sep_line_and_reopens_in_place() {
+    let mut wb = Workbook::new();
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.set_value(CellRef::new(0, 0), gridcraft_core::Value::text("sep=;"));
+    sh.set_value(CellRef::new(1, 0), gridcraft_core::Value::text("x"));
+    let saved = save_bytes(&wb, "list.tsv").unwrap();
+    assert_eq!(saved, b"sep=;\r\nx\r\n");
+    let (again, _) = open_bytes("list.tsv", &saved).unwrap();
+    let text = |r: u32| again.sheet(0).unwrap().value(CellRef::new(r, 0)).as_text().map(str::to_string);
+    assert_eq!((text(0), text(1)), (Some("sep=;".into()), Some("x".into())));
+    // Saved as CSV, the same sheet keeps its protective line, which reading drops again.
+    let csv = save_bytes(&wb, "list.csv").unwrap();
+    assert_eq!(csv, b"sep=,\r\nsep=;\r\nx\r\n");
+    let (again, _) = open_bytes("list.csv", &csv).unwrap();
+    assert_eq!(again.sheet(0).unwrap().value(CellRef::new(0, 0)).as_text(), Some("sep=;"));
 }
 
 #[test]
@@ -1725,7 +1787,7 @@ fn opening_google_sheets_export_unwraps_only_formulas_gridcraft_calculates() {
     }
     let bytes = gridcraft_xlsx::write_xlsx(&wb).unwrap();
     let (opened, _) = open_bytes("google.xlsx", &bytes).unwrap();
-    let text = |at: &str| opened.sheets[0].cells.get(CellRef::parse(at).unwrap()).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone());
+    let text = |at: &str| opened.sheets[0].cells.get(CellRef::parse(at).unwrap()).and_then(|c| c.formula.as_ref()).map(|f| f.text().into_owned());
     assert_eq!(text("A1").as_deref(), Some("SUM(ROW(B1:B3))"));
     assert_eq!(text("A2").as_deref(), Some("IFERROR(__XLUDF.DUMMYFUNCTION(\"GOOGLETRANSLATE(\"\"hi\"\",\"\"en\"\",\"\"fr\"\")\"),\"salut\")"));
     assert_eq!(opened.sheets[0].cells.get(CellRef::parse("A2").unwrap()).map(|c| c.value.clone()), Some(Value::text("salut")));
@@ -1812,7 +1874,7 @@ fn sylk_files_open_with_values_formulas_formats_and_widths() {
     let sh = wb.sheet(0).unwrap();
     assert_eq!(sh.name, "Parts list", "the sheet is named after the file");
     let at = |a: &str| CellRef::parse(a).unwrap();
-    let formula = |a: &str| sh.cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone());
+    let formula = |a: &str| sh.cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text().into_owned());
     let text = |s: &str| gridcraft_core::Value::Text(s.into());
     assert_eq!(sh.value(at("A1")), text("Item"));
     assert_eq!(sh.value(at("A2")), text("Bolts; small"), ";; is a semicolon");

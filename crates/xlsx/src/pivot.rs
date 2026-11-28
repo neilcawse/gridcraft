@@ -9,9 +9,26 @@
 //! A PivotTable whose cache can't be rebuilt from the model (a source in another workbook, or a
 //! defined name) goes back as the file had it while it is unchanged (`passthrough::pivots`).
 //!
+//! Distinct Count: SpreadsheetML's subtotal list has no distinct count (Excel has one only for
+//! PivotTables on its Data Model, whose binary model part we don't write). Such a value field is
+//! written as `subtotal="count"` with a GridCraft `extLst` marker ([`EXT_GC_DATA_FIELD`]) that
+//! GridCraft reads back as Distinct Count; other readers ignore the unknown extension. The cache
+//! of a PivotTable with a Distinct Count field is written without `refreshOnLoad`, so Excel opens
+//! it showing the distinct counts already on the sheet. A Refresh in Excel recomputes the field as
+//! Count.
+//!
 //! Reading: the cache's source and field names plus the table's areas, functions, show-values-as,
 //! layout flags, grand totals and style become a model [`PivotTable`]. Anything we don't model
 //! (OLAP sources, calculated fields, numeric grouping…) becomes a warning.
+//!
+//! A PivotTable whose source is a range or name in another workbook (its cache's
+//! `worksheetSource` has an `r:id` to a workbook path relationship, see
+//! [`crate::package::is_external_workbook_path`]), a data connection or
+//! the workbook's Data Model (`cacheSource type="external"` with a `connectionId` in
+//! `xl/connections.xml`) is not modelled: GridCraft never opens the other workbook, runs the
+//! connection or loads the model, so it couldn't refresh it. [`read_pivots`] reports it instead,
+//! and `passthrough` keeps its PivotTable, cache and records parts unchanged (with the Data Model
+//! for a PivotTable on the model).
 
 use std::collections::HashMap;
 
@@ -19,8 +36,8 @@ use gridcraft_core::date::{datetime_from_serial, iso_ymd, serial_from_iso_ymd};
 use gridcraft_core::{CellRef, DateSystem, RangeRef, Value, number_to_text};
 use gridcraft_formula::quote_sheet;
 use gridcraft_model::{
-    PivotCalcField, PivotDateGroup, PivotField, PivotFilter, PivotFunc, PivotLayout, PivotScopeItem, PivotShowAs, PivotSort, PivotTable, PivotValue,
-    Workbook,
+    PivotCalcField, PivotColRole, PivotCustomStyle, PivotDateGroup, PivotField, PivotFilter, PivotFunc, PivotLayout, PivotRowRole, PivotScopeItem,
+    PivotShowAs, PivotSort, PivotStyleElement, PivotStyleGrid, PivotStyleLayout, PivotStyleOptions, PivotTable, PivotValue, Workbook,
 };
 
 use crate::IoError;
@@ -31,22 +48,20 @@ use crate::xml::{El, esc_attr};
 mod read;
 mod write;
 
-pub use read::{CachesIn, NonSourceField, bind_sources, read_pivots};
+pub use read::{CachesIn, ExternalPivot, KeptSource, NonSourceField, ReadPivotSource, bind_sources, read_pivots};
 pub use write::{PivotSlicerInfo, PivotWriter};
-pub(crate) use write::{can_share, slicer_field_ok};
+pub(crate) use write::{can_share, resolve_source, rewrite_preserved_pivot_table, slicer_field_ok};
 pub const CT_PIVOT_TABLE: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.pivotTable+xml";
 pub const CT_PIVOT_CACHE_DEF: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml";
 pub const CT_PIVOT_CACHE_REC: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheRecords+xml";
 
 /// The parts of a PivotTable read into the model whose cache the writer may not rebuild (a source
-/// in another workbook, or a defined name), noted for pass-through.
+/// that is a defined name), noted for pass-through.
 pub struct PivotPartsIn {
     /// The PivotTable's model id.
     pub pivot: u32,
     pub table_part: String,
     pub cache_part: String,
-    /// Whether the cache's source is in another workbook.
-    pub external: bool,
 }
 
 /// Largest source block scanned for a cache (cells); bigger sources are not written.
@@ -87,6 +102,10 @@ const CUSTOM_SUBTOTALS: [&str; 11] = [
     "varPSubtotal",
 ];
 const NS_X14: &str = "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main";
+/// GridCraft's `dataField` extension: `<gc:summary func="distinctCount"/>` marks a value field
+/// written as `subtotal="count"` as a Distinct Count (see the module documentation).
+const EXT_GC_DATA_FIELD: &str = "{80B1AD42-0C9F-45FF-B109-D57FB0F4F0B4}";
+const NS_GC: &str = "https://github.com/storytold/gridcraft/ns/pivot/2026";
 
 pub(crate) fn is_x14_cache_definition(ns: &quick_xml::name::NamespaceResolver, e: &quick_xml::events::BytesStart<'_>) -> bool {
     let (resolved, name) = ns.resolve_element(e.name());
@@ -122,6 +141,10 @@ fn func_name(f: PivotFunc) -> &'static str {
         PivotFunc::Min => "min",
         PivotFunc::Product => "product",
         PivotFunc::CountNumbers => "countNums",
+        // The file format's subtotal list has no distinct count (Excel keeps it in a Data Model
+        // extension), so the nearest function is written, with a GridCraft extension that marks
+        // the field as Distinct Count (see the module documentation).
+        PivotFunc::DistinctCount => "count",
         PivotFunc::StdDev => "stdDev",
         PivotFunc::StdDevP => "stdDevp",
         PivotFunc::Var => "var",
@@ -155,6 +178,7 @@ fn func_caption(f: PivotFunc) -> &'static str {
         PivotFunc::Min => "Min",
         PivotFunc::Product => "Product",
         PivotFunc::CountNumbers => "Count",
+        PivotFunc::DistinctCount => "Distinct Count",
         PivotFunc::StdDev => "StdDev",
         PivotFunc::StdDevP => "StdDevp",
         PivotFunc::Var => "Var",
