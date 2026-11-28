@@ -183,7 +183,8 @@ pub trait Host {
     fn note_volatile(&mut self) {}
     /// Called when a formula uses a linked workbook's name whose definition can't be calculated
     /// from the values saved with the link (no definition, `#REF!`, or sheets, names or tables
-    /// the link didn't save). Excel keeps showing the value it saved for such a formula, since
+    /// the link didn't save), or reads as a value a cell the link didn't save from a sheet whose
+    /// last update failed. Excel keeps showing the value it saved for such a formula, since
     /// linked values only change when the link is updated; hosts that hold that value use it.
     fn note_unknown_link(&mut self) {}
     /// The spill range of the dynamic array anchored at `anchor` (`None`: it doesn't spill).
@@ -488,15 +489,23 @@ impl<'h> Evaluator<'h> {
         self.host.workbook().external_books.get(book)?.sheets.get(s)
     }
 
-    /// The value of a cell, in this workbook or in a linked one's saved values.
+    /// The value of a cell, in this workbook or in a linked one's saved values. A cell that a
+    /// linked sheet whose last update failed (`refreshError`) didn't save is `#REF!`; when the
+    /// sheet saved other cells, it is also noted to the host, since what Excel showed for it isn't
+    /// known (see [`linked_value`]). Excel's caches show `#REF!` throughout for a failed sheet
+    /// that saved no cells.
     pub(super) fn cell(&mut self, sheet: usize, c: CellRef) -> Value {
         if linked_parts(sheet).is_none() {
             return self.host.cell_value(sheet, c);
         }
-        match self.linked_sheet(sheet) {
-            Some(s) => linked_value(s, s.cached_value(c)),
-            None => Value::Error(CellError::Ref),
+        let Some(s) = self.linked_sheet(sheet) else { return Value::Error(CellError::Ref) };
+        let saved = s.cached_value(c);
+        let unknown = saved.is_none() && s.refresh_error && !s.cells.is_empty();
+        let v = linked_value(s, saved);
+        if unknown {
+            self.host.note_unknown_link();
         }
+        v
     }
 
     /// Values of a block, row-major, in this workbook or in a linked one's saved values.

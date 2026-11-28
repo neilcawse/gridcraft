@@ -5023,6 +5023,49 @@ fn a_linked_sheet_without_sheet_data_keeps_its_formula_cache_through_reopen() {
     assert_eq!(s.execute("cell.get", json!({"cell": "B1"})).unwrap()["formula"], "=[1]Sheet1!A1");
 }
 
+/// The Excel-cached values in the public SpreadsheetBench 59932 workbooks show 0 for
+/// `='[1]Stock '!B6`, a cell the failed (`refreshError`) linked sheet didn't save, while the Enron
+/// workbooks converted from `.xls` show `#REF!` for such cells; nothing in the link part tells
+/// them apart. The formula keeps the value Excel saved until it is entered again, and the link
+/// part is saved byte for byte.
+#[test]
+fn an_uncached_cell_of_a_failed_linked_sheet_keeps_the_saved_formula_value() {
+    use std::io::Read;
+    let part = |bytes: &[u8]| {
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut out = Vec::new();
+        zip.by_name("xl/externalLinks/externalLink1.xml").unwrap().read_to_end(&mut out).unwrap();
+        out
+    };
+    // Synthetic XLSX: B1 is `=[1]Sheet1!A1` saved as 10; the failed sheet saved only B2.
+    let partial = r#"<sheetDataSet><sheetData sheetId="0" refreshError="1"><row r="2"><cell r="B2"><v>5</v></cell></row></sheetData></sheetDataSet>"#;
+    let bytes = linked_workbook_with_data("Gone.xlsx", partial);
+    let mut s = s();
+    s.execute("file.open", json!({"name": "Linked.xlsx", "base64": crate::io::base64_encode(&bytes)})).unwrap();
+    s.execute("formulas.calculateNow", json!({})).unwrap();
+    assert_eq!(v(&s, "B1"), Value::Number(10.0));
+    s.execute("cell.set", json!({"cell": "C1", "input": "=B1+[1]Sheet1!B2"})).unwrap();
+    assert_eq!(v(&s, "C1"), Value::Number(15.0));
+    let saved = s.execute("file.saveBytes", json!({"format": "xlsx"})).unwrap();
+    let saved = crate::io::base64_decode(saved["base64"].as_str().unwrap()).unwrap();
+    assert_eq!(part(&saved), part(&bytes));
+    s.execute("file.open", json!({"name": "Reopened.xlsx", "base64": crate::io::base64_encode(&saved)})).unwrap();
+    s.execute("formulas.calculateNow", json!({})).unwrap();
+    assert_eq!(v(&s, "B1"), Value::Number(10.0));
+    assert_eq!(v(&s, "C1"), Value::Number(15.0));
+    // Entered again, the formula is calculated: the uncached cell is #REF!.
+    s.execute("cell.set", json!({"cell": "B1", "input": "=[1]Sheet1!A1"})).unwrap();
+    assert_eq!(v(&s, "B1"), Value::Error(gridcraft_core::CellError::Ref));
+    let recalculated = s.execute("file.saveBytes", json!({"format": "xlsx"})).unwrap();
+    s.execute("file.open", json!({"name": "Recalculated.xlsx", "base64": recalculated["base64"]})).unwrap();
+    assert_eq!(v(&s, "B1"), Value::Error(gridcraft_core::CellError::Ref));
+    // A failed sheet that saved no cells is #REF! throughout, as Excel's caches show.
+    let bytes = linked_workbook_with_data("Gone.xlsx", r#"<sheetDataSet><sheetData sheetId="0" refreshError="1"/></sheetDataSet>"#);
+    s.execute("file.open", json!({"name": "Empty.xlsx", "base64": crate::io::base64_encode(&bytes)})).unwrap();
+    s.execute("formulas.calculateNow", json!({})).unwrap();
+    assert_eq!(v(&s, "B1"), Value::Error(gridcraft_core::CellError::Ref));
+}
+
 /// The target of the linked workbook in a saved file.
 fn link_target(path: &std::path::Path) -> String {
     use std::io::Read;

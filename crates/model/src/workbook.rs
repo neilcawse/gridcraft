@@ -431,7 +431,8 @@ pub struct ExternalSheet {
     /// Cached cells, sorted by position (row, then column).
     pub cells: Vec<(CellRef, Value)>,
     /// The last update of the link couldn't read this sheet (`refreshError`): Excel keeps the
-    /// cells it had saved, and references to anything else in it are `#REF!`.
+    /// cells it had saved. What it shows for anything else in it differs between files (`#REF!`
+    /// or 0); see `gridcraft_calc::linked_value`.
     pub refresh_error: bool,
     /// The link saved no cells for this sheet at all (no `sheetData` for it, as when the file
     /// has no `sheetDataSet`): what Excel showed for references into it isn't known.
