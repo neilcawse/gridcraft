@@ -999,7 +999,8 @@ fn lookup_multi_area_index_errors_on_reference_and_evaluated_tables() {
     for (at, input) in [("D1", "1"), ("D2", "2"), ("E1", "10"), ("E2", "20"), ("G3", "=1/0"), ("G4", "=NA()")] {
         t.set(at, input);
     }
-    // A reference table cannot dereference a multi-area index. An evaluated table lifts it.
+    // A reference table cannot dereference a multi-area index. An evaluated table lifts it in a
+    // dynamic formula; a legacy array rejects it (below).
     t.set("A1", "=VLOOKUP(9,D1:E2,(G3,G4),FALSE)");
     t.set("A2", "=VLOOKUP(9,{1,10;2,20},(G3,G4),FALSE)");
     t.set("A3", "=VLOOKUP(2,D1:E2,(G3,G4),FALSE)");
@@ -1069,6 +1070,47 @@ fn legacy_lookup_truncates_cell_text_indexes_before_bounds() {
             t.set_legacy_array(&at, &formula, &at);
             assert_eq!(t.get(&at), expected, "{formula} with index {input}");
         }
+    }
+}
+
+#[test]
+fn legacy_array_lookup_index_rules_cover_inferred_index_shapes() {
+    // Inferred from the measured union and text cases: every index that evaluates to more
+    // than one area is rejected on a hit, while one-area indexes keep their array lifting, and
+    // cell text is read as any text-to-number coercion reads it.
+    let mut t = T::new();
+    t.wb.sheets.push(std::sync::Arc::new(gridcraft_model::Sheet::new("Sheet2")));
+    for (at, input) in [("D1", "1"), ("D2", "2"), ("K1", "=SEQUENCE(2)"), ("H1", "'1.5e0"), ("H2", "'$1.50"), ("H3", "'(1)")] {
+        t.set(at, input);
+    }
+    for (name, formula) in [("Two", "Sheet1!$D$1,Sheet1!$D$2"), ("One", "Sheet1!$D$1:$D$2")] {
+        t.wb.names.push(gridcraft_model::DefinedName {
+            name: name.into(),
+            scope: None,
+            formula: formula.into(),
+            comment: String::new(),
+            hidden: false,
+            uid: Default::default(),
+            legacy_grid: false,
+        });
+    }
+    let reference_error = Value::Error(CellError::Ref);
+    for (row, index, expected) in [
+        (1, "Two", [reference_error.clone(), reference_error.clone()]),
+        (2, "CHOOSE(1,(D1,D2))", [reference_error.clone(), reference_error.clone()]),
+        (3, "Sheet1:Sheet2!D2", [reference_error.clone(), reference_error]),
+        (4, "One", [Value::Number(2.0), Value::Number(2.0)]),
+        (5, "D1:D2", [Value::Number(2.0), Value::Number(2.0)]),
+        (6, "K1#", [Value::Number(2.0), Value::Number(2.0)]),
+    ] {
+        let formula = format!("=VLOOKUP(2,{{1,10;2,20}},{index},FALSE)");
+        t.set_legacy_array(&format!("A{row}"), &formula, &format!("A{row}:B{row}"));
+        assert_eq!([t.get(&format!("A{row}")), t.get(&format!("B{row}"))], expected, "{formula}");
+    }
+    for (row, expected) in [(1, Value::Number(2.0)), (2, Value::Number(2.0)), (3, Value::Error(CellError::Value))] {
+        let at = format!("F{row}");
+        t.set_legacy_array(&at, &format!("=VLOOKUP(2,{{1,10;2,20}},H{row},FALSE)"), &at);
+        assert_eq!(t.get(&at), expected, "H{row}");
     }
 }
 
