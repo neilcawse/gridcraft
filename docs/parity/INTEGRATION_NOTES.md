@@ -451,17 +451,35 @@ this supports retaining the marker independently of the current group. Undo rest
 and save/reopen keeps their outline state in GridCraft.
 
 Batch 5 did not inspect Excel's saved XML or measure summary placement above/left, nesting,
-stale markers at the destination boundary, or either of these GridCraft policies:
+or stale markers at the destination boundary. GridCraft does not clear a marker outside the
+paste. A same-sheet Cut resets vacated lines before marking the destination boundary; an
+object-model `Range.Cut` into the immediately preceding rows confirmed that the vacated line
+can receive the collapsed marker (hidden level-2 rows 3:4 cut to 1:2, row 3 reads `ShowDetail` false).
 
-- A marker-only write requires Format Rows or Format Columns on a protected sheet, even if
-  the pasted line records already match. Without permission the paste is refused.
-- A same-sheet Cut resets the vacated source lines before marking the destination boundary.
-  A vacated line immediately outside the paste can receive a marker based on the final group.
-
-GridCraft does not clear a marker outside the paste. AutoFill keeps the outline on the
+AutoFill keeps the outline on the
 destination; X64 measures a change in visibility, not in outlines. Paste Special modes other
 than All, transposed, linked, filtered, tiled and drag-and-drop pastes keep their previous
 behavior: they transfer no line formats.
+
+### X65 — Whole-row Copy onto matching unlocked detail on a protected sheet
+
+Excel for Mac 16.115.2, object-model measurement of a synthetic workbook: `Range.Copy`
+with a destination copied rows 3:4 into rows 8:9 on two protected sheets. Both destinations
+were unlocked through a row style; Format Columns was denied on both and Format Rows was
+denied on one. Both accepted the copy: A8:A9 became `detail 3` / `detail 4`, rows 8 and 9
+stayed hidden at levels 1 and 2 and 0 pt, and row 10 stayed visible at level 1 and 15 pt
+while `ShowDetail` changed from true to false. Rows 7 and 11 were unchanged. Source row 5
+also changed to `ShowDetail` false; the mechanism is unmeasured and GridCraft does not
+reproduce that source-side effect.
+
+Old X44 rule: even a marker-only write required Format Rows or Format Columns. New rule:
+the below-detail summary marker can be set without Format Rows during a same-workbook plain
+whole-row Copy/Paste onto already hidden rows whose line records would not change. The rows
+must be unlocked, with formulas not hidden, through their row style, without conflicting
+explicit cell styles, and the hidden group that gets the marker must start inside the paste.
+Other line-format changes, protection checks, Cut, Paste Special and column transfers keep their
+previous rules. Excel UI Paste was not measured; applying the object-model result to
+GridCraft's shared Clipboard Paste path is an [inference].
 
 ## X23 — Sheet copy keeps tables
 
@@ -886,7 +904,7 @@ All 13 merge commits have the published lane head as their second parent. The re
 - **X44 × X48 (fix).** A row sort moves a shown row's whole line record (X48). A source row without a record used to clear only the destination's size, so the destination kept its outline level, collapsed-summary marker and line style. After an X44 paste marks a summary row, a sort that moves that row left a copy of the marker behind on the row that took its place. Now a recordless source row also resets the destination line (`crates/engine/src/cmd/data/sort.rs`), as X48 describes: "the moved line's settings replace the destination's". Test: `row_paste_outline::sort_after_whole_row_paste_keeps_hidden_detail_and_moves_the_summary_line`. The sort still has no outline awareness (X48 "Not handled"), so the marker moves with its row away from the hidden group.
 - **Row record coverage.** Under GridCraft's X48 rule, the style, thick-edge flags, custom height and XLSX bare-row marker travel with the source record rather than staying at its old index. A recordless source does not duplicate these settings. `row_sort_replaces_each_moved_line_record_including_absence` checks both directions, a hidden row, the header and the row just below the sort. X48's Excel readback establishes the visible-row permutation and group recovery in its fixture, not the treatment of those individual metadata fields.
 - **X45 × X48/X34/X38.** X48's collapsed-group sort tests use a 270° group. With X45 they pass with the root anchor as the turned box: members have height after the fit, and the hold, span check and recovery behave as X48 states. No code change.
-- **X44 × X47.** X44 gates its outline and marker writes on Format Rows or Format Columns, as whole-line paste already gated line formats; X47 gates direct sizing, including Default Width, on the same permissions. Under Format Rows only, a direct whole-row fill is refused (X47, measured). A whole-row paste still carries the source row's line style and outline level (X25/X44; X47 leaves transfers outside its direct-setter rule). Pinned by `protected_format_rows_refuses_direct_row_fill_but_whole_row_paste_carries_line_format`. Whether Excel lets a whole-row paste change fill under Format Rows only is unmeasured.
+- **X44 × X47.** X44 gates its outline and marker writes on Format Rows or Format Columns, as whole-line paste already gated line formats (except the marker-only write X65 measured); X47 gates direct sizing, including Default Width, on the same permissions. Under Format Rows only, a direct whole-row fill is refused (X47, measured). A whole-row paste still carries the source row's line style and outline level (X25/X44; X47 leaves transfers outside its direct-setter rule). Pinned by `protected_format_rows_refuses_direct_row_fill_but_whole_row_paste_carries_line_format`. Whether Excel lets a whole-row paste change fill under Format Rows only is unmeasured.
 - **X41 × X42.** An index computed by a `_xludf.` call is an index expression, like the unprefixed call of the same LAMBDA, so X41's order applies to it: its error beats a missed key and invalid mode text. Pinned by calc `name_bound_lookup_index_takes_the_x41_expression_order`.
 - **X42 × X46.** Typed entry applies both rules to one formula. `=_xludf.vstack([@Qty])` in a table takes the casing of the sheet-level name and binds to that table; outside every table it is refused. Pinned by `typed_name_call_with_a_bare_structured_ref_binds_or_is_refused`.
 

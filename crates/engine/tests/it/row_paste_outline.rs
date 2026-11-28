@@ -428,7 +428,7 @@ fn x25_paste_special_all_and_insert_copied_rows_carry_outline() {
 fn whole_row_paste_marking_a_summary_needs_row_formatting_on_a_protected_sheet() {
     use gridcraft_engine::model::SheetProtection;
 
-    // GridCraft policy, not measured in Excel: a marker-only write still needs Format Rows.
+    // A marker-only write still needs Format Rows when the destination rows are locked.
     // The destination rows already match the source, so only the summary marker would change.
     for format_rows in [false, true] {
         let mut s = Session::new();
@@ -461,13 +461,170 @@ fn whole_row_paste_marking_a_summary_needs_row_formatting_on_a_protected_sheet()
     }
 }
 
+/// Excel for Mac 16.115.2, object-model measurement of a synthetic workbook: copy source
+/// rows 3:4 to matching hidden rows 8:9 on another sheet, all unlocked by their row style.
+fn protected_row_copy_fixture(format_rows: bool) -> gridcraft_engine::Result<Session> {
+    use gridcraft_engine::model::SheetProtection;
+
+    let mut s = Session::new();
+    s.new_workbook();
+    s.execute("home.insertSheet", json!({"name": "Destination"}))?;
+    let wb = Arc::make_mut(&mut s.doc_mut()?.wb);
+    for (name, first, labels) in [("Sheet1", 2, ["detail 3", "detail 4"]), ("Destination", 7, ["old 8", "old 9"])] {
+        unlocked_detail_rows(wb, name, first, labels)?;
+    }
+    let dest = wb.sheet_index("Destination").and_then(|i| wb.sheet_mut(i)).ok_or(gridcraft_engine::EngineError::NoDocument)?;
+    dest.protection = Some(SheetProtection { format_rows, ..Default::default() });
+    s.execute("sheet.activate", json!({"sheet": "Destination"}))?;
+    Ok(s)
+}
+
+/// Hidden rows `first` (level 1) and `first + 1` (level 2), unlocked through their row style.
+fn unlocked_detail_rows(wb: &mut gridcraft_engine::model::Workbook, name: &str, first: u32, labels: [&str; 2]) -> gridcraft_engine::Result<()> {
+    let mut unlocked = Style::default();
+    unlocked.protection.locked = false;
+    let unlocked = wb.styles.intern(unlocked);
+    let sh = wb.sheet_index(name).and_then(|i| wb.sheet_mut(i)).ok_or(gridcraft_engine::EngineError::NoDocument)?;
+    for (row, outline, label) in [(first, 0, labels[0]), (first + 1, 1, labels[1])] {
+        sh.rows.insert(row, LineInfo { hidden: true, outline, style: Some(unlocked), ..Default::default() });
+        sh.set_value(CellRef::new(row, 0), Value::text(label));
+    }
+    Ok(())
+}
+
+fn assert_protected_row_copy(format_rows: bool) -> gridcraft_engine::Result<()> {
+    let mut s = protected_row_copy_fixture(format_rows)?;
+    let expected_detail = [(1, true, 0., true), (2, true, 0., true)];
+    let before = sheet(&s, "Destination");
+    let before_rows = before.rows.clone();
+    assert_eq!([8, 9].map(|row| row_readback(before, row)), expected_detail);
+    assert_eq!([7, 11].map(|row| row_readback(before, row)), [(1, false, 15., true); 2]);
+    assert_eq!(row_readback(before, 10), (1, false, 15., true));
+    s.execute("edit.copy", json!({"sheet": "Sheet1", "range": "3:4"}))?;
+    s.execute("edit.paste", json!({"at": "A8"}))?;
+    let after = sheet(&s, "Destination");
+    assert_eq!(after.value(at("A8")), Value::text("detail 3"));
+    assert_eq!(after.value(at("A9")), Value::text("detail 4"));
+    assert_eq!([8, 9].map(|row| row_readback(after, row)), expected_detail);
+    assert_eq!([7, 11].map(|row| row_readback(after, row)), [(1, false, 15., true); 2]);
+    assert_eq!(row_readback(after, 10), (1, false, 15., false));
+    // Excel also turned source row 5's ShowDetail false; that is not modelled, so it isn't pinned.
+    let after_rows = after.rows.clone();
+    s.execute("edit.undo", json!({}))?;
+    let undone = sheet(&s, "Destination");
+    assert_eq!((undone.rows.clone(), undone.value(at("A8"))), (before_rows, Value::text("old 8")));
+    s.execute("edit.redo", json!({}))?;
+    let redone = sheet(&s, "Destination");
+    assert_eq!((redone.rows.clone(), redone.value(at("A8"))), (after_rows, Value::text("detail 3")));
+    Ok(())
+}
+
+#[test]
+fn whole_row_copy_marks_unlocked_matching_detail_when_format_rows_is_denied() -> gridcraft_engine::Result<()> {
+    assert_protected_row_copy(false)
+}
+
+#[test]
+fn whole_row_copy_marks_unlocked_matching_detail_when_format_rows_is_allowed() -> gridcraft_engine::Result<()> {
+    assert_protected_row_copy(true)
+}
+
+/// Outside the measured shape the marker-only write still needs Format Rows: a cell overriding
+/// the row style, a row format change, Paste Special, Cut, a copy from another workbook, a
+/// visible destination row, a group reaching above the paste, or rows with formulas hidden.
+/// A copied cell that would change cell protection is refused by the cell protection rule.
+#[test]
+fn protected_row_copy_exception_excludes_other_shapes() -> gridcraft_engine::Result<()> {
+    use gridcraft_engine::model::style::Protection;
+
+    for case in [
+        "cell override",
+        "row height",
+        "paste special",
+        "cut",
+        "other workbook",
+        "visible row",
+        "group above paste",
+        "formulas hidden",
+        "incoming locked cell",
+    ] {
+        let mut s = protected_row_copy_fixture(false)?;
+        let wb = Arc::make_mut(&mut s.doc_mut()?.wb);
+        let source = wb.sheet_index("Sheet1").ok_or(gridcraft_engine::EngineError::NoDocument)?;
+        let dest = wb.sheet_index("Destination").ok_or(gridcraft_engine::EngineError::NoDocument)?;
+        fn line(wb: &mut gridcraft_engine::model::Workbook, sheet: usize, row: u32) -> gridcraft_engine::Result<&mut LineInfo> {
+            wb.sheet_mut(sheet).and_then(|sh| sh.rows.get_mut(&row)).ok_or(gridcraft_engine::EngineError::NoDocument)
+        }
+        match case {
+            "cell override" => {
+                let sh = wb.sheet_mut(dest).ok_or(gridcraft_engine::EngineError::NoDocument)?;
+                sh.set_value(at("C8"), Value::text("locked cell"));
+                sh.set_style(at("C8"), StyleId::DEFAULT);
+            }
+            "row height" => line(wb, dest, 7)?.size = Some(32.),
+            "visible row" => {
+                for (i, row) in [(source, 2), (dest, 7)] {
+                    line(wb, i, row)?.hidden = false;
+                }
+            }
+            "group above paste" => {
+                for (i, row) in [(source, 2), (dest, 7)] {
+                    line(wb, i, row)?.outline = 1;
+                }
+                // Row 7 joins the hidden group with the default (locked) style.
+                let sh = wb.sheet_mut(dest).ok_or(gridcraft_engine::EngineError::NoDocument)?;
+                sh.rows.insert(6, LineInfo { hidden: true, outline: 1, ..Default::default() });
+            }
+            "formulas hidden" => {
+                let mut hidden = Style::default();
+                hidden.protection = Protection { locked: false, hidden: true };
+                let hidden = wb.styles.intern(hidden);
+                for (i, first) in [(source, 2), (dest, 7)] {
+                    let sh = wb.sheet_mut(i).ok_or(gridcraft_engine::EngineError::NoDocument)?;
+                    for row in [first, first + 1] {
+                        sh.rows.get_mut(&row).ok_or(gridcraft_engine::EngineError::NoDocument)?.style = Some(hidden);
+                        sh.set_style(CellRef::new(row, 0), hidden);
+                    }
+                }
+            }
+            "incoming locked cell" => {
+                let sh = wb.sheet_mut(source).ok_or(gridcraft_engine::EngineError::NoDocument)?;
+                sh.set_value(at("C3"), Value::text("locked cell"));
+                sh.set_style(at("C3"), StyleId::DEFAULT);
+            }
+            _ => (),
+        }
+        let home = s.doc()?.uid;
+        if case == "other workbook" {
+            let other = s.new_workbook();
+            s.set_active(other);
+            unlocked_detail_rows(Arc::make_mut(&mut s.doc_mut()?.wb), "Sheet1", 2, ["detail 3", "detail 4"])?;
+        }
+        let copy = if case == "cut" { "edit.cut" } else { "edit.copy" };
+        s.execute(copy, json!({"sheet": "Sheet1", "range": "3:4"}))?;
+        if case == "other workbook" {
+            s.set_active(0);
+            assert_eq!(s.doc()?.uid, home);
+        }
+        let cmd = if case == "paste special" { "edit.pasteSpecial" } else { "edit.paste" };
+        let result = s.execute(cmd, json!({"at": "A8"}));
+        let refusal = if case == "incoming locked cell" { "cell protection" } else { "Formatting rows" };
+        assert!(matches!(result, Err(err) if err.to_string().contains(refusal)), "{case}");
+        let after = sheet(&s, "Destination");
+        assert_eq!(after.value(at("A8")), Value::text("old 8"), "{case}");
+        assert_eq!(row_readback(after, 10), (1, false, 15., true), "{case}");
+    }
+    Ok(())
+}
+
 #[test]
 fn adjacent_whole_row_cut_marks_its_summary_after_resetting_the_source() {
-    // GridCraft policy, not measured in Excel: the summary may land on a just-vacated row.
+    // Excel for Mac 16.115.2, object-model measurement of a synthetic workbook:
+    // cut hidden level-2 rows 3:4 above themselves, leaving the marker on vacated row 3.
     let mut s = Session::new();
     s.new_workbook();
     let sh = Arc::make_mut(&mut s.doc_mut().unwrap().wb).sheet_mut(0).unwrap();
-    let detail = LineInfo { outline: 1, hidden: true, size: Some(32.), custom: true, ..Default::default() };
+    let detail = LineInfo { outline: 1, hidden: true, size: Some(32.), custom: true, ..Default::default() }; // 24 pt
     sh.rows.insert(2, detail);
     sh.rows.insert(3, detail);
     sh.set_value(at("A3"), Value::text("first detail"));
@@ -479,6 +636,10 @@ fn adjacent_whole_row_cut_marks_its_summary_after_resetting_the_source() {
     assert_eq!(sh.rows[&1], detail);
     assert_eq!(sh.rows[&2], LineInfo { collapsed: true, ..Default::default() });
     assert!(!sh.rows.contains_key(&3));
+    assert_eq!(
+        [1, 2, 3, 4].map(|row| row_readback(sh, row)),
+        [(2, true, 0., true), (2, true, 0., true), (1, false, 15., false), (1, false, 15., true)]
+    );
     assert_eq!(sh.value(at("A1")), Value::text("first detail"));
     assert_eq!(sh.value(at("A3")), Value::Empty);
 }
