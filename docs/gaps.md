@@ -243,6 +243,10 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
   the destination column's aggregate style or sample a blank destination cell.
   Saved XML flags were not recovered; a size of zero established only effective geometry.
   Hidden, outline level and `ShowDetail` were read in Batch 5 (X44).
+  [X65](parity/INTEGRATION_NOTES.md#x65--whole-row-copy-onto-matching-unlocked-detail-on-a-protected-sheet)
+  captures the narrow protected-copy exception for a below-detail marker when the existing
+  unlocked, hidden row records match. The Excel evidence uses `Range.Copy` with a destination;
+  Excel UI Paste remains unmeasured.
 
 ### 26. Sheet copy: names on a copy of a copy (F)
 - **Added (X35/X43):** numbered tabs increment from the source suffix, and sheet-local copies

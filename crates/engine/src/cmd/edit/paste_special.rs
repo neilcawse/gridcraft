@@ -10,12 +10,19 @@ use super::{
     json, shared_links, str_param, target_sheet,
 };
 
+#[derive(Clone, Copy)]
+pub(super) enum PasteRoute {
+    Clipboard,
+    Special,
+    Drag,
+}
+
 pub(super) fn paste_special(s: &mut Session, p: &Json) -> Result<Json> {
-    paste_internal(s, p, true)
+    paste_internal(s, p, PasteRoute::Special)
 }
 
 #[allow(clippy::cognitive_complexity)] // The command applies the selected paste mode in one atomic edit.
-pub(super) fn paste_internal(s: &mut Session, p: &Json, transfer_lines: bool) -> Result<Json> {
+pub(super) fn paste_internal(s: &mut Session, p: &Json, route: PasteRoute) -> Result<Json> {
     let Some(clip) = s.clipboard.clone() else { return Err(EngineError::Other("Nothing to paste.".into())) };
     let what = match str_param(p, "what").unwrap_or("all") {
         "all" => What::All,
@@ -133,7 +140,15 @@ pub(super) fn paste_internal(s: &mut Session, p: &Json, transfer_lines: bool) ->
     // A geometric full-width or full-height source counts regardless of how it was selected.
     // Packed/filtered, tiled and full-sheet copies are outside the contiguous line case.
     // Only plain Paste All transfers line formats; modifiers keep their cell-only behavior.
-    let line_axis = if transfer_lines && what == What::All && op == "none" && !skip_blanks && !transpose && !link && whole && !clip.filtered && !tile
+    let line_axis = if !matches!(route, PasteRoute::Drag)
+        && what == What::All
+        && op == "none"
+        && !skip_blanks
+        && !transpose
+        && !link
+        && whole
+        && !clip.filtered
+        && !tile
     {
         match (src.is_full_rows(), src.is_full_cols()) {
             (true, false) => Some(LineAxis::Rows),
@@ -174,7 +189,8 @@ pub(super) fn paste_internal(s: &mut Session, p: &Json, transfer_lines: bool) ->
                 }
                 axis.replace(cx, dest_sheet, dest..=dest_last, incoming, &mut map_style, true)?;
             }
-            axis.mark_collapsed_summary(cx, dest_sheet, dest, dest_last)?;
+            let plain_copy = matches!(route, PasteRoute::Clipboard) && same_doc && !clip.cut;
+            axis.mark_collapsed_summary(cx, dest_sheet, dest, dest_last, plain_copy)?;
             if moving && clip.sheet != dest_sheet {
                 protected_source = live.filter(|sh| sh.is_protected());
             }
@@ -534,6 +550,18 @@ pub(super) fn paste_internal(s: &mut Session, p: &Json, transfer_lines: bool) ->
     Ok(json!({"pasted": s.doc()?.selection.a1()}))
 }
 
+/// Check whole rows using their inherited style and sparse explicit cells. A row without an
+/// unlocked style, or a cell overriding that style, is outside the measured case.
+fn unlocked_hidden_rows(wb: &Workbook, sh: &Sheet, first: u32, last: u32) -> bool {
+    (first..=last)
+        .all(|row| sh.rows.get(&row).is_some_and(|info| info.hidden && info.style.is_some_and(|style| !wb.styles.get(style).protection.locked)))
+        && sh.cells.iter_range(RangeRef::rows(first, last)).all(|(at, cell)| sh.rows.get(&at.row).and_then(|row| row.style) == Some(cell.style))
+}
+
+fn formatting_denied(what: &str) -> EngineError {
+    EngineError::Other(format!("{what} isn't allowed on this protected sheet (Review › Unprotect Sheet)."))
+}
+
 /// The axis of a whole-line transfer: Paste All of entire rows or columns, and AutoFill of them.
 #[derive(Clone, Copy)]
 pub(super) enum LineAxis {
@@ -627,7 +655,7 @@ impl LineAxis {
 
     /// Infer a collapsed summary just outside the paste if a fully hidden group meets its edge.
     /// Batch 5 measured this with summaries below/right; before-detail summaries are symmetric.
-    pub(super) fn mark_collapsed_summary(self, cx: &mut Ctx, sheet: usize, first: u32, last: u32) -> Result<()> {
+    fn mark_collapsed_summary(self, cx: &mut Ctx, sheet: usize, first: u32, last: u32, plain_copy: bool) -> Result<()> {
         let target = cx.wb.sheets.get(sheet).ok_or(EngineError::NoDocument)?;
         let (rows, end) = match self {
             Self::Rows => (true, gridcraft_core::MAX_ROWS),
@@ -655,7 +683,15 @@ impl LineAxis {
             }
             prev = index;
         }
-        self.refuse_unless_formatting_allowed(cx, sheet)?;
+        // When Format Rows is denied, reaching here means replace() left the row records
+        // unchanged. Only a plain copy onto entirely unlocked, already hidden rows may add
+        // the below-detail summary marker in this case (X65).
+        if let Some(protection) = &target.protection
+            && let Some(what) = self.denied_formatting(protection)
+            && !(rows && !before && plain_copy && unlocked_hidden_rows(&cx.wb, target, first, last))
+        {
+            return Err(formatting_denied(what));
+        }
         let target = cx.sheet_mut(sheet)?;
         let lines = match self {
             Self::Rows => &mut target.rows,
@@ -666,17 +702,18 @@ impl LineAxis {
     }
 
     fn refuse_unless_formatting_allowed(self, cx: &Ctx, sheet: usize) -> Result<()> {
-        if let Some(protection) = cx.wb.sheet(sheet).and_then(|sh| sh.protection.as_ref()) {
-            let denied = match self {
-                Self::Rows if !protection.format_rows => Some("Formatting rows"),
-                Self::Columns if !protection.format_columns => Some("Formatting columns"),
-                _ => None,
-            };
-            if let Some(what) = denied {
-                return Err(EngineError::Other(format!("{what} isn't allowed on this protected sheet (Review › Unprotect Sheet).")));
-            }
+        if let Some(what) = cx.wb.sheet(sheet).and_then(|sh| sh.protection.as_ref()).and_then(|p| self.denied_formatting(p)) {
+            return Err(formatting_denied(what));
         }
         Ok(())
+    }
+
+    fn denied_formatting(self, protection: &gridcraft_model::SheetProtection) -> Option<&'static str> {
+        match self {
+            Self::Rows if !protection.format_rows => Some("Formatting rows"),
+            Self::Columns if !protection.format_columns => Some("Formatting columns"),
+            _ => None,
+        }
     }
 
     /// Checks protection against the final staged state, including cells that gain or lose

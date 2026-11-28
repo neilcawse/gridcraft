@@ -407,18 +407,34 @@ this supports retaining the marker independently of the current group. Undo rest
 and save/reopen keeps their outline state in GridCraft.
 
 Batch 5 did not inspect Excel's saved XML or measure summary placement above/left, nesting,
-stale markers at the destination boundary, or either of these GridCraft policies:
+or stale markers at the destination boundary. GridCraft does not clear a marker outside the
+paste. A same-sheet Cut resets vacated lines before marking the destination boundary; an
+object-model `Range.Cut` into the immediately preceding rows confirmed that the vacated line
+can receive the collapsed marker (hidden level-2 rows 3:4 cut to 1:2, row 3 reads `ShowDetail` false).
 
-- A marker-only write requires Format Rows or Format Columns on a protected sheet, even if
-  the pasted line records already match. Without permission the paste is refused.
-- A same-sheet Cut resets the vacated source lines before marking the destination boundary.
-  A vacated line immediately outside the paste can receive a marker based on the final group.
-
-GridCraft does not clear a marker outside the paste. AutoFill keeps visibility and outline on
-the destination, as X31 documents. Batch 5's
+AutoFill keeps visibility and outline on the destination, as X31 documents. Batch 5's
 `x25-autofill-hidden-*` readbacks concern AutoFill visibility, not outline, and are outside this
 lane. Paste Special modes other than All, transposed, linked, filtered, tiled and drag-and-drop
 pastes keep their previous behavior: they transfer no line formats.
+
+### X65 — Whole-row Copy onto matching unlocked detail on a protected sheet
+
+Excel for Mac 16.115.2, object-model measurement of a synthetic workbook: `Range.Copy`
+with a destination copied rows 3:4 into rows 8:9 on two protected sheets. Both destinations
+were unlocked through a row style; Format Columns was denied on both and Format Rows was
+denied on one. Both accepted the copy: A8:A9 became `detail 3` / `detail 4`, rows 8 and 9
+stayed hidden at levels 1 and 2 and 0 pt, and row 10 stayed visible at level 1 and 15 pt
+while `ShowDetail` changed from true to false. Rows 7 and 11 were unchanged. Source row 5
+also changed to `ShowDetail` false; the mechanism is unmeasured and GridCraft does not
+reproduce that source-side effect.
+
+Old X44 rule: even a marker-only write required Format Rows or Format Columns. New rule:
+the below-detail summary marker can be set without Format Rows during a same-workbook plain
+whole-row Copy/Paste onto already hidden rows whose line records would not change. The rows
+must be unlocked through their row style, without conflicting explicit cell styles. Other
+line-format changes, protection checks, Cut, Paste Special and column transfers keep their
+previous rules. Excel UI Paste was not measured; applying the object-model result to
+GridCraft's shared Clipboard Paste path is an [inference].
 
 ## X23 — Sheet copy keeps tables
 
