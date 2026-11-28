@@ -278,6 +278,7 @@ fn only_workbook_names_that_use_the_copied_sheet_get_sheet_level_copies() {
         comment: String::new(),
         hidden: true,
         uid: Default::default(),
+        legacy_grid: false,
     });
     copy(&mut s, "Data", 1);
     let copies: Vec<(String, String)> = names(&s).into_iter().filter(|n| n.0.as_deref() == Some("Data (2)")).map(|n| (n.1, n.2)).collect();
@@ -343,6 +344,7 @@ fn copy_keeps_only_the_first_definition_per_name_and_scope() {
             comment: String::new(),
             hidden: false,
             uid: Default::default(),
+            legacy_grid: false,
         });
     }
     copy(&mut s, "Data", 1);

@@ -741,3 +741,52 @@ fn print_shifted_matches_shift_relative_including_oob_spill_and_trim() -> Result
     }
     Ok(())
 }
+
+#[test]
+fn legacy_residues_save_as_the_shortest_signed_offset() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::adjust::{BIFF8_COLS, BIFF8_ROWS, legacy_signed_offset, legacy_to_xlsx_residues};
+    // Below half the grid an offset stays positive; from half on (the tie too) it is negative.
+    assert_eq!(legacy_signed_offset(0, BIFF8_ROWS), 0);
+    assert_eq!(legacy_signed_offset(32_767, BIFF8_ROWS), 32_767);
+    assert_eq!(legacy_signed_offset(32_768, BIFF8_ROWS), -32_768);
+    assert_eq!(legacy_signed_offset(65_530, BIFF8_ROWS), -6);
+    assert_eq!(legacy_signed_offset(127, BIFF8_COLS), 127);
+    assert_eq!(legacy_signed_offset(128, BIFF8_COLS), -128);
+    assert_eq!(legacy_signed_offset(255, BIFF8_COLS), -1);
+    let save = |f: &str| crate::parse_name(f).map(|e| print(&legacy_to_xlsx_residues(e)));
+    // Six up, one left, both, and a small positive offset; `$` parts are kept as they are.
+    assert_eq!(save("Sheet1!A65531")?, "Sheet1!A1048571");
+    assert_eq!(save("Sheet1!IV1")?, "Sheet1!XFD1");
+    assert_eq!(save("Sheet1!IV65536")?, "Sheet1!XFD1048576");
+    assert_eq!(save("Sheet1!D3")?, "Sheet1!D3");
+    assert_eq!(save("Sheet1!$IV65531")?, "Sheet1!$IV1048571");
+    assert_eq!(save("Sheet1!IV$65531")?, "Sheet1!XFD$65531");
+    assert_eq!(save("SUM(Sheet1!A65534:A65536)")?, "SUM(Sheet1!A1048574:A1048576)");
+    assert_eq!(save("Sheet1!65531:65536")?, "Sheet1!1048571:1048576");
+    assert_eq!(save("Sheet1!IV:IV")?, "Sheet1!XFD:XFD");
+    Ok(())
+}
+
+#[test]
+fn legacy_names_keep_relative_offsets_through_inserts_and_deletes() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::adjust::adjust_legacy_name;
+    // `[]` is how a workbook-level name's host is spelled (no sheet's references are taken for it).
+    let adj = |f: &str, e: &Edit| crate::parse_name(f).map(|x| print(&adjust_legacy_name(x, "[]", "Sheet1", e)));
+    let ins = Edit::Insert { axis: Axis::Rows, at: 2, count: 2 };
+    // A relative residue is an offset from the cell using the name, not a cell: it stays. A `$`
+    // row moves as an ordinary reference does.
+    assert_eq!(adj("Sheet1!A65531", &ins)?, "Sheet1!A65531");
+    assert_eq!(adj("Sheet1!$A$5", &ins)?, "Sheet1!$A$7");
+    assert_eq!(adj("Sheet1!A$5", &ins)?, "Sheet1!A$7");
+    assert_eq!(adj("Sheet1!$A5", &ins)?, "Sheet1!$A5");
+    let del = Edit::Delete { axis: Axis::Rows, at: 2, count: 2 }; // rows 3-4
+    assert_eq!(adj("Sheet1!A65531", &del)?, "Sheet1!A65531");
+    assert_eq!(adj("Sheet1!A$3", &del)?, "#REF!");
+    assert_eq!(adj("Sheet1!B$6", &del)?, "Sheet1!B$4");
+    // Columns: a relative column stays, a `$` one moves; another sheet's references don't.
+    let ins = Edit::Insert { axis: Axis::Cols, at: 0, count: 1 };
+    assert_eq!(adj("Sheet1!IV1", &ins)?, "Sheet1!IV1");
+    assert_eq!(adj("Sheet1!$C1", &ins)?, "Sheet1!$D1");
+    assert_eq!(adj("Other!$C1", &ins)?, "Other!$C1");
+    Ok(())
+}

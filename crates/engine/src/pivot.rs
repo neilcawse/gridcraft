@@ -602,7 +602,15 @@ mod source_tests {
     use super::resolve_source;
 
     fn name(name: &str, scope: Option<usize>, formula: &str) -> DefinedName {
-        DefinedName { name: name.into(), scope, formula: formula.into(), comment: String::new(), hidden: false, uid: Default::default() }
+        DefinedName {
+            name: name.into(),
+            scope,
+            formula: formula.into(),
+            comment: String::new(),
+            hidden: false,
+            uid: Default::default(),
+            legacy_grid: false,
+        }
     }
 
     /// Sheets `Report` and `data`; `rData` of sheet `data` is its A1:B3, the workbook's `rData`

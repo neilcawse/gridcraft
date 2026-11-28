@@ -606,11 +606,12 @@ pub fn save_bytes_reported(wb: &Workbook, path: &str, kind: FileKind) -> Result<
 }
 
 /// [`save_bytes`] for the file at `path`: relative paths to linked workbooks are rewritten for
-/// its folder, so they still name the same files.
-pub fn save_file_bytes(wb: &Workbook, path: &str) -> Result<Vec<u8>> {
+/// its folder, so they still name the same files. With the save's warnings
+/// (`gridcraft_xlsx::WriteReport`).
+pub fn save_file_bytes(wb: &Workbook, path: &str) -> Result<(Vec<u8>, Vec<String>)> {
     match source_dir(path).and_then(|f| gridcraft_xlsx::rebase_links(wb, &f)) {
-        Some(rebased) => save_bytes(&rebased, path),
-        None => save_bytes(wb, path),
+        Some(rebased) => save_bytes_for_path_reported(&rebased, path),
+        None => save_bytes_for_path_reported(wb, path),
     }
 }
 

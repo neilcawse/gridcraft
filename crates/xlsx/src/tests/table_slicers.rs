@@ -233,6 +233,7 @@ fn table_repaired_on_save_keeps_its_slicer() -> TestResult {
         comment: String::new(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     });
     let (bytes, warnings) = save(&wb)?;
     assert!(warnings.iter().any(|w| w.contains("was renamed")), "{warnings:?}");

@@ -25,6 +25,7 @@ fn go_to_workbook() -> Session {
         comment: String::new(),
         hidden: true,
         uid: Default::default(),
+        legacy_grid: false,
     });
     s
 }
@@ -56,6 +57,7 @@ fn go_to_lists_many_aliases_and_follows_them() {
         comment: String::new(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     };
     wb.names.push(alias("Chain0".into(), "Areas".into()));
     for i in 1..20_000 {

@@ -55,7 +55,7 @@ fn series(name: &str, values: &str) -> Series {
 }
 
 fn name(n: &str, scope: Option<usize>, formula: &str) -> DefinedName {
-    DefinedName { name: n.into(), scope, formula: formula.into(), comment: String::new(), hidden: false, uid: Default::default() }
+    DefinedName { name: n.into(), scope, formula: formula.into(), comment: String::new(), hidden: false, uid: Default::default(), legacy_grid: false }
 }
 
 /// Excel draws a chart blank when a `<c:f>` holds a bare name (observed in Excel for Windows,

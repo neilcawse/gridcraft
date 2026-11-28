@@ -85,6 +85,7 @@ fn workbook() -> Workbook {
         comment: String::new(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     });
 
     let mut report = Sheet::new("Report");
@@ -1343,6 +1344,7 @@ fn separate_imported_caches_and_sheet_relative_defined_names_do_not_merge_caches
         comment: String::new(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     });
 
     let mk_pt = |id: u32, name: &str, cache_id: Option<u32>| PivotTable {
@@ -1405,6 +1407,7 @@ fn slicer_cache_names_respect_ordinary_definitions() {
             comment: "Keep this definition".into(),
             hidden: true,
             uid: Default::default(),
+            legacy_grid: false,
         };
         wb.names.push(ordinary.clone());
         let report = wb.sheet_mut(1).unwrap();
@@ -2109,6 +2112,7 @@ fn an_imported_cache_keeps_its_marker_beside_a_sheet_scoped_namesake() {
         comment: "Local".into(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     };
     wb.names.push(local.clone());
     let saved = write_xlsx(&wb).unwrap();

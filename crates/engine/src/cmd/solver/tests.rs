@@ -1326,6 +1326,7 @@ fn reset_all_masks_a_workbook_level_model_and_keeps_other_sheets_models() {
                 comment: String::new(),
                 hidden: true,
                 uid: Default::default(),
+                legacy_grid: false,
             });
         }
     }
@@ -1421,6 +1422,7 @@ fn saving_and_resetting_a_model_keep_the_users_own_solver_names() {
         comment: String::new(),
         hidden,
         uid: Default::default(),
+        legacy_grid: false,
     };
     {
         let d = s.doc_mut().unwrap();
@@ -1692,6 +1694,7 @@ fn excel_iteration_and_time_limits_are_not_read_as_gridcraft_options() {
                 comment: String::new(),
                 hidden: true,
                 uid: Default::default(),
+                legacy_grid: false,
             });
         }
     }

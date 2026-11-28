@@ -102,6 +102,7 @@ fn imported_tables_with_reserved_prefixes_get_free_numbered_names() -> Result<()
         hidden: false,
         comment: String::new(),
         uid: Default::default(),
+        legacy_grid: false,
     });
     let sh = Arc::make_mut(&mut wb.sheets[0]);
     for (i, name) in ["ChartRows", "PrintRows", "SanitizedRows", "OtherRows", "table2"].into_iter().enumerate() {
@@ -518,6 +519,7 @@ fn sheet_scoped_names_reserve_table_names() -> Result<(), Box<dyn std::error::Er
         comment: String::new(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     });
     wb.names.push(DefinedName {
         name: "Summary".into(),
@@ -526,6 +528,7 @@ fn sheet_scoped_names_reserve_table_names() -> Result<(), Box<dyn std::error::Er
         comment: String::new(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     });
     wb.preserved = Some(Arc::new(Preserved {
         sheets: vec![PreservedSheet {
@@ -671,6 +674,7 @@ fn a_reference_to_no_table_is_not_captured_by_a_repaired_name() -> Result<(), Bo
         comment: String::new(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     });
     let mut back = wb;
     for cycle in 0..2 {

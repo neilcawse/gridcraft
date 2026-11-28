@@ -350,6 +350,15 @@ pub struct DefinedName {
     /// The name's identity while the app runs ([`DefinitionUid`]). Not in JSON or the file.
     #[serde(skip)]
     pub uid: DefinitionUid,
+    /// Read from an Excel 97-2003 (`.xls`) file with relative parts: Compatibility Mode keeps
+    /// such a workbook on the 65,536 × 256 grid, and [MS-XLS] RgceLocRel wraps a relative row
+    /// modulo 65,536 and column modulo 256. The text keeps the residues as seen from A1
+    /// (`A65531` is six rows up), so calculation wraps its relative parts on that grid
+    /// ([`gridcraft_formula::adjust::BIFF8_ROWS`]), structural edits leave them in place, and an
+    /// XLSX save writes them for the big grid. A definition replaced in GridCraft is an ordinary
+    /// one. Kept in JSON; never written to an XLSX file.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub legacy_grid: bool,
 }
 
 /// Whether canonical formula text starts with a direct `LAMBDA(` call. This is a prefix
@@ -722,6 +731,9 @@ pub struct RefHost<'a> {
     /// scope sheet, where they are read), or [`NAME_HOST`] for a workbook-level defined name
     /// (read on whichever sheet uses it).
     pub name: &'a str,
+    /// A legacy-grid `.xls` defined name ([`DefinedName::legacy_grid`]): its relative parts are
+    /// offsets from the cell that uses it, which a structural edit must leave in place.
+    pub legacy_grid: bool,
 }
 
 /// [`RefHost::name`] for a workbook-level defined name: `[` and `]` can't be in a sheet's name, so
@@ -765,7 +777,7 @@ impl Workbook {
         let sheet_names: Vec<String> = self.sheets.iter().map(|s| s.name.clone()).collect();
         for n in &mut self.names {
             let name = n.scope.and_then(|i| sheet_names.get(i)).map_or(NAME_HOST, String::as_str);
-            let host = RefHost { sheet: n.scope, name };
+            let host = RefHost { sheet: n.scope, name, legacy_grid: n.legacy_grid };
             rewrite_with(&mut n.formula, &|e| f(host, e), gridcraft_formula::parse_name);
         }
         // A series name is read by the chart as a reference when it starts with `=`, names a
@@ -785,7 +797,7 @@ impl Workbook {
             // Worked out on the shared sheet; a list is copied only when something in it
             // changes, and a sheet nothing changes on stays shared with undo snapshots.
             let sh: &Sheet = shared;
-            let host = RefHost { sheet: Some(si), name: &sh.name };
+            let host = RefHost { sheet: Some(si), name: &sh.name, legacy_grid: false };
             let f = |e: Expr| f(host, e);
             let changes = |t: &str| rewrite_with(&mut t.to_string(), &f, gridcraft_formula::parse);
             let cells: Vec<(gridcraft_core::CellRef, Formula)> = sh
@@ -1356,6 +1368,7 @@ mod tests {
             comment: String::new(),
             hidden: false,
             uid: DefinitionUid::fresh(),
+            legacy_grid: false,
         });
         let base = Arc::new(gridcraft_formula::parse("_xludf.VSTACK(A1)")?);
         let sheet = wb.sheet_mut(0).ok_or("missing sheet")?;
