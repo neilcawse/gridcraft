@@ -565,8 +565,9 @@ impl LineAxis {
 
     /// Replaces the line formatting of `first..=last` on `sheet` with `incoming` (ascending
     /// `(index, line)` pairs inside that span; a missing index resets to the default line).
-    /// `paste` also moves visibility, the outline level and the collapsed-summary marker, as
-    /// Excel's whole-line Copy/Cut does (X25, X33/X44); AutoFill leaves them on their own lines.
+    /// Size, style and visibility transfer on both paths. A `clipboard` transfer (whole-line
+    /// Copy/Cut: X25, X33/X44) also moves the outline level and the collapsed-summary marker.
+    /// AutoFill (X64) leaves those on their own lines and keeps filter-hidden rows hidden.
     pub(super) fn replace(
         self,
         cx: &mut Ctx,
@@ -574,9 +575,10 @@ impl LineAxis {
         span: std::ops::RangeInclusive<u32>,
         incoming: impl Iterator<Item = (u32, LineInfo)>,
         map_style: &mut impl FnMut(StyleId, &mut Workbook) -> StyleId,
-        paste: bool,
+        clipboard: bool,
     ) -> Result<()> {
         let target = cx.wb.sheets.get(sheet).ok_or(EngineError::NoDocument)?;
+        let filter_spans = if !clipboard && matches!(self, Self::Rows) { target.filter_row_spans() } else { Vec::new() };
         let lines = self.lines(target);
         let mut incoming = incoming.peekable();
         // Take the union of recorded source and destination lines, not the entire axis.
@@ -586,9 +588,10 @@ impl LineAxis {
             let old = existing.next_if(|x| x.0 == i).map(|x| x.1).unwrap_or_default();
             let new = incoming.next_if(|x| x.0 == i).map(|x| x.1).unwrap_or_default();
             // Boundary edges and bare-row markers stay on their own lines.
-            let kept = if paste { LineInfo { hidden: new.hidden, outline: new.outline, collapsed: new.collapsed, ..old } } else { old };
+            let kept = if clipboard { LineInfo { outline: new.outline, collapsed: new.collapsed, ..old } } else { old };
             let info = LineInfo {
                 size: new.size,
+                hidden: new.hidden || (old.hidden && filter_spans.iter().any(|&(first, last)| (first..=last).contains(&i))),
                 custom: new.custom,
                 saved_size: new.saved_size,
                 saved_col_flags: new.saved_col_flags,
