@@ -425,8 +425,9 @@ impl PassHost<'_> {
         }
         let outer_unknown = std::mem::replace(&mut self.unknown_link, false);
         let outer_out_of_stack = std::mem::replace(&mut self.out_of_stack, false);
+        let legacy = self.wb.sheet(k.0).and_then(|s| s.cell(k.1)).and_then(|c| c.formula.as_ref()).and_then(|f| f.array);
         let v = {
-            let mut ev = Evaluator::with_shift(self, k.0, k.1, shift);
+            let mut ev = Evaluator::with_shift(self, k.0, k.1, shift).with_legacy_array(legacy.is_some());
             ev.value(&expr)
         };
         let out_of_stack = std::mem::replace(&mut self.out_of_stack, outer_out_of_stack);
@@ -458,7 +459,6 @@ impl PassHost<'_> {
         // until the formula has to be calculated again.
         let v = if unknown && !self.reached.is_some_and(|r| r.contains(&k)) { self.saved_value(k).unwrap_or(v) } else { v };
         // A legacy array formula fills the range it was entered in.
-        let legacy = self.wb.sheet(k.0).and_then(|s| s.cell(k.1)).and_then(|c| c.formula.as_ref()).and_then(|f| f.array);
         let v = match legacy {
             Some(range) => fit_to_range(v, range),
             None => v,

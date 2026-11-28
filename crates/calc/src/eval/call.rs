@@ -423,8 +423,11 @@ impl<'h> Evaluator<'h> {
                 },
                 _ => None,
             };
+            // A legacy lookup's multi-area index is an invalid reference, not a vector of
+            // indexes. Keep it reference-sourced so a miss still beats the index error.
+            let legacy_lookup_index = self.legacy_array && i == 2 && matches!(spec.name, "VLOOKUP" | "HLOOKUP");
             let value = match ev {
-                Ev::R(areas) if areas.len() > 1 => {
+                Ev::R(areas) if areas.len() > 1 && !legacy_lookup_index => {
                     // Multi-area references (unions): flatten into one row for aggregates.
                     let mut vals = Vec::new();
                     for ar in &areas {
