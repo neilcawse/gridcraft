@@ -561,8 +561,23 @@ Excel's `Range.Formula2` added a leading `@` to every formula in the table, incl
 - A same-named defined name that holds no LAMBDA leaves the call with the built-in. Unprefixed calls inside defined names, conditional formats, validation and chart formulas are read as before. Sheet-level LAMBDA names bind like workbook-level ones from their own sheet, which is an inference.
 - Excel's saved spelling for these calls (no workbook was saved). `.xls`, `.xlsb` and ODS import are unchanged.
 - Unsupported newer built-ins such as `_xlfn.TRANSLATE(1)` give the same result as when no colliding name exists, and retain the built-in spelling on save. Typed `translate(1)` likewise gives the unsupported-function result instead of calling the LAMBDA, consistent with typed entry binding to the built-in. An unprefixed `TRANSLATE(1)` in file XML still binds to a visible LAMBDA and is saved as `_xludf.Translate(1)`.
-- A call of a LET variable shows in upper case (`VSTACK(1)`; Excel shows `vstack(1)`). GridCraft also discards the `_xlfn.` marker during parsing, so an explicitly prefixed call inside a LET with a same-named lexical LAMBDA uses that LAMBDA. Excel's behavior for that combination was not measured; the fixture used `_xlpm.vstack` at the call site.
+- A call of a LET variable shows in upper case (`VSTACK(1)`; Excel shows `vstack(1)`). An explicitly `_xlfn.`-prefixed call inside a LET with a same-named lexical LAMBDA was unmeasured here and used that LAMBDA; Batch 6 measured it and X61 changed it to the built-in (see X61).
 - Mixed bindings on rename: GridCraft rewrites a workbook-scoped name body even if the old name resolved to a sheet-local definition for some callers. This matches the existing behavior for plain name references; those callers can therefore switch to the renamed global definition. Excel behavior is unmeasured.
+
+## X61 — An explicitly qualified built-in inside LET
+
+**Measured (Batch 6, Excel for Mac 16.115.2, `x42-let-prefixed`; read at open, nothing saved).** The cell XML `_xlfn.LET(_xlpm.vstack,_xlfn.LAMBDA(_xlpm.x,5),_xlfn.VSTACK(1))` (no defined names) reads back as `Range.Formula` `=LET(vstack,LAMBDA(x,5),VSTACK(1))`, `Formula2` `=@LET(vstack,LAMBDA(x,5),VSTACK(1))`, value 1. The explicitly qualified call is the built-in although LET binds `vstack`. X42 gave 5 (the lexical LAMBDA).
+
+**Old rule → new rule.** Old: the parser dropped every `_xlfn.`, so a qualified call inside LET was the same model call as an unprefixed one and a same-named LET or LAMBDA variable holding a LAMBDA took it. New: a `_xlfn.` (or `_xlfn._xlws.`) call of a newer function keeps its file prefix in the model, spelled `_xlfn.VSTACK` / `_xlfn._xlws.FILTER`, exactly where a LET name or LAMBDA parameter of that name is in scope (a LET name from after its value expression; `_xlpm.` names count). There the evaluator calls the built-in and never the variable (`gridcraft_formula::qualified_builtin`). Everywhere else `_xlfn.` is dropped as before, so `LET(a,1,_xlfn.VSTACK(a))` is stored `LET(a,1,VSTACK(a))`.
+
+**Mechanism.** It extends X42's: a file prefix carried on the call name itself, which the parser keeps, the writer writes unchanged and the formula bar hides and restores, as with `_xludf.`. No new model state.
+- Open: the reader parses the file text; the qualification survives into the stored text `@LET(vstack,LAMBDA(x,5),_xlfn.VSTACK(1))` (the legacy `@` is X42's implicit intersection) and the value is 1. Because the canonical text keeps a file-only spelling, the imported formula-bar layout is not kept (as for `_xludf.`).
+- Edit display: the editor shows `=LET(vstack,LAMBDA(x,5),VSTACK(1))`, like Excel. Confirming it unchanged keeps the qualified call; `cell.get`, `sheet.read` and FORMULATEXT expose `_xlfn.VSTACK`, and re-entering that text keeps it. Typing the shown text into another cell gives the unprefixed call, which the LET variable takes (5).
+- Save: written `_xlfn.LET(_xlpm.vstack,_xlfn.LAMBDA(_xlpm.x,5),_xlfn.VSTACK(1))`; an unprefixed lexical call is still written `_xlpm.VSTACK(1)`. Structural edits (row insert) keep the qualification. Excel's saved spelling was not measured, so keeping it after an edit is an [inference].
+
+**Unchanged (controls).** Batch 5 `x30-lambda-collisions`: the unprefixed call inside LET is the variable (5); `_xlfn.VSTACK(1)` at workbook scope is the built-in (1); `_xludf.VSTACK(1)` is the workbook LAMBDA. Batch 6 `x42-typed-vstack`: typed `=VStack(1)` beside a workbook LAMBDA `VStack` is stored `VSTACK(1)` and gives 1.
+
+**Unmeasured ([inference]).** A LAMBDA parameter shadows like a LET name, and typed `_xlfn.` entry inside LET follows the same rule as file text. A qualified newer function GridCraft doesn't implement gives `#NAME?` rather than the variable. Older functions (no file prefix) are unaffected: the parser drops a `_xlfn.` on them and the variable never takes them (X42).
 
 ## X36 — Structured-reference entry and display text
 

@@ -216,7 +216,8 @@ pub(crate) fn bind_name_calls(text: &str, names: &std::collections::HashSet<Stri
 /// Excel stores some formula-bar operators and names as compatibility functions. Preserve the
 /// surrounding source layout, but only change actual tokens, not literals or sheet names. A
 /// formula holding a file-only spelling the formula bar shows otherwise (`[#This Row]`,
-/// `_xleta.SUM`, `_xludf.`, `_xlfn._TRO_ALL(…)`) keeps the canonical text instead.
+/// `_xleta.SUM`, `_xludf.`, `_xlfn._TRO_ALL(…)`, or a `_xlfn.` call the model keeps qualified
+/// against a LET variable) keeps the canonical text instead.
 pub(crate) fn formula_bar_text(text: &str, canonical: &str) -> Option<String> {
     use gridcraft_formula::{
         StructItem,
@@ -226,6 +227,11 @@ pub(crate) fn formula_bar_text(text: &str, canonical: &str) -> Option<String> {
 
     let body = text.strip_prefix('=').unwrap_or(text);
     if body == canonical {
+        return None;
+    }
+    if canonical.contains("_xlfn.")
+        && tokenize(canonical).is_ok_and(|ts| ts.iter().any(|t| matches!(&t.tok, Tok::Func(s) if gridcraft_formula::qualified_builtin(s).is_some())))
+    {
         return None;
     }
     let tokens = tokenize(body).ok()?;

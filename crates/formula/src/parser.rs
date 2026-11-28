@@ -68,7 +68,7 @@ pub(crate) fn parse_top(src: &str, locale: crate::FormulaLocale, allow_union: bo
     }
     let toks = tokenize_locale(body, locale).map_err(|e| ParseError { msg: e.msg, pos: e.pos })?;
     let toks = significant_spaces(toks);
-    let mut p = Parser { toks, i: 0, depth: 0, input: locale == crate::FormulaLocale::Es, table_on_sheet };
+    let mut p = Parser { toks, i: 0, depth: 0, input: locale == crate::FormulaLocale::Es, table_on_sheet, bound: Vec::new() };
     let e = p.expr(0, allow_union)?;
     match p.peek() {
         Tok::Eof if wrapper_height(&e) > MAX_DEPTH => Err(ParseError { msg: "formula is nested too deeply".into(), pos: 0 }),
@@ -134,6 +134,32 @@ struct Parser<'a> {
     depth: usize,
     input: bool,
     table_on_sheet: TableOnSheet<'a>,
+    /// LET and LAMBDA variables in scope at the current token, without `_xlpm.`.
+    bound: Vec<String>,
+}
+
+/// What a call's arguments declare: LET names (each in scope after its value) or LAMBDA
+/// parameters (all but the body).
+#[derive(Clone, Copy)]
+enum Binder {
+    Let,
+    Lambda,
+}
+
+impl Binder {
+    fn of(name: &str) -> Option<Self> {
+        match name {
+            "LET" => Some(Self::Let),
+            "LAMBDA" => Some(Self::Lambda),
+            _ => None,
+        }
+    }
+}
+
+/// `_xlpm.x` → `x`: files prefix LET and LAMBDA variables.
+fn variable_name(n: &str) -> &str {
+    const PARAM: &str = "_xlpm.";
+    n.get(..PARAM.len()).filter(|p| p.eq_ignore_ascii_case(PARAM)).and_then(|_| n.get(PARAM.len()..)).unwrap_or(n)
 }
 
 fn word_is_cols(w: &str) -> Option<(u32, bool)> {
@@ -270,7 +296,7 @@ impl Parser<'_> {
                     return Err(self.err("formula is nested too deeply"));
                 }
                 self.next();
-                let args = self.args()?;
+                let args = self.args(None)?;
                 lhs = Expr::Invoke(Box::new(lhs), args);
                 continue;
             }
@@ -298,7 +324,14 @@ impl Parser<'_> {
         Ok(lhs)
     }
 
-    fn args(&mut self) -> Result<Vec<Expr>, ParseError> {
+    fn args(&mut self, binder: Option<Binder>) -> Result<Vec<Expr>, ParseError> {
+        let scope = self.bound.len();
+        let args = self.args_in_scope(binder);
+        self.bound.truncate(scope);
+        args
+    }
+
+    fn args_in_scope(&mut self, binder: Option<Binder>) -> Result<Vec<Expr>, ParseError> {
         let mut args = Vec::new();
         if *self.peek() == Tok::RParen {
             self.next();
@@ -309,17 +342,48 @@ impl Parser<'_> {
                 Tok::Comma | Tok::RParen => Expr::Missing,
                 _ => self.expr(0, false)?,
             };
-            args.push(a);
-            match self.next() {
-                Tok::Comma => continue,
-                Tok::RParen => break,
+            let more = match self.next() {
+                Tok::Comma => true,
+                Tok::RParen => false,
                 t => return Err(self.err(format!("expected `,` or `)`, found {}", describe(&t)))),
+            };
+            // A declaration is followed by more arguments; a LET name comes into scope after
+            // its value, so when the value has been read.
+            if more {
+                match (binder, &a) {
+                    (Some(Binder::Lambda), Expr::Name(n)) => self.bound.push(variable_name(n).to_string()),
+                    (Some(Binder::Let), _) if args.len() % 2 == 1 => {
+                        if let Some(Expr::Name(n)) = args.last() {
+                            self.bound.push(variable_name(n).to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            args.push(a);
+            if !more {
+                break;
             }
         }
         if args.len() > 255 {
             return Err(self.err("too many arguments"));
         }
         Ok(args)
+    }
+
+    /// A call's name in the model: [`normalize_function_name`], except that an explicitly
+    /// qualified newer function (`_xlfn.VSTACK`) keeps its file prefix where a LET or LAMBDA
+    /// variable of its name is in scope, so it stays the built-in (see
+    /// [`crate::qualified_builtin`]). Unprefixed, the call is the variable's.
+    fn call_name(&self, spelling: &str) -> String {
+        let name = normalize_function_name(spelling);
+        if self.bound.is_empty() || name.len() == spelling.len() {
+            return name;
+        }
+        match crate::file_prefix(&name) {
+            Some(prefix) if self.bound.iter().any(|b| crate::same_name(b, &name)) => format!("{prefix}{name}"),
+            _ => name,
+        }
     }
 
     fn prefix(&mut self, allow_union: bool) -> Result<Expr, ParseError> {
@@ -338,8 +402,8 @@ impl Parser<'_> {
             }
             Tok::LBrace => self.array(),
             Tok::Func(spelling) => {
-                let name = normalize_function_name(&spelling);
-                let mut args = self.args()?;
+                let name = self.call_name(&spelling);
+                let mut args = self.args(Binder::of(&name))?;
                 // Files write `A1#` as `_xlfn.ANCHORARRAY(A1)`.
                 if name == "ANCHORARRAY"
                     && let [Expr::Ref(Reference { kind: RefKind::Cell(_), .. })] = args.as_slice()

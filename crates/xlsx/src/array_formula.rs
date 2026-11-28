@@ -765,15 +765,15 @@ impl<'a> Legacy<'a> {
         if name == "LET" && args.len() >= 3 {
             return self.let_(args, sheet, ctx, depth);
         }
+        // A built-in qualified against a LET variable (`_xlfn.VSTACK`) has the built-in's shape.
+        let skip = name.len() - gridcraft_formula::qualified_builtin(&name).map_or(name.len(), str::len);
+        let key = name.get(skip..).unwrap_or_default();
         let lambda_name = if let Some(bare) = gridcraft_formula::user_defined_name(&name) {
             self.wb.name(bare, sheet).is_some_and(|n| gridcraft_model::workbook::starts_with_lambda(n.formula.trim_start_matches('=').trim_start()))
         } else {
-            user_function(&name, self.functions) && gridcraft_formula::file_prefix(&name).is_none() && self.wb.name(&name, sheet).is_some()
+            user_function(key, self.functions) && gridcraft_formula::file_prefix(key).is_none() && self.wb.name(key, sheet).is_some()
         };
-        if args.len() > 255
-            || lambda_name
-            || matches!(name.as_str(), "LAMBDA" | "MAP" | "REDUCE" | "SCAN" | "BYROW" | "BYCOL" | "MAKEARRAY" | "ISOMITTED")
-        {
+        if args.len() > 255 || lambda_name || matches!(key, "LAMBDA" | "MAP" | "REDUCE" | "SCAN" | "BYROW" | "BYCOL" | "MAKEARRAY" | "ISOMITTED") {
             self.certain = false;
             return (Expr::Call(name, args), Kind::Array);
         }
@@ -781,7 +781,7 @@ impl<'a> Legacy<'a> {
         let mut kinds = Vec::with_capacity(args.len());
         let mut out = Vec::with_capacity(args.len());
         for (i, arg) in args.into_iter().enumerate() {
-            let param = param(&name, i, self.functions);
+            let param = param(key, i, self.functions);
             let arg_ctx = match param {
                 Param::Value | Param::Single => Ctx::Value,
                 Param::Ref | Param::First => Ctx::Ref,
@@ -810,7 +810,7 @@ impl<'a> Legacy<'a> {
             out.push(arg);
         }
         let first = kinds.first().copied().unwrap_or(Kind::Scalar);
-        let kind = match name.as_str() {
+        let kind = match key {
             "IF" | "CHOOSE" if !lifted => kinds.iter().skip(1).fold(Kind::Scalar, |k, x| k.join(*x)),
             "ROW" | "COLUMN" => {
                 if first == Kind::Scalar {

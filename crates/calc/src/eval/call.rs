@@ -17,6 +17,15 @@ impl<'h> Evaluator<'h> {
     }
 
     pub(super) fn call(&mut self, name: &str, args: &[Expr]) -> Ev {
+        // An explicitly qualified call (`_xlfn.VSTACK`, which the parser keeps only under a LET
+        // or LAMBDA variable of that name) is the built-in: Excel gives 1 for
+        // `LET(vstack,LAMBDA(x,5),_xlfn.VSTACK(1))` (Excel for Mac 16.115.2, object-model
+        // measurement of a synthetic workbook).
+        let qualified = gridcraft_formula::qualified_builtin(name);
+        if qualified.is_some_and(|bare| !gridcraft_functions::is_known_function(bare)) {
+            return err(CellError::Name);
+        }
+        let name = qualified.unwrap_or(name);
         // The parser normally uppercases calls. An already-stored AST can carry old casing.
         let name = if name.bytes().any(|b| b.is_ascii_lowercase()) {
             gridcraft_functions::canonical_function_name(name).filter(|canonical| canonical.eq_ignore_ascii_case(name)).unwrap_or(name)
@@ -26,7 +35,8 @@ impl<'h> Evaluator<'h> {
         // A LET or LAMBDA variable holding a LAMBDA comes before a newer (`_xlfn.`) function of
         // its name: Excel gives 5 for `LET(vstack,LAMBDA(x,5),vstack(1))` (Batch 5,
         // `x30-lambda-collisions` A6). Older functions keep the built-in (unmeasured).
-        if let Some((_, Ev::L(l))) = self.env.iter().rev().find(|(k, _)| gridcraft_formula::same_name(k, name))
+        if qualified.is_none()
+            && let Some((_, Ev::L(l))) = self.env.iter().rev().find(|(k, _)| gridcraft_formula::same_name(k, name))
             && gridcraft_formula::file_prefix(name).is_some()
         {
             let l = Arc::clone(l);

@@ -10,11 +10,12 @@ pub(crate) fn canonical(
     sheet: usize,
     cell: gridcraft_engine::core::CellRef,
 ) -> Result<String, ParseError> {
-    // The editor hid the `_xludf.` prefixes of this cell's formula; confirming it unchanged keeps
-    // the user-defined calls instead of binding them to the built-ins of the same name.
+    // The editor hid the `_xludf.` and `_xlfn.` prefixes of this cell's formula; confirming it
+    // unchanged keeps the user-defined calls and the qualified built-ins instead of binding them
+    // to the built-ins or LET variables of the same name.
     if let Some(sh) = wb.sheet(sheet)
         && let Some(f) = sh.cell(cell).and_then(|c| c.formula.as_ref())
-        && has_udf_prefix(&f.text())
+        && has_call_prefix(&f.text())
         && text == display(&gridcraft_engine::display::formula_text(wb, sh, cell, f), locale, wb, sheet)
     {
         return Ok(format!("={}", f.text()));
@@ -46,13 +47,13 @@ pub(crate) fn canonical(
 }
 
 pub(crate) fn display(text: &str, locale: FormulaLocale, wb: &Workbook, sheet: usize) -> String {
-    // English (and every language without a formula table) shows the stored text, `_xludf.`
+    // English (and every language without a formula table) shows the stored text, call
     // prefixes aside, and skips a parse per frame.
     if locale == FormulaLocale::En {
-        return hide_udf_prefix(text, locale);
+        return hide_call_prefixes(text, locale);
     }
     let shown = localize_for_entry(text, locale, wb, sheet);
-    hide_udf_prefix(shown.as_deref().unwrap_or(text), locale)
+    hide_call_prefixes(shown.as_deref().unwrap_or(text), locale)
 }
 
 /// Localizes injected formula text without hiding prefixes needed when it is entered in another cell.
@@ -66,24 +67,39 @@ pub(crate) fn localize_for_entry(text: &str, locale: FormulaLocale, wb: &Workboo
 }
 
 const UDF_PREFIX: &str = "_xludf.";
+/// What a stored call explicitly qualified as the built-in starts with (see
+/// [`formula::qualified_builtin`]): `_xlfn.VSTACK`, `_xlfn._xlws.FILTER`.
+const BUILTIN_PREFIXES: [&str; 2] = ["_xlfn._xlws.", "_xlfn."];
 
-fn has_udf_prefix(text: &str) -> bool {
-    text.to_ascii_lowercase().contains(UDF_PREFIX)
+fn has_call_prefix(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains(UDF_PREFIX) || lower.contains(BUILTIN_PREFIXES[1])
 }
 
-/// Excel shows a user-defined call such as `_xludf.EOMONTH()` as `=EOMONTH()`. Only function
+/// The length of the prefix the formula bar hides on a call spelled `spelling`, if any.
+fn hidden_prefix_len(spelling: &str) -> Option<usize> {
+    let starts = |p: &str| spelling.get(..p.len()).is_some_and(|s| s.eq_ignore_ascii_case(p));
+    if starts(UDF_PREFIX) {
+        return Some(UDF_PREFIX.len());
+    }
+    formula::qualified_builtin(spelling)?;
+    BUILTIN_PREFIXES.iter().find(|p| starts(p)).map(|p| p.len())
+}
+
+/// Excel shows a user-defined call such as `_xludf.EOMONTH()` as `=EOMONTH()`, and a built-in
+/// call qualified against a LET variable, `_xlfn.VSTACK(1)`, as `VSTACK(1)`. Only function
 /// names lose the prefix: text literals and names keep it.
-fn hide_udf_prefix(text: &str, locale: FormulaLocale) -> String {
-    let Some(body) = text.strip_prefix('=').filter(|b| has_udf_prefix(b)) else { return text.to_string() };
+fn hide_call_prefixes(text: &str, locale: FormulaLocale) -> String {
+    let Some(body) = text.strip_prefix('=').filter(|b| has_call_prefix(b)) else { return text.to_string() };
     let Ok(tokens) = formula::lexer::tokenize_locale(body, locale) else { return text.to_string() };
     let mut out = String::from("=");
     let mut from = 0;
     for t in tokens {
-        if matches!(t.tok, formula::lexer::Tok::Func(_))
-            && body.get(t.start..t.start + UDF_PREFIX.len()).is_some_and(|p| p.eq_ignore_ascii_case(UDF_PREFIX))
+        if let formula::lexer::Tok::Func(spelling) = &t.tok
+            && let Some(len) = hidden_prefix_len(spelling)
         {
             out.push_str(body.get(from..t.start).unwrap_or(""));
-            from = t.start + UDF_PREFIX.len();
+            from = t.start + len;
         }
     }
     out.push_str(body.get(from..).unwrap_or(""));
@@ -205,5 +221,21 @@ mod tests {
         assert_eq!(entry("--").as_deref(), Some("'--"));
         assert_eq!(entry("+34 612 345 678").as_deref(), Some("'+34 612 345 678"));
         assert_eq!(entry("=--"), None);
+    }
+
+    /// Excel shows `_xlfn.VSTACK(1)` under a LET variable `vstack` as `VSTACK(1)`; confirming the
+    /// shown text unchanged keeps the built-in instead of binding the call to the variable.
+    #[test]
+    fn qualified_builtin_shows_unprefixed_and_survives_an_unchanged_confirm() {
+        use gridcraft_engine::model::{Cell, Formula};
+        let mut wb = Workbook::new();
+        let at = CellRef::parse("A1").unwrap();
+        let stored = "LET(vstack,LAMBDA(x,5),_xlfn.VSTACK(1))";
+        wb.sheet_mut(0).unwrap().cells.set(at, Cell::formula(Formula::new(stored)));
+        let shown = display(&format!("={stored}"), FormulaLocale::En, &wb, 0);
+        assert_eq!(shown, "=LET(vstack,LAMBDA(x,5),VSTACK(1))");
+        assert_eq!(canonical(&shown, FormulaLocale::En, &wb, 0, at).unwrap(), format!("={stored}"));
+        // Text keeps the prefix.
+        assert_eq!(display("=\"_xlfn.x\"&_xlfn.VSTACK(1)", FormulaLocale::En, &wb, 0), "=\"_xlfn.x\"&VSTACK(1)");
     }
 }
