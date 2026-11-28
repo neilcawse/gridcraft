@@ -677,8 +677,8 @@ impl LineAxis {
         if level == 0 || !detail.hidden || lines.get(&i).is_some_and(|l| l.collapsed || l.outline >= level) {
             return Ok(());
         }
-        // Only the deepest group touching the boundary matters: all shallower groups contain
-        // it and share its summary coordinate if they also end here.
+        // The deepest group can require a marker even when a shallower group sharing the
+        // same summary is not fully hidden.
         let mut run = if before { lines.range(first + 1..) } else { lines.range(..last) };
         let mut prev = boundary;
         while let Some((&index, line)) = if before { run.next() } else { run.next_back() } {
@@ -690,14 +690,20 @@ impl LineAxis {
             }
             prev = index;
         }
-        // When Format Rows is denied, reaching here means replace() left the row records
-        // unchanged. Only a plain copy onto entirely unlocked, already hidden rows whose group
-        // starts inside the paste may add the below-detail summary marker in this case (X65).
         if let Some(protection) = &target.protection
             && let Some(what) = self.denied_formatting(protection)
-            && !(rows && !before && plain_copy && prev >= first && unlocked_hidden_rows(&cx.wb, target, first, last))
         {
-            return Err(formatting_denied(what));
+            // replace() left the rows unchanged. Check the shallowest group sharing this
+            // summary too: a single marker applies to all of them, not just the deepest one.
+            let crosses_start = || {
+                let summary_level = lines.get(&i).map_or(0, |line| line.outline);
+                first.checked_sub(1).is_some_and(|preceding| {
+                    lines.range(preceding..prev).rev().take_while(|(_, line)| line.outline > summary_level).count() == (prev - preceding) as usize
+                })
+            };
+            if !(rows && !before && plain_copy && prev >= first && !crosses_start() && unlocked_hidden_rows(&cx.wb, target, first, last)) {
+                return Err(formatting_denied(what));
+            }
         }
         let target = cx.sheet_mut(sheet)?;
         let lines = match self {

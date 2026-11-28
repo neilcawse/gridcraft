@@ -545,6 +545,7 @@ fn protected_row_copy_exception_excludes_other_shapes() -> gridcraft_engine::Res
         "other workbook",
         "visible row",
         "group above paste",
+        "outer group above paste",
         "formulas hidden",
         "incoming locked cell",
     ] {
@@ -572,6 +573,16 @@ fn protected_row_copy_exception_excludes_other_shapes() -> gridcraft_engine::Res
                     line(wb, i, row)?.outline = 1;
                 }
                 // Row 7 joins the hidden group with the default (locked) style.
+                let sh = wb.sheet_mut(dest).ok_or(gridcraft_engine::EngineError::NoDocument)?;
+                sh.rows.insert(6, LineInfo { hidden: true, outline: 1, ..Default::default() });
+            }
+            "outer group above paste" => {
+                for (i, first) in [(source, 2), (dest, 7)] {
+                    line(wb, i, first)?.outline = 1;
+                    line(wb, i, first + 1)?.outline = 2;
+                }
+                // The inner group starts inside the paste, but both groups end at row 9
+                // and share summary row 10. The outer group includes locked row 7.
                 let sh = wb.sheet_mut(dest).ok_or(gridcraft_engine::EngineError::NoDocument)?;
                 sh.rows.insert(6, LineInfo { hidden: true, outline: 1, ..Default::default() });
             }

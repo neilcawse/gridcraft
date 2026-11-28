@@ -3936,6 +3936,10 @@ fn qualified_builtin_in_let_binds_the_builtin_through_save() {
     // [inference]: this is GridCraft behavior, not an Excel measurement.
     s.execute("cell.set", json!({"cell": "A3", "input": "=LET(vstack,LAMBDA(x,5),VSTACK(1))"})).unwrap();
     assert_eq!(v(&s, "A3"), Value::Number(5.0));
+    for (cell, input) in [("A4", "=LET(let,LAMBDA(x,99),LET(1))"), ("A5", "=LET(lambda,LAMBDA(x,99),LAMBDA(1))")] {
+        s.execute("cell.set", json!({"cell": cell, "input": input})).unwrap();
+        assert_eq!(v(&s, cell), Value::Number(99.0));
+    }
     let saved = s.execute("file.saveBytes", json!({"format": "xlsx"})).unwrap();
     let bytes = crate::io::base64_decode(saved["base64"].as_str().unwrap()).unwrap();
     let mut xml = String::new();
@@ -3946,9 +3950,15 @@ fn qualified_builtin_in_let_binds_the_builtin_through_save() {
     .unwrap();
     assert_eq!(xml.matches("_xlfn.LET(_xlpm.vstack,_xlfn.LAMBDA(_xlpm.x,5),_xlfn.VSTACK(1))").count(), 2, "{xml}");
     assert_eq!(xml.matches("_xlpm.VSTACK(1)").count(), 1, "{xml}");
+    for call in ["_xlpm.LET(1)", "_xlpm.LAMBDA(1)"] {
+        assert_eq!(xml.matches(call).count(), 1, "{xml}");
+    }
     s.execute("file.open", json!({"name": "reopened.xlsx", "base64": saved["base64"]})).unwrap();
     check(&s, "A2", "reopen");
     assert_eq!(v(&s, "A3"), Value::Number(5.0));
+    for cell in ["A4", "A5"] {
+        assert_eq!(v(&s, cell), Value::Number(99.0));
+    }
 }
 
 /// The typed `=VStack(1)`, with a workbook LAMBDA `VStack`, is stored as the built-in and gives 1

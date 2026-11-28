@@ -82,6 +82,10 @@ fn prefix_params(e: Expr, scope: &[String]) -> Expr {
             acc
         }
         Expr::Invoke(c, args) => Expr::Invoke(sub(c, scope), args.into_iter().map(|a| prefix_params(a, scope)).collect()),
+        // A LET-bound LAMBDA called by name, e.g. `f(3)`.
+        Expr::Call(name, args) if scope.iter().any(|s| s.eq_ignore_ascii_case(&name)) => {
+            Expr::Call(format!("{PARAM_PREFIX}{name}"), args.into_iter().map(|a| prefix_params(a, scope)).collect())
+        }
         Expr::Call(name, args) if matches!(gridcraft_formula::builtin_identity(&name), "LET" | "LAMBDA") => {
             let last = args.len().saturating_sub(1);
             let is_let = gridcraft_formula::builtin_identity(&name) == "LET";
@@ -109,10 +113,6 @@ fn prefix_params(e: Expr, scope: &[String]) -> Expr {
                 }
             }
             Expr::Call(name, out)
-        }
-        // A LET-bound LAMBDA called by name, e.g. `f(3)`.
-        Expr::Call(name, args) if scope.iter().any(|s| s.eq_ignore_ascii_case(&name)) => {
-            Expr::Call(format!("{PARAM_PREFIX}{name}"), args.into_iter().map(|a| prefix_params(a, scope)).collect())
         }
         Expr::Call(name, args) => Expr::Call(name, args.into_iter().map(|a| prefix_params(a, scope)).collect()),
         other => other,

@@ -476,7 +476,8 @@ Old X44 rule: even a marker-only write required Format Rows or Format Columns. N
 the below-detail summary marker can be set without Format Rows during a same-workbook plain
 whole-row Copy/Paste onto already hidden rows whose line records would not change. The rows
 must be unlocked, with formulas not hidden, through their row style, without conflicting
-explicit cell styles, and the hidden group that gets the marker must start inside the paste.
+explicit cell styles. Every group sharing the summary marker must start inside the paste;
+otherwise the exception could also mark a group that extends above the pasted rows.
 Other line-format changes, protection checks, Cut, Paste Special and column transfers keep their
 previous rules. Excel UI Paste was not measured; applying the object-model result to
 GridCraft's shared Clipboard Paste path is an [inference].
@@ -640,7 +641,7 @@ Excel's `Range.Formula2` added a leading `@` to every formula in the table, incl
 **Mechanism.** It extends X42's: a file prefix carried on the call name itself, which the parser keeps, the writer writes unchanged and the formula bar hides and restores, as with `_xludf.`. No new model state.
 - Open: the reader parses the file text; the qualification survives into the stored text `@LET(vstack,LAMBDA(x,5),_xlfn.VSTACK(1))` (the legacy `@` is X42's implicit intersection) and the value is 1. Because the canonical text keeps a file-only spelling, the imported formula-bar layout is not kept (as for `_xludf.`).
 - Edit display: the editor shows `=LET(vstack,LAMBDA(x,5),VSTACK(1))`, like Excel. Confirming it unchanged keeps the qualified call; `cell.get`, `sheet.read` and FORMULATEXT expose `_xlfn.VSTACK`, and re-entering that text keeps it. Typing the shown text into another cell gives the unprefixed call, which the LET variable takes (5).
-- Save: written `_xlfn.LET(_xlpm.vstack,_xlfn.LAMBDA(_xlpm.x,5),_xlfn.VSTACK(1))`; an unprefixed lexical call is still written `_xlpm.VSTACK(1)`. Row and column edits and copy/paste keep the qualification. Excel's saved spelling and these edit paths were not measured ([inference]).
+- Save: written `_xlfn.LET(_xlpm.vstack,_xlfn.LAMBDA(_xlpm.x,5),_xlfn.VSTACK(1))`; an unprefixed lexical call is still written `_xlpm.VSTACK(1)`. This also applies when the local variable shadows `LET` or `LAMBDA`: its calls use `_xlpm.`, while explicitly qualified binder calls keep `_xlfn.`. Row and column edits and copy/paste keep the qualification. Excel's saved spelling and these edit paths were not measured ([inference]).
 
 **Unchanged (controls).** Batch 5 `x30-lambda-collisions`: the unprefixed call inside LET is the variable (5); `_xlfn.VSTACK(1)` at workbook scope is the built-in (1); `_xludf.VSTACK(1)` is the workbook LAMBDA. Batch 6 `x42-typed-vstack`: typed `=VStack(1)` beside a workbook LAMBDA `VStack` is stored `VSTACK(1)` and gives 1.
 
