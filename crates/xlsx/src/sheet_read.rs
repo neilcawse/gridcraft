@@ -830,7 +830,9 @@ fn with_bar_text(mut fm: Formula, file_text: &str, text: &str, unwrapped: bool) 
         let canonical = fm.text();
         if canonical == file_text { None } else { formula_bar_text(file_text, &canonical) }
     };
-    fm.display_text = bar.map(Box::new);
+    if let Some(bar) = bar {
+        fm.set_display_text(bar);
+    }
     fm
 }
 

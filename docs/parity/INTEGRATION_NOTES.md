@@ -912,3 +912,7 @@ The final release CLI (source checkpoint `bee6d352`, SHA-256 `eb654645f6876af43e
 `column-style-autofilter.xlsx` is clean (27 checked cells, no mismatches or round-trip differences). Conversion retains all 17 PivotTable reports and all five cache registrations; the external relationship on each cache keeps its `xlPathMissing` type and target. All ten chart annotation cases completed without annotation relationship loss. The only audit keys new to both parents are the two Consolidate PivotTable keys and the Exp8 printer settings key classified above. The Scenario case remains unsupported but did not contribute a new audit key in this run.
 
 The XLSX unit suite passed all 838 tests. The missing-path regression fails with the old `externalLinkPath`-only predicate and passes with the repaired reader; Save As rebasing remains unchanged. In isolation on the final source, `many_listed_controls_read_in_linear_time` passed in 0.56 s against its 3 s limit.
+
+## Formula memory budget
+
+`Formula` is limited to 56 bytes on 64-bit targets by a compile-time assertion. Canonical text and shared templates retain their existing inline representation for formulas without imported spelling. A formula that stores a separate formula-bar spelling keeps it alongside the representation in one box, without materializing a shared template. JSON fields and XLSX formula-writing behavior are unchanged.

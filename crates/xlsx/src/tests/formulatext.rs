@@ -37,7 +37,7 @@ fn imported_formulatext_keeps_layout_and_displays_compatibility_operators() {
         ("L1", None),
     ] {
         let f = sheet.cell(CellRef::parse(cell).unwrap()).unwrap().formula.as_deref().unwrap();
-        assert_eq!(f.display_text.as_deref().map(String::as_str), display, "{cell}");
+        assert_eq!(f.display_text(), display, "{cell}");
     }
     assert_eq!(sheet.cell(CellRef::new(0, 0)).unwrap().formula.as_deref().unwrap().text(), "A2*2");
 }
@@ -116,7 +116,7 @@ fn trim_file_tokens_and_defined_name_calls_stay_distinct_on_write() -> Result<()
     for row in [0, 1] {
         let trim = formula(&wb, row)?;
         assert_eq!(trim.text(), "A1.:.E10");
-        assert_eq!(trim.display_text, None);
+        assert_eq!(trim.display_text(), None);
         assert_eq!(formula(&saved, row)?.text(), "TRIMRANGE(A1:E10,3,3)");
     }
     for row in [2, 3] {

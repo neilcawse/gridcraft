@@ -164,8 +164,8 @@ pub(crate) fn containing_table<'a>(wb: &Workbook, sheet: &'a Sheet, c: CellRef) 
 /// in), without changing the stored text or expression: an imported formula-bar spelling is kept
 /// as written, and otherwise references to the table holding `c` omit the table name.
 pub fn formula_text(wb: &Workbook, sheet: &Sheet, c: CellRef, f: &gridcraft_model::Formula) -> String {
-    if f.display_text.is_some() {
-        return format!("={}", f.bar_body());
+    if let Some(display) = f.display_text() {
+        return format!("={display}");
     }
     // A shared follower prints straight from its template, never materializing a shifted tree.
     if f.is_shared()

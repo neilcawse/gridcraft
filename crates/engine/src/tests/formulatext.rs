@@ -8,7 +8,7 @@ use super::{Session, s, v};
 
 fn imported(session: &mut Session, at: &str, display: &str) {
     let mut f = Formula::new(display);
-    f.display_text = Some(Box::new(display.into()));
+    f.set_display_text(display.into());
     let wb = Arc::make_mut(&mut session.doc_mut().unwrap().wb);
     wb.sheet_mut(0).unwrap().set_cell(CellRef::parse(at).unwrap(), Cell::formula(f));
 }
