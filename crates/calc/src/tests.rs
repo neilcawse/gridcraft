@@ -25,6 +25,13 @@ impl T {
         self.wb.sheet_mut(0).unwrap().cells.set(c(at), cell);
         self.calc.cells_changed(&mut self.wb, &[(0, c(at))]);
     }
+    fn set_legacy_array(&mut self, at: &str, input: &str, range: &str) {
+        let mut formula = Formula::new(input);
+        formula.array = gridcraft_core::RangeRef::parse(range);
+        assert!(formula.array.is_some(), "{range}");
+        std::sync::Arc::make_mut(&mut self.wb.sheets[0]).cells.set(c(at), Cell::formula(formula));
+        self.calc.cells_changed(&mut self.wb, &[(0, c(at))]);
+    }
     fn get(&self, at: &str) -> Value {
         self.wb.sheet(0).unwrap().value(c(at))
     }
@@ -1008,6 +1015,75 @@ fn lookup_multi_area_index_errors_on_reference_and_evaluated_tables() {
             Value::Number(20.0),
         ],
     );
+}
+
+#[test]
+fn legacy_array_lookup_rejects_multi_area_index_on_hit_only() {
+    // Excel for Mac 16.115.2, object-model measurement of a synthetic workbook. The HLOOKUP
+    // variant transposes the table and index references to exercise the same rule by row.
+    for (func, d2, e1, table, index) in [("VLOOKUP", "2", "10", "{1,10;2,20}", "(D1,D2)"), ("HLOOKUP", "10", "2", "{1,2;10,20}", "(D1,E1)")] {
+        let mut t = T::new();
+        for (at, input) in [("D1", "1"), ("D2", d2), ("E1", e1), ("E2", "20"), ("G3", "=1/0"), ("G4", "=NA()")] {
+            t.set(at, input);
+        }
+        t.set_legacy_array("A1", &format!("={func}(2,{table},{index},FALSE)"), "A1:B1");
+        let reference_error = Value::Error(CellError::Ref);
+        assert_eq!([t.get("A1"), t.get("B1")], [reference_error.clone(), reference_error.clone()], "{func}");
+
+        t.set_legacy_array("A2", &format!("={func}(9,D1:E2,(G3,G4),FALSE)"), "A2");
+        t.set_legacy_array("A3", &format!("={func}(9,{table},(G3,G4),FALSE)"), "A3:B3");
+        t.set_legacy_array("A4", &format!("={func}(2,D1:E2,(G3,G4),FALSE)"), "A4");
+        assert_eq!([t.get("A2"), t.get("A3"), t.get("B3")], [const { Value::Error(CellError::NA) }; 3], "{func}");
+        assert_eq!(t.get("A4"), reference_error, "{func}");
+    }
+}
+
+#[test]
+fn legacy_lookup_truncates_cell_text_indexes_before_bounds() {
+    // Excel for Mac 16.115.2, object-model measurement of a synthetic workbook. HLOOKUP
+    // transposes the table. Each lookup is a single-cell legacy array formula.
+    for (func, d2, e1) in [("VLOOKUP", "2", "10"), ("HLOOKUP", "10", "2")] {
+        let mut t = T::new();
+        for (at, input) in [("D1", "1"), ("D2", d2), ("E1", e1), ("E2", "20")] {
+            t.set(at, input);
+        }
+        let value_error = Value::Error(CellError::Value);
+        for (i, (input, expected)) in [
+            ("'-0.5", value_error.clone()),
+            ("'1.5", Value::Number(2.0)),
+            ("'.9", value_error.clone()),
+            ("' 0.9", value_error.clone()),
+            ("'90%", value_error.clone()),
+            ("'0.5e0", value_error.clone()),
+            ("=\"0.9\"", value_error),
+            ("'2", Value::Number(20.0)),
+            ("'1.0", Value::Number(2.0)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let row = i + 1;
+            let at = format!("A{row}");
+            t.set(&format!("H{row}"), input);
+            let formula = format!("={func}(2,D1:E2,H{row},FALSE)");
+            t.set_legacy_array(&at, &formula, &at);
+            assert_eq!(t.get(&at), expected, "{formula} with index {input}");
+        }
+    }
+}
+
+#[test]
+fn legacy_lookup_array_mode_preserves_error_precedence() {
+    // Excel for Mac 16.115.2, object-model measurement of a synthetic workbook with
+    // a mode column containing FALSE, invalid text, and TRUE.
+    let mut t = T::new();
+    for (at, input) in [("D1", "1"), ("D2", "2"), ("E1", "10"), ("E2", "20"), ("H1", "=FALSE()"), ("H2", "x"), ("H3", "=TRUE()")] {
+        t.set(at, input);
+    }
+    t.set_legacy_array("A1", "=VLOOKUP(2,D1:E2,2,H1:H3)", "A1:A3");
+    t.set_legacy_array("A4", "=VLOOKUP(2,D1:E2,1/0,H1:H3)", "A4:A6");
+    assert_eq!([t.get("A1"), t.get("A2"), t.get("A3")], [Value::Number(20.0), Value::Error(CellError::Value), Value::Number(20.0)]);
+    assert_eq!([t.get("A4"), t.get("A5"), t.get("A6")], [const { Value::Error(CellError::Div0) }; 3]);
 }
 
 // Excel for Mac 16.115.2, Batch 5 lookup-vlookup and lookup-hlookup: the rows and expected

@@ -238,8 +238,8 @@ fn range_lookup_arg(v: &Value, from_ref: bool) -> R<bool> {
 
 /// The 0-based column (VLOOKUP) or row (HLOOKUP) in a local table of width or height `len`.
 /// Resolve a cell-read index and check the bounds only after a hit. An error read from a cell
-/// returns `#REF!`, as does text read from a cell unless it parses as a whole number or a number
-/// in [0, 1); a numeric index below 1 returns `#VALUE!`, and one past the table `#REF!`.
+/// returns `#REF!`. A numeric or numeric-text index is truncated; a result below 1 returns
+/// `#VALUE!`, and one past the table returns `#REF!`.
 fn lookup_index(v: &Value, from_ref: bool, len: usize) -> R<usize> {
     let idx = lookup_index_number(v, from_ref, false)?;
     if idx >= len { Err(CellError::Ref) } else { Ok(idx) }
@@ -269,17 +269,17 @@ fn lookup_index_number(v: &Value, from_ref: bool, linked: bool) -> R<usize> {
         Value::Error(_) if from_ref => return Err(CellError::Ref),
         Value::Error(e) => return Err(e),
         Value::Text(t) if from_ref => {
-            // Batch 5 G2 (text "0.9"): local lookups report #VALUE! below 1. Retain the
-            // whole-number requirement for other fractional text and for linked tables.
-            parse_number_text(&t).filter(|n| n.fract() == 0.0 || (!linked && (0.0..1.0).contains(n))).ok_or(CellError::Ref)?
+            // Linked tables retain their existing whole-number requirement for cell text.
+            parse_number_text(&t).filter(|n| !linked || n.fract() == 0.0).ok_or(CellError::Ref)?
         }
         v => v.to_number()?,
-    };
+    }
+    .trunc();
     // NaN too: it would pass `idx < 1.0` and become index 0 (#2163).
     if idx.is_nan() || idx < 1.0 {
         return Err(CellError::Value);
     }
-    Ok((idx.trunc() as usize).saturating_sub(1))
+    Ok((idx as usize).saturating_sub(1))
 }
 
 /// Resolves the 0-based match position of `LOOKUP` against a 1-D key array; `len` as for
@@ -836,15 +836,19 @@ mod tests {
         is_err(ev("VLOOKUP", vec![n(0.5), rf(table()), e(CellError::Div0), b(false)]), CellError::Div0);
         is_err(ev("HLOOKUP", vec![n(0.5), rf(table()), e(CellError::Div0), b(false)]), CellError::Div0);
         is_err(ev("VLOOKUP", vec![n(0.5), rf(table()), rf(Value::Error(CellError::Div0)), b(false)]), CellError::NA);
-        // Fractional text outside [0, 1) fails reference-text coercion before the bounds check.
-        for idx in [rf(Value::Error(CellError::Div0)), rf(Value::Error(CellError::NA)), rf(tv("abc")), rf(tv("29.9e-1")), rf(tv("-0.5"))] {
+        // Cell errors and nonnumeric cell text still fail reference-text coercion.
+        for idx in [rf(Value::Error(CellError::Div0)), rf(Value::Error(CellError::NA)), rf(tv("abc"))] {
             is_err(ev("VLOOKUP", vec![n(3.0), rf(table()), idx, b(false)]), CellError::Ref);
         }
-        is_err(ev("VLOOKUP", vec![n(3.0), rf(table()), rf(tv("0.9")), b(false)]), CellError::Value);
-        for text in ["2", " 2 "] {
+        for text in ["0.9", "-0.5"] {
+            is_err(ev("VLOOKUP", vec![n(3.0), rf(table()), rf(tv(text)), b(false)]), CellError::Value);
+        }
+        for text in ["2", " 2 ", "29.9e-1"] {
             is_text(ev("VLOOKUP", vec![n(3.0), rf(table()), rf(tv(text)), b(false)]), "three");
         }
         close(ev("VLOOKUP", vec![n(3.0), rf(table()), rf(tv("1.0")), b(false)]), 3.0);
+        close(ev("VLOOKUP", vec![n(3.0), rf(table()), rf(tv("3.9")), b(false)]), 30.0);
+        is_err(ev("VLOOKUP", vec![n(3.0), rf(table()), rf(tv("4.1")), b(false)]), CellError::Ref);
         close(ev("VLOOKUP", vec![n(3.0), rf(table()), t("3"), b(false)]), 30.0);
         is_err(ev("VLOOKUP", vec![n(3.0), rf(table()), t("invalid"), b(false)]), CellError::Value);
         is_text(ev("VLOOKUP", vec![n(3.0), rf(table()), t("2.75"), b(false)]), "three");

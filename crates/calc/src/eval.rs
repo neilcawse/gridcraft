@@ -256,6 +256,8 @@ pub struct Evaluator<'h> {
     /// `sheet` moves to a defined name's scope while the name is evaluated, but the setting
     /// belongs to the sheet that holds the formula.
     transition: bool,
+    /// The calling cell has a fixed legacy array extent, not a dynamic spill.
+    legacy_array: bool,
     /// Relative reference shift applied on the fly to `Expr::Ref` (for shared formulas).
     pub shift: (i32, i32),
     env: Vec<(String, Ev)>,
@@ -313,7 +315,9 @@ impl Ctx for FnCtx<'_, '_> {
         if self.ev.active_criteria.contains(&(area.sheet, at)) {
             return Some(false);
         }
-        let expr = self.ev.host.workbook().sheet(area.sheet)?.cell(at)?.formula.as_ref()?.expr_arc()?;
+        let formula = self.ev.host.workbook().sheet(area.sheet)?.cell(at)?.formula.as_ref()?;
+        let legacy_array = formula.array.is_some();
+        let expr = formula.expr_arc()?;
         let shifted = gridcraft_formula::adjust::shift_relative((*expr).clone(), record as i64 - 1, 0);
         let env = (0..db.cols)
             .filter_map(|c| match db.get(0, c) {
@@ -329,6 +333,7 @@ impl Ctx for FnCtx<'_, '_> {
             sheet: area.sheet,
             at,
             transition,
+            legacy_array,
             shift: (0, 0),
             env,
             depth: self.ev.depth,
@@ -380,6 +385,7 @@ impl<'h> Evaluator<'h> {
             sheet,
             at,
             transition,
+            legacy_array: false,
             shift,
             env: Vec::new(),
             depth: 0,
@@ -390,6 +396,11 @@ impl<'h> Evaluator<'h> {
             exhausted: false,
             active_criteria: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_legacy_array(mut self, legacy_array: bool) -> Self {
+        self.legacy_array = legacy_array;
+        self
     }
 
     /// Gives this evaluation `work` units instead of [`EVAL_WORK`] (never more than that).
