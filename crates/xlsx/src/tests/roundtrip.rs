@@ -23,6 +23,11 @@ fn sample() -> Workbook {
     wb.calc = CalcSettings { mode: CalcMode::Manual, iterative: true, max_iterations: 42, max_change: 0.5, precision_as_displayed: true, r1c1: true };
     wb.protected_structure = true;
     wb.structure_password = Some(gridcraft_model::PasswordHash::new_sha512("s3cret", b"0123456789abcdef"));
+    wb.write_reservation = Some(gridcraft_model::WriteReservation {
+        user_name: "Ann & <Bob>".into(),
+        read_only_recommended: true,
+        password: Some(gridcraft_model::PasswordHash::new_sha512("modify-me", b"fedcba9876543210")),
+    });
     wb.props = DocProps {
         title: "T & <x>".into(),
         subject: "S".into(),
@@ -51,6 +56,7 @@ fn sample() -> Workbook {
             indent: 1,
             rotation: -30,
             reading_order: Some(ReadingOrder::RightToLeft),
+            padding: [None; 4],
         };
         s.protection.locked = false;
     });
@@ -114,7 +120,8 @@ fn sample() -> Workbook {
     s.spill.insert(at("H3"), Value::Number(3.0));
 
     s.cols.insert(0, LineInfo { size: Some(100.0), ..Default::default() });
-    s.cols.insert(1, LineInfo { size: Some(100.0), ..Default::default() });
+    // Column B was sized by hand (customWidth), A widened by itself; both come back as they were.
+    s.cols.insert(1, LineInfo { size: Some(100.0), custom: true, ..Default::default() });
     s.cols.insert(3, LineInfo { hidden: true, outline: 1, ..Default::default() });
     s.cols.insert(5, LineInfo { style: Some(money), ..Default::default() });
     s.rows.insert(0, LineInfo { size: Some(32.0), custom: true, ..Default::default() });
@@ -406,6 +413,7 @@ fn sample() -> Workbook {
             align: Some(ShapeTextAlign::Right),
             anchor: Some(ShapeTextAnchor::Bottom),
             rtl: true,
+            left_indent: 0.0,
         },
         rotation: 0.0,
     });
@@ -428,6 +436,7 @@ fn sample() -> Workbook {
             number_format: None,
             innermost_categories: false,
             label_number_format: None,
+            ..Default::default()
         }],
         legend: LegendPos::Bottom,
         data_labels: true,
@@ -443,6 +452,8 @@ fn sample() -> Workbook {
         pivot: None,
         axis_number_formats: Default::default(),
         pivot_label_formats: Vec::new(),
+        area_style: Default::default(),
+        user_shapes: Vec::new(),
     };
     for kind in [
         ChartKind::ColumnClustered,
@@ -454,6 +465,8 @@ fn sample() -> Workbook {
         ChartKind::Line,
         ChartKind::LineMarkers,
         ChartKind::LineStacked,
+        ChartKind::LineStacked100,
+        ChartKind::LineStacked100Markers,
         ChartKind::Pie,
         ChartKind::Doughnut,
         ChartKind::Area,
@@ -552,6 +565,8 @@ fn assert_workbook_metadata_roundtrip(wb: &Workbook, back: &Workbook) {
     assert!(back.protected_structure);
     assert_eq!(back.structure_password, wb.structure_password);
     assert!(back.structure_password.as_ref().unwrap().verify("s3cret").unwrap());
+    assert_eq!(back.write_reservation, wb.write_reservation);
+    assert!(back.write_reservation.as_ref().and_then(|r| r.password.as_ref()).unwrap().verify("modify-me").unwrap());
     assert_eq!(back.props, wb.props);
     assert_eq!(back.theme, wb.theme);
     assert_eq!(back.names, wb.names);
@@ -570,7 +585,7 @@ fn assert_sheet_cells_and_settings(wb: &Workbook, back: &Workbook, a: &Sheet, b:
     for (c, cell) in a.cells.iter() {
         let got = b.cell(c).unwrap_or_else(|| panic!("missing {c}"));
         assert_eq!(got.value, cell.value, "value at {c}");
-        assert_eq!(got.formula.as_ref().map(|f| (&f.text, f.array)), cell.formula.as_ref().map(|f| (&f.text, f.array)), "formula at {c}");
+        assert_eq!(got.formula.as_ref().map(|f| (f.text(), f.array)), cell.formula.as_ref().map(|f| (f.text(), f.array)), "formula at {c}");
         assert_eq!(back.styles.get(got.style), wb.styles.get(cell.style), "style at {c}");
     }
     for (c, _) in b.cells.iter() {
@@ -662,7 +677,7 @@ fn assert_drawing_and_chart_roundtrip(a: &Sheet, b: &Sheet) {
 fn package_structure() {
     let bytes = write_xlsx(&sample()).unwrap();
     let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
-    let names: Vec<String> = (0..z.len()).map(|i| z.name_for_index(i).unwrap().to_string()).collect();
+    let names: Vec<String> = (0..z.len()).map(|i| z.name_for_index(i).unwrap().unwrap().to_string()).collect();
     assert_eq!(names[0], "[Content_Types].xml");
     for n in [
         "_rels/.rels",
@@ -836,6 +851,33 @@ fn empty_workbook_roundtrip() {
     assert_eq!(back.sheets[0].default_col_width, 64.0);
     assert_eq!(back.sheets[0].default_row_height, 20.0);
     assert!(crate::sniff(&bytes) == crate::Format::Xlsx);
+}
+
+/// Outlined (hollow) letters are kept on save and reopen, written after `<strike/>` as Excel does;
+/// `<outline val="0"/>` reads as not outlined.
+#[test]
+fn outlined_font_survives_xlsx_roundtrip() {
+    let mut wb = Workbook::new();
+    let outlined = wb.styles.derive(StyleId::DEFAULT, |s| {
+        s.font.outline = true;
+        s.font.strike = true;
+    });
+    let sheet = wb.sheet_mut(0).unwrap();
+    sheet.cells.set(at("A1"), Cell { value: Value::text("hollow"), formula: None, style: outlined, py: None });
+    sheet.set_value(at("A2"), Value::text("solid"));
+
+    let bytes = write_xlsx(&wb).unwrap();
+    let styles = Package::open(&bytes).unwrap().read("xl/styles.xml").unwrap().unwrap();
+    let styles = String::from_utf8(styles).unwrap();
+    assert!(styles.contains("<strike/><outline/>"), "{styles}");
+    assert_eq!(styles.matches("<outline").count(), 1, "only the outlined font says so: {styles}");
+
+    let (back, _) = read_xlsx(&bytes).unwrap();
+    let sheet = &back.sheets[0];
+    let style_of = |a: &str| back.styles.get(sheet.cells.get(at(a)).map_or(StyleId::DEFAULT, |c| c.style));
+    assert!(style_of("A1").font.outline && style_of("A1").font.strike);
+    assert!(!style_of("A2").font.outline);
+    assert!(!crate::styles::read_font(&crate::xml::parse(br#"<font><outline val="0"/></font>"#).unwrap(), &[]).outline);
 }
 
 #[test]
@@ -1051,7 +1093,7 @@ fn vba_project_roundtrip() {
     assert_eq!(write_xlsx(&wb).unwrap(), bytes, "output is deterministic");
 
     let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes.clone())).unwrap();
-    let names: Vec<String> = (0..z.len()).map(|i| z.name_for_index(i).unwrap().to_string()).collect();
+    let names: Vec<String> = (0..z.len()).map(|i| z.name_for_index(i).unwrap().unwrap().to_string()).collect();
     assert!(names.iter().any(|x| x == "xl/vbaProject.bin"), "missing vbaProject.bin");
     let mut bin = vec![];
     z.by_name("xl/vbaProject.bin").unwrap().read_to_end(&mut bin).unwrap();
@@ -1323,7 +1365,7 @@ fn implicit_intersection_is_written_as_legacy_or_single() {
     assert!(metadata);
     let (back, _) = read_xlsx(&bytes).unwrap();
     let sh = back.sheet(0).unwrap();
-    let text = |a: &str| sh.cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone());
+    let text = |a: &str| sh.cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text().into_owned());
     assert_eq!(text("D3").as_deref(), Some("@A1:A3*2"));
     assert_eq!(text("D4").as_deref(), Some("A1*2"));
     assert_eq!(text("D5").as_deref(), Some("@(A1:A3*2)"));
@@ -1340,7 +1382,8 @@ fn legacy_and_dynamic_formulas_keep_their_kind() {
       <row r="3"><c r="A3"><v>3</v></c><c r="B3"><f>SUM(A1:A3)</f><v>6</v></c></row>
     </sheetData>"#;
     let (wb, _) = read_xlsx(&super::minimal(body, &[], "", "")).unwrap();
-    let text = |wb: &Workbook, a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| (f.text.clone(), f.array)).unwrap();
+    let text =
+        |wb: &Workbook, a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| (f.text().into_owned(), f.array)).unwrap();
     assert_eq!(text(&wb, "B2"), ("TANH(@A1:A3)+@A1:A3".to_string(), None));
     let bytes = write_xlsx(&wb).unwrap();
     let (xml, _) = sheet1_xml(&bytes);
@@ -1399,7 +1442,7 @@ fn long_and_deeply_nested_legacy_formulas_never_gain_single() {
     let defs: String = (1..=30).map(|i| format!(r#"<definedName name="Part_{i}">{part}</definedName>"#)).collect();
     let names = format!(r#"<definedNames><definedName name="Big">{big}</definedName>{defs}</definedNames>"#);
     let (wb, _) = read_xlsx(&super::minimal(&body, &[], "", &names)).unwrap();
-    let text = |wb: &Workbook, a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone()).unwrap();
+    let text = |wb: &Workbook, a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text().into_owned()).unwrap();
     assert_eq!(text(&wb, "D2"), chain);
     assert_eq!(text(&wb, "D3"), format!("@A1:A3+{chain}"));
     assert_eq!(text(&wb, "D4"), nested(64, "@A1:A3"));
@@ -1445,7 +1488,7 @@ fn implicit_intersection_keeps_its_parentheses() {
     let (back, _) = read_xlsx(&bytes).unwrap();
     for (i, f) in formulas.iter().enumerate() {
         let cell = back.sheet(0).unwrap().cell(CellRef::new(4 + i as u32, 4)).and_then(|c| c.formula.as_ref());
-        assert_eq!(cell.map(|c| (c.text.as_str(), c.expr().is_some())), Some((*f, true)), "{f}");
+        assert_eq!(cell.map(|c| (c.text().into_owned(), c.expr().is_some())), Some(((*f).to_string(), true)), "{f}");
     }
 }
 
@@ -1466,7 +1509,7 @@ fn legacy_unions_in_parentheses_and_names_with_if_save_as_read() {
     </sheetData>"#;
     let names = r#"<definedNames><definedName name="Flag">IF(Data!$A$1:$A$3&gt;1,1,0)</definedName></definedNames>"#;
     let (wb, _) = read_xlsx(&super::minimal(body, &[], "", names)).unwrap();
-    let text = |a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone()).unwrap();
+    let text = |a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text().into_owned()).unwrap();
     let bytes = write_xlsx(&wb).unwrap();
     let cases = [
         ("E1", "SQRT((A1:A2,C1:C2))"),
@@ -1498,7 +1541,7 @@ fn implied_intersection_made_redundant_by_an_edit_saves_legacy() {
     </sheetData>"#;
     let names = r#"<definedNames><definedName name="Rng">Data!$A$1:$A$3</definedName></definedNames>"#;
     let (mut wb, _) = read_xlsx(&super::minimal(body, &[], "", names)).unwrap();
-    let text = |wb: &Workbook, a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone()).unwrap();
+    let text = |wb: &Workbook, a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text().into_owned()).unwrap();
     assert_eq!(text(&wb, "B5"), "SQRT(@A1:A3)");
     assert_eq!(text(&wb, "C5"), "SQRT(@Rng)");
     // What deleting rows 2:3 leaves.
@@ -1527,7 +1570,7 @@ fn single_in_a_legacy_formula_saves_as_read() {
     </sheetData>"#;
     let names = r#"<definedNames><definedName name="RelativeRow">Data!$H1</definedName></definedNames>"#;
     let (mut wb, _) = read_xlsx(&super::minimal(body, &[], "", names)).unwrap();
-    let text = |wb: &Workbook, a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone()).unwrap();
+    let text = |wb: &Workbook, a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text().into_owned()).unwrap();
     let shown = [
         ("O6", "@SUM(F5#)"),
         ("J6", "@F5#%"),
@@ -1585,7 +1628,7 @@ fn formulas_into_linked_workbooks_save_back_as_written() {
         cell("F1", "SUM('[1]My Data'!B2:B4)"),
     );
     let (wb, _) = read_xlsx(&super::minimal(&body, &[], "", "")).unwrap();
-    let text = |a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone()).unwrap();
+    let text = |a: &str| wb.sheet(0).unwrap().cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text().into_owned()).unwrap();
     assert_eq!(text("E1"), "Data!B2");
     let (xml, _) = sheet1_xml(&write_xlsx(&wb).unwrap());
     for (r, f) in [
@@ -1684,7 +1727,7 @@ fn let_lambda_parameters_drop_xlpm_on_read() {
     assert!(xml.contains("_xlpm.v"), "{xml}");
     let (back, _) = read_xlsx(&bytes).unwrap();
     let sh = back.sheet(0).unwrap();
-    let text = |a: &str| sh.cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone());
+    let text = |a: &str| sh.cell(at(a)).and_then(|c| c.formula.as_ref()).map(|f| f.text().into_owned());
     assert_eq!(text("A1").as_deref(), Some("LET(x,1,x+1)"));
     assert_eq!(text("A2").as_deref(), Some("LAMBDA(a,a*2)(3)"));
     assert_eq!(text("C1").as_deref(), Some("MAP(B1:B2,LAMBDA(v,v+1))"));
@@ -1711,8 +1754,8 @@ fn builtin_call_spelling_survives_xlsx_import() {
     assert!(xml.contains(">ISREF(A1)</f>"), "{xml}");
     let (opened, _) = read_xlsx(&bytes).unwrap();
     let sh = opened.sheet(0).unwrap();
-    assert_eq!(sh.cell(at("C1")).unwrap().formula.as_ref().unwrap().text, "MyFn(1)");
-    assert_eq!(sh.cell(at("B1")).unwrap().formula.as_ref().unwrap().text, "ISREF(A1)");
+    assert_eq!(sh.cell(at("C1")).unwrap().formula.as_ref().unwrap().text(), "MyFn(1)");
+    assert_eq!(sh.cell(at("B1")).unwrap().formula.as_ref().unwrap().text(), "ISREF(A1)");
 }
 
 /// Batch 5 `x30-lambda-collisions`: in formula XML an unprefixed call of a newer function that a
@@ -1740,7 +1783,7 @@ fn future_function_calls_keep_their_binding_through_xlsx() {
     let rows: String = formulas.iter().enumerate().map(|(i, (f, _, _))| format!(r#"<row r="{0}"><c r="A{0}"><f>{f}</f></c></row>"#, i + 1)).collect();
     let bytes = super::minimal(&format!("<sheetData>{rows}</sheetData>"), &[], "", names);
     let (wb, _) = read_xlsx(&bytes).unwrap();
-    let text = |wb: &Workbook, row: usize| wb.sheet(0).unwrap().cell(at(&format!("A{row}"))).unwrap().formula.as_ref().unwrap().text.clone();
+    let text = |wb: &Workbook, row: usize| wb.sheet(0).unwrap().cell(at(&format!("A{row}"))).unwrap().formula.as_ref().unwrap().text().into_owned();
     let saved = write_xlsx(&wb).unwrap();
     let (xml, _) = sheet1_xml(&saved);
     let (reopened, _) = read_xlsx(&saved).unwrap();
@@ -1774,7 +1817,7 @@ fn legacy_explicit_lambda_call_preserves_formula_element() {
     let (wb, _) = read_xlsx(&bytes).unwrap();
     let check = |wb: &Workbook| {
         let f = wb.sheet(0).unwrap().cell(at("A1")).unwrap().formula.as_ref().unwrap();
-        assert_eq!(f.text, "@_xludf.VStack(1)");
+        assert_eq!(f.text(), "@_xludf.VStack(1)");
         assert!(!f.dynamic);
     };
     check(&wb);
@@ -1791,8 +1834,8 @@ fn non_lambda_local_name_shadows_global_lambda_on_import() {
     let names = r#"<definedNames><definedName name="VStack">_xlfn.LAMBDA(_xlpm.x,3)</definedName><definedName name="vSTACK" localSheetId="0">1</definedName><definedName name="TrimRange" localSheetId="1">_xlfn.LAMBDA(_xlpm.x,4)</definedName></definedNames>"#;
     let (wb, _) = read_xlsx(&super::minimal(sheet, &[], "", names)).unwrap();
     let sh = wb.sheet(0).unwrap();
-    assert_eq!(sh.cell(at("A1")).unwrap().formula.as_ref().unwrap().text, "@VSTACK(1)");
-    assert_eq!(sh.cell(at("B1")).unwrap().formula.as_ref().unwrap().text, "@TRIMRANGE(1)");
+    assert_eq!(sh.cell(at("A1")).unwrap().formula.as_ref().unwrap().text(), "@VSTACK(1)");
+    assert_eq!(sh.cell(at("B1")).unwrap().formula.as_ref().unwrap().text(), "@TRIMRANGE(1)");
 }
 
 #[test]
@@ -1801,7 +1844,7 @@ fn malformed_name_with_whitespace_after_equals_does_not_bind_call() {
     let names = r#"<definedNames><definedName name="VStack">= LAMBDA(</definedName></definedNames>"#;
     let (wb, _) = read_xlsx(&super::minimal(sheet, &[], "", names)).unwrap();
     let f = wb.sheet(0).unwrap().cell(at("A1")).unwrap().formula.as_ref().unwrap();
-    assert_eq!(f.text, "@VSTACK(1)");
+    assert_eq!(f.text(), "@VSTACK(1)");
 }
 
 /// A line break in a table column name (and its header cell) survives; a
@@ -1838,7 +1881,7 @@ fn table_newline_column_and_backslash_name_survive() {
     assert_eq!(s.tables[0].name, "\\_Prime.1");
     assert_eq!(s.tables[0].columns[0].name, "Handle\nBars");
     assert_eq!(s.value(at("A1")), Value::text("Handle\nBars"));
-    assert_eq!(s.cell(at("D1")).and_then(|c| c.formula.as_ref()).map(|f| f.text.as_str()), Some("COUNTA(\\_Prime.1[Name])"));
+    assert_eq!(s.cell(at("D1")).and_then(|c| c.formula.as_ref()).map(|f| f.text()), Some(std::borrow::Cow::Borrowed("COUNTA(\\_Prime.1[Name])")));
     assert!(gridcraft_formula::parse("COUNTA(\\_Prime.1[Name])").is_ok(), "backslash table name parses as a structured reference");
 }
 
@@ -1894,7 +1937,7 @@ fn table_save_repairs_the_workbook_namespace() {
     let names = |si: usize| back.sheet(si).unwrap().tables.iter().map(|t| t.name.clone()).collect::<Vec<_>>();
     assert_eq!(names(0), ["sales_2", "a_b", "Kept"]);
     assert_eq!(names(1), ["SALES_3"]);
-    let g1 = back.sheet(0).unwrap().cell(at("G1")).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone());
+    let g1 = back.sheet(0).unwrap().cell(at("G1")).and_then(|c| c.formula.as_ref()).map(|f| f.text().clone());
     assert_eq!(g1.as_deref(), Some("SUM(sales_2[V])+SUM(Kept[V])"));
     assert_eq!(
         report.warnings,
@@ -2260,6 +2303,25 @@ fn japanese_paper_sizes_round_trip() {
     assert_eq!(back.sheet(0).unwrap().print.paper, "B5");
 }
 
+/// The paper names every spelling folds onto keep their file id: `11x17` is Tabloid (3), and
+/// ISO B5 is id 34 (ECMA-376's 176×250 mm "B5 envelope"), read back as `B5 (ISO)`. An empty
+/// paper (none stated) writes no `paperSize`, so the reader's own paper applies.
+#[test]
+fn paper_names_keep_their_xlsx_id_and_an_unstated_paper_writes_none() {
+    for (paper, id, back_as) in [("11x17", 3, "Tabloid"), ("US Legal", 5, "Legal"), ("B5 (ISO)", 34, "B5 (ISO)"), ("Envelope B5", 34, "B5 (ISO)")] {
+        let mut wb = Workbook::new();
+        wb.sheet_mut(0).unwrap().print.paper = paper.into();
+        let bytes = write_xlsx(&wb).unwrap();
+        assert!(sheet1_xml(&bytes).0.contains(&format!("paperSize=\"{id}\"")), "{paper}");
+        let (back, _) = read_xlsx(&bytes).unwrap();
+        assert_eq!(back.sheet(0).unwrap().print.paper, back_as);
+    }
+    let mut wb = Workbook::new();
+    wb.sheet_mut(0).unwrap().print.paper = String::new();
+    let (xml, _) = sheet1_xml(&write_xlsx(&wb).unwrap());
+    assert!(!xml.contains("paperSize"), "{xml}");
+}
+
 /// A table's dropdown filter lives in `sheet.autofilter` (the engine's only live filter state),
 /// not in `Table::filter`. Writing used to suppress the sheet `<autoFilter>` because a table
 /// intersects it and write the table part from `Table::filter`, which was empty: the criteria
@@ -2305,9 +2367,9 @@ fn a_table_filter_criteria_survive_a_round_trip() {
     assert!(b.autofilter.is_none(), "a table's filter belongs to the table part, not the sheet");
 }
 
-/// Stored `colId` offsets are relative to the filter range's first column, so criteria of a filter
-/// that starts right of the table's first column must not be folded into the table part, where
-/// they would apply to the wrong column.
+/// Stored `colId` offsets are relative to the table's first column, so criteria of a sheet filter
+/// that starts right of the table's first column are moved to the column they filter (Region), not
+/// kept at the filter's own offset (which would be Id).
 #[test]
 fn a_partial_sheet_filter_is_not_folded_into_a_table() {
     let mut wb = Workbook::new();
@@ -2342,8 +2404,26 @@ fn a_partial_sheet_filter_is_not_folded_into_a_table() {
     assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
     let b = back.sheet(0).unwrap();
     let t = b.tables.first().expect("the table survived");
-    assert!(t.filter.is_empty(), "the criteria landed on the wrong table column: {:?}", t.filter);
+    assert!(
+        matches!(t.filter.as_slice(), [(1, FilterCriterion::Values { values, .. })] if values == &["East".to_string()]),
+        "the criteria landed on the wrong table column: {:?}",
+        t.filter
+    );
     assert!(b.autofilter.is_none(), "a sheet filter inside a table would be invalid");
+}
+
+#[test]
+fn legacy_reservation_password_is_written_with_a_user_name() {
+    let mut wb = sample();
+    wb.write_reservation =
+        Some(WriteReservation { user_name: String::new(), read_only_recommended: false, password: Some(PasswordHash::Legacy(0x83AF)) });
+    let (back, _) = read_xlsx(&write_xlsx(&wb).unwrap()).unwrap();
+    let r = back.write_reservation.expect("the reservation survived");
+    assert_eq!(r.password, Some(PasswordHash::Legacy(0x83AF)), "a nameless legacy password is kept, under a placeholder name");
+    assert!(!r.user_name.is_empty());
+    wb.write_reservation.as_mut().unwrap().user_name = "Ann".into();
+    let (back, _) = read_xlsx(&write_xlsx(&wb).unwrap()).unwrap();
+    assert_eq!(back.write_reservation.and_then(|r| r.password), Some(PasswordHash::Legacy(0x83AF)));
 }
 
 #[test]
@@ -2583,6 +2663,72 @@ fn remove_personal_information_is_kept_and_honoured() {
     assert!(String::from_utf8(pkg.read("docProps/core.xml").unwrap().unwrap()).unwrap().contains("Jane Example"));
 }
 
+/// A password set in GridCraft (both forms) is written as its Excel form, which reads back and
+/// verifies; a SHA-256 digest alone has no XLSX form, so its protection is kept without it.
+#[test]
+fn protection_passwords_write_the_form_xlsx_stores() {
+    let mut wb = Workbook::new();
+    wb.protected_structure = true;
+    wb.structure_password = Some(PasswordHash::new_for_files("b00k", b"0123456789abcdef"));
+    let both = PasswordHash::new_for_files("pa55", b"fedcba9876543210");
+    let sheet = wb.sheet_mut(0).unwrap();
+    sheet.protection = Some(SheetProtection { password: Some(both.clone()), ..Default::default() });
+    let mut digest_only = Sheet::new("Digest");
+    digest_only.protection = Some(SheetProtection { password: Some(PasswordHash::new_sha256_digest("pa55")), ..Default::default() });
+    wb.sheets.push(Arc::new(digest_only));
+    let (back, _) = read_xlsx(&write_xlsx(&wb).unwrap()).unwrap();
+    assert_eq!(back.structure_password.as_ref(), wb.structure_password.as_ref().and_then(PasswordHash::excel));
+    assert!(back.structure_password.as_ref().unwrap().verify("b00k").unwrap());
+    let read = back.sheets[0].protection.as_ref().and_then(|p| p.password.clone());
+    assert_eq!(read.as_ref(), both.excel());
+    assert!(read.unwrap().verify("pa55").unwrap());
+    let digest = back.sheets[1].protection.as_ref().unwrap();
+    assert_eq!(digest.password, None);
+}
+
+#[test]
+fn cell_padding_is_dropped_by_xlsx_and_nothing_else_is() {
+    // SpreadsheetML has no cell padding: it is not written, and everything else in the style is.
+    let mut wb = Workbook::new();
+    let full = wb.styles.derive(StyleId::DEFAULT, |s| {
+        s.font.bold = true;
+        s.fill = Fill::solid(Color::Rgb(0x00AAFF));
+        s.align = Alignment {
+            h: HAlign::Right,
+            v: VAlign::Center,
+            wrap: true,
+            shrink: false,
+            indent: 2,
+            rotation: 45,
+            reading_order: None,
+            padding: [Some(100), Some(200), Some(0), None],
+        };
+    });
+    let only_padding = wb.styles.derive(StyleId::DEFAULT, |s| s.align.padding = [Some(50); 4]);
+    let mut s = Sheet::new("Padded");
+    s.cells.set(at("A1"), Cell { value: Value::text("full"), formula: None, style: full, py: None });
+    s.cells.set(at("B2"), Cell { value: Value::Number(7.0), formula: None, style: only_padding, py: None });
+    wb.sheets = vec![Arc::new(s)];
+
+    let bytes = write_xlsx(&wb).unwrap();
+    assert_eq!(write_xlsx(&wb).unwrap(), bytes, "output is deterministic");
+    // Only the full style writes `<alignment>`: the padding-only one differs from the default by
+    // nothing SpreadsheetML has, so it writes neither an empty `<alignment/>` nor `applyAlignment`.
+    let mut pkg = Package::open(&bytes).unwrap();
+    let styles = String::from_utf8(pkg.read("xl/styles.xml").unwrap().unwrap()).unwrap();
+    assert_eq!(styles.matches("<alignment").count(), 1, "{styles}");
+    assert_eq!(styles.matches("applyAlignment").count(), 1, "{styles}");
+    let (back, _) = read_xlsx(&bytes).unwrap();
+    let (a, b) = (wb.sheet(0).unwrap(), back.sheet(0).unwrap());
+    for cell in ["A1", "B2"] {
+        let (ca, cb) = (a.cells.get(at(cell)).unwrap(), b.cells.get(at(cell)).unwrap());
+        assert_eq!(ca.value, cb.value, "{cell}");
+        let mut want = wb.styles.get(ca.style).clone();
+        want.align.padding = [None; 4];
+        assert_eq!(back.styles.get(cb.style), &want, "{cell}");
+    }
+}
+
 #[test]
 fn issue_778_xlsx_xml_import_save_reopen_roundtrip() {
     let mut wb = Workbook::new();
@@ -2645,6 +2791,8 @@ fn issue_778_xlsx_xml_import_save_reopen_roundtrip() {
         pivot: None,
         axis_number_formats: Default::default(),
         pivot_label_formats: Vec::new(),
+        area_style: Default::default(),
+        user_shapes: Vec::new(),
     });
     wb.sheets[0] = Arc::new(s);
 
@@ -2656,7 +2804,7 @@ fn issue_778_xlsx_xml_import_save_reopen_roundtrip() {
     let sh = &again.sheets[0];
     assert_eq!(sh.cells.get(at("A2")).unwrap().value, Value::text("Alpha"));
     assert_eq!(sh.cells.get(at("B3")).unwrap().value, Value::Number(85.0));
-    assert_eq!(sh.cells.get(at("B3")).unwrap().formula.as_ref().map(|f| f.text.as_str()), Some("B2*2"));
+    assert_eq!(sh.cells.get(at("B3")).unwrap().formula.as_ref().map(|f| f.text().into_owned()), Some("B2*2".to_string()));
     assert_eq!(sh.merges, vec![rr("A4:B4")]);
     assert_eq!(sh.hyperlinks.get(&at("A2")).map(|h| h.target.as_str()), Some("https://example.com"));
     assert_eq!(sh.comments.get(&at("B2")).map(|c| c.text.as_str()), Some("Checked"));
@@ -2743,11 +2891,11 @@ fn issue_778_full_workbook_import_save_reopen_roundtrip() {
 
     let sh = &again.sheets[0];
     assert_eq!(sh.cells.get(at("B3")).unwrap().value, Value::Number(85.0));
-    assert_eq!(sh.cells.get(at("B3")).unwrap().formula.as_ref().map(|f| f.text.as_str()), Some("B2*2"));
+    assert_eq!(sh.cells.get(at("B3")).unwrap().formula.as_ref().map(|f| f.text().into_owned()), Some("B2*2".to_string()));
     assert_eq!(sh.cells.get(at("C2")).unwrap().value, Value::Number(10.0));
-    assert_eq!(sh.cells.get(at("C2")).unwrap().formula.as_ref().map(|f| f.text.as_str()), Some("[1]Sheet1!$A$1"));
+    assert_eq!(sh.cells.get(at("C2")).unwrap().formula.as_ref().map(|f| f.text().into_owned()), Some("[1]Sheet1!$A$1".to_string()));
     assert_eq!(sh.cells.get(at("C3")).unwrap().value, Value::Number(60.0));
-    assert_eq!(sh.cells.get(at("C3")).unwrap().formula.as_ref().map(|f| f.text.as_str()), Some("SUM([1]Sheet1!A1:A3)*2"));
+    assert_eq!(sh.cells.get(at("C3")).unwrap().formula.as_ref().map(|f| f.text().into_owned()), Some("SUM([1]Sheet1!A1:A3)*2".to_string()));
 
     assert_eq!(sh.images.len(), 1);
     assert_eq!(sh.images[0].data.as_ref(), png.as_slice());
@@ -2772,4 +2920,220 @@ fn issue_778_full_workbook_import_save_reopen_roundtrip() {
     assert!(out_ext_rels.contains("file:///C:/never/opened/Book2.xlsx") && out_ext_rels.contains("TargetMode=\"External\""), "{out_ext_rels}");
     let out_chart = read_part("xl/charts/chart1.xml");
     assert!(out_chart.contains("<c:numCache>") && out_chart.contains("<c:v>42.5</c:v>"), "{out_chart}");
+}
+
+#[test]
+fn streaming_xlsx_deduplicates_column_formulas_and_emits_shared_runs() {
+    let mut body = String::from("<sheetData>");
+    for r in 1..=100u32 {
+        body.push_str(&format!(
+            r#"<row r="{r}"><c r="A{r}"><v>{r}</v></c><c r="B{r}"><f>if(A{r}&gt;50,A{r}*2,A{r}+1)</f><v>{}</v></c></row>"#,
+            if r > 50 { r * 2 } else { r + 1 }
+        ));
+    }
+    body.push_str("</sheetData>");
+    let bytes = super::minimal(&body, &[], "", "");
+    let (wb, _) = read_xlsx(&bytes).unwrap();
+    let sh = wb.sheet(0).unwrap();
+    let first_base = sh.cell(at("B1")).unwrap().formula.as_ref().unwrap().expr_shifted().unwrap().0;
+    for r in 1..=100u32 {
+        let f = sh.cell(CellRef::new(r - 1, 1)).unwrap().formula.as_ref().unwrap();
+        let (base, dr, dc) = f.expr_shifted().unwrap();
+        assert!(std::sync::Arc::ptr_eq(base, first_base), "row {r} should share master AST");
+        assert_eq!((dr, dc), ((r - 1) as i32, 0));
+        assert_eq!(f.text(), format!("IF(A{r}>50,A{r}*2,A{r}+1)"));
+    }
+    let saved = write_xlsx(&wb).unwrap();
+    let (xml, _) = sheet1_xml(&saved);
+    assert!(xml.contains(r#"t="shared" ref="B1:B100" si="0""#), "{xml}");
+    assert!(xml.contains(r#"<f t="shared" si="0"/>"#), "{xml}");
+    let (reopened, _) = read_xlsx(&saved).unwrap();
+    for r in 1..=100u32 {
+        let f = reopened.sheet(0).unwrap().cell(CellRef::new(r - 1, 1)).unwrap().formula.as_ref().unwrap();
+        assert_eq!(f.text(), format!("IF(A{r}>50,A{r}*2,A{r}+1)"));
+    }
+}
+
+#[test]
+fn shared_formula_export_skips_members_shifting_off_grid_to_ref() {
+    let mut wb = Workbook::new();
+    let base = std::sync::Arc::new(gridcraft_formula::parse("A2+1").unwrap());
+    {
+        let sh = wb.sheet_mut(0).unwrap();
+        // Row 0 shifts A2 by dr=-2 -> #REF!; rows 1..=70 shift A2 by dr=-1..=68 -> A1..=A70.
+        for r in 0..=70u32 {
+            sh.cells.set(CellRef::new(r, 1), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base), r as i32 - 2, 0)));
+        }
+    }
+    let saved = write_xlsx(&wb).unwrap();
+    let (xml, _) = sheet1_xml(&saved);
+    assert!(xml.contains(r#"<c r="B1"><f>#REF!+1</f></c>"#), "{xml}");
+    assert!(xml.contains(r#"t="shared" ref="B2:B71" si="0">A1+1</f>"#), "{xml}");
+    let (reopened, _) = read_xlsx(&saved).unwrap();
+    let sh = reopened.sheet(0).unwrap();
+    assert_eq!(sh.cell(at("B1")).unwrap().formula.as_ref().unwrap().text(), "#REF!+1");
+    assert_eq!(sh.cell(at("B2")).unwrap().formula.as_ref().unwrap().text(), "A1+1");
+    assert_eq!(sh.cell(at("B71")).unwrap().formula.as_ref().unwrap().text(), "A70+1");
+}
+
+#[test]
+fn shared_formula_export_assigns_monotonic_deterministic_si_and_skips_struct_spill() {
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+    use std::collections::HashSet;
+
+    let mut wb = Workbook::new();
+    let base_b1 = std::sync::Arc::new(gridcraft_formula::parse("A1+1").unwrap());
+    let base_c = std::sync::Arc::new(gridcraft_formula::parse("A1*2").unwrap());
+    let base_d = std::sync::Arc::new(gridcraft_formula::parse("A1+10").unwrap());
+    let base_b2 = std::sync::Arc::new(gridcraft_formula::parse("A1*3").unwrap());
+    let base_struct = std::sync::Arc::new(gridcraft_formula::parse("Table1[Qty]+1").unwrap());
+    let base_spill = std::sync::Arc::new(gridcraft_formula::parse("SUM(A1#)").unwrap());
+    {
+        let sh = wb.sheet_mut(0).unwrap();
+        // Staggered overlapping vertical runs (>= 64 rows each) designed so end-row flush order
+        // (C ends at row 80, D at 100, B1 at 120, B2 at 200) differs from start-row master order
+        // (D starts at row 2, B1 at 5, C at 10, B2 at 130).
+        for r in 5..=120u32 {
+            sh.cells.set(CellRef::new(r, 1), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_b1), r as i32, 0)));
+        }
+        for r in 10..=80u32 {
+            sh.cells.set(CellRef::new(r, 2), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_c), r as i32, 0)));
+        }
+        for r in 2..=100u32 {
+            sh.cells.set(CellRef::new(r, 3), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_d), r as i32, 0)));
+        }
+        for r in 130..=200u32 {
+            sh.cells.set(CellRef::new(r, 1), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_b2), r as i32, 0)));
+        }
+        // Structured table refs and spill `#` refs must never be emitted as `<f t="shared">`.
+        for r in 1..=70u32 {
+            sh.cells.set(CellRef::new(r, 4), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_struct), r as i32, 0)));
+            sh.cells.set(CellRef::new(r, 5), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_spill), r as i32, 0)));
+        }
+    }
+
+    let saved1 = write_xlsx(&wb).unwrap();
+    let saved2 = write_xlsx(&wb).unwrap();
+    let (xml1, _) = sheet1_xml(&saved1);
+    let (xml2, _) = sheet1_xml(&saved2);
+    assert_eq!(xml1, xml2, "repeated write_xlsx must produce deterministic shared-formula XML");
+
+    let mut reader = Reader::from_str(&xml1);
+    let mut masters: Vec<(u32, String)> = Vec::new();
+    let mut seen_masters: HashSet<u32> = HashSet::new();
+    let mut follower_count = 0usize;
+    loop {
+        match reader.read_event().unwrap() {
+            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == b"f" => {
+                let mut t = None;
+                let mut r = None;
+                let mut si = None;
+                for attr in e.attributes().flatten() {
+                    let val = std::str::from_utf8(&attr.value).unwrap().to_string();
+                    match attr.key.as_ref() {
+                        b"t" => t = Some(val),
+                        b"ref" => r = Some(val),
+                        b"si" => si = Some(val.parse::<u32>().unwrap()),
+                        _ => {}
+                    }
+                }
+                if t.as_deref() == Some("shared") {
+                    let id = si.expect("shared formula must have si");
+                    if let Some(ref_attr) = r {
+                        assert!(seen_masters.insert(id), "duplicate shared master si={id}");
+                        masters.push((id, ref_attr));
+                    } else {
+                        assert!(seen_masters.contains(&id), "follower si={id} appeared before its master in document order");
+                        follower_count += 1;
+                    }
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+
+    assert_eq!(
+        masters,
+        vec![(0, "D3:D101".to_string()), (1, "B6:B121".to_string()), (2, "C11:C81".to_string()), (3, "B131:B201".to_string()),],
+        "shared formula masters must be strictly monotonic si=0..N in <sheetData> row-major order and exclude struct/spill refs"
+    );
+    assert_eq!(follower_count, (120 - 5) + (80 - 10) + (100 - 2) + (200 - 130));
+
+    let (reopened, _) = read_xlsx(&saved1).unwrap();
+    let sh = reopened.sheet(0).unwrap();
+    assert_eq!(sh.cell(at("D3")).unwrap().formula.as_ref().unwrap().text(), "A3+10");
+    assert_eq!(sh.cell(at("D101")).unwrap().formula.as_ref().unwrap().text(), "A101+10");
+    assert_eq!(sh.cell(at("B6")).unwrap().formula.as_ref().unwrap().text(), "A6+1");
+    assert_eq!(sh.cell(at("B121")).unwrap().formula.as_ref().unwrap().text(), "A121+1");
+    assert_eq!(sh.cell(at("C11")).unwrap().formula.as_ref().unwrap().text(), "A11*2");
+    assert_eq!(sh.cell(at("C81")).unwrap().formula.as_ref().unwrap().text(), "A81*2");
+    assert_eq!(sh.cell(at("B131")).unwrap().formula.as_ref().unwrap().text(), "A131*3");
+    assert_eq!(sh.cell(at("B201")).unwrap().formula.as_ref().unwrap().text(), "A201*3");
+}
+
+#[test]
+fn shared_formula_export_skips_cross_sheet_and_disallowed_shared_ptgs() {
+    let mut wb = Workbook::new();
+    wb.sheets.push(std::sync::Arc::new(Sheet::new("Lookup")));
+    let base_local = std::sync::Arc::new(gridcraft_formula::parse("IF(A1>0,A1*2,0)").unwrap());
+    let base_xsheet = std::sync::Arc::new(gridcraft_formula::parse("IF(A1=Lookup!$B$1,A1,0)").unwrap());
+    let base_3d = std::sync::Arc::new(gridcraft_formula::parse("SUM(Sheet1:Lookup!A1)").unwrap());
+    let base_array = std::sync::Arc::new(gridcraft_formula::parse("SUM(A1*{1,2})").unwrap());
+    let base_union = std::sync::Arc::new(gridcraft_formula::parse("SUM((A1,A2))").unwrap());
+    let base_ref_err = std::sync::Arc::new(gridcraft_formula::parse("IFERROR(#REF!+A1,0)").unwrap());
+    let base_ext_name = std::sync::Arc::new(gridcraft_formula::parse("A1*Lookup!Rate").unwrap());
+    let base_rtd = std::sync::Arc::new(gridcraft_formula::parse(r#"RTD("prog","",A1)"#).unwrap());
+    let base_linked_ref_err = std::sync::Arc::new(gridcraft_formula::parse("[1]Lookup!#REF!+A1").unwrap());
+    let base_intersect = std::sync::Arc::new(gridcraft_formula::parse("SUM(A1:B2 B1:C2)").unwrap());
+    let base_range_op = std::sync::Arc::new(gridcraft_formula::parse("SUM(A1:INDEX(A:A,3))").unwrap());
+    let base_lambda_invoke = std::sync::Arc::new(gridcraft_formula::parse("LAMBDA(x,x+1)(A1)").unwrap());
+    {
+        let sh = wb.sheet_mut(0).unwrap();
+        for r in 0..70u32 {
+            let dr = r as i32;
+            sh.cells.set(CellRef::new(r, 1), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_local), dr, 0)));
+            sh.cells.set(CellRef::new(r, 2), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_xsheet), dr, 0)));
+            sh.cells.set(CellRef::new(r, 3), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_3d), dr, 0)));
+            sh.cells.set(CellRef::new(r, 4), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_array), dr, 0)));
+            sh.cells.set(CellRef::new(r, 5), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_union), dr, 0)));
+            sh.cells.set(CellRef::new(r, 6), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_ref_err), dr, 0)));
+            sh.cells.set(CellRef::new(r, 7), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_ext_name), dr, 0)));
+            sh.cells.set(CellRef::new(r, 8), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_rtd), dr, 0)));
+            sh.cells.set(CellRef::new(r, 9), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_linked_ref_err), dr, 0)));
+            sh.cells.set(CellRef::new(r, 10), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_intersect), dr, 0)));
+            sh.cells.set(CellRef::new(r, 11), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_range_op), dr, 0)));
+            sh.cells.set(CellRef::new(r, 12), Cell::formula(Formula::from_shared(std::sync::Arc::clone(&base_lambda_invoke), dr, 0)));
+        }
+    }
+
+    let saved = write_xlsx(&wb).unwrap();
+    let (xml, _) = sheet1_xml(&saved);
+    // Same-sheet column B remains a shared run.
+    assert!(xml.contains(r#"t="shared" ref="B1:B70" si="0""#), "{xml}");
+    assert!(xml.contains(r#"<f t="shared" si="0"/>"#), "{xml}");
+    // Cross-sheet, 3D, array-constant, reference-operator, #REF!, sheet-qualified name, RTD,
+    // linked ref error, intersect, dynamic range, and LAMBDA/invoke runs must never be emitted as
+    // `<f t="shared">` (Excel rejects them per [MS-XLSB] §2.5.98.98 SharedParsedFormula).
+    for col in ["C1:C70", "D1:D70", "E1:E70", "F1:F70", "G1:G70", "H1:H70", "I1:I70", "J1:J70", "K1:K70", "L1:L70", "M1:M70"] {
+        assert!(!xml.contains(col), "unexpected shared ref {col} in {xml}");
+    }
+    assert!(!xml.contains(r#"si="1""#), "only column B should be shared: {xml}");
+
+    let (reopened, _) = read_xlsx(&saved).unwrap();
+    let sh = reopened.sheet(0).unwrap();
+    assert_eq!(sh.cell(at("B70")).unwrap().formula.as_ref().unwrap().text(), "IF(A70>0,A70*2,0)");
+    assert_eq!(sh.cell(at("C1")).unwrap().formula.as_ref().unwrap().text(), "IF(A1=Lookup!$B$1,A1,0)");
+    assert_eq!(sh.cell(at("C70")).unwrap().formula.as_ref().unwrap().text(), "IF(A70=Lookup!$B$1,A70,0)");
+    assert_eq!(sh.cell(at("D70")).unwrap().formula.as_ref().unwrap().text(), "SUM(Sheet1:Lookup!A70)");
+    assert_eq!(sh.cell(at("E70")).unwrap().formula.as_ref().unwrap().text(), "SUM(A70*{1,2})");
+    assert_eq!(sh.cell(at("F70")).unwrap().formula.as_ref().unwrap().text(), "SUM((A70,A71))");
+    assert_eq!(sh.cell(at("G70")).unwrap().formula.as_ref().unwrap().text(), "IFERROR(#REF!+A70,0)");
+    assert_eq!(sh.cell(at("H70")).unwrap().formula.as_ref().unwrap().text(), "A70*Lookup!Rate");
+    assert_eq!(sh.cell(at("I70")).unwrap().formula.as_ref().unwrap().text(), r#"RTD("prog","",A70)"#);
+    assert_eq!(sh.cell(at("J70")).unwrap().formula.as_ref().unwrap().text(), "[1]Lookup!#REF!+A70");
+    assert_eq!(sh.cell(at("K70")).unwrap().formula.as_ref().unwrap().text(), "SUM(A70:B71 B70:C71)");
+    assert_eq!(sh.cell(at("L70")).unwrap().formula.as_ref().unwrap().text(), "SUM(A70:INDEX(A:A,3))");
+    assert_eq!(sh.cell(at("M70")).unwrap().formula.as_ref().unwrap().text(), "LAMBDA(x,x+1)(A70)");
 }

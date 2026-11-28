@@ -147,16 +147,16 @@ fn fit_measures_logarithmically() {
     assert_eq!(c2.1.get(), 1);
 }
 
-fn legend_entries(n: usize, label: &dyn Fn(usize) -> String) -> Vec<(String, Rgba, Swatch)> {
-    (0..n).map(|i| (label(i), [10, 20, 30, 255], if i % 3 == 0 { Swatch::Line } else { Swatch::Box })).collect()
+fn legend_entries(n: usize, label: &dyn Fn(usize) -> String) -> Vec<(String, Rgba, Option<Rgba>, Swatch)> {
+    (0..n).map(|i| (label(i), [10, 20, 30, 255], None, if i % 3 == 0 { Swatch::Line } else { Swatch::Box })).collect()
 }
 
 /// Colour column width as the old code computed it, from the returned remaining area.
-fn old_colw(m: &dyn Measure, entries: &[(String, Rgba, Swatch)], area: Bx) -> f32 {
+fn old_colw(m: &dyn Measure, entries: &[(String, Rgba, Option<Rgba>, Swatch)], area: Bx) -> f32 {
     let ctx = Ctx { out: vec![], m };
     let size = LABEL_SIZE;
     let s = size * 0.8;
-    entries.iter().map(|e| swatch_w(e.2, s) + 4.0 + ctx.tw(&e.0, size)).fold(0.0f32, f32::max).min(area.w * 0.35)
+    entries.iter().map(|e| swatch_w(e.3, s) + 4.0 + ctx.tw(&e.0, size)).fold(0.0f32, f32::max).min(area.w * 0.35)
 }
 
 #[test]
@@ -295,4 +295,48 @@ fn squarify_matches_reference() {
             assert_eq!(format!("{new:?}"), format!("{old:?}"), "{vals:?} in {r:?}");
         }
     }
+}
+
+#[test]
+fn many_points_with_max_dpt_styles_uses_logarithmic_lookup() {
+    let c = Chart {
+        id: 1,
+        kind: ChartKind::ColumnClustered,
+        anchor: Default::default(),
+        title: Some(String::new()),
+        series: vec![],
+        legend: gridcraft_model::LegendPos::None,
+        data_labels: false,
+        data_table: None,
+        gridlines: false,
+        style: 2,
+        hole_size: 75,
+        first_slice_angle: 0,
+        x_title: None,
+        y_title: None,
+        source: None,
+        by_rows: false,
+        pivot: None,
+        axis_number_formats: Default::default(),
+        pivot_label_formats: vec![],
+        area_style: Default::default(),
+        user_shapes: vec![],
+    };
+    let n = 20_000usize;
+    let points: Vec<crate::PointStyleData> = (0..4096)
+        .rev()
+        .map(|i| crate::PointStyleData { idx: i * 4, fill: Some([(i & 0xFF) as u8, 0x80, 0xC0, 0xFF]), ..Default::default() })
+        .collect();
+    let data = ChartData {
+        categories: (0..n).map(|i| i.to_string()).collect(),
+        series: vec![SeriesData { values: vec![Some(10.0); n], points, ..SeriesData::default() }],
+        ..ChartData::default()
+    };
+    let clean = super::sanitized(&data);
+    assert_eq!(clean.series[0].points.len(), 4096);
+    assert!(clean.series[0].points.windows(2).all(|w| w[0].idx < w[1].idx));
+    assert_eq!(clean.series[0].point_style(4095 * 4).and_then(|p| p.fill), Some([0xFF, 0x80, 0xC0, 0xFF]));
+    assert_eq!(clean.series[0].point_style(1), None);
+    let prims = crate::render(&c, &data, 800.0, 400.0, &crate::ApproxMeasure);
+    assert!(!prims.is_empty());
 }

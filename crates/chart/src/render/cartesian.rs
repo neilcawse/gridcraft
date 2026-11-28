@@ -1,10 +1,13 @@
+use gridcraft_model::DataLabelPos;
+
 use super::frame::{Bx, CatAxis, ValAxis, frame, on, value_range};
-use super::legend::{cat_label, plot_kind};
+use super::kinds::format_point_label;
+use super::legend::cat_label;
 use super::lines::{decimate_area, draw_markers, draw_runs};
 use super::trend::{draw_trend_labels, draw_trendlines, max_backward, max_forward, max_forward_slots, supports_trendline};
 use super::{
     Chart, ChartData, ChartKind, Ctx, Fmt, HAlign, LABEL_SIZE, MAX_CATS, MAX_LABELS, MAX_LINE_PTS, MAX_MARKERS, MIN_BAR_PX, Prim, Rgba, Scale,
-    SeriesData, TEXT, VAlign, WHITE, axis_fmt, clean, label_fmt, nice_scale,
+    SeriesData, TEXT, VAlign, WHITE, axis_fmt, clean, nice_scale,
 };
 
 // ---------------------------------------------------------------- cartesian (column/bar/line/area/combo)
@@ -16,6 +19,7 @@ enum Fam {
     Col100,
     Line,
     LineStack,
+    Line100,
     Area,
     AreaStack,
     Area100,
@@ -31,6 +35,7 @@ fn family(k: ChartKind) -> Fam {
         ColumnStacked100 | BarStacked100 => Fam::Col100,
         Line | LineMarkers | Scatter | ScatterLines | Radar | Stock => Fam::Line,
         LineStacked => Fam::LineStack,
+        LineStacked100 | LineStacked100Markers => Fam::Line100,
         Area => Fam::Area,
         AreaStacked => Fam::AreaStack,
         AreaStacked100 => Fam::Area100,
@@ -40,7 +45,7 @@ fn family(k: ChartKind) -> Fam {
 
 /// Families stacked to 100%: each category's values are shares of its total.
 fn is_100(f: Fam) -> bool {
-    matches!(f, Fam::Col100 | Fam::Area100)
+    matches!(f, Fam::Col100 | Fam::Line100 | Fam::Area100)
 }
 
 fn is_col(f: Fam) -> bool {
@@ -48,7 +53,12 @@ fn is_col(f: Fam) -> bool {
 }
 
 fn is_line(f: Fam) -> bool {
-    matches!(f, Fam::Line | Fam::LineStack)
+    matches!(f, Fam::Line | Fam::LineStack | Fam::Line100)
+}
+
+/// Line kinds that draw a marker at each point.
+fn has_markers(k: ChartKind) -> bool {
+    matches!(k, ChartKind::LineMarkers | ChartKind::LineStacked100Markers)
 }
 
 /// Bars that fall into one pixel column, merged: extent along the category axis (`a0..=a1`, the
@@ -127,14 +137,14 @@ impl BarSink {
     }
     /// Draws the bar at category center `c` spanning `lo..lo + len` on the value axis, or, when
     /// `merge` is set, adds it to the current run.
-    fn bar(&mut self, ctx: &mut Ctx, merge: bool, c: f32, lo: f32, len: f32) {
+    fn bar(&mut self, ctx: &mut Ctx, merge: bool, c: f32, lo: f32, len: f32, style: (Option<Rgba>, Option<(Rgba, f32)>)) {
         let pos = self.pos(c);
         let band = self.band();
         if !merge {
-            if self.horizontal {
-                ctx.rect(lo, pos, len, self.bw, self.color, None);
-            } else {
-                ctx.rect(pos, lo, self.bw, len, self.color, None);
+            let (fill, stroke) = style;
+            let (x, y, w, h) = if self.horizontal { (lo, pos, len, self.bw) } else { (pos, lo, self.bw, len) };
+            if fill.is_some() || stroke.is_some() {
+                ctx.out.push(Prim::Rect { x, y, w, h, fill, stroke, radius: 0.0 });
             }
             return;
         }
@@ -155,8 +165,94 @@ impl BarSink {
     }
 }
 
+/// Resolved fill and outline stroke for bar/column point `j` of series `s`.
+fn bar_style(s: &SeriesData, j: usize) -> (Option<Rgba>, Option<(Rgba, f32)>) {
+    let pt = s.point_style(j);
+    let fill = match pt {
+        Some(p) if p.no_fill => None,
+        Some(p) if p.fill.is_some() => p.fill,
+        _ => Some(s.color),
+    };
+    let stroke = match pt {
+        Some(p) if p.no_line => None,
+        Some(p) if p.stroke.is_some() => p.stroke,
+        _ if s.no_line => None,
+        _ => s.line,
+    };
+    (fill, stroke)
+}
+
+struct BarLabelCtx {
+    horizontal: bool,
+    stacked: bool,
+    pos: DataLabelPos,
+    pb: f32,
+    pt: f32,
+    c: f32,
+    nslots: f32,
+    k: f32,
+    bw: f32,
+    val: f64,
+    fill: Rgba,
+}
+
+fn draw_bar_label(ctx: &mut Ctx, bl: &BarLabelCtx, text: &str) {
+    let lo = bl.pb.min(bl.pt);
+    let hi = bl.pb.max(bl.pt);
+    let len = hi - lo;
+    let mid = (bl.pb + bl.pt) / 2.0;
+    let effective = match bl.pos {
+        DataLabelPos::Auto if bl.stacked => DataLabelPos::Center,
+        DataLabelPos::Auto => DataLabelPos::OutsideEnd,
+        p => p,
+    };
+    if bl.horizontal {
+        let y = bl.c + bl.nslots * bl.bw / 2.0 - (bl.k + 0.5) * bl.bw;
+        match effective {
+            DataLabelPos::Center => ctx.text(mid, y, text, LABEL_SIZE, on(bl.fill), (HAlign::Center, VAlign::Middle)),
+            DataLabelPos::InsideEnd if len >= ctx.tw(text, LABEL_SIZE) + 6.0 => {
+                if bl.val >= 0.0 {
+                    ctx.text(hi - 4.0, y, text, LABEL_SIZE, on(bl.fill), (HAlign::Right, VAlign::Middle));
+                } else {
+                    ctx.text(lo + 4.0, y, text, LABEL_SIZE, on(bl.fill), (HAlign::Left, VAlign::Middle));
+                }
+            }
+            DataLabelPos::InsideBase if len >= ctx.tw(text, LABEL_SIZE) + 6.0 => {
+                if bl.val >= 0.0 {
+                    ctx.text(lo + 4.0, y, text, LABEL_SIZE, on(bl.fill), (HAlign::Left, VAlign::Middle));
+                } else {
+                    ctx.text(hi - 4.0, y, text, LABEL_SIZE, on(bl.fill), (HAlign::Right, VAlign::Middle));
+                }
+            }
+            _ if bl.val >= 0.0 => ctx.text(hi + 3.0, y, text, LABEL_SIZE, TEXT, (HAlign::Left, VAlign::Middle)),
+            _ => ctx.text(lo - 3.0, y, text, LABEL_SIZE, TEXT, (HAlign::Right, VAlign::Middle)),
+        }
+    } else {
+        let x = bl.c - bl.nslots * bl.bw / 2.0 + (bl.k + 0.5) * bl.bw;
+        match effective {
+            DataLabelPos::Center => ctx.text(x, mid, text, LABEL_SIZE, on(bl.fill), (HAlign::Center, VAlign::Middle)),
+            DataLabelPos::InsideEnd if len >= LABEL_SIZE + 6.0 => {
+                if bl.val >= 0.0 {
+                    ctx.text(x, lo + 4.0, text, LABEL_SIZE, on(bl.fill), (HAlign::Center, VAlign::Top));
+                } else {
+                    ctx.text(x, hi - 4.0, text, LABEL_SIZE, on(bl.fill), (HAlign::Center, VAlign::Bottom));
+                }
+            }
+            DataLabelPos::InsideBase if len >= LABEL_SIZE + 6.0 => {
+                if bl.val >= 0.0 {
+                    ctx.text(x, hi - 4.0, text, LABEL_SIZE, on(bl.fill), (HAlign::Center, VAlign::Bottom));
+                } else {
+                    ctx.text(x, lo + 4.0, text, LABEL_SIZE, on(bl.fill), (HAlign::Center, VAlign::Top));
+                }
+            }
+            _ if bl.val >= 0.0 => ctx.text(x, lo - 2.0, text, LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Bottom)),
+            _ => ctx.text(x, hi + 2.0, text, LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Top)),
+        }
+    }
+}
+
 fn series_spans(data: &ChartData, fams: &[Fam], sec: &[bool], ncat: usize) -> Vec<Vec<Option<(f64, f64)>>> {
-    // Totals for 100% stacking, per axis and family (100% columns and 100% areas stack apart).
+    // Totals for 100% stacking, per axis and family (100% columns, lines and areas stack apart).
     let mut totals: Vec<((bool, Fam), Vec<f64>)> = Vec::new();
     for (i, s) in data.series.iter().enumerate() {
         let fam = fams.get(i).copied().unwrap_or(Fam::Col);
@@ -187,7 +283,7 @@ fn series_spans(data: &ChartData, fams: &[Fam], sec: &[bool], ncat: usize) -> Ve
     for (i, s) in data.series.iter().enumerate() {
         let fam = fams.get(i).copied().unwrap_or(Fam::Col);
         let a = sec.get(i).copied().unwrap_or(false);
-        let stacked = matches!(fam, Fam::ColStack | Fam::Col100 | Fam::LineStack | Fam::AreaStack | Fam::Area100);
+        let stacked = matches!(fam, Fam::ColStack | Fam::Col100 | Fam::LineStack | Fam::Line100 | Fam::AreaStack | Fam::Area100);
         let key = (a, fam);
         let si = if stacked {
             match stacks.iter().position(|(k, _, _)| *k == key) {
@@ -216,7 +312,7 @@ fn series_spans(data: &ChartData, fams: &[Fam], sec: &[bool], ncat: usize) -> Ve
                 }),
                 (Some((_, pos, _)), _) => {
                     let v = v.unwrap_or(0.0);
-                    let v = if fam == Fam::Area100 { share(key, j, v) } else { v };
+                    let v = if is_100(fam) { share(key, j, v) } else { v };
                     pos.get_mut(j).map(|acc| {
                         let base = *acc;
                         *acc = clean(*acc + v);
@@ -296,7 +392,7 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
     if ncat == 0 {
         return;
     }
-    let kinds: Vec<ChartKind> = data.series.iter().enumerate().map(|(i, s)| if horizontal { chart.kind } else { plot_kind(chart, s, i) }).collect();
+    let kinds: Vec<ChartKind> = data.series.iter().map(|s| if horizontal { chart.kind } else { s.kind }).collect();
     let fams: Vec<Fam> = kinds.iter().map(|k| family(*k)).collect();
     let any_primary = data.series.iter().any(|s| !s.secondary);
     let sec: Vec<bool> = data.series.iter().map(|s| s.secondary && any_primary && !horizontal).collect();
@@ -334,8 +430,7 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
 
     let (slot_of, nslots) = column_slots(&fams, &sec);
     let bw = cw / (nslots + 1.5);
-    let labels_on = chart.data_labels && ncat <= MAX_LABELS;
-    // Area labels wait until every area is filled, so a later (stacked) area can't paint over them.
+    let labels_on = (chart.data_labels || data.series.iter().any(|s| s.data_labels.as_ref().is_some_and(|d| d.shows_any()))) && ncat <= MAX_LABELS;
     let mut area_labels = Vec::new();
 
     // Areas first, then columns, then lines on top.
@@ -351,7 +446,6 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
                 continue;
             }
             let sc = scale_of(i);
-            let fmt = label_fmt(s);
             let row = match spans.get(i) {
                 Some(r) => r,
                 None => continue,
@@ -369,8 +463,9 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
                         if labels_on
                             && sp.is_some()
                             && let Some(v) = s.values.get(j).copied().flatten()
+                            && let Some(lbl) = format_point_label(chart, data, s, j, v, None)
                         {
-                            area_labels.push((c, vpos(t, &sc) - 5.0, fmt.format(v, None)));
+                            area_labels.push((c, vpos(t, &sc) - 5.0, lbl));
                         }
                     }
                     if top.len() == 1 {
@@ -387,39 +482,41 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
                 }
                 1 => {
                     let k = slot_of.get(i).copied().unwrap_or(0) as f32;
-                    // Hairline bars are merged per pixel column (their envelope is what shows).
-                    let cull = merge_hairlines(bw, labels_on);
+                    let has_styled_bars = !s.points.is_empty() || (!s.no_line && s.line.is_some());
+                    // Hairline bars are merged per pixel column unless individually styled or labelled.
+                    let cull = merge_hairlines(bw, labels_on || has_styled_bars);
                     let mut sink = BarSink::new(bw, horizontal, s.color, nslots, k);
+                    let pos = s.data_labels.as_ref().map_or(DataLabelPos::Auto, |d| d.pos);
                     for (j, sp) in row.iter().enumerate() {
                         let Some((b, t)) = sp else { continue };
                         let (pb, pt) = (vpos(*b, &sc), vpos(*t, &sc));
                         let c = center(j);
                         let lo = pb.min(pt);
                         let len = (pb - pt).abs();
-                        sink.bar(ctx, cull, c, lo, len);
-                        if labels_on && let Some(v) = s.values.get(j).copied().flatten() {
-                            let t = fmt.format(v, None);
-                            let stacked = fam != Fam::Col;
-                            let mid = (pb + pt) / 2.0;
-                            if horizontal {
-                                let y = c + nslots * bw / 2.0 - (k + 0.5) * bw;
-                                if stacked {
-                                    ctx.text(mid, y, &t, LABEL_SIZE, on(s.color), (HAlign::Center, VAlign::Middle));
-                                } else if v >= 0.0 {
-                                    ctx.text(pb.max(pt) + 3.0, y, &t, LABEL_SIZE, TEXT, (HAlign::Left, VAlign::Middle));
-                                } else {
-                                    ctx.text(lo - 3.0, y, &t, LABEL_SIZE, TEXT, (HAlign::Right, VAlign::Middle));
-                                }
-                            } else {
-                                let x = c - nslots * bw / 2.0 + (k + 0.5) * bw;
-                                if stacked {
-                                    ctx.text(x, mid, &t, LABEL_SIZE, on(s.color), (HAlign::Center, VAlign::Middle));
-                                } else if v >= 0.0 {
-                                    ctx.text(x, lo - 2.0, &t, LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Bottom));
-                                } else {
-                                    ctx.text(x, lo + len + 2.0, &t, LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Top));
-                                }
-                            }
+                        let style = bar_style(s, j);
+                        let fill = style.0;
+                        sink.bar(ctx, cull, c, lo, len, style);
+                        if labels_on
+                            && let Some(v) = s.values.get(j).copied().flatten()
+                            && let Some(lbl) = format_point_label(chart, data, s, j, v, None)
+                        {
+                            draw_bar_label(
+                                ctx,
+                                &BarLabelCtx {
+                                    horizontal,
+                                    stacked: fam != Fam::Col,
+                                    pos,
+                                    pb,
+                                    pt,
+                                    c,
+                                    nslots,
+                                    k,
+                                    bw,
+                                    val: v,
+                                    fill: fill.unwrap_or(WHITE),
+                                },
+                                &lbl,
+                            );
                         }
                     }
                     sink.finish(ctx);
@@ -428,13 +525,15 @@ pub(super) fn cartesian(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx
                     let pts: Vec<Option<[f32; 2]>> = row.iter().enumerate().map(|(j, sp)| sp.map(|(_, t)| [center(j), vpos(t, &sc)])).collect();
                     draw_runs(ctx, &pts, s.color, 2.25, s.smooth.then_some(plot));
                     let k = kinds.get(i).copied().unwrap_or(ChartKind::Line);
-                    if k == ChartKind::LineMarkers && cw >= 3.0 {
+                    if has_markers(k) && cw >= 3.0 {
                         draw_markers(ctx, pts.iter().flatten().copied(), 3.5, s.color);
                     }
                     if labels_on {
                         for (j, p) in pts.iter().enumerate() {
-                            if let (Some(p), Some(v)) = (p, s.values.get(j).copied().flatten()) {
-                                ctx.text(p[0], p[1] - 5.0, &fmt.format(v, None), LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Bottom));
+                            if let (Some(p), Some(v)) = (p, s.values.get(j).copied().flatten())
+                                && let Some(lbl) = format_point_label(chart, data, s, j, v, None)
+                            {
+                                ctx.text(p[0], p[1] - 5.0, &lbl, LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Bottom));
                             }
                         }
                     }
@@ -532,7 +631,7 @@ pub(super) fn scatter(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx) 
                 ctx.out.push(Prim::Circle { cx: p[0], cy: p[1], r, fill: Some(fill), stroke: Some((WHITE, 0.75)) });
             }
         } else {
-            let lines = chart.kind == ChartKind::ScatterLines || s.kind == ChartKind::ScatterLines;
+            let lines = s.kind == ChartKind::ScatterLines;
             if lines {
                 draw_runs(ctx, &px, s.color, 2.0, s.smooth.then_some(plot));
             }
@@ -540,11 +639,13 @@ pub(super) fn scatter(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx) 
                 draw_markers(ctx, px.iter().flatten().copied(), 3.5, s.color);
             }
         }
-        if chart.data_labels && pts.len() <= MAX_LABELS {
-            let fl = label_fmt(s);
-            for (p, raw) in px.iter().zip(pts) {
-                if let (Some(p), Some((_, y))) = (p, raw) {
-                    ctx.text(p[0], p[1] - 6.0, &fl.format(*y, None), LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Bottom));
+        let show_labels = (chart.data_labels || s.data_labels.as_ref().is_some_and(|d| d.shows_any())) && pts.len() <= MAX_LABELS;
+        if show_labels {
+            for (j, (p, raw)) in px.iter().zip(pts).enumerate() {
+                if let (Some(p), Some((_, y))) = (p, raw)
+                    && let Some(lbl) = format_point_label(chart, data, s, j, *y, None)
+                {
+                    ctx.text(p[0], p[1] - 6.0, &lbl, LABEL_SIZE, TEXT, (HAlign::Center, VAlign::Bottom));
                 }
             }
         }

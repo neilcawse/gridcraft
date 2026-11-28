@@ -290,7 +290,7 @@ fn v(wb: &gridcraft_model::Workbook, sheet: usize, a1: &str) -> Value {
 }
 
 fn ftext(wb: &gridcraft_model::Workbook, a1: &str) -> Option<String> {
-    wb.sheets[0].cell(CellRef::parse(a1).unwrap()).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone())
+    wb.sheets[0].cell(CellRef::parse(a1).unwrap()).and_then(|c| c.formula.as_ref()).map(|f| f.text().into_owned())
 }
 
 #[test]
@@ -346,7 +346,7 @@ fn assert_formula_roundtrip(wb: &gridcraft_model::Workbook) {
     // Array formula: the anchor holds it; the other cell's cached result is dropped so that
     // the formula fills the range on recalculation (as when an .xlsx is read, #156).
     let c5 = wb.sheets[0].cell(CellRef::parse("C5").unwrap()).unwrap().formula.clone().unwrap();
-    assert_eq!((c5.text.as_str(), c5.array), ("A5:A6*2", Some(RangeRef::parse("C5:C6").unwrap())));
+    assert_eq!((c5.text(), c5.array), (std::borrow::Cow::Borrowed("A5:A6*2"), Some(RangeRef::parse("C5:C6").unwrap())));
     assert_eq!(ftext(wb, "C6"), None);
     assert_eq!(v(wb, 0, "C6"), Value::Empty);
 }
@@ -371,7 +371,7 @@ fn assert_layout_roundtrip(wb: &gridcraft_model::Workbook) {
 fn assert_xlsx_conversion(wb: &gridcraft_model::Workbook) {
     // The import saves as .xlsx and reads back.
     let (back, _) = read_xlsx(&write_xlsx(wb).unwrap()).unwrap();
-    assert_eq!(back.sheets[0].cell(CellRef::parse("A3").unwrap()).unwrap().formula.as_ref().unwrap().text, "B1*2");
+    assert_eq!(back.sheets[0].cell(CellRef::parse("A3").unwrap()).unwrap().formula.as_ref().unwrap().text(), "B1*2");
     assert_eq!(back.sheets[0].value(CellRef::parse("C3").unwrap()), Value::from("Hello!"));
 }
 
@@ -782,7 +782,7 @@ fn legacy_formulas_read_with_implicit_intersection() {
     let bytes = compound("Workbook", &legacy_formulas_book());
     let formula = |wb: &gridcraft_model::Workbook, a1: &str| {
         let f = wb.sheets[1].cell(CellRef::parse(a1).unwrap()).and_then(|c| c.formula.clone()).unwrap();
-        (f.text.clone(), f.array)
+        (f.text().into_owned(), f.array)
     };
     let range = |a1: &str| RangeRef::parse(a1);
     let (wb, _) = read_xls(&bytes).unwrap();
@@ -839,6 +839,19 @@ fn xls_window2_right_to_left_sheet_opens_right_to_left() {
     };
     assert_eq!(view(&one_sheet_with(&window2(0x0040 | 0x0004))), (true, false, true, false, false));
     assert_eq!(view(&one_sheet_with(&window2(0x0001 | 0x0002 | 0x0010))), (false, true, false, true, true));
+}
+
+/// COLINFO's fUserSet marks a width set by hand, which a wider number format leaves alone (#1077).
+/// craft-xls does not report fBestFit, so fUserSet with fBestFit also reads as set by hand.
+#[test]
+fn xls_column_widths_set_by_hand() {
+    let colinfo = |col: u16, flags: u16| rec(0x007D, &u16s(&[col, col, 20 * 256, 0, flags, 0]));
+    let file = one_sheet_with(&cat(&[&colinfo(0, 0x0002), &colinfo(1, 0), &colinfo(2, 0x0006)]));
+    let (wb, _) = read_xls(&file).unwrap();
+    let sh = &wb.sheets[0];
+    let custom: Vec<bool> = (0..3).map(|c| sh.cols.get(&c).is_some_and(|i| i.custom)).collect();
+    assert_eq!(custom, [true, false, true]);
+    assert!((0..3).all(|c| sh.col_width(c) > sh.default_col_width), "all three keep their stored width");
 }
 
 #[test]

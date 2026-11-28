@@ -26,9 +26,8 @@ enum Operand {
     Error(CellError),
     /// Plain text without wildcards.
     Text(String),
-    /// Wildcard pattern (`*`, `?`, `~` escapes), pre-tokenized for `=` and `<>`.
-    Wildcard(Vec<Tok>),
-    /// A criterion cut to its first 255 UTF-16 units in the middle of a surrogate pair: the
+    /// Wildcard pattern (`*`, `?`, `~` escapes), pre-compiled for `=` and `<>`.
+    Wildcard(CompiledWildcard),
     /// complete characters before the cut, followed (in Excel) by a lone high surrogate.
     ///
     /// No cell text holds a lone surrogate, so `=` matches nothing and `<>` everything, as
@@ -120,7 +119,7 @@ impl Criterion {
         } else if let Some(e) = CellError::parse(rest) {
             Operand::Error(e)
         } else if matches!(op, Op::Eq | Op::Ne) && has_wildcards(rest) {
-            Operand::Wildcard(tokenize(rest))
+            Operand::Wildcard(CompiledWildcard::new(rest))
         } else {
             Operand::Text(rest.to_string())
         };
@@ -166,11 +165,11 @@ impl Criterion {
         }
     }
 
-    /// Matches `v` against a pre-tokenized wildcard pattern (`*`, `?`, `~` escapes).
-    fn matches_wildcard(&self, v: &Value, p: &[Tok]) -> bool {
+    /// Matches `v` against a pre-compiled wildcard pattern (`*`, `?`, `~` escapes).
+    fn matches_wildcard(&self, v: &Value, p: &CompiledWildcard) -> bool {
         // Blank cells hold no text: `"*"` skips them and `"<>*"` counts them.
         let m = match v {
-            Value::Text(t) => wildcard_match_tokens(p, t),
+            Value::Text(t) => p.matches(t),
             _ => false,
         };
         if self.op == Op::Eq { m } else { !m }
@@ -192,6 +191,19 @@ impl Criterion {
             && let Operand::Text(pat) = &self.operand
         {
             Some(pat.as_str())
+        } else {
+            None
+        }
+    }
+
+    /// If this criterion is an exact numeric equality match (`=n`), returns `Some(n)`.
+    pub(crate) fn exact_number(&self) -> Option<f64> {
+        if !self.bare_empty
+            && self.op == Op::Eq
+            && let Operand::Number(n) = self.operand
+            && n.is_finite()
+        {
+            Some(n)
         } else {
             None
         }
@@ -292,6 +304,154 @@ pub(crate) fn has_wildcards(pattern: &str) -> bool {
     pattern.bytes().any(|b| matches!(b, b'*' | b'?' | b'~'))
 }
 
+/// Pre-compiled wildcard matcher (`*`, `?`, `~` escapes) with zero-allocation ASCII fast paths.
+/// Only takes ASCII byte paths when `text.is_ascii()`, preserving exact Unicode case-folding
+/// (e.g. U+0130 `İ` -> `i`) for any non-ASCII text.
+#[derive(Clone, Debug)]
+pub(crate) struct CompiledWildcard {
+    tokens: Vec<Tok>,
+    ascii: Option<AsciiWildcard>,
+}
+
+#[derive(Clone, Debug)]
+enum AsciiWildcard {
+    Any,
+    Contains(Vec<u8>),
+    Prefix(Vec<u8>),
+    Suffix(Vec<u8>),
+    Exact(Vec<u8>),
+    General(Vec<AsciiTok>),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum AsciiTok {
+    Byte(u8),
+    Any,
+    Star,
+}
+
+impl CompiledWildcard {
+    pub(crate) fn new(pattern: &str) -> Self {
+        let raw = tokenize(pattern);
+        // Collapse adjacent stars: `**` is identical to `*` and avoids redundant backtracking.
+        let mut tokens = Vec::with_capacity(raw.len());
+        for tk in raw {
+            if tk == Tok::Star && tokens.last() == Some(&Tok::Star) {
+                continue;
+            }
+            tokens.push(tk);
+        }
+        let ascii = compile_ascii_wildcard(&tokens);
+        Self { tokens, ascii }
+    }
+
+    #[inline]
+    pub(crate) fn matches(&self, text: &str) -> bool {
+        if text.is_ascii()
+            && let Some(fast) = &self.ascii
+        {
+            return match_ascii_wildcard(fast, text.as_bytes());
+        }
+        wildcard_match_tokens(&self.tokens, text)
+    }
+}
+
+fn compile_ascii_wildcard(tokens: &[Tok]) -> Option<AsciiWildcard> {
+    let mut atoks = Vec::with_capacity(tokens.len());
+    for &tk in tokens {
+        match tk {
+            Tok::Char(c) if c.is_ascii() => atoks.push(AsciiTok::Byte(c as u8)),
+            Tok::Char(_) => return None,
+            Tok::Any => atoks.push(AsciiTok::Any),
+            Tok::Star => atoks.push(AsciiTok::Star),
+        }
+    }
+    let only_bytes = |slice: &[AsciiTok]| -> Option<Vec<u8>> {
+        let mut out = Vec::with_capacity(slice.len());
+        for &t in slice {
+            match t {
+                AsciiTok::Byte(b) => out.push(b),
+                _ => return None,
+            }
+        }
+        Some(out)
+    };
+    match atoks.as_slice() {
+        [AsciiTok::Star] => Some(AsciiWildcard::Any),
+        [AsciiTok::Star, mid @ .., AsciiTok::Star] if let Some(lit) = only_bytes(mid) => Some(AsciiWildcard::Contains(lit)),
+        [mid @ .., AsciiTok::Star] if let Some(lit) = only_bytes(mid) => Some(AsciiWildcard::Prefix(lit)),
+        [AsciiTok::Star, mid @ ..] if let Some(lit) = only_bytes(mid) => Some(AsciiWildcard::Suffix(lit)),
+        all if let Some(lit) = only_bytes(all) => Some(AsciiWildcard::Exact(lit)),
+        _ => Some(AsciiWildcard::General(atoks)),
+    }
+}
+
+#[inline]
+fn match_ascii_wildcard(w: &AsciiWildcard, bytes: &[u8]) -> bool {
+    match w {
+        AsciiWildcard::Any => true,
+        AsciiWildcard::Exact(lit) => bytes.len() == lit.len() && bytes.iter().zip(lit).all(|(a, b)| a.to_ascii_lowercase() == *b),
+        AsciiWildcard::Prefix(lit) => bytes.len() >= lit.len() && bytes[..lit.len()].iter().zip(lit).all(|(a, b)| a.to_ascii_lowercase() == *b),
+        AsciiWildcard::Suffix(lit) => {
+            bytes.len() >= lit.len() && bytes[bytes.len() - lit.len()..].iter().zip(lit).all(|(a, b)| a.to_ascii_lowercase() == *b)
+        }
+        AsciiWildcard::Contains(lit) => {
+            let Some(&first) = lit.first() else { return true };
+            if bytes.len() < lit.len() {
+                return false;
+            }
+            let end = bytes.len() - lit.len();
+            for i in 0..=end {
+                if bytes[i].to_ascii_lowercase() == first
+                    && bytes[i + 1..i + lit.len()].iter().zip(&lit[1..]).all(|(a, b)| a.to_ascii_lowercase() == *b)
+                {
+                    return true;
+                }
+            }
+            false
+        }
+        AsciiWildcard::General(p) => {
+            let mut budget = MAX_STEPS;
+            match_from_ascii(p, bytes, &mut budget)
+        }
+    }
+}
+
+fn match_from_ascii(p: &[AsciiTok], t: &[u8], budget: &mut u64) -> bool {
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let mut star: Option<(usize, usize)> = None;
+    loop {
+        let Some(next) = budget.checked_sub(1) else { return false };
+        *budget = next;
+        if pi == p.len() && ti == t.len() {
+            return true;
+        }
+        let step = match (p.get(pi), t.get(ti)) {
+            (Some(AsciiTok::Star), _) => {
+                star = Some((pi, ti));
+                pi += 1;
+                continue;
+            }
+            (Some(AsciiTok::Any), Some(_)) => true,
+            (Some(AsciiTok::Byte(c)), Some(x)) => *c == x.to_ascii_lowercase(),
+            _ => false,
+        };
+        if step {
+            pi += 1;
+            ti += 1;
+            continue;
+        }
+        match star {
+            Some((sp, st)) if st < t.len() => {
+                star = Some((sp, st + 1));
+                pi = sp + 1;
+                ti = st + 1;
+            }
+            _ => return false,
+        }
+    }
+}
+
 /// Case-insensitive whole-text match against pre-tokenized wildcard tokens `p`.
 fn wildcard_match_tokens(p: &[Tok], text: &str) -> bool {
     let t = lower_chars(text);
@@ -301,8 +461,7 @@ fn wildcard_match_tokens(p: &[Tok], text: &str) -> bool {
 
 /// Case-insensitive whole-text match with `*`, `?` and `~` escapes.
 pub(crate) fn wildcard_match(pattern: &str, text: &str) -> bool {
-    let p = tokenize(pattern);
-    wildcard_match_tokens(&p, text)
+    CompiledWildcard::new(pattern).matches(text)
 }
 
 /// Steps one `match_from` call may take. An honest match against Excel's 32,767-character
@@ -495,5 +654,18 @@ mod tests {
         assert!(wildcard_match("i*", "\u{130}stanbul"));
         assert!(has_wildcards("a*"));
         assert!(!has_wildcards("abc"));
+    }
+
+    #[test]
+    fn compiled_wildcard_ascii_and_unicode_parity() {
+        let patterns = ["*", "**", "*mid*", "pre*", "*suf", "exact", "a?c*e", "*~*~?*", "i*"];
+        let texts = ["", "MID", "xxMIDyy", "prefix123", "123SUF", "EXACT", "abCdefE", "x*?y", "\u{130}stanbul", "ß"];
+        for pat in patterns {
+            let compiled = CompiledWildcard::new(pat);
+            let tokens = tokenize(pat);
+            for txt in texts {
+                assert_eq!(compiled.matches(txt), wildcard_match_tokens(&tokens, txt), "pat={pat:?} txt={txt:?}");
+            }
+        }
     }
 }

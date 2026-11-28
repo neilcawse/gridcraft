@@ -1,17 +1,26 @@
 use super::MAX_LAMBDA_CALLS;
 use super::array::{broadcast_len, single};
-use super::{Array, CellError, Ev, Evaluator, Expr, Lambda, MAX_CELLS, Value, err};
+use super::special::is_special;
+use super::{Array, CellError, Ev, Evaluator, Expr, Lambda, MAX_CELLS, MAX_TAIL_CALLS, Tail, Value, err};
 use std::sync::Arc;
 
 impl<'h> Evaluator<'h> {
     pub fn apply_lambda(&mut self, l: &Lambda, args: &[Expr]) -> Ev {
+        match self.bind_args(l, args) {
+            Ok(bound) => self.call_lambda_values(l, bound),
+            Err(e) => e,
+        }
+    }
+
+    /// The arguments of a call to `l`, evaluated in the current scope.
+    fn bind_args(&mut self, l: &Lambda, args: &[Expr]) -> Result<Vec<(String, Ev)>, Ev> {
         // Too many or too few argument positions is #VALUE!. An explicitly empty position, as in
         // `(1,)`, is `Expr::Missing` and still counts as a position (it binds as omitted). `f()`
         // parses to no arguments, which for a one-parameter lambda can also be read as one empty
         // position, so that call still binds the parameter as omitted.
         let positions_ok = args.len() == l.params.len() || (args.is_empty() && l.params.len() == 1);
         if !positions_ok {
-            return err(CellError::Value);
+            return Err(err(CellError::Value));
         }
         let mut bound = Vec::with_capacity(l.params.len());
         for (i, p) in l.params.iter().enumerate() {
@@ -21,7 +30,56 @@ impl<'h> Evaluator<'h> {
             };
             bound.push((p.clone(), v));
         }
-        self.call_lambda_values(l, bound)
+        Ok(bound)
+    }
+
+    /// Follows `e` through the positions whose value is the value of a LAMBDA call (`IF` branches,
+    /// parentheses), and returns the call with its arguments evaluated instead of making it, so
+    /// that `call_lambda_values` can loop. Anything else is evaluated here.
+    fn tail_step(&mut self, e: &Expr) -> Tail {
+        match e {
+            Expr::Paren(x) => self.tail_step(x),
+            Expr::Call(name, args) if name == "IF" && (2..=3).contains(&args.len()) => {
+                let c = self.arg_val(args, 0).unwrap_or_default();
+                if let Value::Array(arr) = &c {
+                    return Tail::Done(self.if_elementwise(arr, args));
+                }
+                match c.to_bool() {
+                    Ok(true) => self.tail_step_branch(args.get(1)),
+                    Ok(false) => match args.get(2) {
+                        Some(_) => self.tail_step_branch(args.get(2)),
+                        None => Tail::Done(Ev::V(Value::Bool(false))),
+                    },
+                    Err(x) => Tail::Done(err(x)),
+                }
+            }
+            Expr::Call(name, args) if gridcraft_functions::lookup(name).is_none() && !is_special(name) => match self.name(name) {
+                Ev::L(l) => self.tail_call(l, args),
+                Ev::V(Value::Error(x)) => Tail::Done(err(x)),
+                _ => Tail::Done(err(CellError::Name)),
+            },
+            Expr::Invoke(callee, args) => match self.eval(callee) {
+                Ev::L(l) => self.tail_call(l, args),
+                Ev::V(Value::Error(x)) => Tail::Done(err(x)),
+                _ => Tail::Done(err(CellError::Value)),
+            },
+            _ => Tail::Done(self.eval(e)),
+        }
+    }
+
+    /// An `IF` branch; an omitted one (`IF(c,,1)`) is 0.
+    fn tail_step_branch(&mut self, branch: Option<&Expr>) -> Tail {
+        match branch {
+            Some(Expr::Missing) | None => Tail::Done(Ev::V(Value::Number(0.0))),
+            Some(b) => self.tail_step(b),
+        }
+    }
+
+    fn tail_call(&mut self, l: Arc<Lambda>, args: &[Expr]) -> Tail {
+        match self.bind_args(&l, args) {
+            Ok(bound) => Tail::Call(l, bound),
+            Err(e) => Tail::Done(e),
+        }
     }
 
     pub(super) fn call_lambda_values(&mut self, l: &Lambda, bound: Vec<(String, Ev)>) -> Ev {
@@ -37,9 +95,33 @@ impl<'h> Evaluator<'h> {
         };
         self.calls += 1;
         let saved = std::mem::replace(&mut self.env, l.env.clone());
+        let saved_shift = std::mem::replace(&mut self.shift, l.shift);
         self.env.extend(bound);
-        let r = self.eval(&l.body);
+        // A call in tail position replaces this one instead of nesting under it, so a tail recursion
+        // uses no more native stack at 5,000 deep than at 5. Each link still spends fuel.
+        let mut tails = 0;
+        let mut step = self.tail_step(&l.body);
+        let r = loop {
+            match step {
+                Tail::Done(v) => break v,
+                Tail::Call(next, bound) => {
+                    tails += 1;
+                    if tails >= MAX_TAIL_CALLS {
+                        break err(CellError::Num);
+                    }
+                    self.fuel = match self.fuel.checked_sub(1) {
+                        Some(f) => f,
+                        None => break err(CellError::Calc),
+                    };
+                    self.env.clear();
+                    self.env.extend(next.env.iter().cloned());
+                    self.env.extend(bound);
+                    step = self.tail_step(&next.body);
+                }
+            }
+        };
         self.env = saved;
+        self.shift = saved_shift;
         self.calls -= 1;
         r
     }
@@ -67,15 +149,16 @@ impl<'h> Evaluator<'h> {
 
     /// The function argument of a LAMBDA helper; a function given by name takes `arity`
     /// arguments.
-    fn lambda_arg(&mut self, e: Option<&Expr>, arity: usize) -> Option<Arc<Lambda>> {
+    fn lambda_arg(&mut self, e: Option<&Expr>, arity: usize) -> Result<Arc<Lambda>, CellError> {
         if let Some(f) = e.and_then(|x| self.function_by_name(x)) {
             let params: Vec<String> = (0..arity).map(|i| format!("_xleta.{i}")).collect();
             let body = Expr::Call(f, params.iter().map(|p| Expr::Name(p.clone())).collect());
-            return Some(Arc::new(Lambda { params, body, env: Vec::new() }));
+            return Ok(Arc::new(Lambda { params, body, env: Vec::new(), shift: (0, 0) }));
         }
         match e.map(|x| self.eval(x)) {
-            Some(Ev::L(l)) => Some(l),
-            _ => None,
+            Some(Ev::L(l)) => Ok(l),
+            Some(Ev::V(Value::Error(e))) => Err(e),
+            _ => Err(CellError::Value),
         }
     }
 
@@ -91,7 +174,10 @@ impl<'h> Evaluator<'h> {
                 if args.len() < 2 {
                     return err(CellError::Value);
                 }
-                let Some(l) = self.lambda_arg(args.last(), args.len() - 1) else { return err(CellError::Value) };
+                let l = match self.lambda_arg(args.last(), args.len() - 1) {
+                    Ok(l) => l,
+                    Err(e) => return err(e),
+                };
                 let arrays: Vec<Arc<Array>> = args[..args.len() - 1].iter().map(|a| as_array(self.value(a))).collect();
                 let rows = arrays.iter().map(|a| a.rows).max().unwrap_or(1);
                 let cols = arrays.iter().map(|a| a.cols).max().unwrap_or(1);
@@ -117,7 +203,10 @@ impl<'h> Evaluator<'h> {
                 }
                 let mut acc = self.value(&args[0]);
                 let arr = as_array(self.value(&args[1]));
-                let Some(l) = self.lambda_arg(args.get(2), 2) else { return err(CellError::Value) };
+                let l = match self.lambda_arg(args.get(2), 2) {
+                    Ok(l) => l,
+                    Err(e) => return err(e),
+                };
                 if l.params.len() != 2 {
                     return err(CellError::Value);
                 }
@@ -142,7 +231,10 @@ impl<'h> Evaluator<'h> {
                     return err(CellError::Value);
                 }
                 let arr = as_array(self.value(&args[0]));
-                let Some(l) = self.lambda_arg(args.get(1), 1) else { return err(CellError::Value) };
+                let l = match self.lambda_arg(args.get(1), 1) {
+                    Ok(l) => l,
+                    Err(e) => return err(e),
+                };
                 let Some(p) = l.params.first().cloned() else { return err(CellError::Value) };
                 if l.params.len() != 1 {
                     return err(CellError::Value);
@@ -175,7 +267,10 @@ impl<'h> Evaluator<'h> {
                 if rows < 1.0 || cols < 1.0 || rows * cols > MAX_CELLS as f64 {
                     return err(CellError::Value);
                 }
-                let Some(l) = self.lambda_arg(args.get(2), 2) else { return err(CellError::Value) };
+                let l = match self.lambda_arg(args.get(2), 2) {
+                    Ok(l) => l,
+                    Err(e) => return err(e),
+                };
                 if l.params.len() != 2 {
                     return err(CellError::Value);
                 }

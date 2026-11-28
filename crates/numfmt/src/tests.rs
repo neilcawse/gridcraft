@@ -1470,3 +1470,83 @@ fn round_as_displayed_matches_excel() {
     assert_eq!(r("0", f64::MAX), f64::MAX);
     assert_eq!(r("0.0E+0", f64::MIN_POSITIVE), 2.2e-308);
 }
+
+#[test]
+fn system_long_date_and_time_pseudo_lcids_match_en_us_excel() {
+    // 2024-10-09 (Wednesday, single-digit day) = serial 45574 in 1900 date system.
+    // Excel saves `[$-F800]dddd\,\ mmmm\,\ dd\,\ yyyy` in OOXML with `dd`, but renders
+    // en-US System Long Date with an unpadded day (`9`, not `09`).
+    assert_eq!(f(r"[$-F800]dddd\,\ mmmm\ dd\,\ yyyy", 45574.0), "Wednesday, October 9, 2024");
+    assert_eq!(f(r"[$-f800]dddd\,\ dd\ mmmm\ yyyy", 45574.0), "Wednesday, October 9, 2024");
+    // Two-digit day stays two digits.
+    assert_eq!(f(r"[$-F800]dddd\,\ mmmm\ dd\,\ yyyy", 45575.0), "Thursday, October 10, 2024");
+    // Colour tags and text sections remain intact alongside `[$-F800]`.
+    let fmt = NumberFormat::parse(r"[Red][$-F800]dddd\,\ mmmm\ dd\,\ yyyy;@");
+    let out = format_value(&Value::Number(45574.0), &fmt, S);
+    assert_eq!(out.text, "Wednesday, October 9, 2024");
+    assert_eq!(out.color, Some(FormatColor::Red));
+    assert_eq!(format_value(&Value::Text("Header".into()), &fmt, S).text, "Header");
+    // `[$-F400]` renders en-US System Long Time (`h:mm:ss AM/PM`) regardless of fallback tokens.
+    assert_eq!(f(r"[$-F400]h:mm:ss\ AM/PM", 0.3350925925925926), "8:02:32 AM");
+    assert_eq!(f(r"[$-F400]HH:mm:ss", 0.5103935185185185), "12:14:58 PM");
+    // Modern Excel aliases `[$-x-sysdate]` and `[$-x-systime]` match case-insensitively.
+    assert_eq!(f(r"[$-x-sysdate]dddd\,\ mmmm\ dd\,\ yyyy", 45574.0), "Wednesday, October 9, 2024");
+    assert_eq!(f(r"[$-X-SYSDATE]dddd\,\ dd\ mmmm\ yyyy", 45575.0), "Thursday, October 10, 2024");
+    assert_eq!(f(r"[$-x-systime]HH:mm:ss", 0.3350925925925926), "8:02:32 AM");
+    assert_eq!(f(r"[$-X-SysTime]h:mm:ss\ AM/PM", 0.5103935185185185), "12:14:58 PM");
+    // System date/time tags override the section cleanly even with empty or non-date fallback tokens.
+    assert_eq!(f("[$-F800]", 45574.0), "Wednesday, October 9, 2024");
+    assert_eq!(f("[$-F800]0.00", 45574.0), "Wednesday, October 9, 2024");
+    assert_eq!(f("[$-x-sysdate]", 45574.0), "Wednesday, October 9, 2024");
+    assert_eq!(f("[$-x-sysdate]General", 45574.0), "Wednesday, October 9, 2024");
+    assert_eq!(f("[$-F400]", 0.3350925925925926), "8:02:32 AM");
+    assert_eq!(f("[$-F400]0.00", 0.3350925925925926), "8:02:32 AM");
+    assert_eq!(f("[$-x-systime]", 0.5103935185185185), "12:14:58 PM");
+    assert_eq!(f(r#"[$-x-systime]"fallback""#, 0.5103935185185185), "12:14:58 PM");
+    assert!(NumberFormat::parse("[$-x-sysdate]").is_date());
+    assert!(NumberFormat::parse("[$-x-systime]").is_date());
+    assert!(NumberFormat::parse("[$-F800]0.00").is_date());
+    // Multi-section formats keep colour tags on the system-date section and leave text sections intact.
+    let sys_fmt = NumberFormat::parse("[Blue][$-x-sysdate]0.00;@");
+    let sys_out = format_value(&Value::Number(45574.0), &sys_fmt, S);
+    assert_eq!(sys_out.text, "Wednesday, October 9, 2024");
+    assert_eq!(sys_out.color, Some(FormatColor::Blue));
+    assert_eq!(format_value(&Value::Text("Title".into()), &sys_fmt, S).text, "Title");
+}
+
+#[test]
+fn excel_aaa_and_aaaa_weekday_format_codes() {
+    // Serial 3 = 1900-01-03 (Tuesday); serial 45574.25 = 2024-10-09 06:00 (Wednesday).
+    assert_eq!(f("aaa", 3.0), "Tue");
+    assert_eq!(f("aaaa", 3.0), "Tuesday");
+    assert_eq!(f("AAA", 45574.25), "Wed");
+    assert_eq!(f("AAAA", 45574.25), "Wednesday");
+    assert_eq!(f("aaaaa", 45574.25), "Wednesday");
+    assert_eq!(f("aaaaaaaa", 45574.25), "Wednesday");
+    assert_eq!(f("yyyy-mm-dd (aaa)", 45574.25), "2024-10-09 (Wed)");
+    assert_eq!(f("h:mm:ss aaa", 45574.25), "6:00:00 Wed");
+    assert_eq!(f("aaa h AM/PM", 45574.25), "Wed 6 AM");
+    assert_eq!(f("aaa a/p", 45574.25), "Wed a");
+    assert_eq!(f("aaa am/pm", 45574.25), "Wed AM");
+    assert_eq!(f("\\aaaa", 45574.25), "aWed");
+    assert_eq!(f("aa aaa", 45574.25), "aa Wed");
+    assert!(NumberFormat::parse("aaa").is_date());
+    assert!(NumberFormat::parse("aaaa").is_date());
+    // Fewer than three `a` characters stay literal and do not trigger date formatting.
+    assert!(!NumberFormat::parse("aa").is_date());
+    assert_eq!(f("0\"aaa\"", 7.0), "7aaa");
+    // Mixed-case runs are literal; a trailing case switch ends the same-case run.
+    for lit in ["Aaa", "aaA", "AAa", "aAA", "aAaA"] {
+        assert!(!NumberFormat::parse(lit).is_date(), "{lit} must not parse as date");
+        assert_eq!(f(lit, 45574.25), lit, "{lit} must render literally");
+    }
+    assert_eq!(f("aaaA", 45574.25), "WedA");
+    assert_eq!(f("AAAa", 45574.25), "Weda");
+    // `am/pm` and `a/p` take priority over the final `a`/`A` of an adjacent run.
+    assert_eq!(f("aaam/pm", 45574.25), "aaAM");
+    assert_eq!(f("aaaam/pm", 45574.25), "WedAM");
+    assert_eq!(f("aaaaam/pm", 45574.25), "WednesdayAM");
+    assert_eq!(f("aaa/p", 45574.25), "aaa");
+    assert_eq!(f("aaa/p", 45574.75), "aap");
+    assert_eq!(f("aaaa/p", 45574.75), "Wedp");
+}

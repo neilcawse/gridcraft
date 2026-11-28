@@ -143,6 +143,116 @@ fn assert_reopened_chart_objects(bytes: &[u8], charts: usize, text: &str) {
     assert_eq!(sheet.images[0].data.as_slice(), PNG);
 }
 
+fn assert_chart_annotations_grafted(wb: &gridcraft_model::Workbook, shapes: &str) {
+    let out = write_xlsx(wb).unwrap();
+    let u = Unpacked::new(&out);
+    u.assert_valid();
+    let chart = super::written_chart(&u);
+    assert!(u.text(&chart).contains("<c:roundedCorners val=\"0\"/>"), "chart must be regenerated");
+    assert_eq!(written_chart_shapes(&u).map(|(_, xml)| xml).as_deref(), Some(shapes));
+    let drawing = u.text(&written_drawing(&u));
+    assert_eq!((count(&drawing, "Peak load"), count(&drawing, "ChartBadge")), (0, 0), "{drawing}");
+    assert_reopened_chart_objects(&out, 1, "Peak load");
+}
+
+#[test]
+fn chart_annotations_survive_direct_removal_of_the_plotted_sheet() {
+    let (bytes, shapes) = chart_package();
+    let mut parts = Unpacked::new(&bytes).parts;
+    let name = "xl/charts/chart1.xml";
+    let chart = String::from_utf8(parts.remove(name).unwrap()).unwrap();
+    parts.insert(name.into(), chart.replace("Data!", "Plotted!").into_bytes());
+    let package: Vec<_> = parts.iter().map(|(p, b)| (p.as_str(), b.as_slice())).collect();
+    let (mut wb, _) = read_xlsx(&make_zip(&package)).unwrap();
+    wb.sheets.push(Arc::new(gridcraft_model::Sheet::new("Plotted")));
+    assert!(written_chart_shapes(&Unpacked::new(&write_xlsx(&wb).unwrap())).is_some());
+    wb.sheets.pop();
+    assert_chart_annotations_grafted(&wb, &shapes);
+}
+
+fn reject_preserved_chart_xml(wb: &mut gridcraft_model::Workbook) {
+    let sheet = Arc::make_mut(&mut wb.sheets[0]);
+    let kept = &mut Arc::make_mut(sheet.preserved.as_mut().unwrap()).charts[0];
+    let xml = kept.parts.iter_mut().find(|p| p.name == kept.part).unwrap();
+    xml.data = Arc::from(&b"<"[..]);
+}
+
+#[test]
+fn chart_annotations_survive_rejection_of_invalid_preserved_chart_xml() {
+    let (bytes, shapes) = chart_package();
+    let (mut wb, _) = read_xlsx(&bytes).unwrap();
+    reject_preserved_chart_xml(&mut wb);
+    assert_chart_annotations_grafted(&wb, &shapes);
+}
+
+#[test]
+fn chart_annotations_are_grafted_without_a_chart_snapshot() {
+    let (bytes, shapes) = chart_package();
+    let (mut wb, _) = read_xlsx(&bytes).unwrap();
+    let sheet = Arc::make_mut(&mut wb.sheets[0]);
+    Arc::make_mut(sheet.preserved.as_mut().unwrap()).charts.clear();
+    assert_chart_annotations_grafted(&wb, &shapes);
+}
+
+#[test]
+fn chart_model_edit_writes_unchanged_annotations_as_sheet_objects() {
+    let (bytes, _) = chart_package();
+    let (mut wb, _) = read_xlsx(&bytes).unwrap();
+    Arc::make_mut(&mut wb.sheets[0]).charts[0].title = Some("Edited chart".into());
+    let out = write_xlsx(&wb).unwrap();
+    let u = Unpacked::new(&out);
+    u.assert_valid();
+    assert!(written_chart_shapes(&u).is_none());
+    let drawing = u.text(&written_drawing(&u));
+    assert_eq!((count(&drawing, "Peak load"), count(&drawing, "ChartBadge")), (1, 1), "{drawing}");
+    assert_reopened_chart_objects(&out, 1, "Peak load");
+    let (back, _) = read_xlsx(&out).unwrap();
+    assert_eq!(back.sheet(0).unwrap().charts[0].title.as_deref(), Some("Edited chart"));
+}
+
+#[test]
+fn rejected_chart_snapshot_keeps_edited_or_surviving_mirrors_on_the_sheet() {
+    let (bytes, _) = chart_package();
+    for deleted in [false, true] {
+        let (mut wb, _) = read_xlsx(&bytes).unwrap();
+        reject_preserved_chart_xml(&mut wb);
+        let sheet = Arc::make_mut(&mut wb.sheets[0]);
+        if deleted {
+            sheet.shapes.clear();
+        } else {
+            sheet.shapes[0].text = "Edited".into();
+        }
+        let out = write_xlsx(&wb).unwrap();
+        let u = Unpacked::new(&out);
+        u.assert_valid();
+        assert!(written_chart_shapes(&u).is_none());
+        assert!(!u.text("[Content_Types].xml").contains("chartshapes+xml"));
+        let drawing = u.text(&written_drawing(&u));
+        assert_eq!((count(&drawing, "Peak load"), count(&drawing, "Edited"), count(&drawing, "ChartBadge")), (0, usize::from(!deleted), 1));
+        let (back, _) = read_xlsx(&out).unwrap();
+        let sheet = back.sheet(0).unwrap();
+        assert_eq!((sheet.charts.len(), sheet.shapes.len(), sheet.images.len()), (1, usize::from(!deleted), 1));
+        assert_eq!(sheet.images[0].data.as_slice(), PNG);
+    }
+}
+
+#[test]
+fn chart_annotations_fall_back_to_mirrors_if_the_graft_lacks_its_picture_part() {
+    let (bytes, _) = chart_package();
+    let (mut wb, _) = read_xlsx(&bytes).unwrap();
+    reject_preserved_chart_xml(&mut wb);
+    let sheet = Arc::make_mut(&mut wb.sheets[0]);
+    let kept = Arc::make_mut(sheet.preserved.as_mut().unwrap());
+    kept.parts.retain(|part| part.name != "xl/media/badge.png");
+    let out = write_xlsx(&wb).unwrap();
+    let u = Unpacked::new(&out);
+    u.assert_valid();
+    assert!(written_chart_shapes(&u).is_none());
+    let drawing = u.text(&written_drawing(&u));
+    assert_eq!((count(&drawing, "Peak load"), count(&drawing, "ChartBadge")), (1, 1), "{drawing}");
+    assert_reopened_chart_objects(&out, 1, "Peak load");
+}
+
 /// How many times `s` is in `x`.
 fn count(x: &str, s: &str) -> usize {
     x.matches(s).count()

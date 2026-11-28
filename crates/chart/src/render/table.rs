@@ -1,7 +1,7 @@
 //! The chart data table uses the same primitives as the plot, including in print/PDF output.
 
 use super::frame::{Bx, CatAxis, level_groups};
-use super::legend::{Swatch, cat_label, draw_swatch, plot_kind};
+use super::legend::{Swatch, cat_label, draw_swatch};
 use super::{AXIS, Chart, ChartData, ChartKind, Ctx, Fmt, HAlign, LABEL_SIZE, TEXT, VAlign};
 
 pub(super) struct Layout {
@@ -70,12 +70,13 @@ pub(super) fn draw(ctx: &mut Ctx, chart: &Chart, data: &ChartData, plot: Bx, lay
         let y = top + (layout.headers as f32 + i as f32 + 0.5) * layout.row_height;
         let name_x = if settings.show_keys { x0 + 25.0 } else { x0 + 4.0 };
         if settings.show_keys {
-            let swatch = match plot_kind(chart, series, i) {
-                ChartKind::Line | ChartKind::LineStacked => Swatch::Line,
-                ChartKind::LineMarkers => Swatch::LineMarker,
+            let swatch = match series.kind {
+                ChartKind::Line | ChartKind::LineStacked | ChartKind::LineStacked100 => Swatch::Line,
+                ChartKind::LineMarkers | ChartKind::LineStacked100Markers => Swatch::LineMarker,
                 _ => Swatch::Box,
             };
-            draw_swatch(ctx, swatch, x0 + 4.0, y, 7.0, series.color);
+            let outline = if !series.no_line { series.line.map(|(c, _)| c) } else { None };
+            draw_swatch(ctx, swatch, x0 + 4.0, y, 7.0, series.color, outline);
         }
         let name = ctx.fit(&series.name, LABEL_SIZE, plot.x - name_x - 4.0);
         ctx.text(name_x, y, &name, LABEL_SIZE, TEXT, (HAlign::Left, VAlign::Middle));

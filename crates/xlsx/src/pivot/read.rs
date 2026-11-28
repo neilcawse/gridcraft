@@ -1,9 +1,26 @@
+use gridcraft_core::{CellError, Value};
+use gridcraft_model::{PivotDataCell, PivotItemRef, pivot_key};
+use std::sync::Arc;
+
 use super::{
-    CUSTOM_SUBTOTALS, CellRef, Ctx, DateSystem, EXT_X14_FIELD, EXT_X14_TABLE, EXT_XPDL_TABLE, El, HashMap, IoError, MAX_FIELDS, PivotCalcField,
-    PivotDateGroup, PivotField, PivotFilter, PivotFunc, PivotLayout, PivotScopeItem, PivotShowAs, PivotSort, PivotTable, PivotValue, RangeRef,
-    VALUES_FIELD, abs_range, func_caption, func_from, number_to_text, quote_sheet, same, serial_from_iso_ymd,
+    CUSTOM_SUBTOTALS, CellRef, Ctx, DateSystem, EXT_GC_DATA_FIELD, EXT_X14_FIELD, EXT_X14_TABLE, EXT_XPDL_TABLE, El, HashMap, IoError, MAX_FIELDS,
+    PivotCalcField, PivotColRole, PivotCustomStyle, PivotDateGroup, PivotField, PivotFilter, PivotFunc, PivotLayout, PivotRowRole, PivotScopeItem,
+    PivotShowAs, PivotSort, PivotStyleElement, PivotStyleGrid, PivotStyleLayout, PivotStyleOptions, PivotTable, PivotValue, RangeRef, VALUES_FIELD,
+    abs_range, func_caption, func_from, number_to_text, quote_sheet, same, serial_from_iso_ymd,
 };
 use gridcraft_model::WorksheetSourceAttrs;
+
+/// Cap on custom `<tableStyle>` definitions and elements read from `styles.xml`.
+const MAX_TABLE_STYLES: usize = 512;
+const MAX_TABLE_STYLE_ELEMENTS: usize = 64;
+
+#[derive(Clone, Debug, Default)]
+struct FieldGroupIn {
+    base: Option<usize>,
+    by: Option<PivotDateGroup>,
+    items: Vec<String>,
+    values: Vec<Value>,
+}
 
 /// A cache field as read.
 #[derive(Clone, Debug, Default)]
@@ -12,8 +29,10 @@ struct FieldIn {
     database: bool,
     /// Shared item captions.
     items: Vec<String>,
-    /// (base field, grouping, group item captions); grouping `None` = unsupported grouping.
-    group: Option<(Option<usize>, Option<PivotDateGroup>, Vec<String>)>,
+    /// Shared item typed values, parallel to `items`.
+    item_values: Vec<Value>,
+    /// Field grouping (`by == None` means unsupported grouping).
+    group: Option<FieldGroupIn>,
     /// A calculated field's formula.
     formula: Option<String>,
 }
@@ -21,8 +40,15 @@ struct FieldIn {
 impl FieldIn {
     fn labels(&self) -> &[String] {
         match &self.group {
-            Some((_, _, items)) if !items.is_empty() => items,
+            Some(g) if !g.items.is_empty() => &g.items,
             _ => &self.items,
+        }
+    }
+
+    fn values(&self) -> &[Value] {
+        match &self.group {
+            Some(g) if !g.items.is_empty() => &g.values,
+            _ => &self.item_values,
         }
     }
 }
@@ -31,15 +57,66 @@ impl FieldIn {
 struct CacheIn {
     id: u32,
     source: String,
+    external_source: bool,
     fields: Vec<FieldIn>,
     /// `x14:pivotCacheDefinition pivotCacheId`: how slicer caches name the cache.
     slicer_id: Option<u32>,
-    /// Whether the source is in another workbook (`worksheetSource r:id`) or a defined name: the
-    /// writer may not rebuild such a cache from the model, so the file's parts are kept.
-    kept: bool,
-    external: bool,
+    /// Set when the PivotTables on this cache are kept as they are, not modelled.
+    kept: Option<KeptSource>,
+    /// Whether the source is a defined name: the writer may not rebuild such a cache from the
+    /// model, so the file's parts are kept with the modelled PivotTable.
+    keep_parts: bool,
     /// The `worksheetSource` attributes of a source that is a name of this workbook, as read.
     attrs: Option<WorksheetSourceAttrs>,
+}
+
+/// Source parts of a PivotTable read from an XLSX sheet, used to preserve raw pivot XML
+/// when the source is external or cannot be resolved locally.
+#[derive(Clone, Debug)]
+pub struct ReadPivotSource {
+    pub pivot_id: u32,
+    pub table_part: String,
+    pub cache_part: String,
+    pub external_source: bool,
+}
+
+/// Where the data of a PivotTable GridCraft keeps unchanged (doesn't model) comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeptSource {
+    /// A range or name in another workbook.
+    OtherWorkbook,
+    /// A data connection of the workbook (`xl/connections.xml`) other than its Data Model.
+    Connection,
+    /// The workbook's Data Model (Power Pivot), through its model connection.
+    DataModel,
+}
+
+impl KeptSource {
+    pub(crate) fn describe(self) -> &'static str {
+        match self {
+            KeptSource::OtherWorkbook => "another workbook",
+            KeptSource::Connection => "a data connection",
+            KeptSource::DataModel => "the workbook's Data Model",
+        }
+    }
+}
+
+/// A PivotTable GridCraft doesn't model (its data is in another workbook, a data connection or
+/// the Data Model), kept unchanged for saving.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExternalPivot {
+    /// The id of the sheet's relationship to the PivotTable part.
+    pub rel_id: String,
+    /// The pivot cache definition part it uses.
+    pub cache_part: String,
+    pub source: KeptSource,
+}
+
+/// The PivotTables of a sheet: those modelled, and those kept as they are.
+#[derive(Debug, Default)]
+pub struct SheetPivots {
+    pub tables: Vec<PivotTable>,
+    pub external: Vec<ExternalPivot>,
 }
 
 /// Workbook-level pivot cache lookup, filled from `<pivotCaches>`; caches are parsed once.
@@ -51,6 +128,10 @@ pub struct CachesIn {
     next_cache_id: u32,
     /// PivotTable id → (its source text, the `worksheetSource` attributes it was read from).
     read_as: HashMap<u32, (String, WorksheetSourceAttrs)>,
+    styles_part: Option<String>,
+    table_styles: Option<HashMap<String, Arc<Vec<PivotStyleElement>>>>,
+    /// The workbook's data connections (`connectionId` → whether it is the Data Model's).
+    connections: HashMap<u32, bool>,
 }
 
 impl CachesIn {
@@ -65,7 +146,49 @@ impl CachesIn {
                 }
             }
         }
-        CachesIn { by_id, parsed: HashMap::new(), next_id: 1, next_cache_id: 1, read_as: HashMap::new() }
+        let styles_part = wb_rels.iter().find(|r| r.kind == "styles" && !r.external).map(|r| r.target.clone());
+        CachesIn {
+            by_id,
+            parsed: HashMap::new(),
+            next_id: 1,
+            next_cache_id: 1,
+            read_as: HashMap::new(),
+            styles_part,
+            table_styles: None,
+            connections: HashMap::new(),
+        }
+    }
+
+    /// Reads the ids of the workbook's data connections (`xl/connections.xml`), which caches on a
+    /// connection or the Data Model name by `connectionId`.
+    pub fn read_connections(&mut self, cx: &mut Ctx<'_>, wb_rels: &[crate::package::Rel]) {
+        let Some(r) = wb_rels.iter().find(|r| r.kind == "connections" && !r.external) else { return };
+        let Ok(Some(x)) = cx.optional_xml(&r.target) else { return };
+        for c in x.kids("connection").take(MAX_CONNECTIONS) {
+            let Some(id) = c.attr_u32("id") else { continue };
+            // The model connection: `<x15:connection model="1">` in its extension list (Excel
+            // also gives it `<dbPr command="Model">`).
+            let x15_model = c.child("extLst").is_some_and(|l| l.kids("ext").filter_map(|e| e.child("connection")).any(|x| x.flag("model", false)));
+            let dbpr_model = c.attr("type") == Some("5") && c.child("dbPr").and_then(|d| d.attr("command")) == Some("Model");
+            self.connections.insert(id, x15_model || dbpr_model);
+        }
+    }
+
+    /// Lazily reads custom `<tableStyle>` definitions from `styles.xml` using `cx.dxfs`.
+    fn custom_style(&mut self, cx: &mut Ctx<'_>, name: &str) -> Option<Arc<Vec<PivotStyleElement>>> {
+        if name.is_empty() {
+            return None;
+        }
+        if self.table_styles.is_none() {
+            let mut map = HashMap::new();
+            if let Some(part) = self.styles_part.as_deref()
+                && let Ok(Some(root)) = cx.pkg.read_xml(part)
+            {
+                read_custom_table_styles(&root, &cx.dxfs, &cx.palette, &mut map);
+            }
+            self.table_styles = Some(map);
+        }
+        self.table_styles.as_ref()?.get(&name.to_ascii_lowercase()).cloned()
     }
 
     /// Whether a slicer cache id resolves to a parsed PivotTable cache.
@@ -81,7 +204,7 @@ impl CachesIn {
         let f = cache.fields.iter().find(|f| f.database && same(&f.name, field))?;
         let group = match &f.group {
             None => PivotDateGroup::None,
-            Some((_, by, _)) => (*by)?,
+            Some(g) => g.by?,
         };
         Some((f.labels(), group))
     }
@@ -98,7 +221,7 @@ impl CachesIn {
             .iter()
             .find(|f| same(&f.name, field))
             .and_then(|f| f.group.as_ref())
-            .and_then(|(base, by, _)| by.and((*base).and_then(|b| cache.fields.get(b))))
+            .and_then(|g| g.by.and(g.base.and_then(|b| cache.fields.get(b))))
             .filter(|b| b.database);
         Some(match base {
             Some(b) => NonSourceField::DateLevel { base: &b.name },
@@ -106,6 +229,9 @@ impl CachesIn {
         })
     }
 }
+
+/// Most data connections read from `xl/connections.xml`.
+const MAX_CONNECTIONS: usize = 100_000;
 
 /// A slicer cache's source field that is not a source column of its pivot cache.
 pub enum NonSourceField<'a> {
@@ -116,21 +242,32 @@ pub enum NonSourceField<'a> {
     Other,
 }
 
-fn item_label_el(e: &El, sys: DateSystem) -> String {
+fn item_label_val_el(e: &El, sys: DateSystem) -> (String, Value) {
     let v = e.attr("v").unwrap_or("");
     match e.name.as_str() {
-        "m" => "(blank)".into(),
-        "n" => v.trim().parse::<f64>().ok().filter(|n| n.is_finite()).map(number_to_text).unwrap_or_else(|| v.to_string()),
-        "b" => if matches!(v.trim(), "1" | "true") { "TRUE" } else { "FALSE" }.into(),
+        "m" => ("(blank)".into(), Value::Empty),
+        "n" => match v.trim().parse::<f64>().ok().filter(|n| n.is_finite()) {
+            Some(n) => (number_to_text(n), Value::Number(n)),
+            None => (v.to_string(), Value::text(v)),
+        },
+        "b" => {
+            let b = matches!(v.trim(), "1" | "true");
+            ((if b { "TRUE" } else { "FALSE" }).into(), Value::Bool(b))
+        }
         // Cache dates count real days from the epoch, as Excel writes them (see `iso`).
-        "d" => crate::sheet_read::parse_iso_datetime_with(v, |y, m, d| serial_from_iso_ymd(sys, y, m, d))
-            .map(number_to_text)
-            .unwrap_or_else(|| v.to_string()),
-        _ => v.to_string(),
+        "d" => match crate::sheet_read::parse_iso_datetime_with(v, |y, m, d| serial_from_iso_ymd(sys, y, m, d)) {
+            Some(s) => (number_to_text(s), Value::Number(s)),
+            None => (v.to_string(), Value::text(v)),
+        },
+        "e" => {
+            let val = CellError::parse(v).map(Value::Error).unwrap_or_else(|| Value::text(v));
+            (v.to_string(), val)
+        }
+        _ => (v.to_string(), Value::text(v)),
     }
 }
 
-fn read_cache(cx: &mut Ctx<'_>, part: &str, sheet_name: &str) -> Option<CacheIn> {
+fn read_cache(cx: &mut Ctx<'_>, part: &str, sheet_name: &str, connections: &HashMap<u32, bool>) -> Option<CacheIn> {
     // A cache that can't be read loses its PivotTable: say so instead of dropping it silently.
     // An oversized cache is refused before it inflates, so warning and opening the rest is safe.
     let x = match cx.optional_xml(part) {
@@ -154,47 +291,54 @@ fn read_cache(cx: &mut Ctx<'_>, part: &str, sheet_name: &str) -> Option<CacheIn>
     }
     let src = x.child("cacheSource");
     let ty = src.and_then(|s| s.attr("type")).unwrap_or("worksheet");
+    // A data connection or the Data Model (OLAP): kept as it is when the workbook has that
+    // connection.
+    if ty == "external" {
+        let model = src.and_then(|s| s.attr_u32("connectionId")).and_then(|id| connections.get(&id).copied());
+        let Some(model) = model else {
+            cx.warn("a PivotTable's data connection is not in the workbook; kept as plain cells");
+            return None;
+        };
+        let kept = if model { KeptSource::DataModel } else { KeptSource::Connection };
+        return Some(CacheIn { kept: Some(kept), ..Default::default() });
+    }
     if ty != "worksheet" {
-        cx.warn(format!("PivotTables with a {ty} data source are not supported; kept as plain cells"));
+        cx.warn(format!("PivotTables with a data source of type \"{ty}\" are not supported; kept as plain cells"));
         return None;
     }
     let ws = src.and_then(|s| s.child("worksheetSource"));
+    // A source in another workbook: `r:id` names the cache's link to that workbook's path. The
+    // namespace-aware reader names it `r:id` whatever prefix the file binds (see `xml::start_el_ns`).
+    if let Some(rid) = ws.and_then(|w| w.attr("r:id").or_else(|| w.attr("id"))) {
+        let linked = cx
+            .pkg
+            .rels(part)
+            .ok()
+            .is_some_and(|rels| rels.iter().any(|r| r.id == rid && r.external && crate::package::is_external_workbook_path(&r.kind)));
+        if !linked {
+            cx.warn("a PivotTable's source is in another workbook that its cache doesn't name; kept as plain cells");
+            return None;
+        }
+        return Some(CacheIn { kept: Some(KeptSource::OtherWorkbook), ..Default::default() });
+    }
     let name = ws.and_then(|w| w.attr("name")).map(str::trim).filter(|n| !n.is_empty()).map(str::to_string);
-    // A source in another workbook keeps naming that workbook (`[Book.xlsx]Sheet!A1:B3`), so the
-    // writer never takes a same-named sheet or name of this one for it.
-    let book = ws.and_then(|w| w.attr("r:id")).map(|id| {
-        let target = cx.pkg.rels(part).ok().and_then(|rels| rels.into_iter().find(|r| r.id == id && r.external).map(|r| r.target));
-        let file = target.as_deref().map(|t| t.rsplit(['/', '\\']).next().unwrap_or(t).to_string()).filter(|f| !f.is_empty());
-        file.unwrap_or_else(|| id.to_string())
-    });
-    let external = book.is_some();
-    let kept = external || name.is_some();
+    let keep_parts = name.is_some();
     let source = match (ws, &name) {
-        (Some(_), Some(n)) => match &book {
-            Some(b) => format!("[{b}]{n}"),
-            // A name with a sheet (`name sheet`) is `Data!rData`, the sheet's name exactly as the
-            // file has it (` Data ` is another sheet than `Data`); what it stands for is settled
-            // once the names and tables are read ([`bind_sources`]).
-            None => match ws.and_then(|w| w.attr("sheet")).filter(|s| !s.is_empty()) {
-                Some(s) => format!("{}!{n}", quote_sheet(s)),
-                None => n.clone(),
-            },
+        // A name with a sheet (`name sheet`) is `Data!rData`, the sheet's name exactly as the file
+        // has it (` Data ` is another sheet than `Data`); what it stands for is settled once the
+        // names and tables are read ([`bind_sources`]).
+        (Some(_), Some(n)) => match ws.and_then(|w| w.attr("sheet")).filter(|s| !s.is_empty()) {
+            Some(s) => format!("{}!{n}", quote_sheet(s)),
+            None => n.clone(),
         },
         (Some(w), None) => {
-            if external {
-                cx.warn("a PivotTable's source is in another workbook; its source reference may not resolve");
-            }
             let r = w.attr("ref").map(|r| r.replace('$', "")).and_then(|r| RangeRef::parse(&r));
             let Some(r) = r else {
                 cx.warn("a PivotTable's source reference is missing or invalid; kept as plain cells");
                 return None;
             };
             let sheet = w.attr("sheet").filter(|s| !s.is_empty()).unwrap_or(sheet_name);
-            let sheet = match &book {
-                Some(b) => format!("[{b}]{sheet}"),
-                None => sheet.to_string(),
-            };
-            format!("{}!{}", quote_sheet(&sheet), abs_range(&r))
+            format!("{}!{}", quote_sheet(sheet), abs_range(&r))
         }
         (None, _) => {
             cx.warn("a PivotTable's cache has no worksheet source; kept as plain cells");
@@ -206,7 +350,8 @@ fn read_cache(cx: &mut Ctx<'_>, part: &str, sheet_name: &str) -> Option<CacheIn>
     let mut truncated = false;
     if let Some(cf) = x.child("cacheFields") {
         for f in capped(cf.kids("cacheField"), &mut truncated) {
-            let items = f.child("sharedItems").map(|si| si.children.iter().map(|e| item_label_el(e, sys)).collect()).unwrap_or_default();
+            let (items, item_values): (Vec<String>, Vec<Value>) =
+                f.child("sharedItems").map(|si| si.children.iter().map(|e| item_label_val_el(e, sys)).unzip()).unwrap_or_default();
             let group = f.child("fieldGroup").map(|g| {
                 let base = g.attr_u32("base").map(|b| b as usize);
                 let by = match g.child("rangePr").map(|r| r.attr("groupBy").unwrap_or("range")) {
@@ -216,13 +361,15 @@ fn read_cache(cx: &mut Ctx<'_>, part: &str, sheet_name: &str) -> Option<CacheIn>
                     Some("days") => Some(PivotDateGroup::Days),
                     _ => None,
                 };
-                let gi = g.child("groupItems").map(|gi| gi.children.iter().map(|e| item_label_el(e, sys)).collect()).unwrap_or_default();
-                (base, by, gi)
+                let (items, values): (Vec<String>, Vec<Value>) =
+                    g.child("groupItems").map(|gi| gi.children.iter().map(|e| item_label_val_el(e, sys)).unzip()).unwrap_or_default();
+                FieldGroupIn { base, by, items, values }
             });
             fields.push(FieldIn {
                 name: f.attr("name").unwrap_or("").to_string(),
                 database: f.flag("databaseField", true),
                 items,
+                item_values,
                 group,
                 formula: f.attr("formula").map(str::to_string),
             });
@@ -237,14 +384,14 @@ fn read_cache(cx: &mut Ctx<'_>, part: &str, sheet_name: &str) -> Option<CacheIn>
     }
     let slicer_id =
         x.child("extLst").and_then(|l| l.kids("ext").flat_map(|e| e.kids("x14:pivotCacheDefinition")).find_map(|d| d.attr_u32("pivotCacheId")));
-    let attrs = ws.filter(|_| name.is_some() && !external).and_then(|w| {
+    let attrs = ws.filter(|_| name.is_some()).and_then(|w| {
         Some(WorksheetSourceAttrs {
             name: w.attr("name")?.into(),
             sheet: w.attr("sheet").map(str::to_owned),
             reference: w.attr("ref").map(str::to_owned),
         })
     });
-    Some(CacheIn { id: 0, source, fields, slicer_id, kept, external, attrs })
+    Some(CacheIn { id: 0, source, external_source: false, fields, slicer_id, kept: None, keep_parts, attrs })
 }
 
 /// Binds the source of every PivotTable read to the defined name or table it stands for
@@ -276,10 +423,18 @@ pub fn bind_sources(wb: &mut gridcraft_model::Workbook, caches: &CachesIn) {
     }
 }
 
-/// Reads the PivotTables related to a worksheet part.
-pub fn read_pivots(cx: &mut Ctx<'_>, caches: &mut CachesIn, sheet_part: &str, sheet_name: &str) -> Result<Vec<PivotTable>, IoError> {
+/// Reads the PivotTables related to a worksheet part. Those whose source is in another workbook,
+/// a data connection or the Data Model are listed in [`SheetPivots::external`] (with a warning),
+/// not modelled.
+pub fn read_pivots(
+    cx: &mut Ctx<'_>,
+    caches: &mut CachesIn,
+    sheet_part: &str,
+    sheet_name: &str,
+    sources: &mut Vec<ReadPivotSource>,
+) -> Result<SheetPivots, IoError> {
     let rels = cx.pkg.rels(sheet_part)?;
-    let mut out = Vec::new();
+    let mut out = SheetPivots::default();
     for rel in rels.iter().filter(|r| r.kind == "pivotTable" && !r.external) {
         let Some(x) = cx.optional_xml(&rel.target)? else { continue };
         if x.name != "pivotTableDefinition" {
@@ -300,7 +455,7 @@ pub fn read_pivots(cx: &mut Ctx<'_>, caches: &mut CachesIn, sheet_part: &str, sh
         let cache = match caches.parsed.get(&cache_part) {
             Some(c) => c.clone(),
             None => {
-                let c = read_cache(cx, &cache_part, sheet_name).map(|mut c| {
+                let c = read_cache(cx, &cache_part, sheet_name, &caches.connections).map(|mut c| {
                     let cid = caches.next_cache_id;
                     caches.next_cache_id = caches.next_cache_id.saturating_add(1);
                     c.id = cid;
@@ -311,20 +466,36 @@ pub fn read_pivots(cx: &mut Ctx<'_>, caches: &mut CachesIn, sheet_part: &str, sh
             }
         };
         let Some(cache) = cache else { continue };
-        if let Some(pt) = read_table(cx, &x, &cache, caches.next_id) {
+        if let Some(source) = cache.kept {
+            let name = x.attr("name").unwrap_or("");
+            let from = source.describe();
+            cx.warn(format!(
+                "PivotTable \"{name}\" on sheet \"{sheet_name}\" gets its data from {from}: it is kept for saving as it is, but can't be edited or refreshed here"
+            ));
+            out.external.push(ExternalPivot { rel_id: rel.id.clone(), cache_part, source });
+            continue;
+        }
+        if let Some(mut pt) = read_table(cx, &x, &cache, caches.next_id) {
+            if !pt.style.is_empty() {
+                pt.custom_style = PivotCustomStyle(caches.custom_style(cx, &pt.style));
+            }
             caches.next_id = caches.next_id.saturating_add(1);
-            if cache.kept {
-                cx.pivot_parts.push(crate::pivot::PivotPartsIn {
-                    pivot: pt.id,
+            if cache.keep_parts {
+                // The kept parts go back with it ([`crate::passthrough`]); only a PivotTable kept
+                // without them is checked for a source that doesn't resolve on import.
+                cx.pivot_parts.push(crate::pivot::PivotPartsIn { pivot: pt.id, table_part: rel.target.clone(), cache_part: cache_part.clone() });
+            } else {
+                sources.push(ReadPivotSource {
+                    pivot_id: pt.id,
                     table_part: rel.target.clone(),
                     cache_part: cache_part.clone(),
-                    external: cache.external,
+                    external_source: cache.external_source,
                 });
             }
             if let Some(attrs) = &cache.attrs {
                 caches.read_as.insert(pt.id, (pt.source.clone(), attrs.clone()));
             }
-            out.push(pt);
+            out.tables.push(pt);
         }
     }
     Ok(out)
@@ -384,15 +555,15 @@ fn field_ref(cx: &mut Ctx<'_>, cache: &CacheIn, i: usize) -> Option<(String, Piv
         return None;
     }
     match &f.group {
-        Some((base, by, _)) => {
-            let by = match by {
-                Some(b) => *b,
+        Some(g) => {
+            let by = match g.by {
+                Some(b) => b,
                 None => {
                     cx.warn(format!("PivotTable grouping of \"{}\" is not supported; the field is ungrouped", f.name));
                     PivotDateGroup::None
                 }
             };
-            let base_name = if f.database { f.name.clone() } else { base.and_then(|b| cache.fields.get(b))?.name.clone() };
+            let base_name = if f.database { f.name.clone() } else { g.base.and_then(|b| cache.fields.get(b))?.name.clone() };
             Some((base_name, by))
         }
         None if !f.database => {
@@ -401,6 +572,39 @@ fn field_ref(cx: &mut Ctx<'_>, cache: &CacheIn, i: usize) -> Option<(String, Piv
         }
         None => Some((f.name.clone(), PivotDateGroup::None)),
     }
+}
+
+fn read_table_options(x: &El, first_axis: Option<&El>, pt: &mut PivotTable) {
+    let (compact, outline) = match first_axis {
+        Some(f) => (f.flag("compact", true), f.flag("outline", true)),
+        None => (x.flag("compact", true), x.flag("outline", false)),
+    };
+    pt.layout = if compact {
+        PivotLayout::Compact
+    } else if outline {
+        PivotLayout::Outline
+    } else {
+        PivotLayout::Tabular
+    };
+    if let Some(f) = first_axis {
+        pt.subtotals = x14_ext(x, EXT_XPDL_TABLE)
+            .and_then(|e| e.attr("EnabledSubtotalsDefault"))
+            .map_or_else(|| field_subtotals(f), |v| v == "1" || v.eq_ignore_ascii_case("true"));
+        pt.subtotals_top = f.flag("subtotalTop", true);
+    }
+    pt.grand_totals_rows = x.flag("colGrandTotals", true);
+    pt.grand_totals_cols = x.flag("rowGrandTotals", true);
+    pt.show_headers = x.flag("showHeaders", true);
+    pt.enable_show_details = x.flag("enableDrill", true);
+    read_style_info(x, pt);
+    let caption = |a: &str| x.attr(a).filter(|c| !c.is_empty()).map(str::to_string);
+    pt.row_header_caption = caption("rowHeaderCaption");
+    pt.col_header_caption = caption("colHeaderCaption");
+    pt.data_caption = caption("dataCaption").filter(|c| c != "Values");
+    pt.grand_total_caption = caption("grandTotalCaption");
+    pt.empty_caption = caption("missingCaption").filter(|_| x.flag("showMissing", true));
+    pt.show_values_row = !x14_ext(x, EXT_X14_TABLE).is_some_and(|e| e.flag("hideValuesRow", false));
+    pt.classic_layout = x.flag("gridDropZones", false);
 }
 
 fn read_table(cx: &mut Ctx<'_>, x: &El, cache: &CacheIn, id: u32) -> Option<PivotTable> {
@@ -438,36 +642,7 @@ fn read_table(cx: &mut Ctx<'_>, x: &El, cache: &CacheIn, id: u32) -> Option<Pivo
 
     // Layout from the first axis field (pivotField defaults: compact and outline on).
     let first_axis = row_x.iter().chain(col_x.iter()).find(|i| **i >= 0).and_then(|i| pf(*i as usize));
-    let (compact, outline) = match first_axis {
-        Some(f) => (f.flag("compact", true), f.flag("outline", true)),
-        None => (x.flag("compact", true), x.flag("outline", false)),
-    };
-    pt.layout = if compact {
-        PivotLayout::Compact
-    } else if outline {
-        PivotLayout::Outline
-    } else {
-        PivotLayout::Tabular
-    };
-    if let Some(f) = first_axis {
-        pt.subtotals = x14_ext(x, EXT_XPDL_TABLE)
-            .and_then(|e| e.attr("EnabledSubtotalsDefault"))
-            .map_or_else(|| field_subtotals(f), |v| v == "1" || v.eq_ignore_ascii_case("true"));
-        pt.subtotals_top = f.flag("subtotalTop", true);
-    }
-    pt.grand_totals_rows = x.flag("colGrandTotals", true);
-    pt.grand_totals_cols = x.flag("rowGrandTotals", true);
-    pt.show_headers = x.flag("showHeaders", true);
-    pt.enable_show_details = x.flag("enableDrill", true);
-    pt.style = x.child("pivotTableStyleInfo").and_then(|s| s.attr("name")).unwrap_or("").to_string();
-    let caption = |a: &str| x.attr(a).filter(|c| !c.is_empty()).map(str::to_string);
-    pt.row_header_caption = caption("rowHeaderCaption");
-    pt.col_header_caption = caption("colHeaderCaption");
-    pt.data_caption = caption("dataCaption").filter(|c| c != "Values");
-    pt.grand_total_caption = caption("grandTotalCaption");
-    pt.empty_caption = caption("missingCaption").filter(|_| x.flag("showMissing", true));
-    pt.show_values_row = !x14_ext(x, EXT_X14_TABLE).is_some_and(|e| e.flag("hideValuesRow", false));
-    pt.classic_layout = x.flag("gridDropZones", false);
+    read_table_options(x, first_axis, &mut pt);
     if x.child("calculatedItems").is_some() || x.path(&["filters", "filter"]).is_some() {
         cx.warn(format!("PivotTable \"{}\": calculated items and label/value filters are not supported", pt.name));
     }
@@ -547,20 +722,7 @@ fn read_table(cx: &mut Ctx<'_>, x: &El, cache: &CacheIn, id: u32) -> Option<Pivo
         let Some(i) = p.attr_i64("fld").filter(|i| *i >= 0).map(|i| i as usize) else { continue };
         let Some((name, group)) = field_ref(cx, cache, i) else { continue };
         let labels: &[String] = cache.fields.get(i).map(|f| f.labels()).unwrap_or(&[]);
-        let selected = if let Some(k) = p.attr_u32("item") {
-            labels.get(k as usize).map(|l| vec![l.clone()])
-        } else {
-            pf(i).and_then(|e| {
-                let items = items_of(e);
-                items.iter().any(|it| it.flag("h", false)).then(|| {
-                    items
-                        .iter()
-                        .filter(|it| !it.flag("h", false))
-                        .filter_map(|it| it.attr_u32("x").and_then(|k| labels.get(k as usize)).cloned())
-                        .collect()
-                })
-            })
-        };
+        let selected = page_field_selected(p, pf(i), labels);
         page_filters.push(PivotFilter { source_col: name, selected, hidden: false, date_group: group });
     }
     let mut axis_filters = Vec::new();
@@ -585,7 +747,7 @@ fn read_table(cx: &mut Ctx<'_>, x: &El, cache: &CacheIn, id: u32) -> Option<Pivo
             continue;
         }
         // Items of a grouping GridCraft can't compute could never match a source value.
-        if let Some(f) = cache.fields.get(i).filter(|f| matches!(f.group, Some((_, None, _)))) {
+        if let Some(f) = cache.fields.get(i).filter(|f| f.group.as_ref().is_some_and(|g| g.by.is_none())) {
             cx.warn(format!("PivotTable \"{}\": the filter on grouped field \"{}\" is not supported and was ignored", pt.name, f.name));
             continue;
         }
@@ -617,12 +779,15 @@ fn read_table(cx: &mut Ctx<'_>, x: &El, cache: &CacheIn, id: u32) -> Option<Pivo
                     PivotFunc::Sum
                 }),
             };
-            let ext = d
-                .child("extLst")
-                .into_iter()
-                .flat_map(|l| l.kids("ext"))
-                .filter_map(|e| e.child("dataField"))
-                .find_map(|e| e.attr("pivotShowAs").map(str::to_string));
+            let exts = || d.child("extLst").into_iter().flat_map(|l| l.kids("ext"));
+            // GridCraft's marker for a Distinct Count written as Count; ignored when the subtotal
+            // was changed to something else since.
+            let distinct = exts()
+                .filter(|e| e.attr("uri") == Some(EXT_GC_DATA_FIELD))
+                .filter_map(|e| e.child("summary"))
+                .any(|e| e.attr("func") == Some("distinctCount"));
+            let func = if distinct && func == PivotFunc::Count { PivotFunc::DistinctCount } else { func };
+            let ext = exts().filter_map(|e| e.child("dataField")).find_map(|e| e.attr("pivotShowAs").map(str::to_string));
             let show_as = match (ext.as_deref(), d.attr("showDataAs")) {
                 (Some("rankDescending"), _) => PivotShowAs::Rank,
                 (Some(other), _) => {
@@ -708,9 +873,325 @@ fn read_table(cx: &mut Ctx<'_>, x: &El, cache: &CacheIn, id: u32) -> Option<Pivo
         cx.warn(format!("PivotTable \"{}\": field lists past {MAX_FIELDS} entries were dropped; the table is incomplete", pt.name));
     }
     pt.anchor = loc.start;
-    let above = if pages.is_empty() { 0 } else { pages.len() as u32 + 1 };
-    pt.last_range = Some(RangeRef::new(CellRef::new(loc.start.row.saturating_sub(above), loc.start.col), loc.end));
+    let loc_el = x.child("location");
+    let page_rows = loc_el.and_then(|l| l.attr_u32("rowPageCount")).unwrap_or(pages.len() as u32);
+    let above = if page_rows == 0 { 0 } else { page_rows.saturating_add(1) };
+    let report_start_row = loc.start.row.saturating_sub(above);
+    let last_range = RangeRef::new(CellRef::new(report_start_row, loc.start.col), loc.end);
+    pt.last_range = Some(last_range);
+    pt.style_grid = PivotStyleGrid(Some(Arc::new(read_style_layout(x, loc, loc_el, page_rows, row_x.len(), col_x.len()))));
+    if let Some(cells) = build_ooxml_data_index(x, loc, loc_el, report_start_row, &row_x, &col_x, &pfs, cache, &pt.values, &data_value) {
+        pt.data_index.set_cells(cells);
+    }
     Some(pt)
+}
+
+/// Resolves a `<pageField>`'s selected item(s). ECMA-376 §18.10.1.62: `pageField/@item` indexes
+/// `<pivotField><items>`, whose `@x` indexes the cache field's items (falling back to direct
+/// cache indexing only when the `<pivotField>` carries no `<items>`).
+fn page_field_selected(p: &El, pf: Option<&El>, labels: &[String]) -> Option<Vec<String>> {
+    if let Some(k) = p.attr_u32("item") {
+        let resolved = match pf.and_then(|e| e.child("items")) {
+            Some(its) => its.kids("item").nth(k as usize).and_then(|it| it.attr_u32("x")).and_then(|sx| labels.get(sx as usize)),
+            None => labels.get(k as usize),
+        };
+        return resolved.map(|l| vec![l.clone()]);
+    }
+    pf.and_then(|e| {
+        let items = items_of(e);
+        items.iter().any(|it| it.flag("h", false)).then(|| {
+            items.iter().filter(|it| !it.flag("h", false)).filter_map(|it| it.attr_u32("x").and_then(|k| labels.get(k as usize)).cloned()).collect()
+        })
+    })
+}
+
+/// Cap on cells indexed from OOXML `<rowItems>`/`<colItems>` (matches `engine::pivot::MAX_INDEXED_CELLS`).
+const MAX_INDEXED_CELLS: usize = 1_000_000;
+
+/// Parses an optional unsigned integer XML attribute strictly: absent -> `Ok(None)`,
+/// valid non-negative integer -> `Ok(Some(v))`, malformed/negative -> `Err(())`.
+fn strict_opt_u32(el: &El, k: &str) -> Result<Option<u32>, ()> {
+    match el.attr(k) {
+        None => Ok(None),
+        Some(raw) => raw.trim().parse::<u32>().map(Some).map_err(|_| ()),
+    }
+}
+
+/// One decoded row or column entry from `<rowItems>` / `<colItems>`.
+struct AxisEntry {
+    /// `(cache_field_index, PivotItemRef)` for each non-Values field on this axis.
+    items: Vec<(usize, PivotItemRef)>,
+    /// Data field index (into `<dataFields>`) when `Values` (`-2`) is on this axis or `@i` is set.
+    data_field_idx: Option<usize>,
+    /// True for `t="grand"`, subtotal `t` (`default`, `sum`, ...), or trailing subtotal `<item>`.
+    is_subtotal_or_grand: bool,
+    /// True when this entry stepped into the `-2` (Values) axis field.
+    has_values_field: bool,
+    /// Raw `(field_idx, item_idx)` path (including `-2`) before stripping subtotal markers.
+    raw_path: Vec<(i64, usize)>,
+}
+
+/// Decodes `<rowItems>` or `<colItems>` (ECMA-376 §18.10.1.84 / §18.10.1.17) into per-row/column
+/// axis item paths. `None` entries in the returned `Vec` correspond to `t="blank"` spacer lines
+/// or non-subtotal item-header lines. Returns `None` if any axis item is malformed or cannot be
+/// resolved, so callers fall back instead of producing truncated keys.
+fn decode_axis_items(axis_el: &El, field_indices: &[i64], pfs: &[&El], cache: &CacheIn, limit: usize) -> Option<Vec<Option<AxisEntry>>> {
+    let pf_items: Vec<Option<Vec<&El>>> = pfs.iter().map(|pf| pf.child("items").map(|its| its.kids("item").collect())).collect();
+    let mut out = Vec::new();
+    let mut prev: Vec<(i64, usize)> = Vec::new();
+    for iel in axis_el.kids("i").take(limit) {
+        let t = iel.attr("t").unwrap_or("data");
+        if t == "blank" {
+            out.push(None);
+            continue;
+        }
+        let r = strict_opt_u32(iel, "r").ok()?.unwrap_or(0) as usize;
+        let mut df_idx = strict_opt_u32(iel, "i").ok()?.map(|v| v as usize);
+        let mut xs = Vec::new();
+        for x in iel.kids("x") {
+            xs.push(strict_opt_u32(x, "v").ok()?.unwrap_or(0) as usize);
+        }
+        if t == "grand" {
+            let mut has_values_field = false;
+            for (j, &xv) in xs.iter().enumerate() {
+                let pos = r.checked_add(j)?;
+                if field_indices.get(pos).copied() == Some(-2) {
+                    if df_idx.is_none() {
+                        df_idx = Some(xv);
+                    }
+                    has_values_field = true;
+                }
+            }
+            out.push(Some(AxisEntry {
+                items: Vec::new(),
+                data_field_idx: df_idx,
+                is_subtotal_or_grand: true,
+                has_values_field,
+                raw_path: Vec::new(),
+            }));
+            prev.clear();
+            continue;
+        }
+        if r > prev.len() {
+            return None;
+        }
+        let mut cur: Vec<(i64, usize)> = prev.iter().take(r).copied().collect();
+        for (j, &xv) in xs.iter().enumerate() {
+            let pos = r.checked_add(j)?;
+            if let Some(&fidx) = field_indices.get(pos) {
+                cur.push((fidx, xv));
+            } else if !field_indices.is_empty() {
+                return None;
+            }
+        }
+        prev = cur.clone();
+        let mut is_subtotal_or_grand = is_subtotal_item_type(t);
+        let mut has_values_field = false;
+        let mut items = Vec::with_capacity(cur.len());
+        for &(fidx, pitem_idx) in &cur {
+            if fidx == -2 {
+                df_idx = Some(pitem_idx);
+                has_values_field = true;
+                continue;
+            }
+            if fidx < 0 {
+                continue;
+            }
+            let fi = fidx as usize;
+            let cf = cache.fields.get(fi)?;
+            let pitems = pf_items.get(fi)?.as_deref()?;
+            let pit = pitems.get(pitem_idx)?;
+            if pit.attr("t").is_some_and(|it_t| it_t != "data") {
+                // Trailing subtotal/total marker item (e.g. `t="default"`): omitted from item path.
+                is_subtotal_or_grand = true;
+                continue;
+            }
+            let sx = strict_opt_u32(pit, "x").ok()?? as usize;
+            let base_label = cf.labels().get(sx)?;
+            let value = cf.values().get(sx).cloned().unwrap_or_else(|| Value::text(base_label.as_str()));
+            let label = pit.attr("n").filter(|n| !n.is_empty()).map(str::to_string).unwrap_or_else(|| base_label.clone());
+            // Use the canonical cache/source field name (matching `compute.rs::item_refs`), not
+            // `pivotField/@name` caption, so GETPIVOTDATA works identically before and after refresh
+            // for both source names and custom captions (resolved via caption->source retry).
+            items.push((fi, PivotItemRef { field: cf.name.clone(), label, value }));
+        }
+        out.push(Some(AxisEntry { items, data_field_idx: df_idx, is_subtotal_or_grand, has_values_field, raw_path: cur }));
+    }
+
+    // Filter out non-subtotal item-header rows/columns (compact/outline layout headers when
+    // subtotals are at the bottom or disabled, or outer item headers before stepping into `-2`
+    // Values on the same axis) so blank header lines never shadow real data/subtotal rows.
+    let axis_has_values = field_indices.contains(&-2);
+    let mut drop_header = vec![false; out.len()];
+    for idx in 0..out.len() {
+        let Some(cur) = out[idx].as_ref() else { continue };
+        if cur.is_subtotal_or_grand {
+            continue;
+        }
+        let next = out[idx + 1..].iter().flatten().next();
+        let is_item_header = next.is_some_and(|n| {
+            (cur.raw_path.len() < n.raw_path.len() && n.raw_path.starts_with(&cur.raw_path))
+                || (axis_has_values
+                    && !cur.has_values_field
+                    && n.items.len() >= cur.items.len()
+                    && n.items[..cur.items.len()] == cur.items[..]
+                    && (n.has_values_field || n.is_subtotal_or_grand))
+        });
+        if !is_item_header {
+            continue;
+        }
+        if axis_has_values && !cur.has_values_field {
+            drop_header[idx] = true;
+            continue;
+        }
+        let last_fidx = cur.raw_path.last().map(|(f, _)| *f);
+        match last_fidx {
+            Some(fi) if fi >= 0 => {
+                let pf = pfs.get(fi as usize).copied();
+                let subtotals_on = pf.is_none_or(field_subtotals);
+                let subtotal_top = pf.is_none_or(|e| e.attr_bool("subtotalTop").unwrap_or(true));
+                if !subtotals_on || !subtotal_top {
+                    drop_header[idx] = true;
+                }
+            }
+            _ => {
+                // `-2` Values header (when Values precedes another axis field) never holds a top subtotal.
+                drop_header[idx] = true;
+            }
+        }
+    }
+    for (slot, drop) in out.iter_mut().zip(drop_header) {
+        if drop {
+            *slot = None;
+        }
+    }
+    Some(out)
+}
+
+/// Builds the `GETPIVOTDATA` lookup index directly from the OOXML `<rowItems>` and `<colItems>`
+/// describing the stored PivotTable report. Returns `None` when the XML carries no stored layout
+/// or cannot be decoded cleanly, letting the lazy engine indexer run.
+#[allow(clippy::too_many_arguments)]
+fn build_ooxml_data_index(
+    x: &El,
+    loc: RangeRef,
+    loc_el: Option<&El>,
+    report_start_row: u32,
+    row_x: &[i64],
+    col_x: &[i64],
+    pfs: &[&El],
+    cache: &CacheIn,
+    pt_values: &[PivotValue],
+    data_value: &[Option<usize>],
+) -> Option<Vec<PivotDataCell>> {
+    if pt_values.is_empty() {
+        return None;
+    }
+    let row_el = x.child("rowItems");
+    let col_el = x.child("colItems");
+    if row_el.is_none() && col_el.is_none() {
+        return None;
+    }
+    let first_data_row = loc_el.and_then(|l| l.attr_u32("firstDataRow")).unwrap_or(1);
+    let first_data_col = loc_el.and_then(|l| l.attr_u32("firstDataCol")).unwrap_or(1);
+    let body_rows = loc.end.row.saturating_sub(loc.start.row).saturating_add(1) as usize;
+    let body_cols = loc.end.col.saturating_sub(loc.start.col).saturating_add(1) as usize;
+    let row_entries = match row_el {
+        Some(el) => decode_axis_items(el, row_x, pfs, cache, body_rows)?,
+        None => vec![Some(AxisEntry {
+            items: Vec::new(),
+            data_field_idx: None,
+            is_subtotal_or_grand: false,
+            has_values_field: false,
+            raw_path: Vec::new(),
+        })],
+    };
+    let col_entries = match col_el {
+        Some(el) => decode_axis_items(el, col_x, pfs, cache, body_cols)?,
+        None => vec![Some(AxisEntry {
+            items: Vec::new(),
+            data_field_idx: None,
+            is_subtotal_or_grand: false,
+            has_values_field: false,
+            raw_path: Vec::new(),
+        })],
+    };
+    if row_entries.is_empty() || col_entries.is_empty() {
+        return None;
+    }
+    let data_row_base = loc.start.row.saturating_sub(report_start_row).saturating_add(first_data_row);
+    let max_row_off = loc.end.row.saturating_sub(report_start_row);
+    let max_col_off = loc.end.col.saturating_sub(loc.start.col);
+    let mut cells: Vec<PivotDataCell> = Vec::new();
+    // Maps lookup key -> (index in `cells`, precedence) so explicit subtotal or `-2` value rows
+    // win over any earlier header row that produced the same key.
+    let mut seen: HashMap<String, (usize, u8)> = HashMap::new();
+    let mut record = |cell: PivotDataCell, prio: u8| -> bool {
+        let key_items: Vec<(&str, &str, bool)> =
+            cell.items.iter().map(|it| (it.field.as_str(), it.label.as_str(), matches!(it.value, Value::Bool(_)))).collect();
+        let key = pivot_key(&cell.data_field, &key_items);
+        if let Some((old_idx, old_prio)) = seen.get_mut(&key)
+            && cells[*old_idx].items == cell.items
+        {
+            if prio > *old_prio {
+                cells[*old_idx] = cell;
+                *old_prio = prio;
+            }
+            return true;
+        }
+        if cells.len() >= MAX_INDEXED_CELLS {
+            return false;
+        }
+        let idx = cells.len();
+        cells.push(cell);
+        seen.insert(key, (idx, prio));
+        true
+    };
+    for (ri, r_opt) in row_entries.iter().enumerate() {
+        let Some(re) = r_opt else { continue };
+        let row_off = data_row_base.saturating_add(ri as u32);
+        if row_off > max_row_off {
+            break;
+        }
+        for (ci, c_opt) in col_entries.iter().enumerate() {
+            let Some(ce) = c_opt else { continue };
+            let col_off = first_data_col.saturating_add(ci as u32);
+            if col_off > max_col_off {
+                break;
+            }
+            let raw_df = re.data_field_idx.or(ce.data_field_idx).unwrap_or(0);
+            let Some(vi) = data_value.get(raw_df).copied().flatten() else { continue };
+            let Some(vdef) = pt_values.get(vi) else { continue };
+            let full_items: Vec<PivotItemRef> = re.items.iter().chain(&ce.items).map(|(_, it)| it.clone()).collect();
+            let prio = 1 + (u8::from(re.is_subtotal_or_grand || ce.is_subtotal_or_grand) << 1) + u8::from(re.has_values_field || ce.has_values_field);
+            let full_cell =
+                PivotDataCell { data_field: vdef.name.clone(), source_col: vdef.source_col.clone(), items: full_items, row: row_off, col: col_off };
+            if !record(full_cell, prio) {
+                return Some(cells);
+            }
+            // If a manual/non-date parent group field (`fieldGroup/@base = b`, no `rangePr`)
+            // appears alongside its base field `b`, Excel allows `GETPIVOTDATA` to omit the
+            // parent group because each base item uniquely identifies its group.
+            let is_manual_parent = |fi: usize| {
+                cache.fields.get(fi).is_some_and(|cf| {
+                    cf.group.as_ref().is_some_and(|g| {
+                        g.by.is_none() && g.base.is_some_and(|base| re.items.iter().chain(&ce.items).any(|(other, _)| *other == base))
+                    })
+                })
+            };
+            let has_manual_parent = re.items.iter().chain(&ce.items).any(|(fi, _)| is_manual_parent(*fi));
+            if has_manual_parent {
+                let stripped: Vec<PivotItemRef> =
+                    re.items.iter().chain(&ce.items).filter(|(fi, _)| !is_manual_parent(*fi)).map(|(_, it)| it.clone()).collect();
+                let stripped_cell =
+                    PivotDataCell { data_field: vdef.name.clone(), source_col: vdef.source_col.clone(), items: stripped, row: row_off, col: col_off };
+                if !record(stripped_cell, 0) {
+                    return Some(cells);
+                }
+            }
+        }
+    }
+    (!cells.is_empty()).then_some(cells)
 }
 
 /// The first [`MAX_FIELDS`] items; sets `truncated` when there were more.
@@ -721,4 +1202,129 @@ fn capped<T>(items: impl Iterator<Item = T>, truncated: &mut bool) -> Vec<T> {
         *truncated = true;
     }
     v
+}
+
+/// Parses workbook-defined `<tableStyles>` elements that apply to PivotTables (`pivot != "0"`).
+fn read_custom_table_styles(root: &El, dxfs: &[gridcraft_model::Style], palette: &[u32], out: &mut HashMap<String, Arc<Vec<PivotStyleElement>>>) {
+    let Some(ts_list) = root.child("tableStyles") else { return };
+    let raw_dxfs: Vec<&El> = root.child("dxfs").map(|d| d.kids("dxf").collect()).unwrap_or_default();
+    for ts in ts_list.kids("tableStyle").take(MAX_TABLE_STYLES) {
+        if !ts.flag("pivot", true) {
+            continue;
+        }
+        let Some(name) = ts.attr("name").filter(|n| !n.is_empty()) else { continue };
+        let mut elems = Vec::new();
+        for el in ts.kids("tableStyleElement").take(MAX_TABLE_STYLE_ELEMENTS) {
+            let Some(kind) = el.attr("type").filter(|t| !t.is_empty()) else { continue };
+            let Some(dxf_id) = el.attr_u32("dxfId") else { continue };
+            let Some(base_style) = dxfs.get(dxf_id as usize) else { continue };
+            let mut style = base_style.clone();
+            // `read_font` normalizes `<color theme="1"/>` (dk1/black) to `Color::Auto`, which would
+            // look unset when layering higher-priority DXFs (e.g. `firstRowStripe`, `firstSubtotalRow`)
+            // over a coloured `wholeTable` DXF. Preserve any explicitly stated font color.
+            if style.font.color == gridcraft_model::Color::Auto
+                && let Some(raw_color) = raw_dxfs.get(dxf_id as usize).and_then(|d| d.child("font")).and_then(|f| f.child("color"))
+            {
+                let c = crate::styles::read_color(raw_color, palette);
+                style.font.color = if c == gridcraft_model::Color::Auto { gridcraft_model::Color::Theme(1, 0) } else { c };
+            }
+            let size = el.attr_u32("size").unwrap_or(1).max(1);
+            elems.push(PivotStyleElement { kind: kind.to_string(), size, style });
+        }
+        out.insert(name.to_ascii_lowercase(), Arc::new(elems));
+    }
+}
+
+fn is_subtotal_item_type(t: &str) -> bool {
+    matches!(t, "default" | "sum" | "countA" | "avg" | "max" | "min" | "product" | "count" | "stdDev" | "stdDevP" | "var" | "varP")
+}
+
+fn read_style_layout(x: &El, loc: RangeRef, loc_el: Option<&El>, page_rows: u32, row_field_count: usize, col_field_count: usize) -> PivotStyleLayout {
+    let first_header_row = loc_el.and_then(|l| l.attr_u32("firstHeaderRow")).unwrap_or(0);
+    let first_data_row = loc_el.and_then(|l| l.attr_u32("firstDataRow")).unwrap_or(1);
+    let first_data_col = loc_el.and_then(|l| l.attr_u32("firstDataCol")).unwrap_or(1);
+    let page_cols = loc_el.and_then(|l| l.attr_u32("colPageCount")).unwrap_or(1).max(1);
+    let body_rows = loc.end.row.saturating_sub(loc.start.row).saturating_add(1) as usize;
+    let body_cols = loc.end.col.saturating_sub(loc.start.col).saturating_add(1) as usize;
+
+    let mut row_roles = Vec::new();
+    let mut row_subheading = Vec::new();
+    if let Some(ri) = x.child("rowItems") {
+        for item in ri.kids("i").take(body_rows) {
+            let t = item.attr("t").unwrap_or("data");
+            let r = item.attr_u32("r").unwrap_or(0);
+            let xc = item.kids("x").count() as u32;
+            let role = if t == "grand" {
+                PivotRowRole::GrandTotal
+            } else if t == "blank" {
+                PivotRowRole::Blank
+            } else if is_subtotal_item_type(t) {
+                PivotRowRole::Subtotal(r.saturating_add(xc.saturating_sub(1)).min(2) as u8)
+            } else {
+                PivotRowRole::Data
+            };
+            let sub = if role == PivotRowRole::Data && row_field_count > 1 && (r.saturating_add(xc) as usize) < row_field_count {
+                Some(r.saturating_add(xc.saturating_sub(1)).min(2) as u8)
+            } else {
+                None
+            };
+            row_roles.push(role);
+            row_subheading.push(sub);
+        }
+    }
+
+    let mut col_roles = Vec::new();
+    let mut col_subheading = Vec::new();
+    if let Some(ci) = x.child("colItems") {
+        for item in ci.kids("i").take(body_cols) {
+            let t = item.attr("t").unwrap_or("data");
+            let r = item.attr_u32("r").unwrap_or(0);
+            let xc = item.kids("x").count() as u32;
+            let role = if t == "grand" {
+                PivotColRole::GrandTotal
+            } else if t == "blank" {
+                PivotColRole::Blank
+            } else if is_subtotal_item_type(t) {
+                PivotColRole::Subtotal(r.saturating_add(xc.saturating_sub(1)).min(2) as u8)
+            } else {
+                PivotColRole::Data
+            };
+            let sub = if role == PivotColRole::Data && col_field_count > 1 && (r.saturating_add(xc) as usize) < col_field_count {
+                Some(r.saturating_add(xc.saturating_sub(1)).min(2) as u8)
+            } else {
+                None
+            };
+            col_roles.push(role);
+            col_subheading.push(sub);
+        }
+    }
+
+    PivotStyleLayout {
+        body_range: Some(loc),
+        first_header_row,
+        first_data_row,
+        first_data_col,
+        page_rows,
+        page_cols,
+        row_roles,
+        row_subheading,
+        col_roles,
+        col_subheading,
+    }
+}
+
+/// Reads `<pivotTableStyleInfo>` name and display flags into `pt`.
+fn read_style_info(x: &El, pt: &mut PivotTable) {
+    if let Some(si) = x.child("pivotTableStyleInfo") {
+        pt.style = si.attr("name").unwrap_or("").to_string();
+        pt.style_options = PivotStyleOptions {
+            show_row_headers: si.flag("showRowHeaders", false),
+            show_col_headers: si.flag("showColHeaders", false),
+            show_row_stripes: si.flag("showRowStripes", false),
+            show_col_stripes: si.flag("showColStripes", false),
+            show_last_column: si.flag("showLastColumn", false),
+        };
+    } else {
+        pt.style.clear();
+    }
 }

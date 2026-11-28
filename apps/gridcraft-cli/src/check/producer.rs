@@ -267,17 +267,18 @@ pub(super) fn detect(bytes: &[u8]) -> Producer {
     };
     let names = zip_names(&mut zip);
     let part = |zip: &mut super::package::Zip<'_>, key: &str| {
-        let name = names.iter().find(|n| part_key(n) == key)?;
-        read_zip_part(zip, name).ok()
+        let (index, name) = names.iter().find(|(_, n)| part_key(n) == key)?;
+        read_zip_part(zip, *index, name).ok()
     };
     let app_part =
-        related_part(&mut zip, &names, "", "extended-properties").or_else(|| names.iter().find(|n| part_key(n) == "docprops/app.xml").cloned());
-    let (application, version) = app_part.and_then(|p| read_zip_part(&mut zip, &p).ok()).map_or((None, None), |xml| app_properties(&xml));
+        related_part(&mut zip, &names, "", "extended-properties").or_else(|| names.iter().find(|(_, n)| part_key(n) == "docprops/app.xml"));
+    let (application, version) =
+        app_part.and_then(|(index, name)| read_zip_part(&mut zip, *index, name).ok()).map_or((None, None), |xml| app_properties(&xml));
     let Some(application) = application else {
         // An OpenDocument package has no extended properties; its `meta.xml` names the generator.
-        if names.iter().any(|n| part_key(n) == "content.xml") {
+        if let Some((index, _)) = names.iter().find(|(_, n)| part_key(n) == "content.xml") {
             let generator = part(&mut zip, "meta.xml").and_then(|xml| odf_generator(&xml));
-            let content = zip_part_head(&mut zip, "content.xml", ROOT_HEAD);
+            let content = zip_part_head(&mut zip, *index, ROOT_HEAD);
             return odf_producer(generator, &content);
         }
         // No application anywhere: the one export that writes no properties at all is recognised
@@ -310,8 +311,8 @@ pub(super) fn detect(bytes: &[u8]) -> Producer {
 }
 
 /// The first [`ROOT_HEAD`] bytes of the package's workbook part, or nothing.
-fn workbook_head(zip: &mut super::package::Zip<'_>, names: &[String]) -> Vec<u8> {
-    workbook_entry(zip, names).map(|w| zip_part_head(zip, &w, ROOT_HEAD)).unwrap_or_default()
+fn workbook_head(zip: &mut super::package::Zip<'_>, names: &[(usize, String)]) -> Vec<u8> {
+    workbook_entry(zip, names).map(|(index, _)| zip_part_head(zip, *index, ROOT_HEAD)).unwrap_or_default()
 }
 
 /// The product the workbook's `<fileVersion appName>` names, when it isn't Excel. ECMA-376
@@ -346,10 +347,10 @@ fn last_saved_by(workbook: &[u8]) -> Option<ProducerKind> {
     }
 }
 
-/// The first `limit` bytes of the part `name`, or nothing when it can't be read.
-fn zip_part_head(zip: &mut super::package::Zip<'_>, name: &str, limit: u64) -> Vec<u8> {
+/// The first `limit` bytes of the indexed part, or nothing when it can't be read.
+fn zip_part_head(zip: &mut super::package::Zip<'_>, index: usize, limit: u64) -> Vec<u8> {
     let mut head = Vec::new();
-    if let Ok(file) = zip.by_name(name) {
+    if let Ok(file) = zip.by_index(index) {
         let _ = file.take(limit).read_to_end(&mut head);
     }
     head

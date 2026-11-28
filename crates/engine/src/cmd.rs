@@ -18,6 +18,7 @@ pub mod macros;
 pub mod pivot;
 pub mod print;
 pub mod python;
+pub mod quick_analysis;
 pub mod review;
 pub mod sheet;
 pub mod slicer;
@@ -187,6 +188,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(forecast::specs());
         v.extend(analysis::specs());
         v.extend(print::specs());
+        v.extend(quick_analysis::specs());
         v
     })
 }
@@ -831,7 +833,7 @@ fn same_content(a: Option<&gridcraft_model::Cell>, b: Option<&gridcraft_model::C
     let empty = |c: Option<&gridcraft_model::Cell>| c.is_none_or(|c| !c.has_content());
     match (a, b) {
         (Some(a), Some(b)) => match (&a.formula, &b.formula) {
-            (Some(x), Some(y)) => x.text == y.text && x.array == y.array,
+            (Some(x), Some(y)) => x.text() == y.text() && x.array == y.array,
             (None, None) => match (&a.py, &b.py) {
                 (Some(x), Some(y)) => x.code == y.code && x.object == y.object,
                 (None, None) => a.value == b.value,
@@ -974,6 +976,12 @@ fn mac_fits_automatic_row(sh: &gridcraft_model::Sheet, row: u32) -> bool {
 
 /// [`auto_row_height`] with the sheet's merges taken from `sweep`.
 pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut MergeSweep) {
+    let mut cf = crate::cf::CfCache::new();
+    fit_row_height_with_cf(wb, si, row, sweep, &mut cf);
+}
+
+/// [`fit_row_height`] reusing a caller-owned [`crate::cf::CfCache`] across all rows of a sheet.
+pub(crate) fn fit_row_height_with_cf(wb: &mut Workbook, si: usize, row: u32, sweep: &mut MergeSweep, cf: &mut crate::cf::CfCache) {
     // Out of budget: the row keeps the height it has.
     if sweep.left() == 0 {
         return;
@@ -1045,14 +1053,19 @@ pub(crate) fn fit_row_height(wb: &mut Workbook, si: usize, row: u32, sweep: &mut
             // Only a wrapping cell is laid out over several lines: each explicit line break
             // starts one, and each line folds at the column width.
             if st.align.wrap {
-                let text = crate::display::cell_text(wb, sh, CellRef::new(row, c));
-                let w = sh.col_width(c).max(1.0) - 6.0;
-                let width = w.max(1.0);
-                lines = if mac {
-                    text.split('\n').map(|l| wrapped_line_count(l, width, size, st.font.bold, true)).sum::<f32>()
-                } else {
-                    text.lines().map(|l| wrapped_line_count(l, width, size, st.font.bold, false)).sum::<f32>().max(1.0)
-                };
+                // Hidden columns return 0.0 from col_width(); wrapping at 0px clamps to 1px
+                // and inflates the row to 546px (409.5pt). Measure at the column's stored
+                // unhidden width (matching Excel AutoFit), skipping wrap only if that is <= 0.
+                let col_w = sh.cols.get(&c).and_then(|i| i.size).unwrap_or(sh.default_col_width);
+                if col_w > 0.0 {
+                    let text = crate::display::cell_text_with_cf(wb, si, sh, CellRef::new(row, c), cf);
+                    let width = (col_w - 6.0).max(1.0);
+                    lines = if mac {
+                        text.split('\n').map(|l| wrapped_line_count(l, width, size, st.font.bold, true)).sum::<f32>()
+                    } else {
+                        text.lines().map(|l| wrapped_line_count(l, width, size, st.font.bold, false)).sum::<f32>().max(1.0)
+                    };
+                }
             }
         } else if !mac && st.font.size <= gridcraft_model::DEFAULT_FONT_SIZE {
             continue;

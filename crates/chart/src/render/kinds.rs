@@ -1,7 +1,9 @@
+use gridcraft_model::DataLabelPos;
+
 use super::frame::{Bx, CatAxis, ValAxis, frame, on, value_range};
-use super::legend::{cat_label, point_color};
+use super::legend::{cat_label, category_color, point_color};
 use super::{
-    AXIS, Chart, ChartData, Ctx, DOWN, Fmt, GRID, HAlign, LABEL_SIZE, MAX_CATS, MAX_LABELS, MAX_MARKERS, MAX_SERIES, MAX_WEDGES, Prim,
+    AXIS, Chart, ChartData, Ctx, DARK_TEXT, DOWN, Fmt, GRID, HAlign, LABEL_SIZE, MAX_CATS, MAX_LABELS, MAX_MARKERS, MAX_SERIES, MAX_WEDGES, Prim,
     QuartileMethod, Rgba, STOCK, SeriesData, TAU, TEXT, UP, VAlign, WHITE, axis_fmt, clean, label_fmt, nice_scale,
 };
 
@@ -177,50 +179,166 @@ fn largest_slices(vals: &[f64], cap: usize) -> Vec<(usize, f64)> {
     idx.into_iter().map(|j| (j, vals[j])).collect()
 }
 
-/// One ring's geometry and separator stroke: the slices of a ring differ only in angle and colour.
+/// One ring's geometry: the slices of a ring differ in angle, colour and outline.
 struct Ring {
     cx: f32,
     cy: f32,
     outer: f32,
     inner: f32,
-    stroke: Option<(Rgba, f32)>,
+}
+
+/// Formats a data label for point `j` of series `s`, honouring `<c:dLbls>` and per-point `<c:dLbl>`.
+pub(super) fn format_point_label(chart: &Chart, data: &ChartData, s: &SeriesData, j: usize, raw_val: f64, total: Option<f64>) -> Option<String> {
+    let Some(dl) = &s.data_labels else {
+        if !chart.data_labels {
+            return None;
+        }
+        let t = label_fmt(s).format(raw_val, None);
+        return (!t.is_empty()).then_some(t);
+    };
+    if dl.delete {
+        return None;
+    }
+    let ov = dl.points.binary_search_by_key(&j, |p| p.idx).ok().and_then(|i| dl.points.get(i));
+    if ov.is_some_and(|p| p.delete) {
+        return None;
+    }
+    if let Some(t) = ov.and_then(|p| p.text.as_deref()) {
+        return (!t.is_empty()).then(|| t.to_string());
+    }
+    let show_ser = ov.and_then(|p| p.show_ser_name).unwrap_or(dl.show_ser_name);
+    let show_cat = ov.and_then(|p| p.show_cat_name).unwrap_or(dl.show_cat_name);
+    let show_val = ov.and_then(|p| p.show_val).unwrap_or(dl.show_val);
+    let show_pct = ov.and_then(|p| p.show_percent).unwrap_or(dl.show_percent);
+    if !(show_ser || show_cat || show_val || show_pct) {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if show_ser && !s.name.is_empty() {
+        parts.push(s.name.clone());
+    }
+    if show_cat {
+        let c = cat_label(data, j);
+        if !c.is_empty() {
+            parts.push(c);
+        }
+    }
+    if show_val {
+        let dl_val_fmt = (!show_pct).then_some(dl.num_fmt.as_deref()).flatten();
+        let code = ov.and_then(|p| p.num_fmt.as_deref()).or(s.label_number_format.as_deref()).or(dl_val_fmt).unwrap_or(&s.number_format);
+        let t = Fmt::new(code).format(raw_val, None);
+        if !t.is_empty() {
+            parts.push(t);
+        }
+    }
+    if show_pct && let Some(tot) = total.filter(|t| t.is_finite() && *t > 0.0) {
+        let pct = raw_val.abs() / tot;
+        let code = ov.and_then(|p| p.num_fmt.as_deref()).or(dl.num_fmt.as_deref()).unwrap_or("0%");
+        let t = Fmt::new(code).format(pct, None);
+        if !t.is_empty() {
+            parts.push(t);
+        }
+    }
+    if parts.is_empty() { None } else { Some(parts.join(dl.separator.as_deref().unwrap_or(", "))) }
+}
+
+/// Resolved fill and outline stroke for point `j` of a pie/doughnut slice.
+fn slice_style(data: &ChartData, s: &SeriesData, j: usize, default_stroke: Option<(Rgba, f32)>) -> (Rgba, Option<(Rgba, f32)>) {
+    let pt = s.point_style(j);
+    let fill = match pt {
+        Some(p) if p.no_fill => [0, 0, 0, 0],
+        Some(p) if p.fill.is_some() => p.fill.unwrap_or([0, 0, 0, 0]),
+        _ => category_color(data, j),
+    };
+    let stroke = match pt {
+        Some(p) if p.no_line => None,
+        Some(p) if p.stroke.is_some() => p.stroke,
+        _ if s.no_line => None,
+        _ if s.line.is_some() => s.line,
+        _ => default_stroke,
+    };
+    (fill, stroke)
+}
+
+/// Outline polyline around a wedge spanning `a0..=a1` (may exceed `TAU`).
+fn wedge_outline(cx: f32, cy: f32, outer: f32, inner: f32, a0: f32, a1: f32) -> Vec<[f32; 2]> {
+    let arc = |r: f32, from: f32, to: f32| -> Vec<[f32; 2]> {
+        let steps = ((r.abs() * (to - from).abs() / 2.0).ceil() as usize).clamp(4, 512);
+        let at = |a: f32| [cx + r * a.sin(), cy - r * a.cos()];
+        (0..=steps).map(|k| at(from + (to - from) * k as f32 / steps as f32)).collect()
+    };
+    let mut pts = arc(outer, a0, a1);
+    if inner > 0.0 {
+        pts.extend(arc(inner, a1, a0));
+    } else {
+        pts.push([cx, cy]);
+    }
+    if let Some(&start) = pts.first() {
+        pts.push(start);
+    }
+    pts
 }
 
 /// A wedge of `ring`, split at 12 o'clock when it crosses the end of the circle.
-fn wedge(ctx: &mut Ctx, ring: &Ring, a0: f32, sweep: f32, fill: Rgba) {
-    let Ring { cx, cy, outer, inner, stroke } = *ring;
+fn wedge(ctx: &mut Ctx, ring: &Ring, a0: f32, sweep: f32, fill: Rgba, stroke: Option<(Rgba, f32)>) {
+    let Ring { cx, cy, outer, inner } = *ring;
     if sweep <= 1e-4 {
         return;
     }
-    // A slice that starts past 12 o'clock still has to be split against 12 o'clock, not against
-    // its unwrapped start: otherwise the half after TAU is drawn from 0 over its neighbours.
     let a0 = a0.rem_euclid(TAU);
     let a1 = a0 + sweep;
+    if fill[3] == 0 {
+        if let Some((color, width)) = stroke {
+            ctx.out.push(Prim::Line { pts: wedge_outline(cx, cy, outer, inner, a0, a1), color, width, dash: false });
+        }
+        return;
+    }
     if a1 <= TAU {
         ctx.out.push(Prim::Wedge { cx, cy, r_outer: outer, r_inner: inner, a0, a1, fill, stroke });
         return;
     }
     // The halves are filled without a stroke: each would outline its own radial edge at 12
-    // o'clock, painting the white separator straight through the slice.
+    // o'clock, painting the separator straight through the slice.
     ctx.out.push(Prim::Wedge { cx, cy, r_outer: outer, r_inner: inner, a0, a1: TAU, fill, stroke: None });
     ctx.out.push(Prim::Wedge { cx, cy, r_outer: outer, r_inner: inner, a0: 0.0, a1: a1 - TAU, fill, stroke: None });
     if let Some((color, width)) = stroke {
-        // One outline for the whole slice: the outer and inner arcs run through 12 o'clock, and
-        // the two radial edges at the slice's own start and end close the path.
-        let arc = |r: f32, from: f32, to: f32| -> Vec<[f32; 2]> {
-            let steps = ((r.abs() * (to - from).abs() / 2.0).ceil() as usize).clamp(4, 512);
-            let at = |a: f32| [cx + r * a.sin(), cy - r * a.cos()];
-            (0..=steps).map(|k| at(from + (to - from) * k as f32 / steps as f32)).collect()
-        };
-        let mut pts = arc(outer, a0, a1);
-        if inner > 0.0 {
-            pts.extend(arc(inner, a1, a0));
-        } else {
-            pts.push([cx, cy]);
+        ctx.out.push(Prim::Line { pts: wedge_outline(cx, cy, outer, inner, a0, a1), color, width, dash: false });
+    }
+}
+
+/// Placed label ready to draw on top of all slices.
+struct SliceLabel {
+    x: f32,
+    y: f32,
+    text: String,
+    color: Rgba,
+    align: HAlign,
+    leader: Option<([f32; 2], [f32; 2])>,
+}
+
+fn place_outside_label(area: Bx, ring: &Ring, mid: f32, text: String, tw: f32, leader_lines: bool) -> SliceLabel {
+    let r_out = ring.outer + 7.0;
+    let sin = mid.sin();
+    let cos = mid.cos();
+    let right_side = sin >= 0.0;
+    let align = if right_side { HAlign::Left } else { HAlign::Right };
+    let raw_x = ring.cx + r_out * sin;
+    let lx = if right_side { raw_x.min((area.right() - tw - 1.0).max(area.x)) } else { raw_x.max((area.x + tw + 1.0).min(area.right())) };
+    let ly = (ring.cy - r_out * cos).clamp(area.y + LABEL_SIZE * 0.6, area.bottom() - LABEL_SIZE * 0.6);
+    let leader = leader_lines.then(|| {
+        let p0 = [ring.cx + ring.outer * sin, ring.cy - ring.outer * cos];
+        let end_x = if right_side { (lx - 2.0).max(p0[0]) } else { (lx + 2.0).min(p0[0]) };
+        (p0, [end_x, ly])
+    });
+    SliceLabel { x: lx, y: ly, text, color: DARK_TEXT, align, leader }
+}
+
+fn draw_slice_labels(ctx: &mut Ctx, labels: Vec<SliceLabel>) {
+    for l in labels {
+        if let Some((p0, p1)) = l.leader {
+            ctx.line(vec![p0, p1], AXIS, 0.75);
         }
-        let start = pts[0];
-        pts.push(start);
-        ctx.out.push(Prim::Line { pts, color, width, dash: false });
+        ctx.text(l.x, l.y, &l.text, LABEL_SIZE, l.color, (l.align, VAlign::Middle));
     }
 }
 
@@ -231,36 +349,76 @@ pub(super) fn pie(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx, inne
     if !(total.is_finite() && total > 0.0) {
         return;
     }
-    let (cx, cy) = (area.cx(), area.cy());
-    let r = area.w.min(area.h) / 2.0 * 0.92;
+    let dl = s.data_labels.as_ref();
+    let pos = dl.map_or(DataLabelPos::Auto, |d| d.pos);
+    let leader_lines = dl.is_some_and(|d| d.show_leader_lines);
+    let can_outside = !names && (matches!(pos, DataLabelPos::OutsideEnd | DataLabelPos::BestFit) || leader_lines);
+    let mut r = area.w.min(area.h) / 2.0 * 0.92;
+    if can_outside && vals.len() <= MAX_LABELS {
+        let needs_room = pos == DataLabelPos::OutsideEnd
+            || vals.iter().enumerate().any(|(j, v)| {
+                let sweep = (*v / total) as f32 * TAU;
+                if sweep <= 1e-4 {
+                    return false;
+                }
+                let raw = s.values.get(j).copied().flatten().unwrap_or(0.0);
+                let Some(t) = format_point_label(chart, data, s, j, raw, Some(total)) else { return false };
+                let rr = if inner > 0.0 { r * (1.0 + inner) / 2.0 } else { r * 0.65 };
+                let room = sweep * rr;
+                let avail = if inner > 0.0 { room.max(r * (1.0 - inner)) } else { room };
+                ctx.tw(&t, LABEL_SIZE) > avail || room < LABEL_SIZE
+            });
+        if needs_room {
+            r = area.w.min(area.h) / 2.0 * 0.76;
+        }
+    }
     if r < 2.0 {
         return;
     }
+    let (cx, cy) = (area.cx(), area.cy());
     let ri = r * inner;
-    let ring = Ring { cx, cy, outer: r, inner: ri, stroke: Some((WHITE, 1.5)) };
-    let f = label_fmt(s);
+    let ring = Ring { cx, cy, outer: r, inner: ri };
     let mut a = (chart.first_slice_angle % 360) as f32 * TAU / 360.0;
     let mut labels = Vec::new();
     for (j, v) in vals.iter().enumerate() {
         let sweep = (*v / total) as f32 * TAU;
         if sweep > 1e-4 {
-            let fill = point_color(data, j);
-            wedge(ctx, &ring, a, sweep, fill);
-            if (chart.data_labels || names) && vals.len() <= MAX_LABELS {
-                let t = if names { cat_label(data, j) } else { f.format(s.values.get(j).copied().flatten().unwrap_or(0.0), None) };
-                let mid = a + sweep / 2.0;
-                let rr = if ri > 0.0 { (r + ri) / 2.0 } else { r * 0.65 };
-                let room = sweep * rr;
-                if ctx.tw(&t, LABEL_SIZE) <= room.max(r - ri) && room >= LABEL_SIZE {
-                    labels.push((cx + rr * mid.sin(), cy - rr * mid.cos(), t, on(fill)));
+            let (fill, stroke) = slice_style(data, s, j, Some((WHITE, 1.5)));
+            wedge(ctx, &ring, a, sweep, fill, stroke);
+            if vals.len() <= MAX_LABELS {
+                let raw = s.values.get(j).copied().flatten().unwrap_or(0.0);
+                let text = if names { Some(cat_label(data, j)) } else { format_point_label(chart, data, s, j, raw, Some(total)) };
+                if let Some(t) = text {
+                    let mid = a + sweep / 2.0;
+                    let rr = match pos {
+                        DataLabelPos::Center if ri == 0.0 => r * 0.5,
+                        DataLabelPos::InsideEnd if ri == 0.0 => r * 0.74,
+                        _ if ri > 0.0 => (r + ri) / 2.0,
+                        _ => r * 0.65,
+                    };
+                    let tw = ctx.tw(&t, LABEL_SIZE);
+                    let room = sweep * rr;
+                    let avail = if ri > 0.0 { room.max(r - ri) } else { room };
+                    let fits_inside = tw <= avail && room >= LABEL_SIZE;
+                    if pos != DataLabelPos::OutsideEnd && fits_inside {
+                        let c = if fill[3] == 0 { DARK_TEXT } else { on(fill) };
+                        labels.push(SliceLabel {
+                            x: cx + rr * mid.sin(),
+                            y: cy - rr * mid.cos(),
+                            text: t,
+                            color: c,
+                            align: HAlign::Center,
+                            leader: None,
+                        });
+                    } else if can_outside {
+                        labels.push(place_outside_label(area, &ring, mid, t, tw, leader_lines));
+                    }
                 }
             }
         }
         a += sweep;
     }
-    for (x, y, t, c) in labels {
-        ctx.text(x, y, &t, LABEL_SIZE, c, (HAlign::Center, VAlign::Middle));
-    }
+    draw_slice_labels(ctx, labels);
 }
 
 /// Excel's doughnut: every series is one concentric ring, the first series innermost (measured in
@@ -279,15 +437,8 @@ pub(super) fn doughnut(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx)
     let hole = f32::from(chart.hole_size.clamp(10, 90)) / 100.0;
     let ri = r * hole;
     let thick = (r - ri) / nser as f32;
-    // A ring thinner than a pixel would vanish. Rather than suppressing the whole chart when there
-    // are more series than the annulus has pixels, keep the outer rings at one pixel each and drop
-    // the innermost series that no longer fit: Excel's order makes the first series the innermost,
-    // so the outermost rings are the ones worth keeping.
     let band = thick.max(1.0);
     let start = (chart.first_slice_angle % 360) as f32 * TAU / 360.0;
-    // Only rings with a pixel of band are drawn, and the wedge budget is shared across them in
-    // drawing order: the innermost ring (the first series) gets its slices first, and the outer
-    // rings are capped instead of the series × category product growing without bound.
     let rings: Vec<(&SeriesData, f32, f32)> = data
         .series
         .iter()
@@ -302,10 +453,8 @@ pub(super) fn doughnut(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx)
     let mut budget = MAX_WEDGES;
     let mut labels = Vec::new();
     for (k, (s, outer, inner)) in rings.iter().enumerate() {
-        // The white separator is 1.5 units wide, wider than a one-pixel band: on a thin ring it
-        // would paint over the fill of this ring and its neighbour, so such rings keep only fill.
-        let stroke = if outer - inner > 1.0 { Some((WHITE, 1.5)) } else { None };
-        let ring = Ring { cx, cy, outer: *outer, inner: *inner, stroke };
+        let default_stroke = if outer - inner > 1.0 { Some((WHITE, 1.5)) } else { None };
+        let ring = Ring { cx, cy, outer: *outer, inner: *inner };
         let vals: Vec<f64> = s.values.iter().take(MAX_CATS).map(|v| v.map(f64::abs).unwrap_or(0.0)).collect();
         let cap = (budget / (rings.len() - k)).max(1);
         let slices = largest_slices(&vals, cap);
@@ -315,28 +464,43 @@ pub(super) fn doughnut(ctx: &mut Ctx, chart: &Chart, data: &ChartData, area: Bx)
         }
         let n = slices.len();
         budget = budget.saturating_sub(n);
-        let f = label_fmt(s);
+        let dl = s.data_labels.as_ref();
+        let pos = dl.map_or(DataLabelPos::Auto, |d| d.pos);
+        let leader_lines = dl.is_some_and(|d| d.show_leader_lines);
         let mut a = start;
         for (j, v) in slices {
             let sweep = (v / total) as f32 * TAU;
             if sweep > 1e-4 {
-                let fill = point_color(data, j);
-                wedge(ctx, &ring, a, sweep, fill);
-                if chart.data_labels && n <= MAX_LABELS {
-                    let t = f.format(s.values.get(j).copied().flatten().unwrap_or(0.0), None);
+                let (fill, stroke) = slice_style(data, s, j, default_stroke);
+                wedge(ctx, &ring, a, sweep, fill, stroke);
+                if n <= MAX_LABELS
+                    && let Some(raw) = s.values.get(j).copied().flatten()
+                    && let Some(t) = format_point_label(chart, data, s, j, raw, Some(total))
+                {
                     let mid = a + sweep / 2.0;
                     let rr = (outer + inner) / 2.0;
-                    if ctx.tw(&t, LABEL_SIZE) <= (sweep * rr).max(outer - inner) && sweep * rr >= LABEL_SIZE {
-                        labels.push((cx + rr * mid.sin(), cy - rr * mid.cos(), t, on(fill)));
+                    let tw = ctx.tw(&t, LABEL_SIZE);
+                    let room = sweep * rr;
+                    let fits = tw <= room.max(outer - inner) * 1.15 && room >= LABEL_SIZE * 0.75;
+                    if pos != DataLabelPos::OutsideEnd && fits {
+                        let c = if fill[3] == 0 { DARK_TEXT } else { on(fill) };
+                        labels.push(SliceLabel {
+                            x: cx + rr * mid.sin(),
+                            y: cy - rr * mid.cos(),
+                            text: t,
+                            color: c,
+                            align: HAlign::Center,
+                            leader: None,
+                        });
+                    } else if matches!(pos, DataLabelPos::OutsideEnd | DataLabelPos::BestFit) || leader_lines {
+                        labels.push(place_outside_label(area, &ring, mid, t, tw, leader_lines));
                     }
                 }
             }
             a += sweep;
         }
     }
-    for (x, y, t, c) in labels {
-        ctx.text(x, y, &t, LABEL_SIZE, c, (HAlign::Center, VAlign::Middle));
-    }
+    draw_slice_labels(ctx, labels);
 }
 
 // ---------------------------------------------------------------- treemap

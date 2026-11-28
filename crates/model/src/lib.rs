@@ -4,7 +4,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
-mod b64;
+pub mod b64;
 pub mod cell;
 mod cellmap;
 mod drawing_file;
@@ -14,6 +14,7 @@ pub mod group;
 mod group_projection;
 mod line_follow;
 pub mod macros;
+pub mod paper;
 pub mod password;
 mod pivot_source;
 pub mod preserved;
@@ -35,7 +36,7 @@ pub use macros::*;
 pub use password::PasswordHash;
 pub use pivot_source::{FoundSource, PivotSource, SavedSource};
 pub use preserved::{
-    Preserved, PreservedCellMeta, PreservedChartShapes, PreservedControlProxies, PreservedIndex, PreservedIndexed, PreservedMetadata, PreservedName,
+    Preserved, PreservedCellMeta, PreservedChart, PreservedControlProxies, PreservedIndex, PreservedIndexed, PreservedMetadata, PreservedName,
     PreservedNoteFill, PreservedNoteFills, PreservedObjectLink, PreservedObjectLinks, PreservedPart, PreservedPivot, PreservedRel, PreservedSheet,
     PreservedSheetKind, PreservedTable, PreservedTableColumn, PreservedTheme, PreservedXml,
 };
@@ -49,7 +50,7 @@ pub use style::{
 };
 pub use workbook::{
     CalcMode, CalcSettings, DefinedName, DefinitionUid, DocProps, EQUATION_BUDGET_MESSAGE, ExternalBook, ExternalName, ExternalSheet,
-    MAX_EQUATION_LAYOUT_BYTES, PhoneticProps, PhoneticRun, PhoneticString, ShowObjects, Workbook, WorkbookView,
+    MAX_EQUATION_LAYOUT_BYTES, PhoneticProps, PhoneticRun, PhoneticString, RefHost, ShowObjects, Workbook, WorkbookView, WriteReservation,
 };
 
 /// Font used for new workbooks. Only a name: renderers substitute an available open font

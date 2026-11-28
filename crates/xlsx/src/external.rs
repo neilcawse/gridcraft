@@ -48,17 +48,25 @@ pub(crate) fn read(cx: &mut Ctx<'_>, wb_xml: &El, wb_rels: &[Rel]) -> Result<Vec
 /// workbook are saved like any other.
 pub(crate) fn saved_as_read(formula: &gridcraft_model::Formula) -> bool {
     use gridcraft_formula::{Expr, SheetSel};
-    let Some(expr) = formula.expr_arc().filter(|_| formula.legacy && formula.array.is_none()) else { return false };
-    let mut linked = false;
-    expr.walk(&mut |e| {
-        linked |= match e {
-            Expr::Ref(r) => matches!(&r.sheet, SheetSel::Named(s) | SheetSel::Span(s, _) if s.starts_with('[')),
-            Expr::Name(n) => n.starts_with('['),
-            Expr::LinkedRefError(_) => true,
-            _ => false,
-        }
-    });
-    linked
+    if !formula.legacy || formula.array.is_some() {
+        return false;
+    }
+    let check = |expr: &Expr| {
+        let mut linked = false;
+        expr.walk(&mut |e| {
+            linked |= match e {
+                Expr::Ref(r) => matches!(&r.sheet, SheetSel::Named(s) | SheetSel::Span(s, _) if s.starts_with('[')),
+                Expr::Name(n) => n.starts_with('['),
+                Expr::LinkedRefError(_) => true,
+                _ => false,
+            }
+        });
+        linked
+    };
+    if let Some((base, _, _)) = formula.expr_shifted() {
+        return check(base);
+    }
+    formula.with_expr(check).unwrap_or(false)
 }
 
 /// The items of a `<ddeLink>` that were saved with values (`<values rows cols>`, row-major): one
@@ -236,8 +244,11 @@ mod tests {
         let (wb, _) = crate::read_xlsx(&crate::tests::minimal(body, &parts, rels, refs)).unwrap();
         let check_formulas = |wb: &gridcraft_model::Workbook| {
             let sheet = wb.sheet(0).unwrap();
-            let text = |a: &str| sheet.cell(gridcraft_core::CellRef::parse(a).unwrap()).unwrap().formula.as_ref().unwrap().text.as_str();
-            assert_eq!((text("A1"), text("B1"), text("C1")), ("@[1]!'''bid!ask[slot]'''", "[1]!Price", "[1]!'''bid!ask[slot]'''"));
+            let text = |a: &str| sheet.cell(gridcraft_core::CellRef::parse(a).unwrap()).unwrap().formula.as_ref().unwrap().text().into_owned();
+            assert_eq!(
+                (text("A1").as_str(), text("B1").as_str(), text("C1").as_str()),
+                ("@[1]!'''bid!ask[slot]'''", "[1]!Price", "[1]!'''bid!ask[slot]'''")
+            );
         };
         check_formulas(&wb);
         let bytes = crate::write_xlsx(&wb).unwrap();
@@ -259,6 +270,6 @@ mod tests {
         let (wb, _) = crate::read_xlsx(&crate::tests::minimal(body, &parts, rels, refs)).unwrap();
         assert!(wb.name("Quote", 0).is_some());
         let cell = wb.sheet(0).unwrap().cell(gridcraft_core::CellRef::new(0, 0)).unwrap();
-        assert_eq!(cell.formula.as_ref().unwrap().text, "@[1]!Quote");
+        assert_eq!(cell.formula.as_ref().unwrap().text(), "@[1]!Quote");
     }
 }

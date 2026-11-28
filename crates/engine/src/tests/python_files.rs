@@ -56,7 +56,7 @@ fn with_parts(bytes: &[u8], edit: impl Fn(&str, &str) -> String, add: &[(&str, &
     let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     for i in 0..z.len() {
         let mut f = z.by_index(i).unwrap();
-        let name = f.name().to_string();
+        let name = f.name().unwrap().to_string();
         let mut data = Vec::new();
         f.read_to_end(&mut data).unwrap();
         if let Ok(text) = std::str::from_utf8(&data) {
@@ -281,7 +281,7 @@ fn with_damaged_part(bytes: &[u8], name: &str, marker: &str) -> Vec<u8> {
     let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     for i in 0..z.len() {
         let mut f = z.by_index(i).unwrap();
-        let entry = f.name().to_string();
+        let entry = f.name().unwrap().to_string();
         let mut data = Vec::new();
         f.read_to_end(&mut data).unwrap();
         let options = zip::write::SimpleFileOptions::default();
@@ -689,7 +689,7 @@ fn a_legacy_xls_function_named_py_is_not_adopted_as_python() {
     let a1 = wb.sheet(0).unwrap().cell(CellRef::parse("A1").unwrap()).unwrap();
     assert!(a1.py.is_none(), "an .xls holds no Python cell");
     let f = a1.formula.as_ref().expect("the call stays a formula");
-    assert_eq!(f.text, "PY(\"1+1\")");
+    assert_eq!(f.text(), "PY(\"1+1\")");
     assert!(f.array.is_some(), "and an array formula");
     assert_eq!(a1.value, Value::Number(7.0), "with the result the file cached");
     // Saved as xlsx it is still that formula, with no Python part to run as code.

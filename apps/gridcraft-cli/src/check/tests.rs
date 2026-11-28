@@ -343,7 +343,7 @@ fn patched(bytes: &[u8], name: &str, from: &str, to: &str) -> Vec<u8> {
     let mut out = zip::ZipWriter::new(Cursor::new(Vec::new()));
     for i in 0..src.len() {
         let mut f = src.by_index(i).unwrap();
-        let entry = f.name().to_string();
+        let Ok(entry) = f.name().map(|name| name.into_owned()) else { return Vec::new() };
         let mut body = String::new();
         f.read_to_string(&mut body).unwrap();
         if entry == name {
@@ -1228,7 +1228,7 @@ fn with_rels(bytes: &[u8], rels: &[(&str, &str)], parts: &[(&str, &str)]) -> Vec
     let mut pending: Vec<(&str, &str)> = rels.to_vec();
     for i in 0..src.len() {
         let mut f = src.by_index(i).unwrap();
-        let name = f.name().to_string();
+        let name = f.name().unwrap().to_string();
         let mut body = String::new();
         f.read_to_string(&mut body).unwrap();
         if let Some(at) = pending.iter().position(|(r, _)| *r == name) {
@@ -2243,17 +2243,17 @@ fn an_older_answer_is_substituted_only_for_the_call_and_the_inputs_it_is_documen
 /// (a published homework answer key). Cells, all cached `#NUM!` unless said:
 /// - `B1`, `D1`: the two-flow repros, and `B2` `IF(ISERROR(IRR(…)),99,0)` cached 99;
 /// - `J1`: the homework flows at 22%;
-/// - `P1`: a workbook's flows where Excel 16.115 answers `#NUM!` and GridCraft's fallback search
-///   finds a number (GridCraft's own difference): not an old answer, whatever the version;
+/// - `T1`: a workbook's flows where Excel 16.115 and GridCraft both answer `#NUM!`: checked, and
+///   a match under every version stamp;
 /// - `E3` and `F3`: the flows (-3600000, 203454.98, 200318.60) an Excel 2007 workbook cached `NA` for, so an
 ///   Excel 2007 cache of `#NUM!` for them is that version's give-up (`E3`), the IF of that workbook too (`F3`);
 ///   Excel 2002 and 2003 have no such cache, and a third flow past the cached list (`E4`) gates.
 ///
-/// Excel 2007, 2003 and 2002 gate every cell but `E3`/`F3` under 2007.
+/// Excel 2007, 2003 and 2002 gate the mismatches except `E3`/`F3` under 2007.
 #[test]
 fn an_older_excel_s_irr_gives_up_only_where_a_cache_shows_it() {
     let num = Value::Error(CellError::Num);
-    let fallback_flows = [
+    let t1_flows = [
         -12_644.438_140_059_743,
         -12_644.438_140_059_758,
         -12_644.438_140_059_738,
@@ -2282,7 +2282,7 @@ fn an_older_excel_s_irr_gives_up_only_where_a_cache_shows_it() {
     for (c, x) in ["F1", "G1", "H1", "I1"].into_iter().zip([-85.0, 120.0, 100.0, -138.0]) {
         cells.push((c.into(), x.to_string(), n(x)));
     }
-    for (i, x) in fallback_flows.iter().enumerate() {
+    for (i, x) in t1_flows.iter().enumerate() {
         let col = (b'L' + i as u8) as char;
         cells.push((format!("{col}1"), x.to_string(), n(*x)));
     }
@@ -2296,9 +2296,11 @@ fn an_older_excel_s_irr_gives_up_only_where_a_cache_shows_it() {
         for cell in want_legacy {
             assert_eq!(class(&c, cell), Some(CacheTrust::LegacyExcelVersion), "{name} {cell}: {:?}", c.mismatches);
         }
-        for cell in
-            ["!B1", "!B2", "!D1", "!J1", "!E4", "!T1"].into_iter().chain((name != "Excel 2007").then_some(["!E3", "!F3"]).into_iter().flatten())
-        {
+        // Every formula is checked against its cache (none goes without an oracle), so a `T1` that
+        // isn't listed is a match, not a skip.
+        assert_eq!((c.formula_cells, c.no_oracle, c.checked), (8, 0, 8), "{name}: {c:?}");
+        assert_eq!(class(&c, "!T1"), None, "{name}: {:?}", c.mismatches);
+        for cell in ["!B1", "!B2", "!D1", "!J1", "!E4"].into_iter().chain((name != "Excel 2007").then_some(["!E3", "!F3"]).into_iter().flatten()) {
             assert_ne!(class(&c, cell), Some(CacheTrust::LegacyExcelVersion), "{name} {cell}: {:?}", c.mismatches);
             assert!(class(&c, cell).is_some(), "{name} {cell} is a mismatch: {:?}", c.mismatches);
         }
@@ -2637,7 +2639,8 @@ fn with_thumbnail(thumbnail: gridcraft_xlsx::testing::Entry<'_>) -> Vec<u8> {
         let mut f = src.by_index(i).unwrap();
         let mut body = vec![];
         f.read_to_end(&mut body).unwrap();
-        let body = match f.name() {
+        let Ok(name) = f.name().map(|name| name.into_owned()) else { return Vec::new() };
+        let body = match name.as_str() {
             "_rels/.rels" => String::from_utf8(body).unwrap().replace("</Relationships>", &format!("{thumbnail_rel}</Relationships>")).into_bytes(),
             "[Content_Types].xml" => String::from_utf8(body)
                 .unwrap()
@@ -2645,7 +2648,7 @@ fn with_thumbnail(thumbnail: gridcraft_xlsx::testing::Entry<'_>) -> Vec<u8> {
                 .into_bytes(),
             _ => body,
         };
-        parts.push((f.name().to_string(), body));
+        parts.push((name, body));
     }
     let mut entries: Vec<Entry<'_>> = parts.iter().map(|(n, b)| Entry::Intact(n, b)).collect();
     entries.push(thumbnail);

@@ -34,6 +34,7 @@ fn literal_category_with_separators_survives_save() {
             number_format: None,
             innermost_categories: false,
             label_number_format: None,
+            ..Default::default()
         })
         .collect();
     s.charts.push(Chart {
@@ -56,6 +57,8 @@ fn literal_category_with_separators_survives_save() {
         pivot: None,
         axis_number_formats: Default::default(),
         pivot_label_formats: Vec::new(),
+        area_style: Default::default(),
+        user_shapes: Vec::new(),
     });
     wb.sheets = vec![Arc::new(s)];
     let bytes = write_xlsx(&wb).unwrap();

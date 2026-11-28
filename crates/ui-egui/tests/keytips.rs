@@ -176,7 +176,7 @@ fn legacy_paste_special_keeps_formulas_when_requested() {
     assert_eq!(value(&h, "D4"), Value::Empty);
     key(&mut h, Key::Enter);
     let sh = h.state().session.active().unwrap().wb.active().unwrap();
-    assert_eq!(sh.cell(CellRef::parse("D4").unwrap()).unwrap().formula.as_ref().unwrap().text, "20+22");
+    assert_eq!(sh.cell(CellRef::parse("D4").unwrap()).unwrap().formula.as_ref().unwrap().text(), "20+22");
     assert_eq!(value(&h, "D4"), Value::Number(42.0));
     assert_eq!(value(&h, "E4"), Value::Number(99.0));
     assert!(h.state().editor.is_none());
@@ -520,6 +520,30 @@ fn pending_sequences_go_live_when_the_command_lands() {
         "the landed command is journaled like any live command"
     );
     assert_eq!(h.state().keytips.prefix(), None);
+}
+
+#[test]
+fn font_name_box_left_aligns_short_and_long_names() -> Result<(), String> {
+    for name in ["Arial", "Calibri", "Times New Roman"] {
+        let mut session = blank();
+        session.execute("home.fontName", json!({"name": name})).map_err(|e| e.to_string())?;
+        let h = harness(session);
+        // Querying the original name also checks that the button keeps its accessible label.
+        let rect = h.get_by_role_and_label(egui::accesskit::Role::Button, name).rect();
+        assert!((rect.width() - 150.0).abs() < 0.1 && (rect.height() - 24.0).abs() < 0.1, "{name}: {rect:?}");
+        let text_x = h
+            .output()
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == name && rect.contains(text.pos) => Some(text.pos.x),
+                _ => None,
+            })
+            .ok_or("font name was not painted inside its button")?;
+        let inset = text_x - rect.left();
+        assert!((0.0..=10.0).contains(&inset), "{name}: expected a small left inset, got {inset}");
+    }
+    Ok(())
 }
 
 #[test]

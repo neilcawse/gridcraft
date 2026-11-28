@@ -137,6 +137,9 @@ pub struct Sheet {
     pub geometry: crate::Geometry,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_geometry: Option<crate::SavedSheetGeometry>,
+    /// Whether `sheetFormatPr customHeight="1"` was set in the source XLSX file. Not in JSON.
+    #[serde(skip)]
+    pub default_row_height_custom: bool,
     pub merges: Vec<RangeRef>,
     /// Frozen rows and columns (top/left).
     pub freeze: Option<(u32, u32)>,
@@ -254,6 +257,7 @@ impl Sheet {
             xlsx_base_col_width: None,
             geometry: crate::Geometry::default(),
             saved_geometry: None,
+            default_row_height_custom: false,
             merges: vec![],
             freeze: None,
             tab_color: None,
@@ -656,6 +660,10 @@ impl Sheet {
     pub fn table_at(&self, c: CellRef) -> Option<&Table> {
         self.tables.iter().find(|t| t.range.contains(c))
     }
+    pub fn pivot_at(&self, c: CellRef) -> Option<&PivotTable> {
+        self.pivots.iter().find(|p| p.last_range.is_some_and(|r| r.contains(c)))
+    }
+
     /// The shared work extent: stored cells (styled blanks included) and spills. Print, export,
     /// calculation, charts, pivots and the other work bounds use it; inspection and Last Cell
     /// use [`Sheet::reported_used_range`] instead.
@@ -1122,6 +1130,8 @@ mod tests {
                 pivot: None,
                 axis_number_formats: Default::default(),
                 pivot_label_formats: Default::default(),
+                area_style: Default::default(),
+                user_shapes: Default::default(),
             }),
             ObjKind::Image => s.images.push(Image { id, anchor, data: Arc::new(vec![]), mime: String::new(), alt: String::new() }),
             ObjKind::Shape | ObjKind::Equation => s.shapes.push(Shape {

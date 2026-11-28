@@ -93,6 +93,7 @@ fn chart_series_items<'a>(sheet: &str, origin: CellRef, out: &'a Output) -> Vec<
                     number_format: None,
                     innermost_categories: false,
                     label_number_format: None,
+                    ..Default::default()
                 },
                 items.as_slice(),
             ))
@@ -398,6 +399,7 @@ mod tests {
             chart_cols: (1..1000).map(|c| (c, vec![format!("S{c}")])).collect(),
             chart_value_item: false,
             label_col: Some(0),
+            row_label_cols: 1,
             data: vec![],
         };
         assert_eq!(chart_series("Sheet1", CellRef::new(0, 0), &out).len(), MAX_CHART_SERIES);

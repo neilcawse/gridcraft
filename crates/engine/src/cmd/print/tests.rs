@@ -259,7 +259,7 @@ fn rtl_sheet_sparkline_reflects_with_cell_geometry() {
         color: Color::rgb(255, 0, 0),
         markers: false,
     });
-    let options = PrintOptions { range: RangeRef::parse("A1:B2"), ..PrintOptions::default() };
+    let options = PrintOptions { ranges: RangeRef::parse("A1:B2").into_iter().collect(), ..PrintOptions::default() };
     let ltr = render_pdf(&wb, &layouts(&wb, &options), "", "").unwrap().bytes;
     wb.sheet_mut(0).unwrap().right_to_left = true;
     let rtl = render_pdf(&wb, &layouts(&wb, &options), "", "").unwrap().bytes;
@@ -390,20 +390,20 @@ fn page_count_300_rows_letter_portrait() {
     let mut s = s();
     let rows: Vec<Vec<Json>> = (1..=300).map(|i| vec![json!(i)]).collect();
     s.execute("range.setValues", json!({"range": "A1", "values": rows})).unwrap();
-    // 684pt of printable height / 15pt rows = 45 rows per page → 7 pages.
+    // Calibri 11pt 600-dpi row height is 14.52pt (121 dots): 683.04pt / 14.52pt = 47 rows per page → 7 pages.
     let (pdf, pages) = pdf_of(&mut s, json!({}));
     assert_eq!(pages, 7);
     assert!(pdf.starts_with(b"%PDF-1.7"));
     assert!(contains(&pdf, "/Count 7"));
     let pv = s.execute("file.printPreview", json!({})).unwrap();
     assert_eq!(pv["pages"], 7);
-    assert_eq!(pv["pageList"][0]["rows"], "1:45");
-    assert_eq!(pv["pageList"][1]["rows"], "46:90");
-    assert_eq!(s.execute("file.printPreview", json!({"page": 7})).unwrap()["page"]["rows"], "271:300");
+    assert_eq!(pv["pageList"][0]["rows"], "1:47");
+    assert_eq!(pv["pageList"][1]["rows"], "48:94");
+    assert_eq!(s.execute("file.printPreview", json!({"page": 7})).unwrap()["page"]["rows"], "283:300");
     assert!(s.execute("file.printPreview", json!({"page": 8})).is_err());
-    // Landscape: 504pt / 15 = 33 rows per page → 10 pages.
+    // Landscape: 503.04pt / 14.52pt = 34 rows per page → 9 pages.
     s.execute("pageLayout.pageSetup", json!({"orientation": "landscape"})).unwrap();
-    assert_eq!(pdf_of(&mut s, json!({})).1, 10);
+    assert_eq!(pdf_of(&mut s, json!({})).1, 9);
     // Fit to one page.
     assert_eq!(pdf_of(&mut s, json!({"fitToPage": true})).1, 1);
     s.execute("pageLayout.pageSetup", json!({"fitWidth": 1, "fitHeight": 2, "orientation": "portrait"})).unwrap();
@@ -412,8 +412,8 @@ fn page_count_300_rows_letter_portrait() {
     s.execute("pageLayout.pageSetup", json!({"scale": 100, "rowBreaks": [11], "titleRows": "1:1"})).unwrap();
     let pv = s.execute("file.printPreview", json!({})).unwrap();
     assert_eq!(pv["pageList"][0]["rows"], "1:10");
-    // Title row takes one line on later pages: 44 body rows.
-    assert_eq!(pv["pageList"][1]["rows"], "11:54");
+    // Title row takes one line on later pages: 46 body rows.
+    assert_eq!(pv["pageList"][1]["rows"], "11:56");
 }
 
 #[test]
@@ -422,11 +422,11 @@ fn wide_sheet_goes_down_then_over() {
     let rows: Vec<Vec<Json>> = (0..60).map(|r| (0..15).map(|c| json!(r * 100 + c)).collect()).collect();
     s.execute("range.setValues", json!({"range": "A1", "values": rows})).unwrap();
     let pv = s.execute("file.printPreview", json!({})).unwrap();
-    // 511.2pt / 48pt = 10 columns per page; 45 rows per page.
+    // Default Calibri 11pt columns are ~51.57pt wide on paper (9 cols A:I); 14.52pt rows (47 rows per page).
     assert_eq!(pv["pages"], 4);
-    assert_eq!(pv["pageList"][0]["range"], "A1:J45");
-    assert_eq!(pv["pageList"][1]["range"], "A46:J60");
-    assert_eq!(pv["pageList"][2]["range"], "K1:O45");
+    assert_eq!(pv["pageList"][0]["range"], "A1:I47");
+    assert_eq!(pv["pageList"][1]["range"], "A48:I60");
+    assert_eq!(pv["pageList"][2]["range"], "J1:O47");
 }
 
 /// The ranges of the printed pages, in print order.
@@ -547,7 +547,7 @@ fn page_order_without_breaks_and_with_print_titles() {
         s.execute("pageLayout.pageSetup", json!({"pageOrder": "downThenOver"})).unwrap();
         let down = page_ranges(&mut s);
         if !titles {
-            assert_eq!(down, ["A1:J45", "A46:J60", "K1:O45", "K46:O60"]);
+            assert_eq!(down, ["A1:I47", "A48:I60", "J1:O47", "J48:O60"]);
         }
         s.execute("pageLayout.pageSetup", json!({"pageOrder": "overThenDown"})).unwrap();
         let over = page_ranges(&mut s);
@@ -790,6 +790,98 @@ fn charts_and_images_are_drawn() {
     }
 }
 
+/// Bytes of pixel data the pages of a PDF hold: 3 per RGB pixel plus 1 per soft-mask pixel, for
+/// every image each page references. The writer shares identical images across pages, but each
+/// page kept its own copy while the document was built, so a shared image counts once per page.
+fn image_bytes(pdf: &[u8]) -> u64 {
+    let text = String::from_utf8_lossy(pdf);
+    let num_after = |s: &str, key: &str| -> u64 {
+        let at = s.find(key).unwrap() + key.len();
+        s[at..].split_whitespace().next().unwrap().parse().unwrap()
+    };
+    // Object id → (pixel bytes, soft mask id).
+    let mut images = std::collections::HashMap::new();
+    let mut pages = vec![];
+    for obj in text.split("endobj").filter(|o| o.contains(" 0 obj")) {
+        let head = &obj[..obj.find(" 0 obj").unwrap()];
+        let id: u64 = head.split_whitespace().last().unwrap().parse().unwrap();
+        let dict = &obj[..obj.find(">>").unwrap_or(obj.len())];
+        if dict.contains("/Subtype /Image") {
+            let bytes = num_after(dict, "/Width ") * num_after(dict, "/Height ") * if dict.contains("/DeviceRGB") { 3 } else { 1 };
+            let smask = dict.contains("/SMask ").then(|| num_after(dict, "/SMask "));
+            images.insert(id, (bytes, smask));
+        } else if obj.contains("/Type /Page /Parent") {
+            pages.push(obj);
+        }
+    }
+    let with_mask = |id: u64| -> u64 {
+        let (bytes, smask) = images[&id];
+        bytes + smask.map_or(0, |m| images[&m].0)
+    };
+    pages
+        .iter()
+        .filter_map(|page| page.find("/XObject << ").map(|at| &page[at + "/XObject << ".len()..]))
+        .map(|refs| {
+            let refs = &refs[..refs.find(">>").unwrap()];
+            let tokens: Vec<&str> = refs.split_whitespace().collect();
+            tokens.chunks(4).map(|c| with_mask(c[1].parse().unwrap())).sum::<u64>()
+        })
+        .sum()
+}
+
+/// A picture anchored across many pages keeps no more copies in the PDF than the image budget
+/// allows, and the export still succeeds.
+#[test]
+fn picture_copies_across_pages_stay_within_the_image_budget() {
+    // Each page a picture overlaps kept its own decoded copy in the PDF with no document-wide
+    // bound: a 3 KB workbook with one tall picture reached 2 GiB before running out of pages.
+    let mut s = s();
+    let mut png = Vec::new();
+    let img = image::RgbaImage::from_pixel(64, 64, image::Rgba([10, 120, 200, 255]));
+    image::DynamicImage::ImageRgba8(img).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    s.execute("cell.set", json!({"cell": "A1", "input": "Title"})).unwrap();
+    s.execute("pageLayout.pageSetup", json!({"titleRows": "1:1"})).unwrap();
+    let d = s.doc_mut().unwrap();
+    let wb = std::sync::Arc::make_mut(&mut d.wb);
+    let id = wb.next_object_id();
+    let sh = wb.sheet_mut(0).unwrap();
+    // A floating picture over some 20 pages, and a cell picture in the title row on every page.
+    sh.images.push(Image {
+        id,
+        anchor: Anchor { cell: CellRef::new(1, 1), dx: 0.0, dy: 0.0, width: 200.0, height: 19_990.0, mode: gridcraft_model::AnchorMode::MoveAndSize },
+        data: std::sync::Arc::new(png.clone()),
+        mime: "image/png".into(),
+        alt: String::new(),
+    });
+    // `set_picture` gives C1 the cell value `draw_block` needs to reach the picture at all.
+    sh.set_picture(CellRef::new(0, 2), std::sync::Arc::new(CellPicture { data: png, mime: "image/png".into(), alt: String::new() }));
+    let d = s.doc().unwrap();
+    let lays = layouts(&d.wb, &PrintOptions::from_params(&json!({}), "file.exportPdf").unwrap());
+
+    let RenderedPdf { bytes: full, pages, .. } = render_pdf(&d.wb, &lays, "t", "").unwrap();
+    assert!(pages >= 15, "{pages} pages");
+    // Within the default budget every page draws (and holds while the PDF is built) its own copy.
+    // Identical copies are written to the file once, so the draws are what to count.
+    let draws = |pdf: &[u8]| String::from_utf8_lossy(pdf).matches(" Do Q").count();
+    let full_draws = draws(&full);
+    // The cell picture, on its own: the same render without it draws one picture fewer per page.
+    let mut floating_only = (*d.wb).clone();
+    floating_only.sheet_mut(0).unwrap().cell_pictures.clear();
+    let floating_draws = draws(&render_pdf(&floating_only, &lays, "t", "").unwrap().bytes);
+    assert!(floating_draws >= pages - 1, "{floating_draws} floating picture draws on {pages} pages");
+    assert_eq!(full_draws - floating_draws, pages, "the title-row cell picture draws once on each of {pages} pages");
+
+    // 64×64 RGB is 12,288 bytes: a 64 KiB budget holds a handful of page copies, not one per page.
+    let budget = 64 * 1024;
+    let RenderedPdf { bytes: capped, pages: capped_pages, .. } = render_pdf_with_image_budget(&d.wb, &lays, "t", "", budget).unwrap();
+    assert_eq!(capped_pages, pages, "pages past the budget still print, without the pictures");
+    let capped_draws = draws(&capped);
+    assert!((1..full_draws / 2).contains(&capped_draws), "{capped_draws} of {full_draws} picture draws kept with a {budget}-byte budget");
+    let kept = image_bytes(&capped);
+    assert!((1..=budget).contains(&kept), "{kept} bytes of images kept with a {budget}-byte budget");
+    assert!(contains(&capped, "%%EOF"));
+}
+
 #[test]
 fn page_setup_edits_settings() {
     let mut s = s();
@@ -891,6 +983,48 @@ fn page_setup_paper_sizes_reach_the_pdf_page() {
     assert!(close(&pv["pageList"][0]["width"], 612.0) && close(&pv["pageList"][0]["height"], 792.0));
     // Page Setup refuses an unknown name.
     assert!(s.execute("pageLayout.pageSetup", json!({"paper": "Napkin"})).is_err());
+}
+
+/// An empty paper name means no paper is stated; it prints on Letter.
+#[test]
+fn an_unstated_paper_prints_on_letter() {
+    let mut wb = gridcraft_model::Workbook::new();
+    std::sync::Arc::make_mut(&mut wb.sheets[0]).set_value(CellRef::new(0, 0), gridcraft_core::Value::Text("x".into()));
+    std::sync::Arc::make_mut(&mut wb.sheets[0]).print.paper = String::new();
+    let layouts = super::layout::layouts(&wb, &super::layout::PrintOptions::default());
+    let l = &layouts[0];
+    assert_eq!((l.page_w, l.page_h), (612.0, 792.0));
+    assert_eq!(paper_size(""), (612.0, 792.0));
+}
+
+/// Both commands that set the paper store a known one under its table name, so every file
+/// format finds it.
+#[test]
+fn paper_size_commands_store_the_table_name() {
+    let mut s = s();
+    s.execute("pageLayout.size", json!({"paper": "b5-jis"})).unwrap();
+    assert_eq!(s.doc().unwrap().wb.sheets[0].print.paper, "B5");
+    s.execute("pageLayout.pageSetup", json!({"paper": "11x17"})).unwrap();
+    assert_eq!(s.doc().unwrap().wb.sheets[0].print.paper, "Tabloid");
+    // Statement and the envelopes XLSX names are accepted by both commands (Page Setup refused
+    // them before), stored under their table name and printed on their own size.
+    s.execute("range.setValues", json!({"range": "A1", "values": [["x"]]})).unwrap();
+    let close = |v: &Json, want: f64| (v.as_f64().unwrap() - want).abs() < 0.01;
+    for (cmd, given, stored, w, h) in [
+        ("pageLayout.pageSetup", "statement", "Statement", 396.0, 612.0),
+        ("pageLayout.pageSetup", "envelope #10", "Envelope #10", 297.0, 684.0),
+        ("pageLayout.pageSetup", "Envelope-DL", "Envelope DL", 311.81, 623.62),
+        ("pageLayout.size", "Statement", "Statement", 396.0, 612.0),
+        ("pageLayout.size", "envelope dl", "Envelope DL", 311.81, 623.62),
+    ] {
+        s.execute(cmd, json!({"paper": given})).unwrap();
+        assert_eq!(s.doc().unwrap().wb.sheets[0].print.paper, stored, "{cmd} {given}");
+        let pv = s.execute("file.printPreview", json!({})).unwrap();
+        let page = &pv["pageList"][0];
+        assert!(close(&page["width"], w) && close(&page["height"], h), "{cmd} {given}: {page}");
+    }
+    // A new workbook still prints on Letter.
+    assert_eq!(gridcraft_model::Workbook::new().sheets[0].print.paper, "Letter");
 }
 
 #[test]
@@ -1245,7 +1379,8 @@ fn chart_budget_counts_path_points_and_drops_charts_that_do_not_fit() {
     // A smoothed line is its points, not one unit.
     assert_eq!(chart_cost(&[line(4000), Prim::Circle { cx: 0.0, cy: 0.0, r: 1.0, fill: None, stroke: None }]), 4002);
     // Room for exactly two copies of a 1,000-point chart.
-    let mut pics = PicCache { chart_prims: MAX_CHART_PRIMS - 2002, ..Default::default() };
+    let mut pics = PicCache::default();
+    pics.chart_prims = MAX_CHART_PRIMS - 2002;
     let mut renders = 0;
     for expect in [true, true, false, false] {
         let got = pics.chart((0, 0), || {
@@ -1257,7 +1392,391 @@ fn chart_budget_counts_path_points_and_drops_charts_that_do_not_fit() {
     assert_eq!(renders, 1, "a rejected chart is not rendered again");
     assert!(pics.charts.is_empty(), "and its primitives are not kept");
     // A chart too big for what is left is dropped without being cached at all.
-    let mut pics = PicCache { chart_prims: MAX_CHART_PRIMS - 10, ..Default::default() };
+    let mut pics = PicCache::default();
+    pics.chart_prims = MAX_CHART_PRIMS - 10;
     assert!(pics.chart((0, 1), || vec![line(1000)]).is_none());
     assert!(pics.charts.is_empty() && pics.rejected_charts.contains(&(0, 1)));
+}
+
+#[test]
+fn empty_invisibly_styled_cells_do_not_blow_up_pagination() {
+    let mut wb = Workbook::new();
+    let mut invisible = Style::default();
+    invisible.font.bold = true;
+    invisible.num_fmt = gridcraft_model::NumFmt::new("0.00");
+    let invisible_id = wb.styles.intern(invisible);
+
+    let mut filled = Style::default();
+    filled.fill.pattern = PatternType::Solid;
+    filled.fill.fg = Color::Rgb(0x25477B);
+    let filled_id = wb.styles.intern(filled);
+
+    let mut bordered = Style::default();
+    bordered.borders.bottom = BorderLine { style: BorderStyle::Thin, color: Color::Rgb(0x000000) };
+    let bordered_id = wb.styles.intern(bordered);
+
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.set_value(CellRef::new(0, 0), Value::text("Title"));
+    sh.set_value(CellRef::new(4, 2), Value::Number(42.0));
+    // 1000 rows × 20 columns of empty cells with invisible (font/numfmt-only) styling.
+    for r in 5..1000 {
+        for c in 0..20 {
+            sh.cells.set(CellRef::new(r, c), gridcraft_model::Cell::styled(Value::Empty, invisible_id));
+        }
+    }
+    let lay = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
+    assert_eq!(lay.area, RangeRef::new(CellRef::new(0, 0), CellRef::new(4, 2)));
+    assert_eq!(lay.pages.len(), 1);
+
+    // Adding a visible fill or visible border extends the print range to include it.
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.cells.set(CellRef::new(6, 4), gridcraft_model::Cell::styled(Value::Empty, filled_id));
+    let lay = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
+    assert_eq!(lay.area, RangeRef::new(CellRef::new(0, 0), CellRef::new(6, 4)));
+
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.cells.set(CellRef::new(8, 5), gridcraft_model::Cell::styled(Value::Empty, bordered_id));
+    let lay = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
+    assert_eq!(lay.area, RangeRef::new(CellRef::new(0, 0), CellRef::new(8, 5)));
+}
+
+#[test]
+fn blank_trailing_pages_are_trimmed_on_sparse_l_shaped_sheet() {
+    let mut wb = Workbook::new();
+    let sh = wb.sheet_mut(0).unwrap();
+    // Tall column A spanning 2 vertical pages (60 rows), plus a wide header in row 1 spanning 2 horizontal pages (12 cols).
+    // Page grid is 2×2 in DownThenOver order: (r0,c0) data, (r1,c0) data, (r0,c1) header, (r1,c1) completely blank trailing page.
+    for r in 0..60 {
+        sh.set_value(CellRef::new(r, 0), Value::Number(r as f64));
+    }
+    sh.set_value(CellRef::new(0, 11), Value::text("Wide header"));
+    let lay = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
+    assert_eq!(lay.row_bands.len(), 2);
+    assert_eq!(lay.col_bands.len(), 2);
+    assert_eq!(lay.pages, vec![(0, 0), (1, 0), (0, 1)], "trailing blank page (1, 1) must be omitted");
+}
+
+#[test]
+fn column_width_geometry_matches_excel_normal_font_pagination() {
+    // Reproduces horizontal page-break geometry with Arial 10pt Normal font on Letter portrait
+    // (0.7" side margins => 511.2 pt printable width):
+    // cols A,B = 178 px (25.5 chars), col C = 213 px (30.5 chars), col D = 101 px (14.5 chars).
+    // At legacy 0.75 pt/px all 4 columns summed to 502.5 pt and leaked col D onto page 1;
+    // with Excel's 600-dpi Arial 10pt MDW (46 dots = 5.52 pt/char), A..C = 448.7 pt and A..D = 528.3 pt > 511.2 pt,
+    // so col D cleanly breaks to page 2.
+    let mut normal = Style::default();
+    normal.font.name = "Arial".into();
+    normal.font.size = 10.0;
+    let mut wb = Workbook::new();
+    wb.styles = StyleTable::with_default(normal);
+    let sh = wb.sheet_mut(0).unwrap();
+    for (c, w) in [(0, 178.0), (1, 178.0), (2, 213.0), (3, 101.0)] {
+        sh.cols.entry(c).or_default().size = Some(w);
+        sh.set_value(CellRef::new(0, c), Value::text(format!("Col{c}")));
+    }
+    let lay = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
+    assert_eq!(lay.col_bands, vec![(0, 2), (3, 3)]);
+}
+
+#[test]
+fn contiguous_solid_fill_banner_coalesces_into_one_rect_without_seams() {
+    let mut wb = Workbook::new();
+    let mut banner = Style::default();
+    banner.fill.pattern = PatternType::Solid;
+    banner.fill.fg = Color::Rgb(0x25477B);
+    let banner_id = wb.styles.intern(banner);
+
+    let sh = wb.sheet_mut(0).unwrap();
+    for c in 0..4 {
+        sh.cells.set(CellRef::new(0, c), gridcraft_model::Cell::styled(Value::Empty, banner_id));
+    }
+    sh.set_value(CellRef::new(0, 0), Value::text("Banner"));
+
+    let lays = layouts(&wb, &PrintOptions::default());
+    let pdf = render_pdf(&wb, &lays, "", "").unwrap().bytes;
+    let stream = String::from_utf8_lossy(&pdf);
+    let fill_ops: Vec<&str> = stream.lines().filter(|l| l.ends_with(" re f")).collect();
+    assert_eq!(fill_ops.len(), 1, "4 contiguous same-colour cells must emit one coalesced fill rect, got: {fill_ops:?}");
+}
+
+#[test]
+fn unwrapped_text_overflows_across_empty_and_hidden_neighbours_at_print_column_scale() {
+    let mut normal = Style::default();
+    normal.font.name = "Arial".into();
+    normal.font.size = 10.0;
+    let mut wb = Workbook::new();
+    wb.styles = StyleTable::with_default(normal);
+
+    let mut title_style = Style::default();
+    title_style.font.name = "Arial".into();
+    title_style.font.size = 18.0;
+    let title_id = wb.styles.intern(title_style);
+
+    let sh = wb.sheet_mut(0).unwrap();
+    for (c, w) in [(0, 178.0), (1, 178.0), (2, 213.0)] {
+        sh.cols.entry(c).or_default().size = Some(w);
+    }
+    let title = "Long Report Header Title Spanning Columns";
+    sh.cells.set(CellRef::new(0, 0), gridcraft_model::Cell::styled(Value::text(title), title_id));
+    // Col B is empty (allows overflow), Col C is populated (stops overflow).
+    sh.set_value(CellRef::new(0, 2), Value::text("Date"));
+
+    let lays = layouts(&wb, &PrintOptions::default());
+    let pdf = render_pdf(&wb, &lays, "", "").unwrap().bytes;
+    let stream = String::from_utf8_lossy(&pdf);
+    let title_pos = stream.find(&format!("({title}) Tj")).expect("title text in PDF");
+    let clip_line = stream[..title_pos].lines().rev().find(|l| l.ends_with(" re W n")).expect("clip rect before title");
+    let parts: Vec<f32> = clip_line.split_whitespace().take(4).filter_map(|t| t.parse().ok()).collect();
+    let clip_w = parts[2];
+    let expected_ab_w = (178.0 + 178.0) * lays[0].col_px_to_pt;
+    assert!((clip_w - expected_ab_w).abs() < 0.2, "overflow clip width {clip_w} should span A+B ({expected_ab_w})");
+}
+
+#[test]
+fn range_override_and_print_titles_suppress_blank_trailing_page_trimming() {
+    let mut wb = Workbook::new();
+    let sh = wb.sheet_mut(0).unwrap();
+    for r in 0..60 {
+        sh.set_value(CellRef::new(r, 0), Value::Number(r as f64));
+    }
+    sh.set_value(CellRef::new(0, 11), Value::text("Wide header"));
+
+    // Explicit range override keeps all 4 pages, including blank trailing (1, 1).
+    let ovr = RangeRef::new(CellRef::new(0, 0), CellRef::new(59, 11));
+    let lay_ovr = layout_sheet(&wb, 0, &PrintOptions::default(), Some(ovr)).unwrap();
+    assert_eq!(lay_ovr.pages.len(), 4);
+
+    // Repeated title rows/cols keep trailing pages because titles print on them.
+    wb.sheet_mut(0).unwrap().print.title_rows = Some((0, 0));
+    let lay_titles = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
+    assert_eq!(lay_titles.pages.len(), 4);
+}
+
+#[test]
+fn visible_conditional_formatting_expands_print_range_and_prevents_trimming() {
+    let mut wb = Workbook::new();
+    let fill_style = Style { fill: gridcraft_model::Fill::solid(Color::Rgb(0xDCE6F1)), ..Style::default() };
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.set_value(CellRef::new(0, 0), Value::text("Top"));
+    sh.cond_formats.push(gridcraft_model::CondFormat {
+        ranges: vec![RangeRef::new(CellRef::new(55, 11), CellRef::new(55, 11))],
+        rule: gridcraft_model::CfRule::Blanks { style: Box::new(fill_style) },
+        priority: 1,
+        stop_if_true: false,
+    });
+    let lay = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
+    assert_eq!(lay.area, RangeRef::new(CellRef::new(0, 0), CellRef::new(55, 11)));
+    assert_eq!(lay.pages.len(), 4, "trailing page (1, 1) holds visible CF fill and must not be trimmed");
+}
+
+#[test]
+fn absolute_anchor_keeps_physical_position_and_size_under_column_scaling() {
+    let mut normal = Style::default();
+    normal.font.name = "Arial".into();
+    normal.font.size = 10.0;
+    let mut wb = Workbook::new();
+    wb.styles = StyleTable::with_default(normal);
+    let sh = wb.sheet_mut(0).unwrap();
+    sh.set_value(CellRef::new(0, 0), Value::text("A"));
+    sh.shapes.push(gridcraft_model::Shape {
+        id: 1,
+        kind: ShapeKind::Rectangle,
+        anchor: Anchor { cell: CellRef::new(0, 0), dx: 100.0, dy: 40.0, width: 80.0, height: 40.0, mode: gridcraft_model::AnchorMode::Absolute },
+        fill: Color::Rgb(0xFF0000),
+        line: Color::Auto,
+        text: String::new(),
+        format: gridcraft_model::ShapeFormat::default(),
+        rotation: 0.0,
+        math: gridcraft_model::EquationCache::default(),
+    });
+    let lays = layouts(&wb, &PrintOptions::default());
+    let pdf = render_pdf(&wb, &lays, "", "").unwrap().bytes;
+    let stream = String::from_utf8_lossy(&pdf);
+    // Red polygon vertices must use physical 0.75 pt/px (dx=75pt, width=60pt), not col_px_to_pt (~0.7886).
+    let expected_x0 = lays[0].margins[0] + layout::GRID_EDGE_INSET_PT + 100.0 * PX_TO_PT;
+    let expected_x1 = expected_x0 + 80.0 * PX_TO_PT;
+    assert!(
+        stream.contains(&format!("{expected_x0:.2} ")) || stream.contains(&format!("{expected_x0:.1} ")),
+        "expected physical x0={expected_x0:.2} in stream"
+    );
+    assert!(
+        stream.contains(&format!("{expected_x1:.2} ")) || stream.contains(&format!("{expected_x1:.1} ")),
+        "expected physical x1={expected_x1:.2} in stream"
+    );
+}
+
+#[test]
+fn vertical_row_scaling_and_non_custom_font_autofit_match_excel_geometry() {
+    let mut normal = Style::default();
+    normal.font.name = "Arial".into();
+    normal.font.size = 10.0;
+    let mut wb = Workbook::new();
+    wb.styles = StyleTable::with_default(normal);
+    let mut segoe11 = Style::default();
+    segoe11.font.name = "Segoe UI".into();
+    segoe11.font.size = 11.0;
+    let segoe11_id = wb.styles.intern(segoe11);
+
+    let sh = wb.sheet_mut(0).unwrap();
+    // Row 0: explicit customHeight=25.5pt (34 px); Row 1: non-custom ht=16pt (21.33 px) with Segoe UI 11.
+    sh.rows.insert(0, gridcraft_model::LineInfo { size: Some(34.0), custom: true, ..Default::default() });
+    sh.rows.insert(1, gridcraft_model::LineInfo { size: Some(16.0 * 4.0 / 3.0), custom: false, ..Default::default() });
+    sh.cells.set(CellRef::new(0, 0), gridcraft_model::Cell::styled(Value::text("Banner"), segoe11_id));
+    sh.cells.set(CellRef::new(1, 0), gridcraft_model::Cell::styled(Value::text("Data"), segoe11_id));
+    let lay = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
+    // Custom row stays at 34 px and scales by ~0.726 pt/px (~24.7pt); non-custom Segoe UI 11 auto-fits to 22 px (~15.97pt).
+    let r0_pt = lay.row_height(wb.sheet(0).unwrap(), 0) * lay.ky();
+    let r1_pt = lay.row_height(wb.sheet(0).unwrap(), 1) * lay.ky();
+    assert!((r0_pt - 24.7).abs() < 0.15, "row 0 height {r0_pt}pt");
+    assert!((r1_pt - 15.97).abs() < 0.15, "row 1 height {r1_pt}pt");
+}
+
+#[test]
+fn unwrapped_text_overflowing_past_right_edge_expands_print_range_and_survives_trim() {
+    let mut wb = Workbook::new();
+    let sh = wb.sheet_mut(0).unwrap();
+    for c in 0..8 {
+        sh.cols.entry(c).or_default().size = Some(80.0);
+    }
+    // Last populated column H (col 7) sits near right edge of page 1; long unwrapped text overflows into col I/J (page 2).
+    sh.set_value(CellRef::new(0, 0), Value::text("Start"));
+    sh.set_value(CellRef::new(0, 7), Value::text("This unwrapped description clearly overflows into adjacent empty columns on page two"));
+    let lay = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
+    assert!(lay.area.end.col > 7, "overflow should expand area past col H, got {:?}", lay.area);
+    assert_eq!(lay.pages.len(), 2, "overflow page must not be trimmed as blank");
+}
+
+#[test]
+fn conditional_format_persists_on_final_page_of_large_multipage_pdf() {
+    let mut wb = Workbook::new();
+    let sh = wb.sheet_mut(0).unwrap();
+    // 50,000 rows x 2 columns = 100,000 drawn cells (> 60k) with 5 cellIs > 0 rules on A:B
+    // (500,000 total rule evaluations across the PDF, well past the old 250k sheet-wide draw cap).
+    for r in 0..50_000u32 {
+        sh.set_value(CellRef::new(r, 0), Value::Number(1.0));
+        sh.set_value(CellRef::new(r, 1), Value::Number(2.0));
+    }
+    let no_fill_bold = Style { font: gridcraft_model::Font { bold: true, ..Default::default() }, ..Default::default() };
+    let red_fill = Style { fill: gridcraft_model::Fill::solid(Color::Rgb(0xFF0000)), ..Default::default() };
+    for i in 0..5u32 {
+        let style = if i == 4 { red_fill.clone() } else { no_fill_bold.clone() };
+        sh.cond_formats.push(gridcraft_model::CondFormat {
+            ranges: vec![RangeRef::cols(0, 1)],
+            rule: gridcraft_model::CfRule::CellIs { op: gridcraft_model::CfOperator::Greater, a: "0".into(), b: None, style: Box::new(style) },
+            priority: i + 1,
+            stop_if_true: false,
+        });
+    }
+    let lay = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
+    assert!(lay.pages.len() > 100, "expected large multi-page layout, got {} pages", lay.pages.len());
+    let rendered = render_pdf(&wb, &[lay], "", "").unwrap();
+    let text = String::from_utf8_lossy(&rendered.bytes);
+    let streams: Vec<&str> = text.split("endstream").filter(|part| part.contains("stream\n")).collect();
+    assert_eq!(streams.len(), rendered.pages);
+    assert!(streams.first().unwrap().contains("1 0 0 rg"), "page 1 must keep red CF fill");
+    assert!(streams.last().unwrap().contains("1 0 0 rg"), "final page {} must keep red CF fill", rendered.pages);
+}
+
+#[test]
+fn full_row_and_full_column_merges_do_not_explode_print_pagination() {
+    // Separate sheets so the full-row and full-column merges do not overlap.
+    let mut wb = Workbook::new();
+    let banner = wb.styles.intern(Style { fill: gridcraft_model::Fill::solid(Color::Rgb(0xDCE6F1)), ..Default::default() });
+    {
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.set_value(CellRef::new(0, 0), Value::text("Title"));
+        sh.set_value(CellRef::new(4, 3), Value::Number(42.0));
+        sh.set_value(CellRef::new(0, 4), Value::text("ColNote"));
+        sh.rows.entry(1).or_default().style = Some(banner);
+        sh.rows.entry(2).or_default().style = Some(banner);
+        // Whole-row merge A2:XFD3.
+        sh.merges.push(RangeRef::rows(1, 2));
+    }
+    {
+        let mut sh = Sheet::new("ColMerge");
+        sh.set_value(CellRef::new(0, 0), Value::text("Title"));
+        sh.set_value(CellRef::new(4, 3), Value::Number(42.0));
+        sh.set_value(CellRef::new(0, 4), Value::text("ColNote"));
+        // Whole-column merge E1:E1048576.
+        sh.merges.push(RangeRef::cols(4, 4));
+        wb.sheets.push(sh.into());
+    }
+
+    let lay_row = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
+    assert_eq!(lay_row.area.end.col, 4, "full-row merge must not expand area to XFD: {:?}", lay_row.area);
+    assert_eq!(lay_row.area.end.row, 4, "full-row merge area row extent: {:?}", lay_row.area);
+    assert_eq!(lay_row.pages.len(), 1, "full-row merge sheet should paginate to 1 page, not explode to MAX_PAGES");
+
+    let lay_col = layout_sheet(&wb, 1, &PrintOptions::default(), None).unwrap();
+    assert_eq!(lay_col.area.end.col, 4, "full-col merge area col extent: {:?}", lay_col.area);
+    assert_eq!(lay_col.area.end.row, 4, "full-col merge must not expand area to 1048576: {:?}", lay_col.area);
+    assert_eq!(lay_col.pages.len(), 1, "full-col merge sheet should paginate to 1 page, not explode to MAX_PAGES");
+}
+
+fn preview_ranges(s: &mut Session, p: Json) -> Vec<String> {
+    let r = s.execute("file.printPreview", p).unwrap();
+    r["pageList"].as_array().unwrap().iter().map(|pg| pg["range"].as_str().unwrap().to_string()).collect()
+}
+
+#[test]
+fn a_range_prints_instead_of_the_print_area_and_each_area_gets_its_own_pages() {
+    let mut s = s();
+    s.execute("cell.set", json!({"cell": "A1", "input": "x"})).unwrap();
+    s.execute("cell.set", json!({"cell": "H20", "input": "y"})).unwrap();
+    s.execute("pageLayout.pageSetup", json!({"printArea": "F10:H20"})).unwrap();
+    assert_eq!(preview_ranges(&mut s, json!({})), ["F10:H20"]);
+    assert_eq!(preview_ranges(&mut s, json!({"range": "A1:B2"})), ["A1:B2"]);
+    // Several areas, like a multi-area selection: one run of pages each, in the order given.
+    assert_eq!(preview_ranges(&mut s, json!({"range": "D4:E5,A1:B2"})), ["D4:E5", "A1:B2"]);
+    assert_eq!(preview_ranges(&mut s, json!({"range": "Sheet1!A1:B2, D4:E5"})), ["A1:B2", "D4:E5"]);
+    let (_, pages) = pdf_of(&mut s, json!({"range": "A1:B2,D4:E5"}));
+    assert_eq!(pages, 2);
+    for bad in ["A1:B2,", "A1:B2,nope", ","] {
+        assert!(s.execute("file.printPreview", json!({"range": bad})).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn a_sheet_qualifier_on_a_later_area_does_not_swallow_the_earlier_ones() {
+    let mut s = s();
+    assert_eq!(preview_ranges(&mut s, json!({"range": "A1:B2,Sheet1!D4:E5"})), ["A1:B2", "D4:E5"]);
+    assert_eq!(preview_ranges(&mut s, json!({"range": "Sheet1!A1:B2,Sheet1!D4:E5"})), ["A1:B2", "D4:E5"]);
+    // A comma inside a quoted sheet name is not an area separator.
+    assert_eq!(preview_ranges(&mut s, json!({"range": "A1:B2,'a,b'!D4:E5"})), ["A1:B2", "D4:E5"]);
+}
+
+/// XLSX id 34 is ISO B5 (176 × 250 mm), not the Letter fallback of the old name.
+#[test]
+fn imported_xlsx_b5_envelope_uses_iso_b5_print_dimensions() {
+    use std::io::{Cursor, Read, Write};
+    let mut wb = gridcraft_model::Workbook::new();
+    wb.sheet_mut(0).unwrap().set_value(CellRef::new(0, 0), gridcraft_core::Value::Text("x".into()));
+    wb.sheet_mut(0).unwrap().print.paper = "Legal".into();
+    let bytes = gridcraft_xlsx::write_xlsx(&wb).unwrap();
+    let mut input = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+    let mut output = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    for i in 0..input.len() {
+        let mut part = input.by_index(i).unwrap();
+        let mut data = Vec::new();
+        part.read_to_end(&mut data).unwrap();
+        let name = part.name().unwrap().to_string();
+        if name == "xl/worksheets/sheet1.xml" {
+            let xml = String::from_utf8(data).unwrap();
+            assert!(xml.contains(r#"paperSize="5""#));
+            // Set the input id independently of the shared paper-name mapping under test.
+            data = xml.replace(r#"paperSize="5""#, r#"paperSize="34""#).into_bytes();
+        }
+        output.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+        output.write_all(&data).unwrap();
+    }
+    let bytes = output.finish().unwrap().into_inner();
+    let mut s = Session::new();
+    s.execute("file.open", json!({"name": "iso-b5.xlsx", "base64": crate::io::base64_encode(&bytes)})).unwrap();
+    let preview = s.execute("file.printPreview", json!({})).unwrap();
+    let page = &preview["pageList"][0];
+    assert!((page["width"].as_f64().unwrap() - 498.90).abs() < 0.01, "{page}");
+    assert!((page["height"].as_f64().unwrap() - 708.66).abs() < 0.01, "{page}");
+    let (pdf, pages) = pdf_of(&mut s, json!({}));
+    assert_eq!(pages, 1);
+    assert!(contains(&pdf, "/MediaBox [0 0 498.9 708.66]"));
 }

@@ -35,7 +35,13 @@ pub(super) fn on(fill: Rgba) -> Rgba {
 pub(super) fn chart_title(chart: &Chart, data: &ChartData) -> Option<String> {
     match &chart.title {
         Some(t) => Some(t.trim().to_string()).filter(|t| !t.is_empty()),
-        None if data.series.len() == 1 => data.series.first().map(|s| s.name.clone()).filter(|t| !t.is_empty()),
+        None if data.series.len() == 1 => {
+            if chart.series.first().is_some_and(|s| s.name.is_none()) {
+                None
+            } else {
+                data.series.first().map(|s| s.name.clone()).filter(|t| !t.is_empty())
+            }
+        }
         None => None,
     }
 }

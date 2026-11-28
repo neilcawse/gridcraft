@@ -18,13 +18,17 @@ mod lambda;
 mod pivot_fn;
 mod reference_fns;
 mod special;
+mod sumproduct;
 
 use array::map_unary;
 pub use array::{binary_values, zip2};
 pub use format::r1c1_to_a1;
 pub use gridcraft_functions::{SPECIAL_FUNCTIONS, is_known_function};
 pub(crate) use special::used_range_of;
-pub use special::{DynamicReads, dynamic_reads, linked_parts, linked_value, precedents, precedents_at, resized_sum_range, takes_reference};
+pub use special::{
+    DynamicReads, PrecedentTemplate, dynamic_reads, linked_parts, linked_value, precedents, precedents_at, precedents_at_shifted, resized_sum_range,
+    takes_reference,
+};
 use special::{external_name, external_sheet, linked_definition_readable, linked_sheet_number};
 
 /// Largest array a reference may expand to.
@@ -72,6 +76,30 @@ pub struct Lambda {
     pub params: Vec<String>,
     pub body: Expr,
     pub env: Vec<(String, Ev)>,
+    /// Relative reference shift captured from a shared formula (0, 0 for owned formulas/names).
+    pub shift: (i32, i32),
+}
+
+/// What the tail of a LAMBDA body came to.
+enum Tail {
+    Done(Ev),
+    /// A call to make in place of the current one, its arguments evaluated.
+    Call(Arc<Lambda>, Vec<(String, Ev)>),
+}
+
+/// A tail call can pass a closure that captures the previous one, thousands deep. Releasing the
+/// chain is a loop, not a recursion, so it cannot overflow the native stack.
+impl Drop for Lambda {
+    fn drop(&mut self) {
+        let mut pending = std::mem::take(&mut self.env);
+        while let Some((_, ev)) = pending.pop() {
+            if let Ev::L(l) = ev
+                && let Ok(mut inner) = Arc::try_unwrap(l)
+            {
+                pending.append(&mut inner.env);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +123,11 @@ fn err(e: CellError) -> Ev {
 /// The next call answers `#NUM!`. A countdown from 131, the deepest that `MAX_DEPTH` allows, has 132
 /// calls in progress, so it still runs.
 const MAX_LAMBDA_CALLS: usize = 140;
+
+/// Tail calls one LAMBDA call may chain. They run in a loop on one native frame, so this only keeps
+/// an endless tail recursion finite. Excel computes a tail countdown to 5,459 and answers `#NUM!`
+/// for 5,460, which is 5,460 invocations in the chain.
+const MAX_TAIL_CALLS: usize = 5460;
 
 /// Native stack, in bytes, that one formula's evaluation may use below its first `eval`. Past it,
 /// `eval` answers `#NUM!`. It guards the stack and leaves 128 KiB of a 1 MiB thread for the frames
@@ -126,6 +159,17 @@ pub enum OneCellReading {
     /// `""`). Only for reading such a cache again ([`crate::recalc::evaluate_expr_as`]): GridCraft
     /// calculates as the Excel it models does.
     Scalar,
+}
+
+/// Outcome of lazily ensuring a PivotTable's `GETPIVOTDATA` index during evaluation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PivotIndexState {
+    /// `PivotTable::data_index` holds cells and is ready for hash lookup.
+    Ready,
+    /// The stored report no longer matches its source (`#REF!` until refresh).
+    Stale,
+    /// No indexer is registered or building failed for another reason (use sheet-scan fallback).
+    Fallback,
 }
 
 /// What the evaluator needs from its surroundings.
@@ -195,6 +239,12 @@ pub trait Host {
     fn one_cell_reading(&self) -> OneCellReading {
         OneCellReading::Array
     }
+    /// Ensures the PivotTable at `(sheet, pivot_idx)` has its `data_index` populated if possible.
+    /// Hosts whose workbook is immutable during a pass can memoize failures per
+    /// `(sheet, pivot_idx)` without mutating the shared `PivotLookup`.
+    fn ensure_pivot_index(&mut self, sheet: usize, pivot_idx: usize) -> PivotIndexState {
+        crate::pivotdata::build_pivot_index(self.workbook(), sheet, pivot_idx)
+    }
 }
 
 pub struct Evaluator<'h> {
@@ -205,9 +255,10 @@ pub struct Evaluator<'h> {
     /// `sheet` moves to a defined name's scope while the name is evaluated, but the setting
     /// belongs to the sheet that holds the formula.
     transition: bool,
+    /// Relative reference shift applied on the fly to `Expr::Ref` (for shared formulas).
+    pub shift: (i32, i32),
     env: Vec<(String, Ev)>,
     depth: usize,
-    /// LAMBDA calls in progress.
     calls: usize,
     /// `stack_position()` at the outermost `eval`.
     stack_top: usize,
@@ -277,6 +328,7 @@ impl Ctx for FnCtx<'_, '_> {
             sheet: area.sheet,
             at,
             transition,
+            shift: (0, 0),
             env,
             depth: self.ev.depth,
             calls: self.ev.calls,
@@ -317,12 +369,17 @@ impl Ctx for FnCtx<'_, '_> {
 
 impl<'h> Evaluator<'h> {
     pub fn new(host: &'h mut dyn Host, sheet: usize, at: CellRef) -> Self {
+        Self::with_shift(host, sheet, at, (0, 0))
+    }
+
+    pub fn with_shift(host: &'h mut dyn Host, sheet: usize, at: CellRef, shift: (i32, i32)) -> Self {
         let transition = host.workbook().sheet(sheet).is_some_and(|s| s.transition_evaluation);
         Evaluator {
             host,
             sheet,
             at,
             transition,
+            shift,
             env: Vec::new(),
             depth: 0,
             calls: 0,
@@ -332,6 +389,17 @@ impl<'h> Evaluator<'h> {
             exhausted: false,
             active_criteria: Vec::new(),
         }
+    }
+
+    /// Gives this evaluation `work` units instead of [`EVAL_WORK`] (never more than that).
+    pub fn with_work(mut self, work: u64) -> Self {
+        self.work = work.min(EVAL_WORK);
+        self
+    }
+
+    /// Whether a spend found too little work left (the formula stopped with `#CALC!`).
+    pub fn is_exhausted(&self) -> bool {
+        self.exhausted
     }
 
     /// Spends `units` of this cell's work; `false` (and nothing left) when there isn't enough.
@@ -375,9 +443,23 @@ impl<'h> Evaluator<'h> {
         }
     }
 
+    fn shifted_range(&self, r: &Reference) -> Result<RangeRef, CellError> {
+        if self.shift == (0, 0) {
+            Ok(r.range())
+        } else {
+            gridcraft_formula::adjust::shift_ref_kind(&r.kind, i64::from(self.shift.0), i64::from(self.shift.1))
+                .map(|kind| Reference { sheet: SheetSel::Current, kind }.range())
+                .ok_or(CellError::Ref)
+        }
+    }
+
     pub fn reference_areas(&self, r: &Reference) -> Result<Vec<Area>, CellError> {
-        let range = r.range();
-        Ok(self.resolve_sheet(&r.sheet)?.into_iter().map(|sheet| Area { sheet, range }).collect())
+        let range = self.shifted_range(r)?;
+        self.reference_areas_raw(&r.sheet, range)
+    }
+
+    fn reference_areas_raw(&self, sheet_sel: &SheetSel, range: RangeRef) -> Result<Vec<Area>, CellError> {
+        Ok(self.resolve_sheet(sheet_sel)?.into_iter().map(|sheet| Area { sheet, range }).collect())
     }
 
     /// A reference into a linked workbook (`'[2]Prices'!B2`, `[2]Prices!A:A`): an area that keeps
@@ -386,8 +468,8 @@ impl<'h> Evaluator<'h> {
     /// into a linked workbook; `#REF!` = the link didn't save that workbook or sheet, noted to the
     /// host when the link has no saved values to look in: a link that isn't to a workbook, or a
     /// sheet with no `sheetData` entry (see [`Host::note_unknown_link`]).
-    fn linked_area(&mut self, r: &Reference) -> Option<Result<Area, CellError>> {
-        let SheetSel::Named(name) = &r.sheet else { return None };
+    fn linked_area_raw(&mut self, sheet_sel: &SheetSel, range: RangeRef) -> Option<Result<Area, CellError>> {
+        let SheetSel::Named(name) = sheet_sel else { return None };
         let (book, sheet) = external_sheet(name)?;
         let wb = self.host.workbook();
         let linked = book.checked_sub(1).and_then(|b| Some((b, wb.external_books.get(b)?)));
@@ -397,7 +479,7 @@ impl<'h> Evaluator<'h> {
             self.host.note_unknown_link();
             return Some(Err(CellError::Ref));
         }
-        Some(found.and_then(|(b, s)| linked_sheet_number(b, s)).map(|sheet| Area { sheet, range: r.range() }).ok_or(CellError::Ref))
+        Some(found.and_then(|(b, s)| linked_sheet_number(b, s)).map(|sheet| Area { sheet, range }).ok_or(CellError::Ref))
     }
 
     /// The saved sheet of a linked workbook that an area's sheet number stands for.
@@ -480,14 +562,17 @@ impl<'h> Evaluator<'h> {
             Expr::Struct(_) => Expr::Error(CellError::Ref),
             e => e,
         });
-        self.eval(&expr)
+        let saved_shift = std::mem::take(&mut self.shift);
+        let r = self.eval(&expr);
+        self.shift = saved_shift;
+        r
     }
 
-    /// Dereferences: one cell → its value; a block → an array (trimmed to the used range);
-    /// several areas → `#VALUE!`.
     /// Dereferences: one cell → its value; a block → an array; several areas → `#VALUE!`.
     ///
-    /// A block keeps its full shape (blanks included) when it holds at most `FULL_SIZE_CELLS` cells, or when it holds at most `FULL_SIZE_BOUNDED_CELLS` cells (one full column's worth) and does not run to the sheet's last row or column. Every other block (larger, or a bigger one that runs to the sheet's edge, such as `A:A` or `1:1`) is trimmed to the sheet's used range before its values are read. An array over `MAX_CELLS` is `#NUM!`.
+    /// Blocks up to `FULL_SIZE_CELLS` keep their full shape, as do those up to
+    /// `FULL_SIZE_BOUNDED_CELLS` that don't reach the last row or column. Other blocks are trimmed
+    /// to the used range before they're read. An array over `MAX_CELLS` returns `#NUM!`.
     pub fn deref(&mut self, ev: Ev) -> Value {
         match ev {
             Ev::V(v) => v,
@@ -604,14 +689,20 @@ impl<'h> Evaluator<'h> {
                 }
                 Ev::V(Array::new(h, w, data).map(Value::from).unwrap_or(Value::Error(CellError::Value)))
             }
-            Expr::Ref(r) => match self.reference_areas(r) {
-                Ok(a) => Ev::R(a),
-                Err(x) => match self.linked_area(r) {
-                    Some(Ok(a)) => Ev::R(vec![a]),
-                    Some(Err(e)) => err(e),
-                    None => err(x),
-                },
-            },
+            Expr::Ref(r) => {
+                let range = match self.shifted_range(r) {
+                    Ok(range) => range,
+                    Err(e) => return err(e),
+                };
+                match self.reference_areas_raw(&r.sheet, range) {
+                    Ok(a) => Ev::R(a),
+                    Err(x) => match self.linked_area_raw(&r.sheet, range) {
+                        Some(Ok(a)) => Ev::R(vec![a]),
+                        Some(Err(e)) => err(e),
+                        None => err(x),
+                    },
+                }
+            }
             Expr::Name(n) => self.name(n),
             Expr::Struct(s) => self.structured(s),
             Expr::Unary(op, x) => self.unary(*op, x),
@@ -668,11 +759,14 @@ impl<'h> Evaluator<'h> {
                     } else {
                         expr
                     };
-                    let saved = self.sheet;
-                    // Unqualified references in a name refer to the scope sheet.
+                    let saved_sheet = self.sheet;
+                    let saved_shift = self.shift;
+                    // Unqualified references in a name refer to the scope sheet with no shared-formula shift.
                     self.sheet = scope;
+                    self.shift = (0, 0);
                     let r = self.eval(&expr);
-                    self.sheet = saved;
+                    self.sheet = saved_sheet;
+                    self.shift = saved_shift;
                     r
                 }
                 Err(_) => err(CellError::Name),

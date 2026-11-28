@@ -358,7 +358,7 @@ fn ods_error_cache_is_the_error_and_never_its_placeholder_zero() {
     );
     let (wb, report) = read_ods(&bytes).unwrap();
     assert_eq!(wb.sheets[0].value(CellRef::new(0, 0)), Value::Error(gridcraft_core::CellError::Div0));
-    assert_eq!(wb.sheets[0].cell(CellRef::new(0, 0)).unwrap().formula.as_ref().unwrap().text, "1/0");
+    assert_eq!(wb.sheets[0].cell(CellRef::new(0, 0)).unwrap().formula.as_ref().unwrap().text(), "1/0");
     // An application-specific error has no Excel equivalent: its text stays, with a warning.
     assert_eq!(wb.sheets[0].value(CellRef::new(0, 1)), text("Err:502"));
     assert!(wb.sheets[0].cell(CellRef::new(0, 1)).unwrap().formula.is_none());
@@ -387,7 +387,7 @@ fn ods_formulas_and_named_ranges_are_imported() {
     <table:table table:name="Other"><table:table-row><table:table-cell table:formula="of:=['Data'.A1]+[$Data.$B$1]" office:value-type="float" office:value="6"/></table:table-row></table:table>"#);
     let (wb, report) = read_ods(&bytes).unwrap();
     let data = &wb.sheets[0];
-    let formula = |s: usize, c: u32| wb.sheets[s].cell(CellRef::new(0, c)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone());
+    let formula = |s: usize, c: u32| wb.sheets[s].cell(CellRef::new(0, c)).and_then(|c| c.formula.as_ref()).map(|f| f.text().clone());
     assert_eq!(formula(0, 1).as_deref(), Some("A1*2"));
     assert_eq!(data.value(CellRef::new(0, 1)), Value::Number(4.0));
     assert_eq!(formula(0, 2).as_deref(), Some("SUM(A1:B1,1)"));
@@ -395,7 +395,7 @@ fn ods_formulas_and_named_ranges_are_imported() {
     assert_eq!(data.value(CellRef::new(0, 3)), Value::Number(1.2));
     assert_eq!(formula(0, 4).as_deref(), Some("XLOOKUP(2,A1:C1,A1:C1)"));
     let array = data.cell(CellRef::new(0, 5)).and_then(|c| c.formula.clone()).unwrap();
-    assert_eq!(array.text, "{1,2}");
+    assert_eq!(array.text(), "{1,2}");
     assert_eq!(array.array, Some(RangeRef::new(CellRef::new(0, 5), CellRef::new(0, 6))));
     assert_eq!(data.value(CellRef::new(0, 6)), Value::Empty, "the array's other cells are left to the formula");
     assert!(wb.names.iter().any(|n| n.name == "Two" && n.scope == Some(0) && n.formula.contains("$A$1")), "{:?}", wb.names);
@@ -424,12 +424,12 @@ fn ods_names_and_formulas_read_as_their_saved_xlsx_reads() {
     let name = |n: &str| wb.names.iter().find(|d| d.name == n).map(|d| d.formula.clone());
     assert_eq!(name("Edge").as_deref(), Some("Data!$A$1:$B$2"));
     assert_eq!(name("Spaced").as_deref(), Some("'My Data'!$A$1"));
-    let let_text = wb.sheets[0].cell(CellRef::new(0, 0)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone());
+    let let_text = wb.sheets[0].cell(CellRef::new(0, 0)).and_then(|c| c.formula.as_ref()).map(|f| f.text().clone());
     assert_eq!(let_text.as_deref(), Some("LET(x,1,y,x+y)"));
     let (back, _) = read_xlsx(&write_xlsx(&wb).unwrap()).unwrap();
     let names = |w: &gridcraft_model::Workbook| w.names.iter().map(|d| (d.name.clone(), d.formula.clone())).collect::<Vec<_>>();
     assert_eq!(names(&back), names(&wb));
-    assert_eq!(back.sheets[0].cell(CellRef::new(0, 0)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone()), let_text);
+    assert_eq!(back.sheets[0].cell(CellRef::new(0, 0)).and_then(|c| c.formula.as_ref()).map(|f| f.text().clone()), let_text);
 }
 
 /// Excel's built-in names a LibreOffice document keeps are what an XLSX read makes of them: a
@@ -478,7 +478,7 @@ fn ods_formulas_with_functions_the_caller_doesnt_know_keep_their_saved_results()
     let known = |name: &str| name != "NOTAFUNCTION";
     let (wb, _) =
         crate::read_ods_with(&bytes, (crate::FunctionInfo { is_builtin: |_| false, ..Default::default() }, &known as &dyn Fn(&str) -> bool)).unwrap();
-    let formula = |c: u32| wb.sheets[0].cell(CellRef::new(0, c)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone());
+    let formula = |c: u32| wb.sheets[0].cell(CellRef::new(0, c)).and_then(|c| c.formula.as_ref()).map(|f| f.text().clone());
     assert_eq!(formula(0).as_deref(), Some("FORMULATEXT(B1)"), "the predicate, not is_builtin, decides");
     assert_eq!(formula(2), None);
     assert_eq!(wb.sheets[0].value(CellRef::new(0, 2)), Value::Number(3.0));
@@ -534,11 +534,11 @@ fn ods_sheet_names_containing_ref_errors_are_references() {
     let (wb, _) = read_ods(&bytes).unwrap();
     let formula = |c: u32| wb.sheets[0].cell(CellRef::new(0, c)).and_then(|c| c.formula.clone()).unwrap();
     assert_eq!(wb.sheets[1].name, "Budget#REF!");
-    assert_eq!(formula(0).text, "SUM('Budget#REF!'!A1)");
+    assert_eq!(formula(0).text(), "SUM('Budget#REF!'!A1)");
     let mut refs = 0;
-    formula(0).expr.as_deref().unwrap().walk(&mut |e| refs += usize::from(matches!(e, gridcraft_formula::Expr::Ref(_))));
+    formula(0).expr().unwrap().walk(&mut |e| refs += usize::from(matches!(e, gridcraft_formula::Expr::Ref(_))));
     assert_eq!(refs, 1, "a reference to the sheet, not an error constant");
-    assert_eq!(formula(1).text, "#REF!");
+    assert_eq!(formula(1).text(), "#REF!");
 }
 
 /// A DataPilot report is not imported: its cells are plain cells and its area is kept on its
@@ -584,7 +584,7 @@ fn ods_names_that_read_as_cells_are_renamed_and_formulas_follow() {
     assert_eq!(defined("_TAX2020", None).as_deref(), Some("Data!$B$1"));
     assert_eq!(defined("_Q1", Some(0)).as_deref(), Some("Data!$A$1"));
     assert!(wb.names.iter().all(|d| gridcraft_core::valid_defined_name(&d.name)), "{:?}", wb.names);
-    let formula = |c: u32| wb.sheets[0].cell(CellRef::new(0, c)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone());
+    let formula = |c: u32| wb.sheets[0].cell(CellRef::new(0, c)).and_then(|c| c.formula.as_ref()).map(|f| f.text().clone());
     assert_eq!(formula(1).as_deref(), Some("__TAX2020*2"));
     assert_eq!(formula(2).as_deref(), Some("SUM(__TAX2020,1)"), "names are read without regard to case");
     assert_eq!(formula(3).as_deref(), Some("INDIRECT(\"__TAX2020\")"));
@@ -598,7 +598,7 @@ fn ods_names_that_read_as_cells_are_renamed_and_formulas_follow() {
     let saved = write_xlsx(&wb).unwrap();
     let (back, _) = read_xlsx(&saved).unwrap();
     assert!(back.names.iter().any(|d| d.name == "__TAX2020"));
-    assert_eq!(back.sheets[0].cell(CellRef::new(0, 1)).and_then(|c| c.formula.as_ref()).map(|f| f.text.as_str()), Some("__TAX2020*2"));
+    assert_eq!(back.sheets[0].cell(CellRef::new(0, 1)).and_then(|c| c.formula.as_ref()).map(|f| f.text()).as_deref(), Some("__TAX2020*2"));
 }
 
 /// Names with spaces, hyphens, slashes or a leading digit, and R1C1 spellings (`R`, `RC`, `R1C1`),
@@ -639,7 +639,7 @@ fn ods_names_excel_forbids_are_renamed_before_they_reach_xlsx() {
     for want in ["_my_name", "my_name", "_1st", "a_b", "_a_b", "_R", "_RC", "_R1C1", "_R1x", "RCx", "Fine.Name"] {
         assert!(names.contains(&want), "{want} in {names:?}");
     }
-    let formula = |c: u32| wb.sheets[0].cell(CellRef::new(0, c)).and_then(|c| c.formula.as_ref()).map(|f| f.text.clone());
+    let formula = |c: u32| wb.sheets[0].cell(CellRef::new(0, c)).and_then(|c| c.formula.as_ref()).map(|f| f.text().clone());
     assert_eq!(formula(1).as_deref(), Some("A1+my_name"));
     assert_eq!(formula(2).as_deref(), Some("INDIRECT(\"_my_name\")"));
     assert_eq!(formula(3).as_deref(), Some("_R+Fine.Name"));

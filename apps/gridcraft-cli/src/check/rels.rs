@@ -54,8 +54,8 @@ const EXPLICIT_OWNERS: [&str; 2] = ["drawing", "chart"];
 
 /// Every attribute value in the XML part `name`, or `None` when it can't be read as XML (then
 /// every relationship of it counts).
-fn attribute_values(zip: &mut Zip<'_>, name: &str) -> Option<HashSet<String>> {
-    let els = read_zip_part(zip, name).and_then(|xml| xml_elements(&xml)).ok()?;
+fn attribute_values(zip: &mut Zip<'_>, (index, name): &(usize, String)) -> Option<HashSet<String>> {
+    let els = read_zip_part(zip, *index, name).and_then(|xml| xml_elements(&xml)).ok()?;
     Some(els.into_iter().flat_map(|(_, attrs)| attrs.into_iter().map(|(_, v)| v)).collect())
 }
 
@@ -118,8 +118,8 @@ fn part_dir(source: &str) -> &str {
     source.rsplit_once('/').map_or("", |(dir, _)| dir)
 }
 
-fn rels_of(zip: &mut Zip<'_>, name: &str) -> Vec<Rel> {
-    read_zip_part(zip, name).map(|xml| rels_in(&xml)).unwrap_or_default()
+fn rels_of(zip: &mut Zip<'_>, (index, name): &(usize, String)) -> Vec<Rel> {
+    read_zip_part(zip, *index, name).map(|xml| rels_in(&xml)).unwrap_or_default()
 }
 
 /// The relationships a rels part's XML lists.
@@ -141,8 +141,8 @@ fn rels_in(xml: &[u8]) -> Vec<Rel> {
 }
 
 /// `relationship id → sheet name` of the sheets the workbook part `name` lists.
-fn sheet_names(zip: &mut Zip<'_>, name: &str) -> HashMap<String, String> {
-    let Ok(els) = read_zip_part(zip, name).and_then(|xml| xml_elements(&xml)) else { return HashMap::new() };
+fn sheet_names(zip: &mut Zip<'_>, (index, name): &(usize, String)) -> HashMap<String, String> {
+    let Ok(els) = read_zip_part(zip, *index, name).and_then(|xml| xml_elements(&xml)) else { return HashMap::new() };
     els.iter()
         .filter(|(el, _)| el == "sheet")
         .filter_map(|(_, attrs)| Some((attr(attrs, "id")?.to_string(), attr(attrs, "name")?.to_string())))
@@ -151,34 +151,34 @@ fn sheet_names(zip: &mut Zip<'_>, name: &str) -> HashMap<String, String> {
 
 /// `(sheet name, part name)` of every sheet the workbook part `workbook` lists whose relationship
 /// leads to a part of the package.
-pub(super) fn sheet_parts(zip: &mut Zip<'_>, names: &[String], workbook: &str) -> Vec<(String, String)> {
+pub(super) fn sheet_parts<'n>(zip: &mut Zip<'_>, names: &'n [(usize, String)], workbook: &(usize, String)) -> Vec<(String, &'n (usize, String))> {
     let ids = sheet_names(zip, workbook);
-    let key = part_key(workbook);
+    let key = part_key(&workbook.1);
     let rels_key = rels_part_key(&key);
-    let Some(rels_name) = names.iter().find(|n| part_key(n) == rels_key) else { return Vec::new() };
+    let Some(rels_name) = names.iter().find(|(_, n)| part_key(n) == rels_key) else { return Vec::new() };
     let dir = part_dir(&key).to_string();
-    let by_key: HashMap<String, &String> = names.iter().map(|n| (part_key(n), n)).collect();
+    let by_key: HashMap<_, _> = names.iter().map(|entry| (part_key(&entry.1), entry)).collect();
     rels_of(zip, rels_name)
         .into_iter()
         .filter(|r| !r.external)
         .filter_map(|r| {
             let sheet = ids.get(&r.id)?;
             let part = by_key.get(&resolve_target(&dir, &r.target).to_ascii_lowercase())?;
-            Some((sheet.clone(), (*part).clone()))
+            Some((sheet.clone(), *part))
         })
         .collect()
 }
 
 /// The part of the package that `source` reaches by its first internal relationship of `kind`
 /// (compared by [`fold_kind`], so Strict and Transitional spellings are one kind).
-pub(super) fn related_part(zip: &mut Zip<'_>, names: &[String], source: &str, kind: &str) -> Option<String> {
+pub(super) fn related_part<'n>(zip: &mut Zip<'_>, names: &'n [(usize, String)], source: &str, kind: &str) -> Option<&'n (usize, String)> {
     let key = part_key(source);
     let rels_key = rels_part_key(&key);
-    let rels_name = names.iter().find(|n| part_key(n) == rels_key)?;
+    let rels_name = names.iter().find(|(_, n)| part_key(n) == rels_key)?;
     let wanted = fold_kind(kind);
     let rel = rels_of(zip, rels_name).into_iter().find(|r| !r.external && fold_kind(&r.kind) == wanted)?;
     let target = resolve_target(part_dir(&key), &rel.target).to_ascii_lowercase();
-    names.iter().find(|n| part_key(n) == target).cloned()
+    names.iter().find(|(_, n)| part_key(n) == target)
 }
 
 /// The message of a check that gave up at `limit`.
@@ -190,6 +190,34 @@ fn stopped(limit: impl std::fmt::Display) -> String {
 /// decompression it may cause.
 fn over_budget(part: &str) -> String {
     format!("{part}: {}", stopped("decompression limit"))
+}
+
+fn target_content<'a>(
+    zip: &mut Zip<'_>,
+    entries: impl Iterator<Item = &'a (usize, String)>,
+    kind: &str,
+    cache: bool,
+    verdicts: &mut HashMap<(usize, &'static str), bool>,
+    budget: &mut u64,
+) -> Result<(bool, bool), String> {
+    let mut nonempty = false;
+    let mut refreshing = true;
+    for (index, name) in entries {
+        let holds = holds_something(zip, *index, kind, verdicts, budget).ok_or_else(|| over_budget(name))?;
+        nonempty |= holds;
+        if cache && holds {
+            refreshing &= holds_something(zip, *index, "refreshonload", verdicts, budget).ok_or_else(|| over_budget(name))?;
+        }
+    }
+    Ok((nonempty, refreshing))
+}
+
+fn referenced_ids<'a>(zip: &mut Zip<'_>, entries: impl Iterator<Item = &'a (usize, String)>) -> Option<HashSet<String>> {
+    let mut refs = None::<HashSet<String>>;
+    for part in entries {
+        refs.get_or_insert_with(HashSet::new).extend(attribute_values(zip, part)?);
+    }
+    refs
 }
 
 /// Groups the relationships of the package by owner, following them from the package root, so the
@@ -209,14 +237,25 @@ pub(super) fn relationship_tree(bytes: &[u8], limits: Limits) -> Result<RelTree,
         return Err(stopped(format_args!("limit of {} package entries", limits.entries)));
     }
     let names = zip_names(&mut zip);
-    let by_key: HashMap<String, &String> = names.iter().map(|n| (part_key(n), n)).collect();
+    let mut by_key = HashMap::new();
+    let mut duplicates: HashMap<_, Vec<_>> = HashMap::new();
+    for entry in &names {
+        let key = part_key(&entry.1);
+        match by_key.entry(key) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(entry);
+            }
+            std::collections::hash_map::Entry::Occupied(slot) => duplicates.entry(slot.key().clone()).or_default().push(entry),
+        }
+    }
+    let entries = |key: &str| by_key.get(key).copied().into_iter().chain(duplicates.get(key).into_iter().flatten().copied());
     // Several relationships name the same part; each fresh check decompressed it again, so
     // repeated references to one highly compressible part multiplied the work. The verdict is
     // remembered per (part, named content) and the decompression the package can cause is
     // budgeted as a whole, the relationship parts included: many large rels parts would
     // otherwise each spend a full per-part allowance.
     let mut budget = limits.bytes;
-    let mut verdicts: HashMap<(String, &'static str), bool> = HashMap::new();
+    let mut verdicts: HashMap<(usize, &'static str), bool> = HashMap::new();
     let mut work = limits.relationships;
     let mut parsed: HashMap<String, Vec<Rel>> = HashMap::new();
     let mut tree = RelTree::default();
@@ -228,7 +267,9 @@ pub(super) fn relationship_tree(bytes: &[u8], limits: Limits) -> Result<RelTree,
     while let Some(Pending { path, source, mut chain }) = queue.pop_front() {
         let rels_key = rels_part_key(&source);
         // A part with no relationships has nothing to follow, however deep it is.
-        let Some(rels_name) = by_key.get(&rels_key) else { continue };
+        if !by_key.contains_key(&rels_key) {
+            continue;
+        }
         if !expanded.insert((path.clone(), source.clone())) {
             continue;
         }
@@ -239,11 +280,14 @@ pub(super) fn relationship_tree(bytes: &[u8], limits: Limits) -> Result<RelTree,
             return Err(stopped(format_args!("limit of {} owners", limits.owners)));
         }
         if !parsed.contains_key(&rels_key) {
-            let rels = match read_zip_part_within(&mut zip, rels_name, &mut budget) {
-                Ok(xml) => rels_in(&xml),
-                Err(PartError::OverBudget) => return Err(over_budget(rels_name)),
-                Err(PartError::Unreadable) => Vec::new(),
-            };
+            let mut rels = Vec::new();
+            for rels_name in entries(&rels_key) {
+                match read_zip_part_within(&mut zip, rels_name.0, &mut budget) {
+                    Ok(xml) => rels.extend(rels_in(&xml)),
+                    Err(PartError::OverBudget) => return Err(over_budget(&rels_name.1)),
+                    Err(PartError::Unreadable) => {}
+                }
+            }
             parsed.insert(rels_key.clone(), rels);
         }
         let rels = parsed.get(&rels_key).map(Vec::as_slice).unwrap_or_default();
@@ -252,16 +296,15 @@ pub(super) fn relationship_tree(bytes: &[u8], limits: Limits) -> Result<RelTree,
         };
         work = left;
         let in_workbook = path.len() == 1 && path.first().is_some_and(|s| s == "officedocument");
-        let sheets = match by_key.get(&source) {
-            Some(workbook) if in_workbook => sheet_names(&mut zip, workbook),
-            _ => HashMap::new(),
-        };
+        let mut sheets = HashMap::new();
+        if in_workbook {
+            for workbook in entries(&source) {
+                sheets.extend(sheet_names(&mut zip, workbook));
+            }
+        }
         let src_dir = part_dir(&source).to_string();
         let explicit_only = path.last().is_some_and(|seg| EXPLICIT_OWNERS.contains(&seg.as_str()));
-        let referenced = match by_key.get(&source) {
-            Some(part) if explicit_only => attribute_values(&mut zip, part),
-            _ => None,
-        };
+        let referenced = explicit_only.then(|| referenced_ids(&mut zip, entries(&source))).flatten();
         let from_pivot_table = path.last().is_some_and(|seg| seg == "pivottable");
         chain.push(source);
         for rel in rels {
@@ -276,19 +319,18 @@ pub(super) fn relationship_tree(bytes: &[u8], limits: Limits) -> Result<RelTree,
                 continue;
             }
             let resolved = (!rel.external).then(|| resolve_target(&src_dir, &rel.target).to_ascii_lowercase());
-            let part = resolved.as_ref().and_then(|r| by_key.get(r));
-            // An internal target that isn't in the package holds nothing, as an empty part doesn't.
-            if resolved.is_some() {
-                let Some(part) = part else { continue };
-                match holds_something(&mut zip, part, &rel.kind, &mut verdicts, &mut budget) {
-                    Some(true) => {}
-                    Some(false) => continue,
-                    None => return Err(over_budget(part)),
-                }
-            }
             let key = fold_kind(&rel.kind);
-            tree.labels.entry(key.clone()).or_insert_with(|| rel.kind.clone());
             let cache = key == "pivotcachedefinition";
+            let refreshing = if let Some(target) = &resolved {
+                let (nonempty, refreshing) = target_content(&mut zip, entries(target), &rel.kind, cache, &mut verdicts, &mut budget)?;
+                if !nonempty {
+                    continue;
+                }
+                refreshing
+            } else {
+                false
+            };
+            tree.labels.entry(key.clone()).or_insert_with(|| rel.kind.clone());
             if cache
                 && from_pivot_table
                 && let Some(resolved) = &resolved
@@ -299,18 +341,15 @@ pub(super) fn relationship_tree(bytes: &[u8], limits: Limits) -> Result<RelTree,
                 Some(resolved) if cache && in_workbook => workbook_caches.push((path.clone(), resolved.clone())),
                 _ => *tree.owners.entry(path.clone()).or_default().entry(key.clone()).or_default() += 1,
             }
-            if let Some(resolved) = resolved
-                && part.is_some()
-            {
+            if let Some(resolved) = resolved {
                 let segment = match sheets.get(&rel.id) {
                     Some(name) => format!("sheet \"{name}\""),
                     None => key,
                 };
                 let mut child = path.clone();
                 child.push(segment);
-                if cache && let Some(part) = part {
-                    let refresh = holds_something(&mut zip, part, "refreshonload", &mut verdicts, &mut budget).ok_or_else(|| over_budget(part))?;
-                    tree.refreshing_caches.entry(child.clone()).and_modify(|all| *all &= refresh).or_insert(refresh);
+                if cache {
+                    tree.refreshing_caches.entry(child.clone()).and_modify(|all| *all &= refreshing).or_insert(refreshing);
                 }
                 tree.reached.insert(child.clone());
                 if !chain.contains(&resolved) {

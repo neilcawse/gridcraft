@@ -1,51 +1,26 @@
 use super::header_footer::HF_FIXED_SIDE_MARGIN;
 use super::{
-    Anchor, CellRef, Json, MAX_COLS, MAX_PAGES, MAX_ROWS, Orientation, PX_TO_PT, PageOrder, PrintSettings, RangeRef, Result, Sheet, Visibility,
-    Workbook, bad, bool_param, split_sheet, str_param,
+    Anchor, Borders, CellRef, Font, Json, MAX_COLS, MAX_PAGES, MAX_ROWS, Orientation, PX_TO_PT, PageOrder, PatternType, PrintSettings, RangeRef,
+    Result, Sheet, StyleId, Visibility, Workbook, bad, bool_param, split_sheet, str_param,
 };
 
 /// Cells in a page block above which only stored cells are visited (not every grid position).
 pub(super) const DENSE_BLOCK: u64 = 60_000;
 
+/// Total conditional-format rule-evaluation work units allowed across one sheet's print layout
+/// blank-cell discovery passes.
+const MAX_CF_PRINT_WORK: usize = 250_000;
+
+/// Windows Excel reserves 4 printer dots (0.48 pt at 600 dpi) on each edge of the cell grid,
+/// reducing the usable width and height between margins by 0.96 pt.
+pub(super) const GRID_EDGE_INSET_PT: f32 = 0.48;
+
 // ---------------------------------------------------------------- paper
 
-/// Paper size in points (portrait) for a paper name; unknown names fall back to Letter.
+/// Paper size in points, as named (see `gridcraft_model::paper`); unknown names, and the empty
+/// name of a file that stated no paper, fall back to Letter.
 pub fn paper_size(name: &str) -> (f32, f32) {
-    known_paper(name).unwrap_or((612.0, 792.0))
-}
-
-/// Paper sizes in points, portrait. `B4`/`B5`/`B6` are the **JIS** sizes Japanese Excel and its
-/// e-mail attachments use (257×364, 182×257 and 128×182 mm); the ISO B series stays reachable as
-/// `B4 (ISO)`/`B5 (ISO)`/`B6 (ISO)`. The Japanese postcards and envelopes are the JIS ones too.
-pub(super) fn known_paper(name: &str) -> Option<(f32, f32)> {
-    // Spaces, hyphens, underscores and parentheses don't matter: `B5 (JIS)`, `b5-jis` and `b5`
-    // are one name.
-    let n = name.trim().to_ascii_lowercase().replace([' ', '-', '_', '(', ')'], "");
-    Some(match n.as_str() {
-        "letter" | "usletter" => (612.0, 792.0),
-        "legal" | "uslegal" => (612.0, 1008.0),
-        "a4" => (595.28, 841.89),
-        "a3" => (841.89, 1190.55),
-        "a5" => (419.53, 595.28),
-        "a6" => (297.64, 419.53),
-        "tabloid" | "11x17" => (792.0, 1224.0),
-        "ledger" => (1224.0, 792.0),
-        "executive" => (522.0, 756.0),
-        "b4" | "b4jis" => (728.50, 1031.81),
-        "b5" | "b5jis" => (515.91, 728.50),
-        "b6" | "b6jis" => (362.83, 515.91),
-        "b4iso" => (708.66, 1000.63),
-        "b5iso" => (498.90, 708.66),
-        "b6iso" => (354.33, 498.90),
-        "japanesepostcard" | "postcard" => (283.46, 419.53),
-        "japanesedoublepostcard" | "doublepostcard" => (419.53, 566.93),
-        "japaneseenvelope#3" | "chou#3" => (340.16, 666.14),
-        // 長形4号 is 90×205 mm; 90×225 mm is 長形40号, a different envelope, so it stays out.
-        "japaneseenvelope#4" | "chou#4" => (255.12, 581.10),
-        "japaneseenvelopekaku#2" | "kaku#2" => (680.31, 941.10),
-        "japaneseenvelopekaku#3" | "kaku#3" => (612.28, 785.20),
-        _ => return None,
-    })
+    gridcraft_model::paper::size_pt(name).unwrap_or((612.0, 792.0))
 }
 
 // ---------------------------------------------------------------- layout
@@ -59,6 +34,15 @@ pub struct SheetLayout {
     pub page_h: f32,
     /// Left, right, top, bottom, header, footer margins in points.
     pub margins: [f32; 6],
+    /// Horizontal points per sheet column pixel (at 100% scale), matching Excel's Normal-font
+    /// printer digit-width geometry.
+    pub col_px_to_pt: f32,
+    /// Vertical points per sheet row pixel (at 100% scale), matching Excel's Normal-font
+    /// 600-dpi printer-to-96-dpi screen row-height ratio.
+    pub row_px_to_pt: f32,
+    /// Rows without `customHeight` whose content font requires a taller 96-dpi row height than
+    /// stored: sorted `(row, effective_px, cumulative_delta_px_including_row)`.
+    pub(crate) row_deltas: Vec<(u32, f32, f64)>,
     pub scale: f32,
     pub area: RangeRef,
     pub row_bands: Vec<(u32, u32)>,
@@ -75,12 +59,34 @@ pub struct SheetLayout {
 }
 
 impl SheetLayout {
+    /// Physical points per 96-dpi pixel at the page scale (borders, padding, MoveOnly/Absolute objects).
     pub(super) fn k(&self) -> f32 {
         PX_TO_PT * self.scale
     }
+    /// Horizontal points per sheet column pixel at the page scale.
+    pub(super) fn kx(&self) -> f32 {
+        self.col_px_to_pt * self.scale
+    }
+    /// Vertical points per sheet row pixel at the page scale.
+    pub(super) fn ky(&self) -> f32 {
+        self.row_px_to_pt * self.scale
+    }
+    /// Effective print height of `row` in 96-dpi sheet pixels (auto-fitted for non-custom rows).
+    pub(super) fn row_height(&self, sh: &Sheet, row: u32) -> f32 {
+        if let Ok(i) = self.row_deltas.binary_search_by_key(&row, |e| e.0) {
+            return self.row_deltas[i].1;
+        }
+        sh.row_height(row)
+    }
+    /// Effective top offset of `row` in 96-dpi sheet pixels, including auto-fitted row deltas.
+    pub(super) fn row_top(&self, sh: &Sheet, row: u32) -> f64 {
+        let idx = self.row_deltas.partition_point(|e| e.0 < row);
+        let delta = if idx > 0 { self.row_deltas[idx - 1].2 } else { 0.0 };
+        sh.row_top(row) + delta
+    }
     pub(crate) fn avail(&self) -> (f32, f32) {
         let [l, r, t, b, ..] = self.margins;
-        ((self.page_w - l - r).max(36.0), (self.page_h - t - b).max(36.0))
+        ((self.page_w - l - r - 2.0 * GRID_EDGE_INSET_PT).max(36.0), (self.page_h - t - b - 2.0 * GRID_EDGE_INSET_PT).max(36.0))
     }
     /// Left and right margins, in points, that header and footer sections line up with: the
     /// page's side margins with Align with Page Margins on, otherwise 0.7 inch on each side, at
@@ -103,7 +109,8 @@ impl SheetLayout {
 #[derive(Clone, Debug, Default)]
 pub struct PrintOptions {
     pub all_sheets: bool,
-    pub range: Option<RangeRef>,
+    /// Areas of the active sheet to print instead of its print area, in order (Print Selection).
+    pub ranges: Vec<RangeRef>,
     pub fit_to_page: Option<bool>,
 }
 
@@ -114,51 +121,571 @@ impl PrintOptions {
             Some("all") | Some("workbook") => true,
             Some(other) => return Err(bad(cmd, format!("`sheets` must be active or all, not `{other}`"))),
         };
-        let range = match str_param(p, "range").map(str::trim).filter(|r| !r.is_empty()) {
-            Some(r) => Some(RangeRef::parse(split_sheet(r).1).ok_or_else(|| bad(cmd, format!("not a range: `{r}`")))?),
-            None => None,
-        };
-        Ok(PrintOptions { all_sheets, range, fit_to_page: bool_param(p, "fitToPage") })
+        let mut ranges = Vec::new();
+        if let Some(r) = str_param(p, "range").map(str::trim).filter(|r| !r.is_empty()) {
+            for part in split_areas(r) {
+                ranges.push(RangeRef::parse(split_sheet(part.trim()).1.trim()).ok_or_else(|| bad(cmd, format!("not a range: `{r}`")))?);
+            }
+        }
+        Ok(PrintOptions { all_sheets, ranges, fit_to_page: bool_param(p, "fitToPage") })
     }
+}
+
+/// Splits a multi-area reference at the commas outside quoted sheet names, so each area keeps
+/// its own optional `Sheet!` prefix.
+fn split_areas(r: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let (mut start, mut quoted) = (0, false);
+    for (i, c) in r.char_indices() {
+        match c {
+            '\'' => quoted = !quoted,
+            ',' if !quoted => {
+                parts.push(&r[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&r[start..]);
+    parts
+}
+
+/// Excel's printer column-width scale (points per model column pixel at 100% scale).
+///
+/// Model column widths are stored in 96-dpi pixels assuming a 7-px screen MDW (`col_px ≈ chars × 7`).
+/// When Windows Excel prints (600-dpi device), it scales stored column widths using the workbook's
+/// Normal style font (`StyleId::DEFAULT`) maximum digit width measured at 600 dpi:
+/// `lfHeight = round(size_pt × 600 / 72)`, `mdw_dots = round(lfHeight × digit_advance / upm)`,
+/// `mdw_pt = mdw_dots × 72 / 600`.
+pub(crate) fn excel_col_px_to_pt(wb: &Workbook) -> f32 {
+    let font = &wb.styles.get(StyleId::DEFAULT).font;
+    let size = if font.size.is_finite() && font.size > 0.0 { font.size.clamp(1.0, 409.0) } else { 11.0 };
+    let lower = font.name.trim().to_ascii_lowercase();
+    let digit_ratio: f32 = match lower.as_str() {
+        "calibri" | "calibri light" | "carlito" => 1038.0 / 2048.0,
+        "arial" | "arial narrow" | "helvetica" | "liberation sans" | "arimo" => 1139.0 / 2048.0,
+        "aptos" | "aptos narrow" => 1113.0 / 2048.0,
+        "segoe ui" => 1104.0 / 2048.0,
+        "times new roman" | "times" | "liberation serif" => 1024.0 / 2048.0,
+        "verdana" => 1302.0 / 2048.0,
+        "tahoma" => 1119.0 / 2048.0,
+        "courier new" | "courier" => 1229.0 / 2048.0,
+        _ => Font::styled(Font::family_for(&font.name), false, false).char_width('0') as f32 / 1000.0,
+    };
+    let lf_height = (size * (600.0 / 72.0)).round().max(1.0);
+    let mdw_dots = (lf_height * digit_ratio).round().max(1.0);
+    let mdw_pt = mdw_dots * (72.0 / 600.0);
+    mdw_pt / 7.0
+}
+
+/// Excel's printer vertical row-height scale (points per 96-dpi sheet row pixel at 100% scale).
+///
+/// Windows Excel prints row heights using the ratio of the workbook Normal font's 600-dpi
+/// printer standard row height to its 96-dpi screen row height:
+/// - Arial 10 pt:   103 dots (12.36 pt) / 17 px => 0.72706 pt/px (~0.9694 × 0.75)
+/// - Calibri 11 pt: 121 dots (14.52 pt) / 20 px => 0.72600 pt/px (~0.9680 × 0.75)
+pub(crate) fn excel_row_px_to_pt(wb: &Workbook) -> f32 {
+    let font = &wb.styles.get(StyleId::DEFAULT).font;
+    let size = if font.size.is_finite() && font.size > 0.0 { font.size.clamp(1.0, 409.0) } else { 11.0 };
+    let lower = font.name.trim().to_ascii_lowercase();
+    let (ad96, ad600, pad96, pad600): (f32, f32, f32, f32) = match lower.as_str() {
+        "arial" | "arial narrow" | "helvetica" | "liberation sans" | "arimo" => (2288.0 / 2048.0, 2355.0 / 2048.0, 2.0, 8.0),
+        "calibri" | "calibri light" | "carlito" => (2500.0 / 2048.0, 2500.0 / 2048.0, 2.0, 9.0),
+        "segoe ui" => (2724.0 / 2048.0, 2724.0 / 2048.0, 2.0, 9.0),
+        "verdana" => (2489.0 / 2048.0, 2489.0 / 2048.0, 2.0, 9.0),
+        "tahoma" => (2472.0 / 2048.0, 2472.0 / 2048.0, 2.0, 9.0),
+        "times new roman" | "times" | "liberation serif" => (2268.0 / 2048.0, 2268.0 / 2048.0, 2.0, 9.0),
+        _ => return PX_TO_PT * (121.0 / 125.0),
+    };
+    let lf96 = (size * (96.0 / 72.0)).round().max(1.0);
+    let px96 = ((lf96 * ad96).round() + pad96).max(1.0);
+    let lf600 = (size * (600.0 / 72.0)).round().max(1.0);
+    let dots600 = ((lf600 * ad600).round() + pad600).max(1.0);
+    (dots600 * (72.0 / 600.0)) / px96
+}
+
+/// Windows 96-dpi single-line auto-fit row height in pixels for a cell font.
+fn font_autofit_row_px(font: &gridcraft_model::Font) -> f32 {
+    let size = if font.size.is_finite() && font.size > 0.0 { font.size.clamp(1.0, 409.0) } else { 11.0 };
+    let lower = font.name.trim().to_ascii_lowercase();
+    let ad96: f32 = match lower.as_str() {
+        "segoe ui" => 2724.0 / 2048.0,
+        "calibri" | "calibri light" | "carlito" => 2500.0 / 2048.0,
+        "verdana" => 2489.0 / 2048.0,
+        "tahoma" => 2472.0 / 2048.0,
+        "arial" | "arial narrow" | "helvetica" | "liberation sans" | "arimo" => 2288.0 / 2048.0,
+        "times new roman" | "times" | "liberation serif" => 2268.0 / 2048.0,
+        _ => 2500.0 / 2048.0,
+    };
+    let lf96 = (size * (96.0 / 72.0)).round().max(1.0);
+    ((lf96 * ad96).round() + 2.0).max(1.0)
+}
+
+/// Computes auto-fit row height deltas for non-custom, non-hidden rows in `0..=end_row` whose
+/// content cells require a taller Windows 96-dpi single-line height than stored.
+fn compute_row_deltas(wb: &Workbook, sh: &Sheet, end_row: u32) -> Vec<(u32, f32, f64)> {
+    let mut max_px: std::collections::BTreeMap<u32, f32> = std::collections::BTreeMap::new();
+    for (&row, info) in sh.rows.range(0..=end_row) {
+        if info.hidden || info.custom {
+            continue;
+        }
+        if let Some(sid) = info.style {
+            let px = font_autofit_row_px(&wb.styles.get(sid).font);
+            let e = max_px.entry(row).or_insert(0.0);
+            if px > *e {
+                *e = px;
+            }
+        }
+    }
+    let scan = RangeRef::new(CellRef::new(0, 0), CellRef::new(end_row, MAX_COLS - 1));
+    for (pos, cell) in sh.cells.iter_range(scan) {
+        if !cell.has_content() {
+            continue;
+        }
+        if sh.rows.get(&pos.row).is_some_and(|info| info.hidden || info.custom) {
+            continue;
+        }
+        let px = font_autofit_row_px(&wb.styles.get(sh.style_id(pos)).font);
+        let e = max_px.entry(pos.row).or_insert(0.0);
+        if px > *e {
+            *e = px;
+        }
+    }
+    let mut out = Vec::new();
+    let mut cum = 0.0f64;
+    for (row, auto_px) in max_px {
+        let stored = sh.row_height(row);
+        if auto_px > stored + 0.01 {
+            cum += f64::from(auto_px - stored);
+            out.push((row, auto_px, cum));
+        }
+    }
+    out
+}
+
+/// True when `sid` paints something visible on paper even for an empty cell: a visible fill,
+/// any border, or a cell checkbox format.
+fn style_ref_is_printable(wb: &Workbook, style: &super::Style) -> bool {
+    let has_fill = match style.fill.pattern {
+        PatternType::None => false,
+        PatternType::Solid => style.fill.fg.resolve(&wb.theme).is_some(),
+        _ => true,
+    };
+    has_fill || style.borders != Borders::default() || style.num_fmt.as_str() == "checkbox"
+}
+
+fn style_is_printable(wb: &Workbook, sid: StyleId) -> bool {
+    style_ref_is_printable(wb, wb.styles.get(sid))
+}
+
+fn cf_rule_can_paint(wb: &Workbook, rule: &gridcraft_model::CfRule) -> bool {
+    match rule {
+        gridcraft_model::CfRule::ColorScale { .. } | gridcraft_model::CfRule::DataBar { .. } => true,
+        _ => rule.style().is_some_and(|s| style_ref_is_printable(wb, s)),
+    }
+}
+
+fn cf_look_is_printable(wb: &Workbook, look: &crate::cf::CfLook) -> bool {
+    look.scale_fill.is_some() || look.bar.is_some() || look.style.as_ref().is_some_and(|s| style_ref_is_printable(wb, s))
+}
+
+fn union_anchor(sh: &Sheet, r: &mut Option<RangeRef>, a: &Anchor) {
+    let x = sh.col_left(a.cell.col) + a.dx as f64;
+    let y = sh.row_top(a.cell.row) + a.dy as f64;
+    let end_x = if a.width > 0.0 { (x + a.width as f64 - 0.01).max(x) } else { x };
+    let end_y = if a.height > 0.0 { (y + a.height as f64 - 0.01).max(y) } else { y };
+    let end = CellRef::new(sh.row_at(end_y), sh.col_at(end_x));
+    let ar = RangeRef::new(a.cell, end);
+    *r = Some(r.map_or(ar, |u| u.union(&ar)));
 }
 
 /// The range a sheet prints: its print area, else the used range grown to cover drawing
 /// objects. `None` when there is nothing to print.
 pub fn print_range(sh: &Sheet) -> Option<RangeRef> {
     if let Some(a) = sh.print.print_area {
-        return Some(trim_full(sh, a));
+        return Some(trim_full_used(sh.used_range(), a));
     }
     let mut r = sh.used_range();
-    let mut grow = |a: &Anchor| {
-        let x = sh.col_left(a.cell.col) + a.dx as f64;
-        let y = sh.row_top(a.cell.row) + a.dy as f64;
-        let end = CellRef::new(sh.row_at(y + a.height.max(0.0) as f64), sh.col_at(x + a.width.max(0.0) as f64));
-        let ar = RangeRef::new(a.cell, end);
-        r = Some(r.map_or(ar, |u| u.union(&ar)));
-    };
     for c in &sh.charts {
-        grow(&c.anchor);
+        union_anchor(sh, &mut r, &c.anchor);
     }
     for i in &sh.images {
-        grow(&i.anchor);
+        union_anchor(sh, &mut r, &i.anchor);
     }
     for s in &sh.shapes {
-        grow(&s.anchor);
+        union_anchor(sh, &mut r, &s.anchor);
     }
-    // Printing starts at A1 like Excel when the data starts nearby? Excel prints from the first
-    // used cell; keep the used range as is.
     r
 }
 
-/// Whole rows/columns are trimmed to the used range.
-fn trim_full(sh: &Sheet, r: RangeRef) -> RangeRef {
+/// The range a sheet prints, matching Excel: its explicit print area, else the tightest range
+/// covering cells with values/formulas/visible fills/visible borders, spills, cell pictures,
+/// sparklines, tables, printable merges, and floating objects. Empty cells carrying only font,
+/// alignment, or number-format styling do not expand the print range.
+pub(crate) fn sheet_print_range(wb: &Workbook, si: usize, sh: &Sheet) -> Option<RangeRef> {
+    let mut cf = crate::cf::CfCache::new();
+    let mut cf_budget = MAX_CF_PRINT_WORK;
+    sheet_print_range_with_cf(wb, si, sh, &mut cf, &mut cf_budget).0
+}
+
+type OverflowSpan = (u32, u32, u32);
+
+fn sheet_print_range_with_cf(
+    wb: &Workbook,
+    si: usize,
+    sh: &Sheet,
+    cf: &mut crate::cf::CfCache,
+    cf_budget: &mut usize,
+) -> (Option<RangeRef>, Vec<OverflowSpan>) {
+    if let Some(a) = sh.print.print_area {
+        let (used, overflows) = printable_cells_range(wb, si, sh, cf, cf_budget);
+        return (Some(trim_full_used(used, a)), overflows);
+    }
+    let (mut r, overflows) = printable_cells_range(wb, si, sh, cf, cf_budget);
+    for c in &sh.charts {
+        union_anchor(sh, &mut r, &c.anchor);
+    }
+    for i in &sh.images {
+        union_anchor(sh, &mut r, &i.anchor);
+    }
+    for s in &sh.shapes {
+        union_anchor(sh, &mut r, &s.anchor);
+    }
+    (r, overflows)
+}
+
+fn printable_cells_range(
+    wb: &Workbook,
+    si: usize,
+    sh: &Sheet,
+    cf: &mut crate::cf::CfCache,
+    cf_budget: &mut usize,
+) -> (Option<RangeRef>, Vec<OverflowSpan>) {
+    let mut out: Option<RangeRef> = None;
+    let mut extend = |rng: RangeRef| {
+        out = Some(out.map_or(rng, |u| u.union(&rng)));
+    };
+    for (pos, cell) in sh.cells.iter() {
+        if sh.is_row_hidden(pos.row) || sh.is_col_hidden(pos.col) {
+            continue;
+        }
+        if cell.has_content() || style_is_printable(wb, sh.style_id(pos)) {
+            extend(RangeRef::cell(pos));
+        }
+    }
+    // A row with a visible row-level fill or border paints across the sheet's used columns
+    // (matching Excel for full-width header banners set via `<row s="...">`).
+    if let Some(used) = sh.used_range() {
+        for (&row, info) in &sh.rows {
+            if !info.hidden && info.style.is_some_and(|sid| style_is_printable(wb, sid)) {
+                extend(RangeRef::new(CellRef::new(row, used.start.col), CellRef::new(row, used.end.col)));
+            }
+        }
+    }
+    for sr in sh.spill_ranges.values() {
+        extend(*sr);
+    }
+    for &pos in sh.spill.keys() {
+        extend(RangeRef::cell(pos));
+    }
+    for &pos in sh.cell_pictures.keys() {
+        extend(RangeRef::cell(pos));
+    }
+    for sp in &sh.sparklines {
+        extend(RangeRef::cell(sp.cell));
+    }
+    for t in &sh.tables {
+        extend(t.range);
+    }
+    let mut full_merges = Vec::new();
+    for m in &sh.merges {
+        let anchor_printable = sh.cells.get(m.start).is_some_and(|c| c.has_content())
+            || style_is_printable(wb, sh.style_id(m.start))
+            || style_is_printable(wb, sh.style_id(m.end));
+        if !anchor_printable {
+            continue;
+        }
+        if m.is_full_cols() || m.is_full_rows() {
+            full_merges.push(*m);
+        } else {
+            extend(*m);
+        }
+    }
+    if !full_merges.is_empty() {
+        let extent = out.or_else(|| sh.used_range());
+        for m in full_merges {
+            let r = trim_full_merge(extent, m);
+            out = Some(out.map_or(r, |u| u.union(&r)));
+        }
+    }
+    extend_printable_cf_cells(wb, si, sh, cf, cf_budget, &mut out);
+    let overflows = if let Some(cur_out) = out {
+        let (ovs, max_col) = collect_text_overflows(wb, si, sh, cur_out.end.col, cf);
+        if max_col > cur_out.end.col {
+            out = Some(cur_out.union(&RangeRef::cell(CellRef::new(cur_out.start.row, max_col))));
+        }
+        ovs
+    } else {
+        Vec::new()
+    };
+    (out, overflows)
+}
+
+/// Includes cells whose conditional format produces a visible fill, border, colour scale, or data bar.
+fn extend_printable_cf_cells(wb: &Workbook, si: usize, sh: &Sheet, cf: &mut crate::cf::CfCache, cf_budget: &mut usize, out: &mut Option<RangeRef>) {
+    if sh.cond_formats.is_empty() || *cf_budget == 0 {
+        return;
+    }
+    let used = sh.used_range();
+    let (single_cells, multi_ranges) = cf.indexed_ranges(sh, si, None, |r| cf_rule_can_paint(wb, r));
+    for pos in single_cells {
+        if out.is_some_and(|u| u.contains(pos)) || sh.cells.get(pos).is_some_and(|cell| cell.has_content()) {
+            continue;
+        }
+        if *cf_budget == 0 {
+            return;
+        }
+        if cf.look_budgeted(wb, si, pos, cf_budget).is_some_and(|l| cf_look_is_printable(wb, &l)) {
+            let r = RangeRef::cell(pos);
+            *out = Some(out.map_or(r, |u| u.union(&r)));
+        }
+    }
+    for rng in multi_ranges {
+        if out.is_some_and(|u| u.contains(rng.start) && u.contains(rng.end)) {
+            continue;
+        }
+        if rng.count() <= DENSE_BLOCK {
+            for pos in rng.iter() {
+                if out.is_some_and(|u| u.contains(pos)) || sh.cells.get(pos).is_some_and(|cell| cell.has_content()) {
+                    continue;
+                }
+                if *cf_budget == 0 {
+                    return;
+                }
+                if cf.look_budgeted(wb, si, pos, cf_budget).is_some_and(|l| cf_look_is_printable(wb, &l)) {
+                    let r = RangeRef::cell(pos);
+                    *out = Some(out.map_or(r, |u| u.union(&r)));
+                }
+            }
+        } else {
+            // Sparse branch only inspects stored cells in `rng`; if every stored cell in `rng`
+            // already lies inside `out`, none can expand `out`.
+            let Some(sub) = used.and_then(|u| rng.intersection(&u)) else { continue };
+            if out.is_some_and(|u| u.contains(sub.start) && u.contains(sub.end)) {
+                continue;
+            }
+            for (pos, cell) in sh.cells.iter_range(sub) {
+                if out.is_some_and(|u| u.contains(pos)) || cell.has_content() {
+                    continue;
+                }
+                if *cf_budget == 0 {
+                    return;
+                }
+                if cf.look_budgeted(wb, si, pos, cf_budget).is_some_and(|l| cf_look_is_printable(wb, &l)) {
+                    let r = RangeRef::cell(pos);
+                    *out = Some(out.map_or(r, |u| u.union(&r)));
+                }
+            }
+        }
+    }
+}
+
+/// Collects rightward overflow spans of unwrapped text cells into empty neighbours and returns
+/// the furthest column reached beyond `initial_max_col`.
+fn collect_text_overflows(wb: &Workbook, si: usize, sh: &Sheet, initial_max_col: u32, cf: &mut crate::cf::CfCache) -> (Vec<OverflowSpan>, u32) {
+    let col_kx = excel_col_px_to_pt(wb);
+    let pad = 2.0 * PX_TO_PT;
+    let mut overflows = Vec::new();
+    let mut max_col = initial_max_col;
+    for (pos, cell) in sh.cells.iter() {
+        if sh.is_row_hidden(pos.row) || sh.is_col_hidden(pos.col) {
+            continue;
+        }
+        if !matches!(&cell.value, gridcraft_core::Value::Text(_)) && !sh.show_formulas {
+            continue;
+        }
+        let st = wb.styles.get(sh.style_id(pos));
+        if st.align.wrap
+            || st.align.shrink
+            || st.align.rotation != 0
+            || matches!(st.align.h, super::HAlign::Fill | super::HAlign::Right | super::HAlign::CenterAcross)
+        {
+            continue;
+        }
+        let cell_w = sh.col_width(pos.col) * col_kx;
+        let text = if sh.show_formulas {
+            crate::display::cell_text_with_cf(wb, si, sh, pos, cf)
+        } else {
+            crate::display::value_text_as(wb, &cell.value, st.num_fmt.as_str())
+        };
+        let text = text.replace(['\n', '\r'], " ");
+        let size = st.font.size.clamp(1.0, 409.0);
+        if text.is_empty() || (text.len() as f32) * size * 0.85 <= cell_w || sh.merges.iter().any(|m| m.contains(pos)) {
+            continue;
+        }
+        let font = Font::styled(Font::family_for(&st.font.name), st.font.bold, st.font.italic);
+        let indent = st.align.indent as f32 * 9.0 * PX_TO_PT;
+        let excess = gridcraft_pdf::text_width(font, size, &text) + 2.0 * pad + indent - cell_w;
+        if excess <= 0.5 {
+            continue;
+        }
+        let mut rem = if matches!(st.align.h, super::HAlign::Center | super::HAlign::Distributed) { excess / 2.0 } else { excess };
+        let mut col = pos.col + 1;
+        let mut reached = pos.col;
+        while rem > 0.5 && col < MAX_COLS {
+            let nc = CellRef::new(pos.row, col);
+            if sh.is_col_hidden(col) {
+                col += 1;
+                continue;
+            }
+            if sh.value_ref(nc).is_some_and(|v| !v.is_empty()) || sh.merges.iter().any(|m| m.contains(nc)) {
+                break;
+            }
+            reached = col;
+            rem -= sh.col_width(col) * col_kx;
+            col += 1;
+        }
+        if reached > pos.col {
+            overflows.push((pos.row, pos.col, reached));
+            max_col = max_col.max(reached);
+        }
+    }
+    (overflows, max_col)
+}
+
+/// True when page `(rband, cband)` contains at least one printable cell, visible style, merge,
+/// table, conditional format, overflowing text span, or floating object. Used to trim completely
+/// blank trailing pages.
+#[allow(clippy::too_many_arguments)]
+fn page_has_content(
+    wb: &Workbook,
+    si: usize,
+    sh: &Sheet,
+    rband: (u32, u32),
+    cband: (u32, u32),
+    overflows: &[OverflowSpan],
+    cf: &mut crate::cf::CfCache,
+    cf_budget: &mut usize,
+) -> bool {
+    if overflows.iter().any(|&(r, c0, c1)| r >= rband.0 && r <= rband.1 && c1 >= cband.0 && c0 <= cband.1) {
+        return true;
+    }
+    let block = RangeRef::new(CellRef::new(rband.0, cband.0), CellRef::new(rband.1, cband.1));
+    for (pos, cell) in sh.cells.iter_range(block) {
+        if sh.is_row_hidden(pos.row) || sh.is_col_hidden(pos.col) {
+            continue;
+        }
+        if cell.has_content() || style_is_printable(wb, sh.style_id(pos)) {
+            return true;
+        }
+    }
+    for (_, info) in sh.rows.range(rband.0..=rband.1) {
+        if !info.hidden && info.style.is_some_and(|sid| style_is_printable(wb, sid)) {
+            return true;
+        }
+    }
+    if sh.spill.range(block.start..=block.end).any(|(c, _)| block.contains(*c)) {
+        return true;
+    }
+    if sh.cell_pictures.range(block.start..=block.end).any(|(c, _)| block.contains(*c)) {
+        return true;
+    }
+    if sh.sparklines.iter().any(|sp| block.contains(sp.cell)) {
+        return true;
+    }
+    if sh.tables.iter().any(|t| t.range.intersects(&block)) {
+        return true;
+    }
+    if !sh.merges.is_empty() {
+        let mut used: Option<Option<RangeRef>> = None;
+        for m in &sh.merges {
+            let eff = if m.is_full_cols() || m.is_full_rows() {
+                let u = *used.get_or_insert_with(|| sh.used_range());
+                trim_full_merge(u, *m)
+            } else {
+                *m
+            };
+            if eff.intersects(&block)
+                && (sh.cells.get(m.start).is_some_and(|c| c.has_content())
+                    || style_is_printable(wb, sh.style_id(m.start))
+                    || style_is_printable(wb, sh.style_id(m.end)))
+            {
+                return true;
+            }
+        }
+    }
+    if !sh.cond_formats.is_empty() && *cf_budget > 0 {
+        let (single_cells, multi_subs) = cf.indexed_ranges(sh, si, Some(block), |r| cf_rule_can_paint(wb, r));
+        for pos in single_cells {
+            if *cf_budget == 0 {
+                break;
+            }
+            if cf.look_budgeted(wb, si, pos, cf_budget).is_some_and(|l| cf_look_is_printable(wb, &l)) {
+                return true;
+            }
+        }
+        'cf: for sub in multi_subs {
+            if sub.count() <= DENSE_BLOCK {
+                for pos in sub.iter() {
+                    if *cf_budget == 0 {
+                        break 'cf;
+                    }
+                    if cf.look_budgeted(wb, si, pos, cf_budget).is_some_and(|l| cf_look_is_printable(wb, &l)) {
+                        return true;
+                    }
+                }
+            } else {
+                for (pos, _) in sh.cells.iter_range(sub) {
+                    if *cf_budget == 0 {
+                        break 'cf;
+                    }
+                    if cf.look_budgeted(wb, si, pos, cf_budget).is_some_and(|l| cf_look_is_printable(wb, &l)) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    let (sx0, sy0) = (sh.col_left(block.start.col), sh.row_top(block.start.row));
+    let (sx1, sy1) = (sh.col_left(block.end.col.saturating_add(1)), sh.row_top(block.end.row.saturating_add(1)));
+    let hits_anchor = |a: &Anchor| {
+        let x = sh.col_left(a.cell.col) + a.dx as f64;
+        let y = sh.row_top(a.cell.row) + a.dy as f64;
+        a.width > 0.0 && a.height > 0.0 && x < sx1 && x + a.width as f64 > sx0 && y < sy1 && y + a.height as f64 > sy0
+    };
+    sh.charts.iter().any(|c| hits_anchor(&c.anchor))
+        || sh.images.iter().any(|i| hits_anchor(&i.anchor))
+        || sh.shapes.iter().any(|s| hits_anchor(&s.anchor))
+}
+
+/// Whole rows/columns are trimmed to the printable/used range.
+fn trim_full_used(used: Option<RangeRef>, r: RangeRef) -> RangeRef {
     if !(r.is_full_cols() || r.is_full_rows()) {
         return r;
     }
-    match sh.used_range() {
+    match used {
         Some(u) => r.intersection(&RangeRef::new(CellRef::new(0, 0), u.end)).unwrap_or(RangeRef::cell(r.start)),
         None => RangeRef::cell(r.start),
     }
+}
+
+/// Full-row (`A3:XFD4`) and full-column (`A1:A1048576`) merges are clamped along their unbounded
+/// axis to the sheet's used/printable extent so they do not explode pagination to column XFD or
+/// row 1048576.
+fn trim_full_merge(used: Option<RangeRef>, m: RangeRef) -> RangeRef {
+    if !(m.is_full_cols() || m.is_full_rows()) {
+        return m;
+    }
+    let mut r = m;
+    if m.is_full_rows() {
+        let end_col = used.map_or(m.start.col, |u| u.end.col);
+        r.end.col = end_col.max(r.start.col);
+    }
+    if m.is_full_cols() {
+        let end_row = used.map_or(m.start.row, |u| u.end.row);
+        r.end.row = end_row.max(r.start.row);
+    }
+    r
 }
 
 /// Splits `start..=end` into bands whose sizes fit `avail(band_start)`; `breaks` force a new
@@ -220,9 +747,17 @@ pub fn layout_sheet(wb: &Workbook, si: usize, opts: &PrintOptions, range_overrid
             margins[b] *= f;
         }
     }
-    let area = match range_override {
-        Some(r) => trim_full(sh, r),
-        None => print_range(sh).unwrap_or(RangeRef::cell(CellRef::new(0, 0))),
+    let mut cf = crate::cf::CfCache::new();
+    let mut cf_budget = MAX_CF_PRINT_WORK;
+    let (area, overflows) = match range_override {
+        Some(r) => {
+            let (used, ov) = printable_cells_range(wb, si, sh, &mut cf, &mut cf_budget);
+            (trim_full_used(used, r), ov)
+        }
+        None => {
+            let (used, ov) = sheet_print_range_with_cf(wb, si, sh, &mut cf, &mut cf_budget);
+            (used.unwrap_or(RangeRef::cell(CellRef::new(0, 0))), ov)
+        }
     };
     // A print area from a file or JSON can name coordinates past the grid; pagination walks every
     // line of the area (zero-height rows never fill a band), so it is held to the grid first.
@@ -239,12 +774,19 @@ pub fn layout_sheet(wb: &Workbook, si: usize, opts: &PrintOptions, range_overrid
         Some(false) => None,
         None => st.fit_to.filter(|(w, h)| *w > 0 || *h > 0),
     };
+    let col_px_to_pt = excel_col_px_to_pt(wb);
+    let row_px_to_pt = excel_row_px_to_pt(wb);
+    let delta_end = title_rows.map_or(area.end.row, |(_, b)| area.end.row.max(b));
+    let row_deltas = compute_row_deltas(wb, sh, delta_end);
     let mut lay = SheetLayout {
         sheet: si,
         settings: st.clone(),
         page_w: pw,
         page_h: ph,
         margins,
+        col_px_to_pt,
+        row_px_to_pt,
+        row_deltas,
         scale: (st.scale.clamp(10, 400) as f32) / 100.0,
         area,
         row_bands: vec![],
@@ -256,10 +798,28 @@ pub fn layout_sheet(wb: &Workbook, si: usize, opts: &PrintOptions, range_overrid
         heading_h,
         manual_breaks: fit.is_none(),
     };
-    let paginate = |lay: &mut SheetLayout, manual: bool| {
+    let can_trim = !lay.settings.gridlines
+        && !lay.settings.headings
+        && !lay.settings.has_header_footer()
+        && sh.print.print_area.is_none()
+        && range_override.is_none()
+        && lay.title_rows.is_none()
+        && lay.title_cols.is_none();
+    let mut paginate = |lay: &mut SheetLayout, manual: bool| {
         lay.manual_breaks = manual;
         (lay.row_bands, lay.col_bands) = split_bands(sh, lay, MAX_PAGES);
         lay.pages = page_sequence(lay.row_bands.len(), lay.col_bands.len(), lay.settings.page_order, MAX_PAGES);
+        let truncated = lay.row_bands.len().saturating_mul(lay.col_bands.len()) > lay.pages.len();
+        if !truncated && can_trim {
+            while lay.pages.len() > 1 {
+                let Some(&(ri, ci)) = lay.pages.last() else { break };
+                let (Some(&rb), Some(&cb)) = (lay.row_bands.get(ri), lay.col_bands.get(ci)) else { break };
+                if page_has_content(wb, si, sh, rb, cb, &overflows, &mut cf, &mut cf_budget) {
+                    break;
+                }
+                lay.pages.pop();
+            }
+        }
     };
     match fit {
         Some((fw, fh)) => {
@@ -267,11 +827,11 @@ pub fn layout_sheet(wb: &Workbook, si: usize, opts: &PrintOptions, range_overrid
             let total_h: f32 = if area.height() > 200_000 {
                 f32::INFINITY
             } else {
-                (area.start.row..=area.end.row).map(|r| sh.row_height(r)).sum::<f32>() + heading_h
+                (area.start.row..=area.end.row).map(|r| lay.row_height(sh, r)).sum::<f32>() + heading_h
             };
             let (aw, ah) = lay.avail();
-            let sw = if fw > 0 { aw * fw as f32 / (total_w * PX_TO_PT).max(1.0) } else { f32::INFINITY };
-            let sh_ = if fh > 0 { ah * fh as f32 / (total_h * PX_TO_PT).max(1.0) } else { f32::INFINITY };
+            let sw = if fw > 0 { aw * fw as f32 / (total_w * col_px_to_pt).max(1.0) } else { f32::INFINITY };
+            let sh_ = if fh > 0 { ah * fh as f32 / (total_h * row_px_to_pt).max(1.0) } else { f32::INFINITY };
             lay.scale = sw.min(sh_).min(1.0).clamp(0.1, 1.0);
             for _ in 0..40 {
                 paginate(&mut lay, false);
@@ -314,9 +874,10 @@ pub(crate) type Bands = Vec<(u32, u32)>;
 /// honouring manual breaks (when `lay.manual_breaks`), print headings and repeated titles. The
 /// one pagination rule shared by printing, PDF export, Page Break Preview and Page Layout view.
 pub(crate) fn split_bands(sh: &Sheet, lay: &SheetLayout, cap: usize) -> (Bands, Bands) {
-    let k = lay.k();
+    let kx = lay.kx();
+    let ky = lay.ky();
     let (aw, ah) = lay.avail();
-    let (aw, ah) = (aw / k, ah / k);
+    let (aw, ah) = (aw / kx, ah / ky);
     let st = &lay.settings;
     let mut rb: Vec<u32> = if lay.manual_breaks { st.row_breaks.clone() } else { vec![] };
     let mut cb: Vec<u32> = if lay.manual_breaks { st.col_breaks.clone() } else { vec![] };
@@ -325,7 +886,7 @@ pub(crate) fn split_bands(sh: &Sheet, lay: &SheetLayout, cap: usize) -> (Bands, 
     let (title_rows, title_cols) = (lay.title_rows, lay.title_cols);
     let title_h = |start: u32| -> f32 {
         match title_rows {
-            Some((a, b)) if a < start => (a..=b.min(start - 1)).map(|r| sh.row_height(r)).sum(),
+            Some((a, b)) if a < start => (a..=b.min(start - 1)).map(|r| lay.row_height(sh, r)).sum(),
             _ => 0.0,
         }
     };
@@ -336,8 +897,14 @@ pub(crate) fn split_bands(sh: &Sheet, lay: &SheetLayout, cap: usize) -> (Bands, 
         }
     };
     let area = lay.area;
-    let rows = bands(area.start.row, area.end.row, |r| sh.row_height(r), |start| (ah - lay.heading_h - title_h(start)).max(1.0), &rb, cap);
-    let cols = bands(area.start.col, area.end.col, |c| sh.col_width(c), |start| (aw - lay.heading_w - title_w(start)).max(1.0), &cb, cap);
+    let mut rows = bands(area.start.row, area.end.row, |r| lay.row_height(sh, r), |start| (ah - lay.heading_h - title_h(start)).max(1.0), &rb, cap);
+    let mut cols = bands(area.start.col, area.end.col, |c| sh.col_width(c), |start| (aw - lay.heading_w - title_w(start)).max(1.0), &cb, cap);
+    while rows.len() > 1 && rows.last().is_some_and(|&(a, b)| (a..=b).all(|r| lay.row_height(sh, r) <= 0.0)) {
+        rows.pop();
+    }
+    while cols.len() > 1 && cols.last().is_some_and(|&(a, b)| (a..=b).all(|c| sh.col_width(c) <= 0.0)) {
+        cols.pop();
+    }
     (rows, cols)
 }
 
@@ -354,14 +921,20 @@ pub fn layouts(wb: &Workbook, opts: &PrintOptions) -> Vec<SheetLayout> {
         if pages >= MAX_PAGES {
             break;
         }
-        let ovr = if si == wb.active_sheet() { opts.range } else { None };
-        if opts.all_sheets && ovr.is_none() && wb.sheet(si).is_some_and(|s| print_range(s).is_none()) {
+        let areas: Vec<Option<RangeRef>> =
+            if si == wb.active_sheet() && !opts.ranges.is_empty() { opts.ranges.iter().copied().map(Some).collect() } else { vec![None] };
+        if opts.all_sheets && areas == [None] && wb.sheet(si).is_some_and(|s| sheet_print_range(wb, si, s).is_none()) {
             continue;
         }
-        if let Some(mut l) = layout_sheet(wb, si, opts, ovr) {
-            l.pages.truncate(MAX_PAGES - pages);
-            pages += l.pages.len();
-            out.push(l);
+        for ovr in areas {
+            if pages >= MAX_PAGES {
+                break;
+            }
+            if let Some(mut l) = layout_sheet(wb, si, opts, ovr) {
+                l.pages.truncate(MAX_PAGES - pages);
+                pages += l.pages.len();
+                out.push(l);
+            }
         }
     }
     if out.is_empty() && opts.all_sheets {
@@ -382,8 +955,8 @@ pub(super) fn segments(titles: Option<(u32, u32)>, band: (u32, u32)) -> Vec<(u32
     v
 }
 
-pub(super) fn seg_size(sh: &Sheet, seg: (u32, u32), rows: bool) -> f32 {
-    if rows { (seg.0..=seg.1).map(|r| sh.row_height(r)).sum() } else { (seg.0..=seg.1).map(|c| sh.col_width(c)).sum() }
+pub(super) fn seg_size(lay: &SheetLayout, sh: &Sheet, seg: (u32, u32), rows: bool) -> f32 {
+    if rows { (seg.0..=seg.1).map(|r| lay.row_height(sh, r)).sum() } else { (seg.0..=seg.1).map(|c| sh.col_width(c)).sum() }
 }
 
 #[cfg(test)]
@@ -399,5 +972,134 @@ mod tests {
         let lay = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
         assert_eq!((lay.area.end.row, lay.area.end.col), (MAX_ROWS - 1, MAX_COLS - 1));
         assert!(lay.pages.len() <= MAX_PAGES);
+    }
+
+    #[test]
+    fn repeated_cf_ranges_finish_print_layout_within_budget() {
+        let mut wb = Workbook::new();
+        let fill = gridcraft_model::Style {
+            fill: gridcraft_model::Fill { pattern: PatternType::Solid, fg: gridcraft_model::Color::Rgb(0xFFCC00), bg: gridcraft_model::Color::Auto },
+            ..Default::default()
+        };
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.set_value(CellRef::new(0, 0), gridcraft_core::Value::Number(1.0));
+        let block = RangeRef::new(CellRef::new(0, 0), CellRef::new(1999, 24)); // A1:Y2000 (50,000 cells)
+        sh.cond_formats.push(gridcraft_model::CondFormat {
+            ranges: vec![block; 2_000],
+            rule: gridcraft_model::CfRule::CellIs { op: gridcraft_model::CfOperator::Equal, a: "999".into(), b: None, style: Box::new(fill) },
+            priority: 1,
+            stop_if_true: false,
+        });
+        let mut cf = crate::cf::CfCache::new();
+        let mut budget = MAX_CF_PRINT_WORK;
+        let sh_ref = wb.sheet(0).unwrap();
+        let mut out = None;
+        extend_printable_cf_cells(&wb, 0, sh_ref, &mut cf, &mut budget, &mut out);
+        assert_eq!(
+            budget,
+            MAX_CF_PRINT_WORK - 49_999,
+            "2,000 repeated A1:Y2000 ranges must deduplicate to one pass and skip populated A1 before spending budget"
+        );
+
+        let lay = layout_sheet(&wb, 0, &PrintOptions::default(), None).unwrap();
+        let pdf = super::super::render_pdf(&wb, &[lay], "test.xlsx", "").unwrap();
+        assert!(pdf.bytes.starts_with(b"%PDF-"));
+    }
+
+    #[test]
+    fn hidden_styled_rows_do_not_expand_print_range_or_keep_blank_pages() {
+        let mut wb = Workbook::new();
+        let fill = wb.styles.intern(gridcraft_model::Style {
+            fill: gridcraft_model::Fill { pattern: PatternType::Solid, fg: gridcraft_model::Color::Rgb(0xEEEEEE), bg: gridcraft_model::Color::Auto },
+            ..Default::default()
+        });
+        let sh = wb.sheet_mut(0).unwrap();
+        sh.set_value(CellRef::new(0, 0), gridcraft_core::Value::text("Visible"));
+        sh.rows.insert(150, gridcraft_model::LineInfo { size: None, hidden: true, style: Some(fill), ..Default::default() });
+        let sh = wb.sheet(0).unwrap();
+        let range = sheet_print_range(&wb, 0, sh).unwrap();
+        assert_eq!(range.end.row, 0, "hidden row with row-level fill must not expand print range");
+        let mut cf = crate::cf::CfCache::new();
+        let mut budget = MAX_CF_PRINT_WORK;
+        assert!(!page_has_content(&wb, 0, sh, (100, 160), (0, 5), &[], &mut cf, &mut budget));
+    }
+
+    fn minimal_xlsx_with_sheet_xml(sheet_xml: &str, styles_xml: &str) -> Vec<u8> {
+        use std::io::Write;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut zw = zip::ZipWriter::new(&mut buf);
+        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let files = [
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/workbook.xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#,
+            ),
+            ("xl/styles.xml", styles_xml),
+            ("xl/worksheets/sheet1.xml", sheet_xml),
+        ];
+        for (name, content) in files {
+            zw.start_file(name, opts).unwrap();
+            zw.write_all(content.as_bytes()).unwrap();
+        }
+        zw.finish().unwrap();
+        buf.into_inner()
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // tests run only off wasm, where the clock exists
+    fn hostile_10k_single_cells_x_400_blanks_rules_print_and_pdf_fast() {
+        // (1) Via XLSX parse: 10,000 distinct single cells x 400 containsBlanks rules with solid fill.
+        let sq = (1..=10_000).map(|r| format!("A{r}")).collect::<Vec<_>>().join(" ");
+        let rules = r#"<cfRule type="containsBlanks" dxfId="0" priority="1"/>"#.repeat(400);
+        let sheet_xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="B1"><v>42</v></c></row></sheetData><conditionalFormatting sqref="{sq}">{rules}</conditionalFormatting></worksheet>"#
+        );
+        let styles_xml = r#"<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs><dxfs count="1"><dxf><fill><patternFill patternType="solid"><bgColor rgb="FFFFCC00"/></patternFill></fill></dxf></dxfs></styleSheet>"#;
+        let xlsx = minimal_xlsx_with_sheet_xml(&sheet_xml, styles_xml);
+
+        let t0 = std::time::Instant::now();
+        let (wb_parsed, _) = gridcraft_xlsx::read_xlsx(&xlsx).unwrap();
+        assert_eq!(wb_parsed.sheets[0].cond_formats.len(), 10, "parse cap must keep 10 rules (100,000 range entries)");
+        let lay_parsed = layout_sheet(&wb_parsed, 0, &PrintOptions::default(), None).unwrap();
+        let pdf_parsed = super::super::render_pdf(&wb_parsed, &[lay_parsed], "hostile.xlsx", "").unwrap();
+        let parsed_elapsed = t0.elapsed();
+        assert!(pdf_parsed.bytes.starts_with(b"%PDF-"));
+        assert!(parsed_elapsed.as_secs_f64() < 2.0, "XLSX-parsed hostile sheet took {:?}", parsed_elapsed);
+
+        // (2) Directly in Workbook model (bypassing parse cap): all 400 rules x 10,000 single cells = 4,000,000 range entries.
+        let mut wb_direct = Workbook::new();
+        let fill = gridcraft_model::Style {
+            fill: gridcraft_model::Fill { pattern: PatternType::Solid, fg: gridcraft_model::Color::Rgb(0xFFCC00), bg: gridcraft_model::Color::Auto },
+            ..Default::default()
+        };
+        let ranges: Vec<RangeRef> = (0..10_000).map(|r| RangeRef::cell(CellRef::new(r, 0))).collect();
+        let sh = wb_direct.sheet_mut(0).unwrap();
+        sh.set_value(CellRef::new(0, 1), gridcraft_core::Value::Number(42.0));
+        for p in 1..=400u32 {
+            sh.cond_formats.push(gridcraft_model::CondFormat {
+                ranges: ranges.clone(),
+                rule: gridcraft_model::CfRule::Blanks { style: Box::new(fill.clone()) },
+                priority: p,
+                stop_if_true: false,
+            });
+        }
+        let t1 = std::time::Instant::now();
+        let lay_direct = layout_sheet(&wb_direct, 0, &PrintOptions::default(), None).unwrap();
+        let pdf_direct = super::super::render_pdf(&wb_direct, &[lay_direct], "hostile-direct.xlsx", "").unwrap();
+        let direct_elapsed = t1.elapsed();
+        assert!(pdf_direct.bytes.starts_with(b"%PDF-"));
+        assert!(direct_elapsed.as_secs_f64() < 2.0, "direct hostile Workbook took {:?}", direct_elapsed);
     }
 }

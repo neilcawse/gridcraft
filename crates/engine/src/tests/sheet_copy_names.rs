@@ -21,7 +21,7 @@ fn sheet_names(s: &Session) -> Vec<String> {
 fn formula(s: &Session, sheet: &str, a1: &str) -> String {
     let wb = wb(s);
     let si = wb.sheet_index(sheet).unwrap_or_else(|| panic!("no sheet {sheet}"));
-    wb.sheets[si].cell(CellRef::parse(a1).unwrap()).and_then(|c| c.formula.clone()).map(|f| f.text.clone()).unwrap_or_default()
+    wb.sheets[si].cell(CellRef::parse(a1).unwrap()).and_then(|c| c.formula.clone()).map(|f| f.text().into_owned()).unwrap_or_default()
 }
 
 /// Every defined name as (scope's sheet name or `None`, name, formula), sorted.

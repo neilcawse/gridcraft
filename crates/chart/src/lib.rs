@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 pub use axis::{Scale, format_number, nice_scale};
 pub use raster::rasterize;
 pub use render::{Swatch, legend_entries, render, supports_trendline};
-pub use resolve::{default_palette, has_volatile_series, resolve, series_color, series_name, series_plot_kind};
+pub use resolve::{default_palette, has_volatile_series, resolve, series_color, series_name};
 pub use sparkline::render_sparkline;
 
 /// Straight (non-premultiplied) RGBA colour.
@@ -119,6 +119,37 @@ impl Measure for ApproxMeasure {
     }
 }
 
+/// Resolved per-point style override (`<c:dPt><c:spPr>`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PointStyleData {
+    pub idx: usize,
+    pub fill: Option<Rgba>,
+    pub no_fill: bool,
+    pub stroke: Option<(Rgba, f32)>,
+    pub no_line: bool,
+}
+
+/// Resolved embedded chart-relative shape / callout (`<c:userShapes>`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UserShapeData {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub abs_width: Option<f32>,
+    pub abs_height: Option<f32>,
+    pub text: String,
+    pub fill: Option<Rgba>,
+    pub stroke: Option<(Rgba, f32)>,
+    pub text_color: Rgba,
+    pub font_size: f32,
+    pub bold: bool,
+    pub align: HAlign,
+    pub valign: VAlign,
+}
+
 /// Resolved data: series names, categories and values pulled from the workbook.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ChartData {
@@ -132,6 +163,15 @@ pub struct ChartData {
     /// Workbook-theme colours for the points of pie-like charts, repeating (point `j` uses entry `j % len`); empty uses the default theme.
     #[serde(default)]
     pub palette: Vec<Rgba>,
+    /// Explicit resolved chart-area background fill (`<c:chartSpace><c:spPr><a:solidFill>`).
+    #[serde(default)]
+    pub area_fill: Option<Rgba>,
+    /// Explicit resolved chart-area border (`<c:chartSpace><c:spPr><a:ln>`).
+    #[serde(default)]
+    pub area_stroke: Option<(Rgba, f32)>,
+    /// Resolved chart-relative shapes / callouts (`<c:userShapes>`).
+    #[serde(default)]
+    pub user_shapes: Vec<UserShapeData>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -143,7 +183,9 @@ pub struct SeriesData {
     /// Bubble sizes.
     pub sizes: Option<Vec<Option<f64>>>,
     pub color: Rgba,
-    /// Per-series kind (combo charts).
+    /// The kind this series is drawn as. `resolve` sets it from `Chart::series_kind`. `render`
+    /// reads it for every series of a vertical cartesian or scatter chart, so a hand-built
+    /// `ChartData` sets it too (`SeriesData::default()` gives `ColumnClustered`).
     pub kind: ChartKind,
     /// Plotted against the secondary (right) value axis.
     pub secondary: bool,
@@ -156,8 +198,27 @@ pub struct SeriesData {
     /// Number format typed for the data labels; `None` labels with `number_format`.
     #[serde(default)]
     pub label_number_format: Option<String>,
+    /// Resolved series outline (`<c:spPr><a:ln>`).
+    #[serde(default)]
+    pub line: Option<(Rgba, f32)>,
+    /// Explicit no outline (`<c:spPr><a:ln><a:noFill/></a:ln>`).
+    #[serde(default)]
+    pub no_line: bool,
+    /// Resolved per-point style overrides (`<c:dPt>`).
+    #[serde(default)]
+    pub points: Vec<PointStyleData>,
+    /// Structured data label settings (`<c:dLbls>` and per-point `<c:dLbl>`).
+    #[serde(default)]
+    pub data_labels: Option<gridcraft_model::DataLabels>,
 }
 
+impl SeriesData {
+    /// O(log N) lookup into `points`, which [`resolve`] and [`render::sanitize`] keep sorted and
+    /// deduplicated by `idx`.
+    pub(crate) fn point_style(&self, idx: usize) -> Option<&PointStyleData> {
+        self.points.binary_search_by_key(&idx, |p| p.idx).ok().and_then(|i| self.points.get(i))
+    }
+}
 /// A trendline to draw: the model settings with the line colour resolved against the theme.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TrendlineData {
@@ -179,6 +240,10 @@ impl Default for SeriesData {
             trendlines: vec![],
             number_format: "General".into(),
             label_number_format: None,
+            line: None,
+            no_line: false,
+            points: vec![],
+            data_labels: None,
         }
     }
 }

@@ -15,12 +15,20 @@ fn visit_matches(pairs: &[CriteriaPair<'_>], rows: usize, cols: usize, mut visit
     let mut anchor = None;
     let (mut rows, mut cols) = (rows, cols);
     for (i, (range, criterion)) in pairs.iter().enumerate() {
-        if !criterion.matches(&Value::Empty) {
-            rows = rows.min(range.rows);
-            cols = cols.min(range.cols);
+        if criterion.matches(&Value::Empty) {
+            continue;
         }
-        if let Some(pat) = criterion.exact_text()
-            && let Some(positions) = range.text_positions(pat)
+        rows = rows.min(range.rows);
+        cols = cols.min(range.cols);
+        let indexed = if let Some(pat) = criterion.exact_text() {
+            range.text_positions(pat)
+        } else if let Some(n) = criterion.exact_number() {
+            range.criteria_number_positions(n)
+        } else {
+            None
+        };
+        if range.cols != 0
+            && let Some(positions) = indexed
             && anchor.is_none_or(|(_, _, best): (usize, usize, &[u32])| positions.len() < best.len())
         {
             anchor = Some((i, range.cols, positions));
@@ -145,6 +153,12 @@ pub(super) fn countif(a: &[Arg], _c: &mut dyn Ctx) -> R<Value> {
     {
         return num_val(pos.len() as f64);
     }
+    if !c.matches(&Value::Empty)
+        && let Some(n) = c.exact_number()
+        && let Some(pos) = range.criteria_number_positions(n)
+    {
+        return num_val(pos.len() as f64);
+    }
     // A whole-column reference is read inside the used range; the cells past it are blank.
     let cut = range_arg.cut_blanks();
     let cut_matches = if cut > 0 && c.matches(&Value::Empty) { cut } else { 0 };
@@ -161,10 +175,18 @@ fn if_numbers(a: &[Arg]) -> R<Vec<f64>> {
     let c = Criterion::parse_arg(&crate::util::arg(a, 1)?.value.scalar())?;
     let sum_range = if has(a, 2) { Some(as_array(&crate::util::arg(a, 2)?.value)) } else { None };
     let mut out = Vec::new();
-    if range.cols != 0
-        && let Some(pat) = c.exact_text()
-        && let Some(positions) = range.text_positions(pat)
-    {
+    let indexed_positions = if range.cols != 0 {
+        if let Some(pat) = c.exact_text() {
+            range.text_positions(pat)
+        } else if let Some(n) = c.exact_number() {
+            range.criteria_number_positions(n)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if let Some(positions) = indexed_positions {
         for &pos in positions {
             let idx = pos as usize;
             let r = idx / range.cols;

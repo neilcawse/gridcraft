@@ -1,5 +1,5 @@
 use super::layout::{DENSE_BLOCK, SheetLayout};
-use super::objects::draw_cell_picture;
+use super::objects::{PicCache, draw_cell_picture};
 use super::text::{TextPlacement, draw_text};
 use super::{
     BorderLine, BorderStyle, Borders, CellRef, Color, Font, Page, PatternType, Point, RangeRef, Rgb, Sheet, Style, StyleId, Underline, Value,
@@ -24,13 +24,21 @@ pub(super) struct Look {
     fill: Option<Rgb>,
     pub(super) cf: Option<crate::cf::CfLook>,
 }
+/// Most conditional-format rules evaluated for any single drawn cell during PDF export: bounds
+/// hostile sheets stacking hundreds of overlapping rules on one cell while ensuring every cell
+/// on every page of a large multi-page PDF keeps all its normal conditional formats.
+const MAX_CF_RULES_PER_CELL: usize = 64;
 
 fn cell_look(wb: &Workbook, si: usize, sh: &Sheet, c: CellRef, cf: &mut crate::cf::CfCache) -> Look {
     let mut style = match sh.table_at(c) {
         Some(t) => crate::tables::table_cell_shown_style(wb, si, t, cf.table_edges(sh, t), c),
-        None => wb.styles.get(sh.style_id(c)).clone(),
+        None => match sh.pivot_at(c) {
+            Some(pt) => crate::pivot::pivot_cell_style(wb, sh, pt, c),
+            None => wb.styles.get(sh.style_id(c)).clone(),
+        },
     };
-    let cfl = cf.look(wb, si, c);
+    let mut cell_budget = MAX_CF_RULES_PER_CELL;
+    let cfl = cf.look_budgeted(wb, si, c, &mut cell_budget);
     if let Some(st) = cfl.as_ref().and_then(|l| l.style.as_ref()) {
         if st.align.reading_order.is_some() {
             style.align.reading_order = st.align.reading_order;
@@ -168,11 +176,14 @@ pub(super) struct Block<'a> {
     pub(super) wb: &'a Workbook,
     si: usize,
     pub(super) sh: &'a Sheet,
+    pub(super) lay: &'a SheetLayout,
     rows: (u32, u32),
     cols: (u32, u32),
     /// Page x of each column's left edge, plus the right edge of the last.
     pub(super) xs: Vec<f32>,
     pub(super) ys: Vec<f32>,
+    pub(super) kx: f32,
+    pub(super) ky: f32,
     pub(super) k: f32,
     pub(super) scale: f32,
     pub(super) mirror_axis: f32,
@@ -194,14 +205,14 @@ impl Block<'_> {
             return self.xs.get((col - self.cols.0) as usize).copied().unwrap_or(0.0);
         }
         let x0 = self.xs.first().copied().unwrap_or(0.0);
-        x0 + ((self.sh.col_left(col) - self.sh.col_left(self.cols.0)) as f32) * self.k
+        x0 + ((self.sh.col_left(col) - self.sh.col_left(self.cols.0)) as f32) * self.kx
     }
     fn y(&self, row: u32) -> f32 {
         if row >= self.rows.0 && row <= self.rows.1 + 1 {
             return self.ys.get((row - self.rows.0) as usize).copied().unwrap_or(0.0);
         }
         let y0 = self.ys.first().copied().unwrap_or(0.0);
-        y0 + ((self.sh.row_top(row) - self.sh.row_top(self.rows.0)) as f32) * self.k
+        y0 + ((self.lay.row_top(self.sh, row) - self.lay.row_top(self.sh, self.rows.0)) as f32) * self.ky
     }
     pub(super) fn rect(&self, r: RangeRef) -> (f32, f32, f32, f32) {
         let (x0, y0) = (self.x(r.start.col), self.y(r.start.row));
@@ -319,7 +330,7 @@ impl<'a> Covered<'a> {
 }
 
 /// Draws the cells of a block: fills, gridlines, data bars, borders and text.
-pub(super) fn draw_block(pg: &mut Page, b: &Block, gridlines: bool, cf: &mut crate::cf::CfCache) {
+pub(super) fn draw_block(pg: &mut Page, b: &Block, gridlines: bool, cf: &mut crate::cf::CfCache, pics: &mut PicCache) {
     let (bx, by) = (b.xs.first().copied().unwrap_or(0.0), b.ys.first().copied().unwrap_or(0.0));
     let (bw, bh) = (b.xs.last().copied().unwrap_or(bx) - bx, b.ys.last().copied().unwrap_or(by) - by);
     if bw <= 0.0 || bh <= 0.0 {
@@ -354,26 +365,28 @@ pub(super) fn draw_block(pg: &mut Page, b: &Block, gridlines: bool, cf: &mut cra
         }
     }
     // Cheap pre-filter: blank, unstyled cells outside tables and conditional formats draw nothing.
-    let skip = |c: &CellRef| {
-        sh.cond_formats.is_empty()
-            && sh.value_ref(*c).is_none_or(|v| v.is_empty())
-            && sh.style_id(*c) == StyleId::DEFAULT
-            && (sh.tables.is_empty() || sh.table_at(*c).is_none())
-    };
-    let looks: Vec<(CellRef, Look)> = cells
-        .iter()
-        .filter(|c| !skip(c))
-        .chain(merges.iter().map(|m| &m.start))
-        .map(|c| (*c, cell_look(b.wb, b.si, sh, *c, cf)))
-        .filter(|(c, l)| {
-            l.fill.is_some()
-                || l.cf.is_some()
-                || by_start.contains_key(c)
-                || !sh.value(*c).is_empty()
-                || l.style.borders != Borders::default()
-                || l.style.num_fmt.as_str() == "checkbox"
-        })
-        .collect();
+    let mut looks: Vec<(CellRef, Look)> = Vec::new();
+    for &c in cells.iter().chain(merges.iter().map(|m| &m.start)) {
+        let skip = !by_start.contains_key(&c)
+            && !cf.may_apply(b.wb, b.si, c)
+            && sh.value_ref(c).is_none_or(|v| v.is_empty())
+            && sh.style_id(c) == StyleId::DEFAULT
+            && (sh.tables.is_empty() || sh.table_at(c).is_none())
+            && (sh.pivots.is_empty() || sh.pivot_at(c).is_none());
+        if skip {
+            continue;
+        }
+        let l = cell_look(b.wb, b.si, sh, c, cf);
+        if l.fill.is_some()
+            || l.cf.is_some()
+            || by_start.contains_key(&c)
+            || !sh.value(c).is_empty()
+            || l.style.borders != Borders::default()
+            || l.style.num_fmt.as_str() == "checkbox"
+        {
+            looks.push((c, l));
+        }
+    }
     let rect_of = |c: CellRef| -> (f32, f32, f32, f32, bool) {
         match by_start.get(&c) {
             Some(m) => {
@@ -386,18 +399,62 @@ pub(super) fn draw_block(pg: &mut Page, b: &Block, gridlines: bool, cf: &mut cra
             }
         }
     };
-    // Fills (merged blocks hide the gridlines inside them).
+    // Fills (coalesce contiguous same-colour cells horizontally and vertically so solid banners
+    // emit a single rectangle with zero anti-aliasing seams, plus Excel's 0.06 pt bleed on each
+    // side so abutting differently-coloured fills never show subpixel white/gridline hairlines).
+    const FILL_BLEED: f32 = 0.06;
+    let mut fill_rects: Vec<(f32, f32, f32, f32, Rgb)> = Vec::new();
     for (c, l) in &looks {
         let (x, y, w, h, merged) = rect_of(*c);
         if w <= 0.0 || h <= 0.0 {
             continue;
         }
+        let rx = b.text_x(x, w);
         if let Some(f) = l.fill {
-            pg.fill_rect(b.text_x(x, w), y, w, h, f);
+            fill_rects.push((rx, y, rx + w, y + h, f));
         } else if merged && gridlines {
-            pg.fill_rect(b.text_x(x, w), y, w, h, [255, 255, 255]);
+            fill_rects.push((rx, y, rx + w, y + h, [255, 255, 255]));
         }
-        if merged && gridlines {
+    }
+    // 1. Merge horizontally adjacent rects of the same row span and colour.
+    fill_rects.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.3.total_cmp(&b.3)).then_with(|| a.4.cmp(&b.4)).then_with(|| a.0.total_cmp(&b.0)));
+    let mut h_merged: Vec<(f32, f32, f32, f32, Rgb)> = Vec::with_capacity(fill_rects.len());
+    for rect in fill_rects {
+        if let Some(prev) = h_merged.last_mut()
+            && prev.4 == rect.4
+            && (prev.1 - rect.1).abs() <= 0.01
+            && (prev.3 - rect.3).abs() <= 0.01
+            && rect.0 <= prev.2 + 0.02
+        {
+            prev.2 = prev.2.max(rect.2);
+        } else {
+            h_merged.push(rect);
+        }
+    }
+    // 2. Merge vertically adjacent strips of the same column span and colour.
+    h_merged.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.2.total_cmp(&b.2)).then_with(|| a.4.cmp(&b.4)).then_with(|| a.1.total_cmp(&b.1)));
+    let mut v_merged: Vec<(f32, f32, f32, f32, Rgb)> = Vec::with_capacity(h_merged.len());
+    for rect in h_merged {
+        if let Some(prev) = v_merged.last_mut()
+            && prev.4 == rect.4
+            && (prev.0 - rect.0).abs() <= 0.01
+            && (prev.2 - rect.2).abs() <= 0.01
+            && rect.1 <= prev.3 + 0.02
+        {
+            prev.3 = prev.3.max(rect.3);
+        } else {
+            v_merged.push(rect);
+        }
+    }
+    for (x0, y0, x1, y1, f) in v_merged {
+        pg.fill_rect(x0 - FILL_BLEED, y0 - FILL_BLEED, (x1 - x0) + 2.0 * FILL_BLEED, (y1 - y0) + 2.0 * FILL_BLEED, f);
+    }
+    for (c, l) in &looks {
+        let (x, y, w, h, merged) = rect_of(*c);
+        if w <= 0.0 || h <= 0.0 {
+            continue;
+        }
+        if merged && gridlines && l.fill.is_none() {
             pg.rect_stroke(b.text_x(x, w), y, w, h, (0.35 * b.scale).clamp(0.1, 0.5), [0xB0, 0xB0, 0xB0]);
         }
         if let Some((frac, rgb, _)) = l.cf.as_ref().and_then(|cf| cf.bar) {
@@ -434,7 +491,7 @@ pub(super) fn draw_block(pg: &mut Page, b: &Block, gridlines: bool, cf: &mut cra
             continue;
         }
         if let Some(picture) = sh.cell_pictures.get(c) {
-            draw_cell_picture(pg, &picture.data, (b.text_x(x, w), y, w, h), b.k);
+            draw_cell_picture(pg, pics, (b.si, *c), &picture.data, (b.text_x(x, w), y, w, h), b.k);
         } else if let Some(on) = checkbox_state(l, &sh.value(*c)) {
             draw_checkbox(pg, (b.text_x(x, w), y, w, h), b.k, on);
         } else {
@@ -482,14 +539,16 @@ pub(super) struct PendingPdfLink {
     pub(super) target: String,
 }
 
-pub(super) struct PrintedBlock {
+pub(super) struct PrintedBlock<'a> {
     pub(super) page: usize,
     pub(super) sheet: usize,
+    pub(super) lay: &'a SheetLayout,
     pub(super) rows: (u32, u32),
     pub(super) cols: (u32, u32),
     pub(super) x: f32,
     pub(super) y: f32,
-    pub(super) k: f32,
+    pub(super) kx: f32,
+    pub(super) ky: f32,
     /// The page x that right-to-left sheets are mirrored about; `None` for left-to-right sheets.
     pub(super) mirror_axis: Option<f32>,
 }
@@ -522,7 +581,7 @@ pub(super) fn draw_block_links(pg: &mut Page, b: &Block, page: usize, pending: &
     }
 }
 
-pub(super) fn printed_target(wb: &Workbook, blocks: &[PrintedBlock], source_sheet: usize, target: &str) -> Option<(usize, f32, f32)> {
+pub(super) fn printed_target(wb: &Workbook, blocks: &[PrintedBlock<'_>], source_sheet: usize, target: &str) -> Option<(usize, f32, f32)> {
     // `classify` trimmed the original target before stripping its marker. Keep any space that
     // followed the marker here, so only an immediately leading `=` is stripped as before.
     let target = target.trim_start_matches('=');
@@ -531,12 +590,12 @@ pub(super) fn printed_target(wb: &Workbook, blocks: &[PrintedBlock], source_shee
     let cell = RangeRef::parse(&range.replace('$', ""))?.start;
     let sh = wb.sheet(sheet)?;
     let block = blocks.iter().find(|b| b.sheet == sheet && (b.rows.0..=b.rows.1).contains(&cell.row) && (b.cols.0..=b.cols.1).contains(&cell.col))?;
-    let x = block.x + (sh.col_left(cell.col) - sh.col_left(block.cols.0)) as f32 * block.k;
+    let x = block.x + (sh.col_left(cell.col) - sh.col_left(block.cols.0)) as f32 * block.kx;
     let x = match block.mirror_axis {
-        Some(axis) => axis - x - (sh.col_left(cell.col.saturating_add(1)) - sh.col_left(cell.col)) as f32 * block.k,
+        Some(axis) => axis - x - (sh.col_left(cell.col.saturating_add(1)) - sh.col_left(cell.col)) as f32 * block.kx,
         None => x,
     };
-    let y = block.y + (sh.row_top(cell.row) - sh.row_top(block.rows.0)) as f32 * block.k;
+    let y = block.y + (block.lay.row_top(sh, cell.row) - block.lay.row_top(sh, block.rows.0)) as f32 * block.ky;
     Some((block.page, x, y))
 }
 
@@ -583,25 +642,27 @@ pub(super) fn make_block<'a>(
     rows: (u32, u32),
     cols: (u32, u32),
     origin: (f32, f32),
-    lay: &SheetLayout,
+    lay: &'a SheetLayout,
 ) -> Block<'a> {
     let (x, y) = origin;
+    let kx = lay.kx();
+    let ky = lay.ky();
     let k = lay.k();
     let mut xs = Vec::with_capacity((cols.1 - cols.0 + 2) as usize);
     let mut acc = x;
     xs.push(acc);
     for c in cols.0..=cols.1 {
-        acc += sh.col_width(c) * k;
+        acc += sh.col_width(c) * kx;
         xs.push(acc);
     }
     let mut ys = Vec::with_capacity((rows.1 - rows.0 + 2) as usize);
     let mut acc = y;
     ys.push(acc);
     for r in rows.0..=rows.1 {
-        acc += sh.row_height(r) * k;
+        acc += lay.row_height(sh, r) * ky;
         ys.push(acc);
     }
-    Block { wb, si, sh, rows, cols, xs, ys, k, scale: lay.scale, mirror_axis: lay.page_w }
+    Block { wb, si, sh, lay, rows, cols, xs, ys, kx, ky, k, scale: lay.scale, mirror_axis: lay.page_w }
 }
 
 #[cfg(test)]

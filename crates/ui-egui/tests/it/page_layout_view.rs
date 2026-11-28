@@ -295,6 +295,39 @@ fn header_and_footer_margins_are_dragged_on_the_vertical_ruler() {
     assert!((margins(&h)[5] - (start[5] + 0.2)).abs() < 0.03, "{:?}", margins(&h));
 }
 
+/// The vertical ruler measures the page in its own vertical units (rows convert to points at
+/// another rate than columns): at 50% zoom, the half-inch tick 4.5 in below the top margin sits
+/// where 4.5 in of the page's height lands on screen.
+#[test]
+fn vertical_ruler_ticks_follow_the_page_height() {
+    let mut h = fixture();
+    h.state_mut().run("view.zoom", json!({"percent": 50})).unwrap();
+    h.run_steps(4);
+    let g = geo(&h);
+    let pg = g.paper.clone().unwrap();
+    let (_, py, _, _) = pg.page_rect(0, 0);
+    let units_per_pt = pg.page_h / f64::from(pg.paper_pt.1);
+    let want = screen(&g, 0.0, py + pg.margins[2] + 4.5 * 72.0 * units_per_pt).y;
+    let left = h.state().grid.rect.unwrap().left();
+    let ruler = left..=left + gridcraft_ui_egui::paper_view::RULER;
+    // Half-inch ticks are the 4-point marks on the vertical ruler.
+    let ticks: Vec<f32> = h
+        .output()
+        .shapes
+        .iter()
+        .filter_map(|c| match &c.shape {
+            egui::Shape::LineSegment { points: [a, b], .. }
+                if a.y == b.y && ruler.contains(&a.x) && ruler.contains(&b.x) && ((b.x - a.x).abs() - 4.0).abs() < 0.01 =>
+            {
+                Some(a.y)
+            }
+            _ => None,
+        })
+        .collect();
+    let nearest = ticks.iter().copied().min_by(|a, b| (a - want).abs().total_cmp(&(b - want).abs())).unwrap();
+    assert!((nearest - want).abs() < 0.5, "tick at {nearest}, 4.5 in at {want}: {ticks:?}");
+}
+
 #[test]
 fn right_to_left_sheets_mirror_the_horizontal_ruler_drag() {
     let mut h = fixture_with(true, None);

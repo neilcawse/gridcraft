@@ -1,9 +1,10 @@
-//! PivotTables GridCraft reads but can't rebuild from the model: those whose cache's source is in
-//! another workbook (`worksheetSource r:id`) or a defined name, which may be a formula
-//! (`OFFSET(…)`) or missing. The PivotTable part, its cache definition and records and the parts
-//! behind them (the path to the other workbook) go back as the file had them, while the PivotTable
-//! is as it was read and its source still stands for the definition it was bound to (the writer
-//! checks that first, [`gridcraft_model::Workbook::pivot_source`]).
+//! PivotTables GridCraft reads but can't rebuild from the model: those whose cache's source is a
+//! defined name, which may be a formula (`OFFSET(…)`) or missing. (A source in another workbook,
+//! a connection or the Data Model is kept unmodelled instead, [`crate::pivot::ExternalPivot`].)
+//! The PivotTable part, its cache definition and records go back as the file had them, while the
+//! PivotTable is as it was read but for its name and place and its source still stands for the
+//! definition it was bound to (the writer checks that first,
+//! [`gridcraft_model::Workbook::pivot_source`]).
 //!
 //! What the parts refer to outside themselves is given anew: the cache gets the id the writer
 //! gives it (the table's `cacheId`, the cache's `x14:pivotCacheId`), and the number formats
@@ -55,15 +56,7 @@ impl KeptReader {
                     continue;
                 }
             };
-            p.pivots.push(PreservedPivot {
-                table: table.clone(),
-                part,
-                cache,
-                parts: q.parts,
-                num_fmts: styles.0,
-                dxfs: styles.1,
-                external: f.external,
-            });
+            p.pivots.push(PreservedPivot { table: table.clone(), part, cache, parts: q.parts, num_fmts: styles.0, dxfs: styles.1 });
         }
     }
 }
@@ -113,13 +106,19 @@ fn style_refs(table: &[u8], cache: &[u8], cx: &Ctx<'_>) -> Result<StyleRefs, Str
 }
 
 /// The kept parts of the PivotTable `pt` of `sheet`, while it is as it was read and stands for
-/// what it stood for as read. Its source text may have changed since (a sheet or the name it
-/// names was renamed) while it is still bound to the same definition; the writer then writes the
-/// kept cache's source anew.
+/// what it stood for as read. Its name and place may have changed since (renamed, or moved by
+/// inserted or deleted cells), as Excel keeps a PivotTable through those; the writer then writes
+/// them into the kept part. Its source text may have changed too (a sheet or the name it names
+/// was renamed) while it is still bound to the same definition; the writer then writes the kept
+/// cache's source anew. Any other change leaves it unkept.
 pub fn kept_pivot<'a>(sheet: &'a Sheet, pt: &PivotTable) -> Option<&'a PreservedPivot> {
     let def = |pt: &PivotTable| pt.binding.0.as_ref().filter(|b| b.text == pt.source).map(|b| b.def.get());
     sheet.preserved.as_deref()?.pivots.iter().find(|k| {
-        def(&k.table) == def(pt) && (k.table == *pt || (def(pt).is_some() && PivotTable { source: pt.source.clone(), ..k.table.clone() } == *pt))
+        if def(&k.table) != def(pt) {
+            return false;
+        }
+        let moved = PivotTable { name: pt.name.clone(), anchor: pt.anchor, last_range: pt.last_range, ..k.table.clone() };
+        moved == *pt || (def(pt).is_some() && PivotTable { source: pt.source.clone(), ..moved } == *pt)
     })
 }
 
@@ -130,12 +129,19 @@ pub struct KeptPivotOut {
     cache_parts: Option<Vec<PreservedPart>>,
 }
 
-/// Prepares the kept PivotTable `pp` with cache id `cache_id`, its cache's parts too when
-/// `with_cache`: its number and differential formats are added to the styles being written and
-/// renumbered, and the cache's `worksheetSource` gets the attributes `source` when given (the
-/// writer's, so that it reads back to what the PivotTable stands for). An error says why it
-/// can't be kept (its part is damaged).
-pub fn kept_pivot_out(pp: &PreservedPivot, cache_id: u32, with_cache: bool, source: Option<&str>, out: &mut Out) -> Result<KeptPivotOut, String> {
+/// Prepares the kept PivotTable `pp`, as `pt` is now, with cache id `cache_id`, its cache's parts
+/// too when `with_cache`: its number and differential formats are added to the styles being
+/// written and renumbered, its name and location are `pt`'s, and the cache's `worksheetSource`
+/// gets the attributes `source` when given (the writer's, so that it reads back to what the
+/// PivotTable stands for). An error says why it can't be kept (its part is damaged).
+pub fn kept_pivot_out(
+    pp: &PreservedPivot,
+    pt: &PivotTable,
+    cache_id: u32,
+    with_cache: bool,
+    source: Option<&str>,
+    out: &mut Out,
+) -> Result<KeptPivotOut, String> {
     let fmts: HashMap<u32, u32> = pp.num_fmts.iter().map(|(id, code)| (*id, out.num_fmts.id(code))).collect();
     let dxfs: HashMap<u32, u32> = pp.dxfs.iter().map(|(id, style)| (*id, crate::styles::dxf_id(&mut out.dxfs, style))).collect();
     let remap = |attr: &str, value: &str| -> Option<String> {
@@ -147,11 +153,14 @@ pub fn kept_pivot_out(pp: &PreservedPivot, cache_id: u32, with_cache: bool, sour
         }
     };
     let damaged = || "its part is damaged".to_string();
-    let table_xml = rewrite_attrs(&pp.part.data, &mut |root, attr, value| match attr {
+    let mut table_xml = rewrite_attrs(&pp.part.data, &mut |root, attr, value| match attr {
         "cacheId" if root => Some(cache_id.to_string()),
         _ => remap(attr, value),
     })
     .ok_or_else(damaged)?;
+    if (&pt.name, pt.anchor, pt.last_range) != (&pp.table.name, pp.table.anchor, pp.table.last_range) {
+        table_xml = crate::pivot::rewrite_preserved_pivot_table(&table_xml, pt, cache_id);
+    }
     let cache_parts = if with_cache {
         let mut parts = pp.parts.clone();
         let cache = parts.iter_mut().find(|p| normalize(&p.name) == pp.cache).ok_or_else(damaged)?;

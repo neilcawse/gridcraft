@@ -126,10 +126,12 @@ impl Sst {
 /// Package being assembled.
 pub struct Out {
     parts: Vec<(String, Vec<u8>)>,
+    /// Large worksheet parts compressed immediately as they are produced so only one sheet's
+    /// uncompressed XML lives in RAM at a time (critical for 32-bit WASM heap limits).
+    staged_sheets: Option<zip::ZipWriter<std::io::Cursor<Vec<u8>>>>,
     overrides: Vec<(String, String)>,
     defaults: BTreeMap<String, String>,
     pub dxfs: Vec<Style>,
-    /// Number format ids assigned so far (inline `x14:dxf` formats); `styles.xml` adds the rest.
     pub num_fmts: crate::styles::NumFmts,
     /// Excel 2010 conditional format rules written so far (each needs a unique id).
     pub x14_cf_rules: u32,
@@ -189,6 +191,23 @@ impl Out {
         }
         self.parts.push((name.to_string(), data));
     }
+    /// Stores a worksheet part, immediately deflating large sheets (`>= 256 KiB`) into the staging
+    /// zip so uncompressed XML from earlier sheets is freed before the next sheet is generated.
+    pub fn worksheet_part(&mut self, name: &str, content_type: &str, data: Vec<u8>) {
+        const STAGE_THRESHOLD: usize = 256 * 1024;
+        if data.len() < STAGE_THRESHOLD {
+            self.part(name, Some(content_type), data);
+            return;
+        }
+        self.overrides.push((format!("/{name}"), content_type.to_string()));
+        let writer = self.staged_sheets.get_or_insert_with(|| zip::ZipWriter::new(std::io::Cursor::new(Vec::new())));
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .last_modified_time(zip::DateTime::default());
+        if writer.start_file(name, opts).is_err() || std::io::Write::write_all(writer, &data).is_err() {
+            self.parts.push((name.to_string(), data));
+        }
+    }
     /// The `xl/media` file name (`imageN.ext`) holding `data`. A picture used on several sheets,
     /// or twice on one, is written once and every drawing points to that part, as in Excel.
     pub fn image_part(&mut self, ext: &str, data: &[u8]) -> String {
@@ -203,8 +222,17 @@ impl Out {
         self.media.insert(key, file.clone());
         file
     }
+    /// Replaces the bytes of a part already added.
+    pub fn replace(&mut self, name: &str, data: Vec<u8>) {
+        if let Some(p) = self.parts.iter_mut().find(|(n, _)| n == name) {
+            p.1 = data;
+        }
+    }
     pub fn default_type(&mut self, ext: &str, ct: &str) {
         self.defaults.entry(ext.to_string()).or_insert_with(|| ct.to_string());
+    }
+    pub fn part_mut(&mut self, name: &str) -> Option<&mut Vec<u8>> {
+        self.parts.iter_mut().find(|(n, _)| n == name).map(|(_, data)| data)
     }
 }
 
@@ -261,6 +289,29 @@ fn check_sheet_names(wb: &Workbook) -> Result<(), IoError> {
 
 /// Workbook name written in a PivotChart's link when the file name isn't known.
 const DEFAULT_BOOK_NAME: &str = "Workbook.xlsx";
+
+fn append_file_sharing(w: &mut String, wb: &Workbook) {
+    let Some(r) = &wb.write_reservation else { return };
+    w.push_str("<fileSharing");
+    if r.read_only_recommended {
+        w.push_str(" readOnlyRecommended=\"1\"");
+    }
+    // Office needs a userName beside a legacy reservationPassword, so a nameless one gets a placeholder
+    // rather than losing the password.
+    let legacy = matches!(r.password, Some(gridcraft_model::PasswordHash::Legacy(_)));
+    let name = if r.user_name.is_empty() && legacy { "GridCraft" } else { r.user_name.as_str() };
+    if !name.is_empty() {
+        let _ = write!(w, " userName=\"{}\"", esc_attr(name));
+    }
+    match &r.password {
+        Some(gridcraft_model::PasswordHash::Legacy(h)) => {
+            let _ = write!(w, " reservationPassword=\"{h:04X}\"");
+        }
+        Some(h) => w.push_str(&crate::sheet_write::password_attrs(h, "")),
+        None => {}
+    }
+    w.push_str("/>");
+}
 
 pub fn write_xlsx(wb: &Workbook, kind: XlsxKind, functions: FunctionInfo) -> Result<Vec<u8>, IoError> {
     write_xlsx_named_with(wb, kind, None, functions).map(|(bytes, _)| bytes)
@@ -379,6 +430,7 @@ fn write_package(
     }
     let mut out = Out {
         parts: vec![],
+        staged_sheets: None,
         overrides: vec![],
         defaults: BTreeMap::new(),
         dxfs: vec![],
@@ -424,50 +476,22 @@ fn write_package(
     let (sheets_xml, kept, pivots, sheet_ids) =
         write_sheets(wb, (&table_names, catalog.as_ref()), &mut out, active, &mut wb_rels, kind.is_macro_enabled());
     let names = write_defined_names(wb, &defined_names, &kept, &out.chart_names, &out.slicers);
-
-    let mut w = format!("{XML_DECL}<workbook xmlns=\"{NS_MAIN}\" xmlns:r=\"{NS_REL}\">");
-    // A workbook read from a file keeps its <fileVersion> as it was: Excel trusts the saved values
-    // only when appName is "xl" (#799). One without names GridCraft (#1699), and Excel recalculates it.
-    let file_version = crate::passthrough::workbook_elements(wb, "fileVersion");
-    w.push_str(if file_version.is_empty() { "<fileVersion appName=\"gridcraft\"/>" } else { &file_version });
-    w.push_str("<workbookPr");
-    match wb.show_objects {
-        ShowObjects::All => {}
-        ShowObjects::Placeholders => w.push_str(" showObjects=\"placeholders\""),
-        ShowObjects::None => w.push_str(" showObjects=\"none\""),
-    }
-    if wb.date_system == gridcraft_core::DateSystem::D1904 {
-        w.push_str(" date1904=\"1\"");
-    }
-    if wb.remove_personal_info {
-        w.push_str(" filterPrivacy=\"1\"");
-    }
-    w.push_str("/>");
-    if wb.protected_structure {
-        let pw = wb.structure_password.as_ref().map(|h| crate::sheet_write::password_attrs(h, "workbook")).unwrap_or_default();
-        let _ = write!(w, "<workbookProtection{pw} lockStructure=\"1\"/>");
-    }
-    let _ = write!(w, "<bookViews><workbookView activeTab=\"{}\"", kept.file_index(active));
-    w.push_str(&workbook_view_attrs(wb));
-    let _ = write!(w, "/></bookViews><sheets>{sheets_xml}</sheets>");
-    w.push_str(&kept.elements);
-    if !names.is_empty() {
-        let _ = write!(w, "<definedNames>{names}</definedNames>");
-    }
-    w.push_str(&calc_pr(&wb.calc, out.needs_calc));
-    // The kept custom views (View › Custom Views) follow the calculation properties.
-    w.push_str(&crate::passthrough::workbook_elements(wb, crate::passthrough::SLOT_CUSTOM_WORKBOOK_VIEWS));
-    w.push_str(&pivots.workbook_xml(&mut wb_rels));
+    let pivots_xml = pivots.workbook_xml(&mut wb_rels);
     let slicer_ext = std::mem::take(&mut out.slicers).finish(wb, &sheet_ids, &pivots, &mut out, &mut wb_rels);
-    let exts = crate::passthrough::workbook_elements(wb, "ext");
-    if !slicer_ext.is_empty() || !exts.is_empty() {
-        let _ = write!(w, "<extLst>{slicer_ext}{exts}</extLst>");
-    }
-    w.push_str("</workbook>");
+
+    let w = write_workbook_xml(WorkbookHeader { wb, active }, &sheets_xml, &names, &kept, &pivots_xml, &slicer_ext, out.needs_calc);
 
     // Workbook-level parts.
-    let (styles, fmt_ids) = crate::styles::write_styles(wb, &out.dxfs, &pivots.number_formats(wb), std::mem::take(&mut out.num_fmts));
-    pivots.finish(wb, &mut out, &|code: &str| crate::tables::builtin_id(code).or_else(|| fmt_ids.get(code).copied()));
+    let mut extra_fmts = pivots.number_formats(wb);
+    for code in out.kept.num_fmt_codes() {
+        if !extra_fmts.contains(&code) {
+            extra_fmts.push(code);
+        }
+    }
+    let (styles, fmt_ids) = crate::styles::write_styles(wb, &out.dxfs, &extra_fmts, std::mem::take(&mut out.num_fmts));
+    let fmt_id = |code: &str| crate::tables::builtin_id(code).or_else(|| fmt_ids.get(code).copied());
+    pivots.finish(wb, &mut out, &fmt_id);
+    crate::passthrough::finish_style_ids(&mut out, &fmt_id);
     out.part("xl/styles.xml", Some("application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"), styles.into_bytes());
     wb_rels.add("styles", "styles.xml");
     if !out.python_scripts.is_empty() {
@@ -547,24 +571,70 @@ fn write_package(
         let _ = write!(ct, "<Override PartName=\"{}\" ContentType=\"{}\"/>", esc_attr(part), esc_attr(t));
     }
     ct.push_str("</Types>");
-    let mut zip = ZipOut::new();
-    zip.add("[Content_Types].xml", ct.as_bytes())?;
-    // Excel's order: rels, workbook rels, workbook, the rest, document properties last. libmagic (PHP
-    // `finfo`, `file`) recognises an OOXML package only when an `xl/` entry name appears within the
-    // first few KB, so no user-sized part (document properties, a long description) may precede it.
-    let rank = |n: &str| match n {
+    let warnings = std::mem::take(&mut out.warnings);
+    finish_zip_parts(ct.as_bytes(), std::mem::take(&mut out.parts), out.staged_sheets.take())
+        .map(|bytes| Some((bytes, crate::WriteReport { warnings })))
+}
+
+fn part_rank(name: &str) -> u8 {
+    match name {
         "_rels/.rels" => 0,
         "xl/_rels/workbook.xml.rels" => 1,
         "xl/workbook.xml" => 2,
         n if n.starts_with("docProps/") => 4,
         _ => 3,
-    };
-    let mut parts = std::mem::take(&mut out.parts);
-    parts.sort_by_key(|(n, _)| rank(n));
+    }
+}
+
+fn copy_staged_entries(
+    staged_archive: &mut zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
+    zw: &mut zip::ZipWriter<std::io::Cursor<Vec<u8>>>,
+) -> Result<(), IoError> {
+    for i in 0..staged_archive.len() {
+        let entry = staged_archive.by_index_raw(i).map_err(|e| IoError::Zip(e.to_string()))?;
+        zw.raw_copy_file(entry).map_err(|e| IoError::Zip(e.to_string()))?;
+    }
+    Ok(())
+}
+
+fn finish_zip_parts(
+    content_types: &[u8],
+    mut parts: Vec<(String, Vec<u8>)>,
+    staged: Option<zip::ZipWriter<std::io::Cursor<Vec<u8>>>>,
+) -> Result<Vec<u8>, IoError> {
+    parts.sort_by_key(|(n, _)| part_rank(n));
+    if let Some(staged) = staged {
+        let staged_buf = staged.finish().map_err(|e| IoError::Zip(e.to_string()))?.into_inner();
+        let mut staged_archive = zip::ZipArchive::new(std::io::Cursor::new(staged_buf)).map_err(|e| IoError::Zip(e.to_string()))?;
+        let mut zw = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .last_modified_time(zip::DateTime::default());
+        let write_entry = |zw: &mut zip::ZipWriter<std::io::Cursor<Vec<u8>>>, name: &str, data: &[u8]| -> Result<(), IoError> {
+            zw.start_file(name, opts).map_err(|e| IoError::Zip(e.to_string()))?;
+            std::io::Write::write_all(zw, data).map_err(|e| IoError::Zip(e.to_string()))?;
+            Ok(())
+        };
+        write_entry(&mut zw, "[Content_Types].xml", content_types)?;
+        let mut staged_copied = false;
+        for (name, data) in parts {
+            if !staged_copied && part_rank(&name) >= 3 {
+                copy_staged_entries(&mut staged_archive, &mut zw)?;
+                staged_copied = true;
+            }
+            write_entry(&mut zw, &name, &data)?;
+        }
+        if !staged_copied {
+            copy_staged_entries(&mut staged_archive, &mut zw)?;
+        }
+        return Ok(zw.finish().map_err(|e| IoError::Zip(e.to_string()))?.into_inner());
+    }
+    let mut zip = ZipOut::new();
+    zip.add("[Content_Types].xml", content_types)?;
     for (name, data) in parts {
         zip.add(&name, &data)?;
     }
-    zip.finish().map(|bytes| Some((bytes, crate::WriteReport { warnings: std::mem::take(&mut out.warnings) })))
+    zip.finish()
 }
 
 /// Writes the workbook's cell and value metadata: GridCraft's own for its cell pictures, the kept
@@ -590,6 +660,63 @@ fn write_cell_metadata(wb: &Workbook, out: &mut Out, wb_rels: &mut Rels) -> Resu
     Ok(true)
 }
 
+struct WorkbookHeader<'a> {
+    wb: &'a Workbook,
+    active: usize,
+}
+
+fn write_workbook_xml(
+    header: WorkbookHeader<'_>,
+    sheets_xml: &str,
+    names: &str,
+    kept: &crate::passthrough::WorkbookKept,
+    pivots_xml: &str,
+    slicer_ext: &str,
+    needs_calc: bool,
+) -> String {
+    let WorkbookHeader { wb, active } = header;
+    let mut w = format!("{XML_DECL}<workbook xmlns=\"{NS_MAIN}\" xmlns:r=\"{NS_REL}\">");
+    // A workbook read from a file keeps its <fileVersion> as it was: Excel trusts the saved values
+    // only when appName is "xl" (#799). One without names GridCraft (#1699), and Excel recalculates it.
+    let file_version = crate::passthrough::workbook_elements(wb, "fileVersion");
+    w.push_str(if file_version.is_empty() { "<fileVersion appName=\"gridcraft\"/>" } else { &file_version });
+    append_file_sharing(&mut w, wb);
+    w.push_str("<workbookPr");
+    match wb.show_objects {
+        ShowObjects::All => {}
+        ShowObjects::Placeholders => w.push_str(" showObjects=\"placeholders\""),
+        ShowObjects::None => w.push_str(" showObjects=\"none\""),
+    }
+    if wb.date_system == gridcraft_core::DateSystem::D1904 {
+        w.push_str(" date1904=\"1\"");
+    }
+    if wb.remove_personal_info {
+        w.push_str(" filterPrivacy=\"1\"");
+    }
+    w.push_str("/>");
+    if wb.protected_structure {
+        let pw = wb.structure_password.as_ref().map(|h| crate::sheet_write::password_attrs(h, "workbook")).unwrap_or_default();
+        let _ = write!(w, "<workbookProtection{pw} lockStructure=\"1\"/>");
+    }
+    let _ = write!(w, "<bookViews><workbookView activeTab=\"{}\"", kept.file_index(active));
+    w.push_str(&workbook_view_attrs(wb));
+    let _ = write!(w, "/></bookViews><sheets>{sheets_xml}</sheets>");
+    w.push_str(&kept.elements);
+    if !names.is_empty() {
+        let _ = write!(w, "<definedNames>{names}</definedNames>");
+    }
+    w.push_str(&calc_pr(&wb.calc, needs_calc));
+    // The kept custom views (View › Custom Views) follow the calculation properties.
+    w.push_str(&crate::passthrough::workbook_elements(wb, crate::passthrough::SLOT_CUSTOM_WORKBOOK_VIEWS));
+    w.push_str(pivots_xml);
+    let exts = crate::passthrough::workbook_elements(wb, "ext");
+    if !slicer_ext.is_empty() || !exts.is_empty() {
+        let _ = write!(w, "<extLst>{slicer_ext}{exts}</extLst>");
+    }
+    w.push_str("</workbook>");
+    w
+}
+
 fn write_sheets(
     wb: &Workbook,
     (table_names, catalog): (&[Vec<Option<String>>], Option<&Workbook>),
@@ -601,7 +728,7 @@ fn write_sheets(
     // Kept content first: the chart, dialog and macro sheets among the worksheets need their
     // relationship ids. Macro sheets only go into a macro-enabled package, like the VBA project.
     let kept = crate::passthrough::write_workbook(wb, wb_rels, out, macros);
-    let mut pivots = crate::pivot::PivotWriter::default();
+    let mut pivots = crate::pivot::PivotWriter::new(kept.pivot_cache_ids(), kept.pivot_cache_entries());
     let mut sheets_xml = String::new();
     let mut sheet_ids = Vec::with_capacity(wb.sheets.len());
     let any_visible = wb.sheets.iter().any(|s| s.visibility == Visibility::Visible);
@@ -613,7 +740,7 @@ fn write_sheets(
             pivots.add_sheet(wb, catalog, i, out, &mut rels);
         }
         let name = format!("xl/worksheets/sheet{}.xml", i + 1);
-        out.part(&name, Some(CT_WORKSHEET), xml.into_bytes());
+        out.worksheet_part(&name, CT_WORKSHEET, xml.into_bytes());
         if !rels.is_empty() {
             out.part(&format!("xl/worksheets/_rels/sheet{}.xml.rels", i + 1), None, rels.xml().into_bytes());
         }

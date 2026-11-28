@@ -1,9 +1,9 @@
-use super::calc::formula_text;
 use super::package::validate_package;
 use super::rels::{lost_relationships, relationship_tree};
 use super::{
     BTreeMap, BTreeSet, Category, Cell, CellError, CellRef, Diffs, HashMap, Options, RoundTrip, Sheet, Value, Workbook, number_text, quote_sheet,
 };
+use std::sync::Arc;
 
 // ---------------------------------------------------------------- round trip
 
@@ -80,7 +80,7 @@ fn validate_round_trip_package(source: &[u8], bytes: &[u8], opts: &Options) -> D
 fn spreadsheetml_package(bytes: &[u8]) -> bool {
     let Some(mut zip) = super::package::zip_package(bytes) else { return false };
     let names = super::package::zip_names(&mut zip);
-    super::package::workbook_entry(&mut zip, &names).is_some_and(|w| names.contains(&w) && !w.to_ascii_lowercase().ends_with(".bin"))
+    super::package::workbook_entry(&mut zip, &names).is_some_and(|(_, name)| !name.to_ascii_lowercase().ends_with(".bin"))
 }
 
 pub(super) fn value_show(v: &Value) -> String {
@@ -95,7 +95,8 @@ pub(super) fn value_show(v: &Value) -> String {
 }
 
 fn opt_formula(c: Option<&Cell>) -> String {
-    c.filter(|c| c.formula.is_some()).map(formula_text).unwrap_or_default()
+    c.and_then(|cell| cell.formula.as_deref())
+        .map_or_else(String::new, |f| if f.array.is_some() { format!("{{={}}}", f.text()) } else { format!("={}", f.text()) })
 }
 
 /// Per-sheet comparison of two lists, reporting what one side has and the other lacks.
@@ -114,6 +115,13 @@ fn cond_format_list(s: &Sheet) -> Vec<String> {
     let mut cfs: Vec<_> = s.cond_formats.iter().collect();
     cfs.sort_by_key(|c| c.priority);
     cfs.iter().map(|c| format!("{:?} {:?} stopIfTrue={}", c.ranges, c.rule, c.stop_if_true)).collect()
+}
+
+/// The sheet's PivotTables: those modelled, and those kept unchanged for saving (their source is
+/// in another workbook, a data connection or the Data Model).
+fn pivot_count(s: &Sheet) -> usize {
+    let kept = s.preserved.as_deref().map_or(0, |p| p.rels.iter().filter(|r| !r.external && r.rel_type.ends_with("/pivotTable")).count());
+    s.pivots.len() + kept
 }
 
 fn diff_count(d: &mut Diffs, sheet: &str, a: usize, b: usize) {
@@ -181,7 +189,7 @@ pub fn diff_workbooks(a: &Workbook, b: &Workbook, opts: &Options) -> Vec<Categor
 
 struct SheetSnap {
     raw_name: String,
-    cells: Vec<(CellRef, Value, gridcraft_engine::model::StyleId, Option<Box<str>>)>,
+    cells: Vec<(CellRef, Value, gridcraft_engine::model::StyleId, Option<std::sync::Arc<gridcraft_engine::model::Formula>>)>,
     merges: BTreeSet<String>,
     tables: BTreeSet<String>,
     cond_formats: Vec<String>,
@@ -239,14 +247,12 @@ impl WorkbookSnap {
             let charts = sheet_chart_list(&sh);
             let comments = sh.comments.len();
             let hyperlinks = sh.hyperlinks.len();
-            let pivots = sh.pivots.len();
+            let pivots = pivot_count(&sh);
             let raw_name = sh.name.clone();
             let mut cells = Vec::with_capacity(sh.cells.len());
             for (c, cell) in sh.cells.iter() {
-                let f = cell.formula.is_some().then(|| formula_text(cell).into_boxed_str());
-                cells.push((c, as_cached(cell.value.scalar()), cell.style, f));
+                cells.push((c, as_cached(cell.value.scalar()), cell.style, cell.formula.clone()));
             }
-            drop(sh);
             sheets.push(SheetSnap { raw_name, cells, merges, tables, cond_formats, validations, charts, comments, hyperlinks, pivots });
         }
         Self { styles, names, sheets }
@@ -284,6 +290,7 @@ fn diff_snap_with_workbook(a: WorkbookSnap, mut b: Workbook, opts: &Options) -> 
 
     for (sa, partner) in a.sheets.into_iter().zip(pairs) {
         let Some(sb_arc) = partner.and_then(|j| sheets_b.get_mut(j)).and_then(Option::take) else { continue };
+        let mut pair_cache = HashMap::new();
         let sb = std::sync::Arc::unwrap_or_clone(sb_arc);
         let headers = table_headers(&sb);
         let name = quote_sheet(&sa.raw_name);
@@ -293,11 +300,33 @@ fn diff_snap_with_workbook(a: WorkbookSnap, mut b: Workbook, opts: &Options) -> 
             if *va != vb && !is_header_repair(&headers, c, va, &vb) {
                 values.push(|| format!("{name}!{}: {} → {}", c.a1(), value_show(va), value_show(&vb)));
             }
-            let fa_str = fa.as_deref().unwrap_or("");
-            if !fa_str.is_empty() || cb.is_some_and(|x| x.formula.is_some()) {
-                let fb = opt_formula(cb);
-                if fa_str != fb {
-                    formulas.push(|| format!("{name}!{}: {fa_str} → {fb}", c.a1()));
+            let fb = cb.and_then(|x| x.formula.as_ref());
+            if fa.is_some() || fb.is_some() {
+                let same = match (fa, fb) {
+                    (Some(a_f), Some(b_f)) if a_f.array == b_f.array => {
+                        // An out-of-grid shift may change the printed expression. Only
+                        // identical templates with identical shifts can skip formatting.
+                        let same_template = if a_f.is_shared()
+                            && b_f.is_shared()
+                            && let (Some((ba, dra, dca)), Some((bb, drb, dcb))) = (a_f.expr_shifted(), b_f.expr_shifted())
+                        {
+                            (dra, dca) == (drb, dcb) && *pair_cache.entry((Arc::as_ptr(ba), Arc::as_ptr(bb))).or_insert_with(|| ba == bb)
+                        } else {
+                            false
+                        };
+                        same_template || a_f.text() == b_f.text()
+                    }
+                    _ => false,
+                };
+                if !same {
+                    let fa_str = fa
+                        .as_ref()
+                        .map(|f| if f.array.is_some() { format!("{{={}}}", f.text()) } else { format!("={}", f.text()) })
+                        .unwrap_or_default();
+                    let fb_str = opt_formula(cb);
+                    if fa_str != fb_str {
+                        formulas.push(|| format!("{name}!{}: {fa_str} → {fb_str}", c.a1()));
+                    }
                 }
             }
             let na = styles_a.get(style_a).num_fmt.as_str();
@@ -341,7 +370,7 @@ fn diff_snap_with_workbook(a: WorkbookSnap, mut b: Workbook, opts: &Options) -> 
         }
         diff_count(&mut comments, &name, sa.comments, sb.comments.len());
         diff_count(&mut hyperlinks, &name, sa.hyperlinks, sb.hyperlinks.len());
-        diff_count(&mut pivots, &name, sa.pivots, sb.pivots.len());
+        diff_count(&mut pivots, &name, sa.pivots, pivot_count(&sb));
     }
     vec![
         sheets.done(),
