@@ -111,6 +111,22 @@ fn copy_numbers_increment_the_source_suffix() -> crate::Result<()> {
     Ok(())
 }
 
+/// Excel for Mac 16.115.2, object-model measurement of a synthetic workbook: each workbook
+/// has one sheet with A1 set to 1. Copy the sheet after itself and read both tab names.
+#[test]
+fn copy_preserves_the_separator_only_when_the_name_fits() -> crate::Result<()> {
+    for (source, expected) in
+        [("ABCDEFGHIJKLMNOPQRSTUVWXYZab(9)", "ABCDEFGHIJKLMNOPQRSTUVWXYZ (10)"), ("Data  (3)", "Data  (4)"), ("X\u{3000}(3)", "X\u{3000}(4)")]
+    {
+        let mut s = s();
+        s.execute("sheet.rename", json!({"sheet": 0, "name": source}))?;
+        s.execute("cell.set", json!({"cell": "A1", "input": "1"}))?;
+        s.execute("sheet.move", json!({"sheet": source, "to": 1, "copy": true}))?;
+        assert_eq!(sheet_names(&s), [source, expected]);
+    }
+    Ok(())
+}
+
 #[test]
 fn copy_numbering_keeps_existing_unmeasured_edge_cases() {
     let mut long_book = s();
@@ -134,10 +150,7 @@ fn copy_numbering_keeps_existing_unmeasured_edge_cases() {
         ("Q (999999999999999999999999999)", "Q (2)"),
         ("Q(999999999999999999999999999)", "Q(9999999999999999999999999 (2)"),
         ("ABCDEFGHIJKLMNOPQRSTUVWXYZ (99)", "ABCDEFGHIJKLMNOPQRSTUVWXY (100)"),
-        ("ABCDEFGHIJKLMNOPQRSTUVWXYZab(9)", "ABCDEFGHIJKLMNOPQRSTUVWXYZa(10)"),
-        // Only an ASCII space is the separator; the rest of an unshortened base is kept as is.
-        ("X\u{3000}(3)", "X\u{3000}(4)"),
-        ("Data  (3)", "Data  (4)"),
+        ("ABCDEFGHIJKLMNOPQRSTUVWXYZab(8)", "ABCDEFGHIJKLMNOPQRSTUVWXYZab(9)"),
     ] {
         let mut one = s();
         one.execute("sheet.rename", json!({"sheet": 0, "name": name})).unwrap();

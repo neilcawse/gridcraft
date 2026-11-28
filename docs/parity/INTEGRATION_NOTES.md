@@ -504,6 +504,12 @@ No X23 table-name allocator change was needed. P3's copy of formula-visible `R_`
 
 Tests build the workbooks in code in `crates/engine/src/tests/sheet_copy_names.rs` and `sheet_copy_tables.rs`.
 
+## X63 — Spaced suffix when a sheet copy name is too long
+
+Excel for Mac 16.115.2, object-model measurement of a synthetic workbook: copying the only sheet, `ABCDEFGHIJKLMNOPQRSTUVWXYZab(9)`, after itself gives `ABCDEFGHIJKLMNOPQRSTUVWXYZ (10)`. The previous rule always kept the separator when shortening the base, giving `ABCDEFGHIJKLMNOPQRSTUVWXYZa(10)`.
+
+**[inference]** Keep the original separator when an incremented candidate fits in 31 characters; when it would exceed 31 characters, shorten the base to fit a spaced suffix ` (N)`. The overflow rule comes from one ASCII case. `Data  (3)` → `Data  (4)` and `X　(3)` → `X　(4)` confirm that a base needing no shortening keeps its whitespace. The existing numbering readbacks and the 31-character unsuffixed case are unchanged.
+
 ## X22 — Table rename follows references
 
 [Microsoft's structured-reference guidance](https://support.microsoft.com/en-us/excel/using-structured-references-with-excel-tables), under “Rename a table or column,” says Excel automatically changes the name in all structured references used in the workbook. Microsoft documents structured references in [calculated columns](https://support.microsoft.com/en-us/excel/use-calculated-columns-in-an-excel-table) and the [Total Row](https://support.microsoft.com/en-us/excel/get-started/total-the-data-in-an-excel-table), and Excel tables as [PivotTable sources](https://support.microsoft.com/en-us/excel/get-started/create-a-pivottable-to-analyze-worksheet-data). The PivotTable documentation does not say what its source property returns after rename; that Excel readback remains unmeasured.

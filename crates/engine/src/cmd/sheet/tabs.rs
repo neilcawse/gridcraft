@@ -373,22 +373,26 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
     })
 }
 
-/// A copy starts at ` (2)` or increments the source's trailing `(n)`, keeping its separator.
-/// Skip occupied numbers and shorten the base so the suffix fits Excel's 31 characters. Trim
-/// trailing whitespace only after shortening, and use `Sheet` if no non-whitespace base remains.
+/// A copy starts at ` (2)` or increments the source's trailing `(n)`, keeping its separator
+/// if the candidate fits. Otherwise shorten the base to fit a spaced suffix in 31 characters,
+/// then trim trailing whitespace. Skip occupied candidates and use `Sheet` for a blank base.
 fn copied_sheet_name(wb: &gridcraft_model::Workbook, source: &str) -> String {
     use std::fmt::Write;
 
     let (mut base, mut separator, mut k) = copy_number(source);
     let mut candidate = String::new();
     loop {
-        let keep = 31 - (k.ilog10() as usize + 3 + separator.len());
-        let end = base.char_indices().nth(keep).map_or(base.len(), |(i, _)| i);
-        let prefix = if end < base.len() { base[..end].trim_end() } else { base };
+        let keep = 31usize.saturating_sub(k.ilog10() as usize + " (1)".len());
+        let mut chars = base.char_indices();
+        let (prefix, suffix_separator) = match chars.nth(keep) {
+            // With a glued suffix, one more base character fits without shortening.
+            Some((end, _)) if separator == " " || chars.next().is_some() => (base[..end].trim_end(), " "),
+            _ => (base, separator),
+        };
         candidate.clear();
         candidate.push_str(if prefix.trim_start().is_empty() { "Sheet" } else { prefix });
         let tail = candidate.len();
-        let _ = write!(candidate, "{separator}({k})");
+        let _ = write!(candidate, "{suffix_separator}({k})");
         let collides = |name: &str| name.ends_with(&candidate[tail..]) && gridcraft_formula::same_name(name, &candidate);
         // Kept chart, dialog and macro tabs are absent from `wb.sheets`. A worksheet with the
         // same name would displace the kept tab on export.
