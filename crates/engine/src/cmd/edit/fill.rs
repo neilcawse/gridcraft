@@ -66,9 +66,9 @@ pub(super) fn auto_fill(s: &mut Session, p: &Json) -> Result<Json> {
     if !crate::fill::holds_source_in_corner(src, target) {
         return Err(bad("edit.autoFill", "the target must contain the source in one of its corners"));
     }
-    // Whole-line modes that copy cell formats also repeat line size, style and visibility. The
-    // outline level and collapsed marker remain on the original line; Fill Without Formatting
-    // skips the line transfer entirely.
+    // Whole-line modes that copy cell formats also repeat line size, style and visibility.
+    // Filter-hidden destination rows stay hidden; the outline level and collapsed marker
+    // stay on the destination too. Fill Without Formatting skips line transfer entirely.
     let line_axis = match (mode, src.is_full_rows(), src.is_full_cols()) {
         (crate::fill::FillMode::ValuesOnly, ..) => None,
         (_, true, false) => Some(LineAxis::Rows),

@@ -565,9 +565,9 @@ impl LineAxis {
 
     /// Replaces the line formatting of `first..=last` on `sheet` with `incoming` (ascending
     /// `(index, line)` pairs inside that span; a missing index resets to the default line).
-    /// Size, style and visibility always transfer, as Excel's whole-line Copy/Cut (X25) and
-    /// AutoFill (X64) do. `outline` also moves the outline level and the collapsed-summary
-    /// marker, as Copy/Cut does (X33/X44); AutoFill leaves them on their own lines.
+    /// Like whole-line Copy/Cut (X25, X33/X44), `outline` transfers visibility, outline level
+    /// and the collapsed-summary marker. AutoFill (X64) transfers visibility except on
+    /// filter-hidden destination rows, and leaves outline and marker on their own lines.
     pub(super) fn replace(
         self,
         cx: &mut Ctx,
@@ -578,6 +578,7 @@ impl LineAxis {
         outline: bool,
     ) -> Result<()> {
         let target = cx.wb.sheets.get(sheet).ok_or(EngineError::NoDocument)?;
+        let filter_spans = if !outline && matches!(self, Self::Rows) { target.filter_row_spans() } else { Vec::new() };
         let lines = self.lines(target);
         let mut incoming = incoming.peekable();
         // Take the union of recorded source and destination lines, not the entire axis.
@@ -590,7 +591,7 @@ impl LineAxis {
             let kept = if outline { LineInfo { outline: new.outline, collapsed: new.collapsed, ..old } } else { old };
             let info = LineInfo {
                 size: new.size,
-                hidden: new.hidden,
+                hidden: new.hidden || (old.hidden && filter_spans.iter().any(|&(first, last)| (first..=last).contains(&i))),
                 custom: new.custom,
                 saved_size: new.saved_size,
                 saved_col_flags: new.saved_col_flags,

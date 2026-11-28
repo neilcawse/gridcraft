@@ -9731,18 +9731,16 @@ fn whole_column_autofill_repeats_source_column_formatting() {
 
 /// X64, measured in Excel for Mac 16.115.2 (object-model measurement of a synthetic workbook,
 /// `Range("3:4").AutoFill Range("3:9")`, default fill): the whole-row fixture with source row 4
-/// hidden, destination row 8 hidden beforehand (holding -81 and -82), or both. Each destination
-/// row takes the Hidden flag and height of the source row it lines up with: a hidden source
-/// hides rows 6 and 8 (`RowHeight` 0), and a visible source shows row 8 again at 38 pt. Cells
+/// hidden, destination row 8 hidden beforehand, or both. Row 8 starts with -81 and -82 in all
+/// three cases. Each destination row takes the Hidden flag and height of its source pattern row:
+/// a hidden source hides rows 6 and 8 (`RowHeight` 0), and a visible source shows row 8 at 38 pt. Cells
 /// and styles fill as without hidden rows. Every row read `OutlineLevel` 1 and `ShowDetail`
 /// true before and after, so the outline is not exercised here.
 fn assert_whole_row_autofill_visibility(source_hidden: bool, dest_hidden: bool) {
     let mut s = s();
     let [red, blue, _] = whole_row_autofill_fixture(&mut s);
-    if dest_hidden {
-        s.execute("cell.set", json!({"cell": "A8", "input": "-81"})).unwrap();
-        s.execute("cell.set", json!({"cell": "B8", "input": "-82"})).unwrap();
-    }
+    s.execute("cell.set", json!({"cell": "A8", "input": "-81"})).unwrap();
+    s.execute("cell.set", json!({"cell": "B8", "input": "-82"})).unwrap();
     let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
     let rows = &mut wb.sheet_mut(0).unwrap().rows;
     rows.get_mut(&3).unwrap().hidden = source_hidden;
@@ -9759,9 +9757,15 @@ fn assert_whole_row_autofill_visibility(source_hidden: bool, dest_hidden: bool) 
         assert_eq!(sh.style_id(CellRef::new(row, 0)), style, "row {}", row + 1);
     }
     assert_eq!(sh.is_row_hidden(3), source_hidden, "source row 4 keeps its flag");
+    let after = sh.rows.clone();
     assert_eq!([v(&s, "A8"), v(&s, "B8")], [Value::Number(6.), Value::Number(12.)]);
+    assert_eq!(s.execute("cell.get", json!({"cell": "B8"})).unwrap()["formula"], "=A8*2");
     s.execute("edit.undo", json!({})).unwrap();
     assert_eq!(s.doc().unwrap().wb.sheet(0).unwrap().rows, before, "undo");
+    assert_eq!([v(&s, "A8"), v(&s, "B8")], [Value::Number(-81.), Value::Number(-82.)]);
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(s.doc().unwrap().wb.sheet(0).unwrap().rows, after, "redo");
+    assert_eq!([v(&s, "A8"), v(&s, "B8")], [Value::Number(6.), Value::Number(12.)]);
 }
 
 #[test]
@@ -9777,6 +9781,27 @@ fn whole_row_autofill_shows_a_hidden_destination_paired_with_a_visible_source_ro
 #[test]
 fn whole_row_autofill_keeps_a_hidden_destination_paired_with_a_hidden_source_row() {
     assert_whole_row_autofill_visibility(true, true);
+}
+
+#[test]
+fn whole_row_autofill_keeps_filter_hidden_destination_rows_hidden() {
+    let mut s = s();
+    let [_, blue, _] = whole_row_autofill_fixture(&mut s);
+    s.execute("range.setValues", json!({"range": "C6", "values": [["Tag"], ["keep"], ["excluded"]]})).unwrap();
+    s.execute("cell.set", json!({"cell": "C4", "input": "excluded"})).unwrap();
+    s.execute("data.filter", json!({"range": "C6:C8"})).unwrap();
+    assert_eq!(s.execute("data.filterBy", json!({"column": "C", "values": ["keep"]})).unwrap()["hiddenRows"], 1);
+    let wb = std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    wb.sheet_mut(0).unwrap().rows.entry(8).or_default().hidden = true;
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    assert!(sh.is_row_filtered(7));
+    assert!(sh.is_row_hidden(8) && !sh.is_row_filtered(8));
+
+    s.execute("edit.autoFill", json!({"source": "3:4", "target": "3:9"})).unwrap();
+    let sh = s.doc().unwrap().wb.active().unwrap();
+    assert!(sh.is_row_filtered(7), "row 8 stays filter-hidden");
+    assert_eq!((sh.rows[&7].size, sh.rows[&7].style), (Some(38. * 4. / 3.), Some(blue)));
+    assert!(!sh.is_row_hidden(8), "row 9 was hidden by hand and is shown again");
 }
 
 /// Not measured: AutoFill leaves the outline level and the collapsed-summary marker on the
