@@ -3,7 +3,7 @@
 
 use std::io::Read;
 
-use gridcraft_core::CellRef;
+use gridcraft_core::{CellRef, Value};
 use gridcraft_model::Workbook;
 use serde_json::json;
 
@@ -518,5 +518,45 @@ fn copy_provenance_follows_the_sheet_until_the_workbook_is_reopened() -> crate::
     assert!(wb(&s).sheets.iter().all(|sh| !sh.copied_in_session));
     copy(&mut s, "Data (2)", 2);
     assert!(names(&s).contains(&local("Data (3)", "Total", "SUM(Sales534[Qty])")));
+    Ok(())
+}
+
+/// A sheet-level `.xls` name on the legacy grid (`Up`: six rows up, the residue `A65531` seen
+/// from A1) is copied with the sheet still on that grid, and a rename of the copy keeps it there.
+/// The using cell's imported formula-bar spelling goes with it.
+#[test]
+fn a_legacy_grid_local_name_stays_on_the_legacy_grid_in_a_copy() -> crate::Result<()> {
+    let mut s = s();
+    s.execute("sheet.rename", json!({"sheet": 0, "name": "Data"}))?;
+    s.execute("cell.set", json!({"cell": "F15", "input": "15"}))?;
+    s.execute("cell.set", json!({"cell": "F65551", "input": "65551"}))?;
+    let book = std::sync::Arc::make_mut(&mut s.doc_mut()?.wb);
+    book.names.push(gridcraft_model::DefinedName {
+        name: "Up".into(),
+        scope: Some(0),
+        formula: "Data!A65531".into(),
+        comment: String::new(),
+        hidden: false,
+        uid: Default::default(),
+        legacy_grid: true,
+    });
+    let mut f = gridcraft_model::Formula::new("Up");
+    f.set_display_text("up".into());
+    book.sheet_mut(0).unwrap().cells.set(CellRef::parse("F21").unwrap(), gridcraft_model::Cell::formula(f));
+    s.execute("formulas.calculateNow", json!({}))?;
+    let at = |s: &Session, sheet: usize| wb(s).sheets[sheet].value(CellRef::parse("F21").unwrap());
+    assert_eq!(at(&s, 0), Value::Number(15.0));
+
+    copy(&mut s, "Data", 1);
+    let copied = |s: &Session| wb(s).names.iter().find(|n| n.scope == Some(1)).map(|n| (n.formula.clone(), n.legacy_grid));
+    assert_eq!(copied(&s), Some(("'Data (2)'!A65531".into(), true)));
+    s.execute("cell.set", json!({"sheet": "Data (2)", "cell": "F15", "input": "16"}))?;
+    assert_eq!(at(&s, 1), Value::Number(16.0));
+    s.execute("sheet.rename", json!({"sheet": "Data (2)", "name": "Copy"}))?;
+    assert_eq!(copied(&s), Some(("Copy!A65531".into(), true)));
+    s.execute("cell.set", json!({"sheet": "Copy", "cell": "F15", "input": "17"}))?;
+    assert_eq!((at(&s, 0), at(&s, 1)), (Value::Number(15.0), Value::Number(17.0)));
+    let bar = wb(&s).sheets[1].cell(CellRef::parse("F21").unwrap()).and_then(|c| c.formula.as_ref()).map(|f| f.bar_body().into_owned());
+    assert_eq!(bar.as_deref(), Some("up"));
     Ok(())
 }
