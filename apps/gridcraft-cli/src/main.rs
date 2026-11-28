@@ -333,9 +333,12 @@ fn convert(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     let d = s.doc().map_err(|e| e.to_string())?;
-    let bytes = gridcraft_engine::io::save_file_bytes(&d.wb, out).map_err(|e| e.to_string())?;
+    let (bytes, warnings) = gridcraft_engine::io::save_file_bytes(&d.wb, out).map_err(|e| e.to_string())?;
     gridcraft_engine::io::write_file(out, &bytes).map_err(|e| e.to_string())?;
     eprintln!("wrote {out} ({} bytes)", bytes.len());
+    for w in &warnings {
+        eprintln!("warning: {w}");
+    }
     Ok(())
 }
 
@@ -700,7 +703,7 @@ mod tests {
         let output = dir.join("links.pdf");
         let mut s = blank();
         s.execute("insert.link", json!({"cell": "A1", "target": "https://example.org"})).unwrap();
-        let bytes = gridcraft_engine::io::save_file_bytes(&s.doc().unwrap().wb, input.to_str().unwrap()).unwrap();
+        let (bytes, _) = gridcraft_engine::io::save_file_bytes(&s.doc().unwrap().wb, input.to_str().unwrap()).unwrap();
         gridcraft_engine::io::write_file(input.to_str().unwrap(), &bytes).unwrap();
         convert(&[input.to_string_lossy().into_owned(), output.to_string_lossy().into_owned()]).unwrap();
         let pdf = std::fs::read(&output).unwrap();

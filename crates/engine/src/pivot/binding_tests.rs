@@ -17,7 +17,7 @@ const FROM_DATA: f64 = 3.0;
 const FROM_REPORT: f64 = 1803.0;
 
 fn name(n: &str, scope: Option<usize>, formula: &str) -> DefinedName {
-    DefinedName { name: n.into(), scope, formula: formula.into(), comment: String::new(), hidden: false, uid: Default::default() }
+    DefinedName { name: n.into(), scope, formula: formula.into(), comment: String::new(), hidden: false, uid: Default::default(), legacy_grid: false }
 }
 
 fn set_rows(sh: &mut Sheet, v: [f64; 2]) {

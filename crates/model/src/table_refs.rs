@@ -460,7 +460,15 @@ mod tests {
     }
 
     fn name(name: &str, formula: &str) -> DefinedName {
-        DefinedName { name: name.into(), scope: None, formula: formula.into(), comment: String::new(), hidden: false, uid: Default::default() }
+        DefinedName {
+            name: name.into(),
+            scope: None,
+            formula: formula.into(),
+            comment: String::new(),
+            hidden: false,
+            uid: Default::default(),
+            legacy_grid: false,
+        }
     }
 
     /// Defined names keep their escapes, binders, literals and LAMBDA call spelling; only the

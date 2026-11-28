@@ -213,6 +213,7 @@ pub fn set_many(wb: &mut Workbook, items: &[(String, String)]) -> Result<()> {
                 comment: "GridCraft data".into(),
                 hidden: true,
                 uid: Default::default(),
+                legacy_grid: false,
             });
         }
     }
@@ -383,7 +384,15 @@ mod tests {
     use super::*;
 
     fn name(n: &str, formula: &str) -> DefinedName {
-        DefinedName { name: n.into(), scope: None, formula: formula.into(), comment: String::new(), hidden: true, uid: Default::default() }
+        DefinedName {
+            name: n.into(),
+            scope: None,
+            formula: formula.into(),
+            comment: String::new(),
+            hidden: true,
+            uid: Default::default(),
+            legacy_grid: false,
+        }
     }
 
     fn excel_limits_hold(wb: &Workbook) {

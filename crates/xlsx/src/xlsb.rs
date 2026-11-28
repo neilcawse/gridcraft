@@ -110,6 +110,7 @@ fn import_defined_names(book: &craft_xlsx::Workbook, file_to_model: &[Option<usi
             comment: d.comment.clone(),
             hidden: d.hidden,
             uid: Default::default(),
+            legacy_grid: false,
         });
     }
 }

@@ -1021,7 +1021,12 @@ pub(crate) fn rewrite_all_formulas_many(
         wb.names.iter().map(|n| (n.name.to_lowercase(), n.formula.clone(), gridcraft_formula::parse_name(&n.formula).ok())).collect();
     let adjust_all =
         |host: &str, expr: gridcraft_formula::Expr| edits.iter().fold(expr, |expr, e| gridcraft_formula::adjust::adjust(expr, host, target, e));
-    wb.rewrite_references(&|host, expr| adjust_all(host.name, expr));
+    // A legacy-grid `.xls` name's relative parts are offsets from the cell using it: only its `$`
+    // parts move.
+    let adjust_legacy = |host: &str, expr: gridcraft_formula::Expr| {
+        edits.iter().fold(expr, |expr, e| gridcraft_formula::adjust::adjust_legacy_name(expr, host, target, e))
+    };
+    wb.rewrite_references(&|host, expr| if host.legacy_grid { adjust_legacy(host.name, expr) } else { adjust_all(host.name, expr) });
     for &(si, c) in &forgotten {
         if let Some(cell) = wb.sheet_mut(si).and_then(|sh| sh.cells.get_mut(c)) {
             forget_value(cell);

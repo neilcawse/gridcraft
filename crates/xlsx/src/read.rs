@@ -444,6 +444,7 @@ fn read_defined_names(wb: &mut Workbook, wb_xml: &El, file_to_model: &[Option<us
                 comment: d.attr("comment").unwrap_or("").to_string(),
                 hidden: d.flag("hidden", false),
                 uid: Default::default(),
+                legacy_grid: false,
             });
         }
     }

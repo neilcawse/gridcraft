@@ -206,12 +206,16 @@ struct WorkbookSnap {
     sheets: Vec<SheetSnap>,
 }
 
-fn workbook_name_set(wb: &Workbook) -> BTreeSet<String> {
+fn workbook_name_set(wb: &Workbook, project_to_xlsx: bool) -> BTreeSet<String> {
     wb.names
         .iter()
         .map(|n| {
             let scope = n.scope.map(|i| format!("{}!", quote_sheet(wb.sheet(i).map(|s| s.name.as_str()).unwrap_or("?")))).unwrap_or_default();
-            format!("{scope}{}={}", n.name, n.formula)
+            // An `.xls` name on the legacy grid is saved with its residues as XLSX offsets (X60):
+            // that saved form is what the round trip must read back.
+            let saved =
+                (project_to_xlsx && n.legacy_grid).then(|| gridcraft_engine::formula::adjust::legacy_name_text_for_xlsx(&n.formula)).flatten();
+            format!("{scope}{}={}", n.name, saved.as_deref().unwrap_or(&n.formula))
         })
         .collect()
 }
@@ -233,7 +237,7 @@ fn sheet_chart_list(s: &Sheet) -> Vec<String> {
 
 impl WorkbookSnap {
     fn from_workbook(mut wb: Workbook) -> Self {
-        let names = workbook_name_set(&wb);
+        let names = workbook_name_set(&wb, true);
         let styles = std::mem::take(&mut wb.styles);
         let raw_sheets = std::mem::take(&mut wb.sheets);
         drop(wb);
@@ -269,7 +273,7 @@ fn diff_snap_with_workbook(a: WorkbookSnap, mut b: Workbook, opts: &Options) -> 
     }
     let pairs = pair_sheets(&an, &bn);
     let mut names = Diffs::new("names", m);
-    diff_sets(&mut names, "workbook", &a.names, &workbook_name_set(&b));
+    diff_sets(&mut names, "workbook", &a.names, &workbook_name_set(&b, false));
     b.preserved = None;
     b.vba_project = None;
     let styles_a = a.styles;

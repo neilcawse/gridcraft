@@ -16,24 +16,75 @@ pub fn shift_relative(e: Expr, dr: i64, dc: i64) -> Expr {
     })
 }
 
+/// Rows of the Excel 97-2003 (BIFF8) grid, on which Excel keeps an `.xls` workbook in
+/// Compatibility Mode. [MS-XLS] RgceLocRel adjusts a relative row by 0x10000 when it leaves it.
+pub const BIFF8_ROWS: u32 = 65_536;
+/// Columns of the BIFF8 grid (A:IV); a relative column is adjusted by 0x100.
+pub const BIFF8_COLS: u32 = 256;
+
 /// Defined names: relative parts move by `(dr, dc)`, wrapping around the sheet's edges. Files
 /// store a name's relative references as seen from A1 (a name for "the cell to the left" defined
 /// in B1 is `Sheet1!XFD1`), and a use in another cell moves them by that cell's offset from A1.
 pub fn shift_relative_wrapping(e: Expr, dr: i64, dc: i64) -> Expr {
+    shift_relative_wrapping_on(e, dr, dc, (MAX_ROWS, MAX_COLS))
+}
+
+/// [`shift_relative_wrapping`] on a `(rows, cols)` grid: a relative part lands at the caller's
+/// row (column) plus its residue, modulo the grid's extent, even from a caller past that grid.
+/// `$` parts and sheet qualifiers are left as they are. With [`BIFF8_ROWS`] × [`BIFF8_COLS`] this
+/// is how a legacy `.xls` name evaluates (`A65531` from F21 is F15).
+pub fn shift_relative_wrapping_on(e: Expr, dr: i64, dc: i64, (rows, cols): (u32, u32)) -> Expr {
     let wrap = |v: u32, abs: bool, d: i64, max: u32| if abs { v } else { (v as i64 + d).rem_euclid(max as i64) as u32 };
-    let anchor = |a: Anchor| Anchor { row: wrap(a.row, a.row_abs, dr, MAX_ROWS), col: wrap(a.col, a.col_abs, dc, MAX_COLS), ..a };
+    let anchor = |a: Anchor| Anchor { row: wrap(a.row, a.row_abs, dr, rows), col: wrap(a.col, a.col_abs, dc, cols), ..a };
     e.map(&mut |x| match x {
         Expr::Ref(r) => {
             let kind = match r.kind {
                 RefKind::Cell(a) => RefKind::Cell(anchor(a)),
                 RefKind::Range(a, b) => RefKind::Range(anchor(a), anchor(b)),
-                RefKind::Rows(r0, a0, r1, a1) => RefKind::Rows(wrap(r0, a0, dr, MAX_ROWS), a0, wrap(r1, a1, dr, MAX_ROWS), a1),
-                RefKind::Cols(c0, a0, c1, a1) => RefKind::Cols(wrap(c0, a0, dc, MAX_COLS), a0, wrap(c1, a1, dc, MAX_COLS), a1),
+                RefKind::Rows(r0, a0, r1, a1) => RefKind::Rows(wrap(r0, a0, dr, rows), a0, wrap(r1, a1, dr, rows), a1),
+                RefKind::Cols(c0, a0, c1, a1) => RefKind::Cols(wrap(c0, a0, dc, cols), a0, wrap(c1, a1, dc, cols), a1),
             };
             Expr::Ref(Reference { sheet: r.sheet, kind })
         }
         other => other,
     })
+}
+
+/// The signed offset a BIFF8 residue `k` (`0..extent`) is saved as for the big grid, until Excel's
+/// own Save As rule is measured: the shortest one, negative on a tie (`k >= extent / 2` is
+/// `k − extent`). [MS-XLS] makes `k` and `k − extent` the same legacy offset, so this is a choice,
+/// not a decoding.
+pub fn legacy_signed_offset(k: u32, extent: u32) -> i64 {
+    let k = i64::from(k % extent);
+    if k >= i64::from(extent / 2) { k - i64::from(extent) } else { k }
+}
+
+/// A legacy-grid name's formula for an XLSX file: every relative residue is re-expressed for
+/// the big grid through [`legacy_signed_offset`] (`A65531` → `A1048571`, `IV1` → `XFD1`,
+/// `B1` stays). `$` parts are left alone.
+pub fn legacy_to_xlsx_residues(e: Expr) -> Expr {
+    let line = |v: u32, abs: bool, legacy: u32, max: u32| if abs { v } else { legacy_signed_offset(v, legacy).rem_euclid(i64::from(max)) as u32 };
+    let anchor = |a: Anchor| Anchor { row: line(a.row, a.row_abs, BIFF8_ROWS, MAX_ROWS), col: line(a.col, a.col_abs, BIFF8_COLS, MAX_COLS), ..a };
+    e.map(&mut |x| match x {
+        Expr::Ref(r) => {
+            let kind = match r.kind {
+                RefKind::Cell(a) => RefKind::Cell(anchor(a)),
+                RefKind::Range(a, b) => RefKind::Range(anchor(a), anchor(b)),
+                RefKind::Rows(r0, a0, r1, a1) => RefKind::Rows(line(r0, a0, BIFF8_ROWS, MAX_ROWS), a0, line(r1, a1, BIFF8_ROWS, MAX_ROWS), a1),
+                RefKind::Cols(c0, a0, c1, a1) => RefKind::Cols(line(c0, a0, BIFF8_COLS, MAX_COLS), a0, line(c1, a1, BIFF8_COLS, MAX_COLS), a1),
+            };
+            Expr::Ref(Reference { sheet: r.sheet, kind })
+        }
+        other => other,
+    })
+}
+
+/// A legacy-grid name's formula text as an XLSX file holds it ([`legacy_to_xlsx_residues`]), or
+/// `None` when it is written as it is (no residue changes, or the text doesn't parse).
+pub fn legacy_name_text_for_xlsx(text: &str) -> Option<String> {
+    let e = crate::parse_name(text).ok()?;
+    let converted = legacy_to_xlsx_residues(e.clone());
+    (converted != e).then(|| crate::print(&converted))
 }
 
 /// Paste Special ▸ Transpose: the cell holding the formula moves from `src` to `dest`, so every
@@ -202,6 +253,61 @@ pub fn adjust(e: Expr, host: &str, target: &str, edit: &Edit) -> Expr {
         },
         other => other,
     })
+}
+
+/// [`adjust`] for a legacy-grid `.xls` name ([`shift_relative_wrapping_on`] with the BIFF8
+/// grid). Its relative parts are offsets from the cell that uses it, not positions, so an edit
+/// leaves them where they are; its `$` parts move and are deleted as in [`adjust`]. A reference
+/// with a relative part keeps its place under a move or a cell shift, which relocate positions.
+pub fn adjust_legacy_name(e: Expr, host: &str, target: &str, edit: &Edit) -> Expr {
+    e.map(&mut |x| match x {
+        Expr::Ref(r) if on_target(&r, host, target) => match adjust_legacy_ref(r, edit) {
+            Some(r) => Expr::Ref(r),
+            None => Expr::Error(CellError::Ref),
+        },
+        other => other,
+    })
+}
+
+fn adjust_legacy_ref(r: Reference, edit: &Edit) -> Option<Reference> {
+    let (Edit::Insert { axis, at, count } | Edit::Delete { axis, at, count }) = edit else {
+        return if has_absolute_only(&r) { adjust_ref(r, edit) } else { Some(r) };
+    };
+    let insert = matches!(edit, Edit::Insert { .. });
+    let rows = *axis == Axis::Rows;
+    let absolute = |a: &Anchor| if rows { a.row_abs } else { a.col_abs };
+    let pinned = match &r.kind {
+        RefKind::Cell(a) => absolute(a),
+        RefKind::Range(a, b) => absolute(a) && absolute(b),
+        RefKind::Rows(_, a, _, b) if rows => *a && *b,
+        RefKind::Cols(_, a, _, b) if !rows => *a && *b,
+        _ => return Some(r),
+    };
+    if pinned {
+        return adjust_ref(r, edit);
+    }
+    let max = if rows { MAX_ROWS } else { MAX_COLS };
+    let map = |v: u32, abs: bool| if abs { map_index(v, *at, *count, insert, max) } else { Some(v) };
+    let anchor = |a: &Anchor| -> Option<Anchor> {
+        Some(if rows { Anchor { row: map(a.row, a.row_abs)?, ..*a } } else { Anchor { col: map(a.col, a.col_abs)?, ..*a } })
+    };
+    let kind = match &r.kind {
+        RefKind::Cell(a) => RefKind::Cell(anchor(a)?),
+        RefKind::Range(a, b) => RefKind::Range(anchor(a)?, anchor(b)?),
+        RefKind::Rows(r0, a0, r1, a1) => RefKind::Rows(map(*r0, *a0)?, *a0, map(*r1, *a1)?, *a1),
+        RefKind::Cols(c0, a0, c1, a1) => RefKind::Cols(map(*c0, *a0)?, *a0, map(*c1, *a1)?, *a1),
+    };
+    Some(Reference { sheet: r.sheet, kind })
+}
+
+/// Whether every row and column of the reference is pinned with `$`.
+fn has_absolute_only(r: &Reference) -> bool {
+    let abs = |a: &Anchor| a.row_abs && a.col_abs;
+    match &r.kind {
+        RefKind::Cell(a) => abs(a),
+        RefKind::Range(a, b) => abs(a) && abs(b),
+        RefKind::Rows(_, a0, _, a1) | RefKind::Cols(_, a0, _, a1) => *a0 && *a1,
+    }
 }
 
 /// [`adjust`] for a borrowed formula: `None` when the edit leaves it exactly as it is, so a

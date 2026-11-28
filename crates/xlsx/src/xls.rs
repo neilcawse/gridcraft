@@ -134,13 +134,18 @@ pub(crate) fn read_xls_budgeted(bytes: &[u8], limits: x::Limits, functions: Func
     wb.calc = calc_of(&book.calc);
     wb.calc.precision_as_displayed = book.precision_as_displayed;
     for n in &book.names {
+        let formula = with_trim_prefixes(&n.formula, &book.names).into_owned();
+        // Excel keeps an .xls workbook on Compatibility Mode's 65,536 × 256 grid: a name with
+        // relative parts wraps there, from whichever cell uses it.
+        let legacy_grid = gridcraft_formula::parse_name(&formula).is_ok_and(|e| gridcraft_formula::adjust::has_relative_refs(&e));
         wb.names.push(DefinedName {
             name: n.name.clone(),
             scope: n.scope,
-            formula: with_trim_prefixes(&n.formula, &book.names).into_owned(),
+            formula,
             comment: String::new(),
             hidden: n.hidden,
             uid: Default::default(),
+            legacy_grid,
         });
     }
     // Every .xls formula is a legacy (pre-dynamic-array) one: read with Excel's implicit `@`, like
@@ -156,6 +161,9 @@ pub(crate) fn read_xls_budgeted(bytes: &[u8], limits: x::Limits, functions: Func
         0,
         "Imported from an Excel 97-2003 (.xls) workbook: values, formulas, cell formatting, merged cells, column widths, row heights, defined names and data validation were read. Charts, pictures, comments and other features are not imported yet. Save as .xlsx; saving .xls is not supported.".into(),
     );
+    if let Some(notice) = crate::export_names::import_notice(&wb, functions) {
+        report.warnings.insert(0, notice);
+    }
     Ok((wb, report))
 }
 

@@ -348,7 +348,10 @@ pub fn write_xlsx_named_with(wb: &Workbook, kind: XlsxKind, book_name: Option<&s
     let mut repaired = std::borrow::Cow::Borrowed(wb);
     let mut renames = Vec::new();
     crate::table_names::repair(&mut repaired, crate::chartex::generated_names(wb), &mut renames);
-    let wb = repaired.as_ref();
+    // Names read from an `.xls` workbook, converted once for the file: both attempts below write
+    // this one projection.
+    let legacy = crate::export_names::prepare(repaired.as_ref(), functions);
+    let wb = legacy.wb.as_ref();
     // The workbook's kept cell and value metadata is written when it fits what GridCraft writes
     // with it. Its dynamic-array formulas are marked `cm="1"`, an entry the kept part may lack:
     // the workbook is then written again without the kept metadata.
@@ -364,6 +367,11 @@ pub fn write_xlsx_named_with(wb: &Workbook, kind: XlsxKind, book_name: Option<&s
         }
     };
     report.warnings.extend(renames);
+    // What the `.xls` names' conversion can change comes first, so a notice that shows only the
+    // first warning shows it.
+    if let Some(notice) = legacy.notice {
+        report.warnings.insert(0, notice);
+    }
     Ok((bytes, report))
 }
 
@@ -828,6 +836,7 @@ fn pivot_catalog(
             hidden: false,
             comment: String::new(),
             uid: Default::default(),
+            legacy_grid: false,
         }))
         .collect();
     Some(catalog)

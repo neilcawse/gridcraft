@@ -297,6 +297,7 @@ pub(super) fn reset_model(s: &mut Session, _p: &Json) -> Result<Json> {
                     comment: String::new(),
                     hidden: true,
                     uid: Default::default(),
+                    legacy_grid: false,
                 });
             }
             Ok(())

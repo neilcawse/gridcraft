@@ -140,6 +140,7 @@ fn hidden(name: &str, text: &str) -> DefinedName {
         comment: String::new(),
         hidden: true,
         uid: Default::default(),
+        legacy_grid: false,
     }
 }
 
@@ -232,7 +233,15 @@ fn a_macro_built_in_code_goes_through_the_size_check_too() {
 }
 
 fn visible(name: &str) -> DefinedName {
-    DefinedName { name: name.into(), scope: None, formula: "Sheet1!$A$1".into(), comment: String::new(), hidden: false, uid: Default::default() }
+    DefinedName {
+        name: name.into(),
+        scope: None,
+        formula: "Sheet1!$A$1".into(),
+        comment: String::new(),
+        hidden: false,
+        uid: Default::default(),
+        legacy_grid: false,
+    }
 }
 
 /// Saves `wb` to xlsx and returns the names in the file and the workbook opened from it.

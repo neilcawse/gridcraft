@@ -257,6 +257,34 @@ fn dynamic_array_formulas_beside_a_kept_part_without_the_flag_get_a_metadata_par
 }
 
 #[test]
+fn writer_fallback_keeps_one_legacy_name_notice_and_the_projected_definition() {
+    let (mut wb, _) = read_xlsx(&package(&Pack { dynamic_cells: true, ..pack(metadata_rich()) })).unwrap();
+    wb.names.push(gridcraft_model::DefinedName {
+        name: "LegacyAbove".into(),
+        scope: None,
+        formula: "A65531".into(),
+        comment: String::new(),
+        hidden: false,
+        uid: Default::default(),
+        legacy_grid: true,
+    });
+    let save = |wb| crate::write_xlsx_named_with(wb, crate::XlsxKind::Workbook, "Book.xlsx", Default::default()).unwrap();
+    let (bytes, report) = save(&wb);
+    assert!(report.warnings[0].contains("LegacyAbove (workbook) (no checked use found)"), "{:?}", report.warnings);
+    assert!(report.warnings[1].contains("did not fit the dynamic-array formulas"), "{:?}", report.warnings);
+    assert_eq!(report.warnings.iter().filter(|s| s.contains("LegacyAbove")).count(), 1);
+    assert!(wb.names[0].legacy_grid);
+    assert_eq!(wb.names[0].formula, "A65531");
+    assert_eq!(save(&wb).1.warnings, report.warnings);
+    let (back, _) = read_xlsx(&bytes).unwrap();
+    assert_eq!(back.names[0].formula, "A1048571");
+    assert!(!back.names[0].legacy_grid);
+    let (again, report) = save(&back);
+    assert!(!report.warnings.iter().any(|s| s.contains("LegacyAbove")), "{:?}", report.warnings);
+    assert_eq!(read_xlsx(&again).unwrap().0.names[0].formula, "A1048571");
+}
+
+#[test]
 fn value_metadata_that_points_at_nothing_is_reported() {
     // The structure part is gone: the rich values can't be kept faithfully.
     let (wb, rep) = read_xlsx(&package(&Pack { structures: false, ..pack(metadata_rich()) })).unwrap();

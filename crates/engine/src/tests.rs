@@ -30,6 +30,7 @@ pub(crate) fn seed_name(s: &mut Session, name: &str, scope: Option<usize>, formu
         comment: String::new(),
         hidden: false,
         uid: gridcraft_model::DefinitionUid::fresh(),
+        legacy_grid: false,
     });
 }
 
@@ -729,6 +730,7 @@ fn kept_value_session(cells: &[(&str, &str, f64)], names: &[(&str, &str)]) -> Se
             comment: String::new(),
             hidden: false,
             uid: Default::default(),
+            legacy_grid: false,
         });
     }
     for (at, input, saved) in cells {
@@ -3211,6 +3213,7 @@ fn table_rename_keeps_a_defined_name_with_the_same_name() -> Result<(), Box<dyn 
         comment: String::new(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     });
     s.execute("cell.set", json!({"cell": "E1", "input": "=Data"})).unwrap();
     s.execute("cell.set", json!({"cell": "F1", "input": "=SUM(Data[Qty])"})).unwrap();
@@ -5106,6 +5109,7 @@ fn save_reports_what_the_file_is_written_without() {
             comment: String::new(),
             hidden: false,
             uid: Default::default(),
+            legacy_grid: false,
         });
     }
     let r = s.execute("file.save", json!({"path": dir.join("names.xlsx")})).unwrap();

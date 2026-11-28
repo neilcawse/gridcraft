@@ -1383,6 +1383,7 @@ impl Import {
                     comment: String::new(),
                     hidden: false,
                     uid: Default::default(),
+                    legacy_grid: false,
                 });
             }
         }

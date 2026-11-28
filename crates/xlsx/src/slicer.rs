@@ -1055,6 +1055,7 @@ mod tests {
             hidden: true,
             comment: "Imported marker".into(),
             uid: Default::default(),
+            legacy_grid: false,
         };
         wb.sheet_mut(0).unwrap().slicers[1].imported_cache =
             gridcraft_model::SlicerCacheOrigin { name: marker.name.clone(), marker: Some(marker.uid), table_items: None };

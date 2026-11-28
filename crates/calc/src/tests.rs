@@ -271,6 +271,7 @@ fn measured_aggregate_reference_form_rejects_array_constants() {
                 comment: String::new(),
                 hidden: false,
                 uid: Default::default(),
+                legacy_grid: false,
             });
         }
         for (at, input) in [("A1", "1"), ("A2", "2"), ("A3", "3")] {
@@ -328,6 +329,7 @@ fn transition_arithmetic_in_a_sheet_scoped_name_follows_the_formula_worksheet() 
             comment: String::new(),
             hidden: false,
             uid: Default::default(),
+            legacy_grid: false,
         });
     }
     let ordinary = t.wb.sheet_mut(1).unwrap();
@@ -452,6 +454,7 @@ fn spill_range_operator() {
         comment: String::new(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     });
     t.set("E1", "=SUM(Seq)*10");
     assert_eq!(t.num("E1"), 30.0);
@@ -537,6 +540,7 @@ fn references_into_linked_workbooks_read_the_saved_values() {
         comment: String::new(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     });
     t.set("A1", "='[2]P&L Prices'!B2*2");
     t.set("A2", "=VLOOKUP(\"gas\",Price,2,FALSE)");
@@ -712,6 +716,7 @@ fn linked_dynamic_array_through_defined_name_keeps_saved_spill_values() {
         comment: String::new(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     });
     let sh = t.wb.sheet_mut(0).unwrap();
     sh.cells.set(c("A1"), Cell { value: Value::Number(10.0), ..Cell::formula(Formula::new("=Price")) });
@@ -2086,6 +2091,7 @@ fn references_functions() {
         comment: String::new(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     });
     t.calc.rebuild(&t.wb);
     t.set("C3", "=INDIRECT(\"Third\",FALSE)");
@@ -2226,6 +2232,7 @@ fn relative_names() {
             comment: String::new(),
             hidden: false,
             uid: Default::default(),
+            legacy_grid: false,
         });
     }
     t.calc.rebuild(&t.wb);
@@ -2238,6 +2245,67 @@ fn relative_names() {
     assert_eq!(t.num("B4"), 80.0);
     t.set("A6", "=SUM(Above3)");
     assert_eq!(t.num("A6"), 120.0);
+}
+
+#[test]
+fn legacy_grid_names_wrap_on_the_biff8_grid() {
+    // An `.xls` name keeps its residue on Compatibility Mode's 65,536 × 256 grid: `Attend` is six
+    // rows up (A65531 seen from A1), `Left` one column left (IV1), `Ahead` 200 columns right.
+    let mut t = T::new();
+    for (name, formula, legacy_grid) in [
+        ("Attend", "Sheet1!A65531", true),
+        ("Left", "Sheet1!IV1", true),
+        ("Ahead", "Sheet1!GS1", true),
+        ("Pinned", "Sheet1!$C65531", true),
+        ("Modern", "Sheet1!A65531", false),
+    ] {
+        t.wb.names.push(gridcraft_model::DefinedName {
+            name: name.into(),
+            scope: None,
+            formula: formula.into(),
+            comment: String::new(),
+            hidden: false,
+            uid: Default::default(),
+            legacy_grid,
+        });
+    }
+    t.calc.rebuild(&t.wb);
+    // Six up from F21 is F15; on the big grid the residue would read F65551.
+    t.set("F15", "15");
+    t.set("F65551", "65551");
+    t.set("F21", "=Attend");
+    assert_eq!(t.num("F21"), 15.0);
+    // One left from B22 is A22; on the big grid IV1 would be 255 columns right, IW22.
+    t.set("A22", "22");
+    t.set("IW22", "257");
+    t.set("B22", "=Left");
+    assert_eq!(t.num("B22"), 22.0);
+    // From column A, one left wraps to IV, the legacy grid's last column, not XFD.
+    t.set("IV5", "256");
+    t.set("XFD5", "16384");
+    t.set("A5", "=Left");
+    assert_eq!(t.num("A5"), 256.0);
+    // 200 right from CW (column 101) wraps past IV to AS; on the big grid it would be KO.
+    t.set("AS7", "45");
+    t.set("KO7", "301");
+    t.set("CW7", "=Ahead");
+    assert_eq!(t.num("CW7"), 45.0);
+    // A caller past the legacy grid still folds its relative targets into it: six up from row
+    // 100,000 is row 99,994, which is row 34,458 modulo 65,536.
+    t.set("C34458", "34458");
+    t.set("C99994", "99994");
+    t.set("C100000", "=Attend");
+    assert_eq!(t.num("C100000"), 34458.0);
+    // A `$` column stays put while the relative row wraps: six up from H9 is row 3, column C.
+    t.set("C3", "3");
+    t.set("C65539", "65539");
+    t.set("H9", "=Pinned");
+    assert_eq!(t.num("H9"), 3.0);
+    // An ordinary name with the same text wraps on the big grid.
+    t.set("F27", "=Modern");
+    assert_eq!(t.num("F27"), 0.0);
+    t.set("F21", "=Modern");
+    assert_eq!(t.num("F21"), 65551.0);
 }
 
 #[test]
@@ -2353,6 +2421,7 @@ fn builtin_call_spelling_does_not_change_dispatch() {
         comment: String::new(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     });
     t.set("A1", "1");
     // Bypass the parser's uppercasing: a stored AST can already have the old spelling.
@@ -2377,6 +2446,7 @@ fn future_function_names_bind_xludf_calls_and_let_variables() {
         comment: String::new(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     });
     t.set("D1", "10");
     t.set("B1", "=_xludf.VStack(1)");
@@ -2405,6 +2475,7 @@ fn name_bound_lookup_index_takes_the_x41_expression_order() {
             comment: String::new(),
             hidden: false,
             uid: Default::default(),
+            legacy_grid: false,
         });
     }
     for (at, input) in [("D1", "1"), ("D2", "2"), ("E1", "10"), ("E2", "20")] {
@@ -2517,6 +2588,7 @@ fn lambda_argument_count() {
         comment: String::new(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     });
     t.calc.rebuild(&t.wb);
     let omit = "LAMBDA(x,y,IF(ISOMITTED(y),\"Missing\",x+y))";
@@ -2554,6 +2626,7 @@ fn a_lambda_that_calls_itself_without_end_is_num_on_a_small_stack() {
                 comment: String::new(),
                 hidden: false,
                 uid: Default::default(),
+                legacy_grid: false,
             });
             t.calc.rebuild(&t.wb);
             let endless = "=LET(f,LAMBDA(g,x,g(g,x)),f(f,1))";
@@ -2587,6 +2660,7 @@ fn a_recursive_lambda_stops_at_the_same_call_on_any_stack_size() {
                     comment: String::new(),
                     hidden: false,
                     uid: Default::default(),
+                    legacy_grid: false,
                 });
                 // W's call to `f` is a tail call, so a wrapped call level costs one call in progress, not two. A tail call reuses its frame, so the tail chain is bounded by `MAX_TAIL_CALLS`, as in Excel
                 // (5,459 ok, 5,460 #NUM!). F(F,n) otherwise has n + 1 calls in progress at its deepest; W adds
@@ -2619,6 +2693,7 @@ fn a_tail_recursive_lambda_reaches_excels_depth_on_a_small_stack() {
                     comment: String::new(),
                     hidden: false,
                     uid: Default::default(),
+                    legacy_grid: false,
                 });
                 let tail = |n: u32| format!("=LET(F,LAMBDA(me,n,IF(n=0,0,me(me,n-1))),F(F,{n}))");
                 // The same chain through parentheses and an applied lambda, and one that returns the base case's value.
@@ -2697,6 +2772,7 @@ fn names_and_sheets() {
         comment: String::new(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     });
     t.wb.sheets.push(std::sync::Arc::new(gridcraft_model::Sheet::new("Data")));
     t.wb.sheet_mut(1).unwrap().set_value(c("A1"), Value::Number(8.0));
@@ -2720,6 +2796,7 @@ fn name_referring_to_several_ranges() {
         comment: String::new(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     });
     for (at, v) in [("A1", "1"), ("A2", "2"), ("C1", "5"), ("C2", "7")] {
         t.set(at, v);
@@ -2744,6 +2821,7 @@ fn linked_saved_value_recalculates_through_union_name() {
         comment: String::new(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     });
     for (at, value) in [("A1", "1"), ("A2", "2"), ("C1", "5"), ("C2", "7")] {
         t.set(at, value);
@@ -3114,6 +3192,7 @@ fn sumif_resized_sum_range_on_another_sheet_and_through_a_name() {
         comment: String::new(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     });
     for (r, k) in ["a", "b", "a"].iter().enumerate() {
         t.set(&format!("A{}", r + 1), k);
@@ -3399,6 +3478,7 @@ fn bare_trim_name_calls_a_workbook_lambda() {
         comment: String::new(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     });
     t.calc.rebuild(&t.wb);
     t.set("A1", "=_TRO_ALL(41)");
@@ -3806,6 +3886,7 @@ fn analysis_toolpak_value_params_reject_multi_cell_references() {
         comment: String::new(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     });
     let value = Value::Error(CellError::Value);
     for f in [

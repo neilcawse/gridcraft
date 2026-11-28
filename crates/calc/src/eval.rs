@@ -745,6 +745,13 @@ impl<'h> Evaluator<'h> {
         if let Some(def) = wb.name(bare, scope_sheet) {
             let text = def.formula.clone();
             let scope = def.scope.unwrap_or(self.sheet);
+            // An `.xls` name stays on Compatibility Mode's 65,536 × 256 grid ([MS-XLS]
+            // RgceLocRel): its relative parts wrap there, from any caller.
+            let grid = if def.legacy_grid {
+                (gridcraft_formula::adjust::BIFF8_ROWS, gridcraft_formula::adjust::BIFF8_COLS)
+            } else {
+                (gridcraft_core::MAX_ROWS, gridcraft_core::MAX_COLS)
+            };
             // Each use parses and evaluates the definition again: names that each use the one
             // before twice double the work per name, so it is charged.
             if !self.spend(text.len() as u64) {
@@ -755,7 +762,7 @@ impl<'h> Evaluator<'h> {
                     // Relative references in a name are relative to A1: used here, they move by
                     // this cell's offset from it.
                     let expr = if gridcraft_formula::adjust::has_relative_refs(&expr) {
-                        gridcraft_formula::adjust::shift_relative_wrapping(expr, self.at.row as i64, self.at.col as i64)
+                        gridcraft_formula::adjust::shift_relative_wrapping_on(expr, self.at.row as i64, self.at.col as i64, grid)
                     } else {
                         expr
                     };
@@ -1132,6 +1139,7 @@ mod fuel_tests {
             comment: String::new(),
             hidden: false,
             uid: Default::default(),
+            legacy_grid: false,
         };
         wb.names.push(name("Step0".into(), "1".into()));
         for i in 1..=60 {
@@ -1174,6 +1182,7 @@ mod fuel_tests {
             comment: String::new(),
             hidden: false,
             uid: Default::default(),
+            legacy_grid: false,
         };
         wb.names.push(name("Step0".into(), "1".into()));
         for i in 1..=60 {

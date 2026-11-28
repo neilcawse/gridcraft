@@ -589,6 +589,7 @@ mod tests {
             comment: String::new(),
             hidden: false,
             uid: Default::default(),
+            legacy_grid: false,
         });
         wb.names.push(gridcraft_model::DefinedName {
             name: "Rates".into(),
@@ -597,6 +598,7 @@ mod tests {
             comment: String::new(),
             hidden: false,
             uid: Default::default(),
+            legacy_grid: false,
         });
         wb
     }
@@ -809,6 +811,7 @@ mod tests {
                 comment: String::new(),
                 hidden: false,
                 uid: Default::default(),
+                legacy_grid: false,
             });
         }
         let env = Env { wb: &wb, active_sheet: 0, inputs: &[], output: None, item: None };
@@ -958,6 +961,7 @@ mod tests {
             comment: String::new(),
             hidden: false,
             uid: Default::default(),
+            legacy_grid: false,
         });
         let env = Env { wb: &wb, active_sheet: 0, inputs: &[], output: None, item: None };
         check(&env, "Name:Dollars", "'US$'!F20");

@@ -406,8 +406,13 @@ fn define_name(s: &mut Session, p: &Json) -> Result<Json> {
         // PivotTable's source, still is. A new name gets a new one.
         let same = |n: &DefinedName, name: &str, scope: Option<usize>| n.name.eq_ignore_ascii_case(name) && n.scope == scope;
         let mut uid = None;
+        // A legacy-grid `.xls` name stays one when it is renamed or edited with its definition
+        // unchanged; a new definition is an ordinary XLSX one.
+        let mut legacy_grid = false;
         if let Some((old_name, old_scope)) = &old {
-            uid = cx.wb.names.iter().find(|n| same(n, old_name, *old_scope)).map(|n| n.uid);
+            let previous = cx.wb.names.iter().find(|n| same(n, old_name, *old_scope));
+            uid = previous.map(|n| n.uid);
+            legacy_grid = previous.is_some_and(|n| n.legacy_grid && n.formula == refers);
             // Formulas are renamed while the old name is still defined, so a chart series named
             // by it is still read as a reference. A change of case alone still respells calls.
             if old_name != &name {
@@ -429,7 +434,15 @@ fn define_name(s: &mut Session, p: &Json) -> Result<Json> {
         uid = uid.or_else(|| cx.wb.names.iter().find(|n| same(n, &name, scope)).map(|n| n.uid));
         cx.wb.names.retain(|n| !same(n, &name, scope));
         let uid = uid.unwrap_or_default();
-        cx.wb.names.push(DefinedName { name: name.clone(), scope, formula: refers.clone(), comment: comment.clone(), hidden: false, uid });
+        cx.wb.names.push(DefinedName {
+            name: name.clone(),
+            scope,
+            formula: refers.clone(),
+            comment: comment.clone(),
+            hidden: false,
+            uid,
+            legacy_grid,
+        });
         if let Some(uid) = renamed {
             cx.wb.follow_renamed_definition(uid);
         }
@@ -697,7 +710,15 @@ fn create_from_selection(s: &mut Session, p: &Json) -> Result<Json> {
     edit(s, |cx| {
         for (name, f) in made {
             cx.wb.names.retain(|x| !(x.name.eq_ignore_ascii_case(&name) && x.scope.is_none()));
-            cx.wb.names.push(DefinedName { name, scope: None, formula: f, comment: String::new(), hidden: false, uid: Default::default() });
+            cx.wb.names.push(DefinedName {
+                name,
+                scope: None,
+                formula: f,
+                comment: String::new(),
+                hidden: false,
+                uid: Default::default(),
+                legacy_grid: false,
+            });
         }
         cx.structural = true;
         Ok(json!({"created": n, "skipped": skipped}))
@@ -1139,6 +1160,7 @@ mod tests {
             comment: String::new(),
             hidden: false,
             uid: Default::default(),
+            legacy_grid: false,
         });
         s.execute("formulas.defineName", json!({"name": "DataRows", "oldName": "DataRows", "refersTo": "=2", "comment": "kept"}))?;
         s.execute("formulas.defineName", json!({"name": "DATAROWS", "refersTo": "=3"}))?;
@@ -1169,6 +1191,7 @@ mod tests {
             comment: String::new(),
             hidden: false,
             uid: Default::default(),
+            legacy_grid: false,
         });
         for params in [json!({"name": "GRÖSSE", "refersTo": "=2"}), json!({"name": "GRÖSSE", "oldName": "Größe", "refersTo": "=2"})] {
             let refused = s.execute("formulas.defineName", params);
@@ -1177,6 +1200,123 @@ mod tests {
         let wb = &s.doc()?.wb;
         assert_eq!(wb.names.len(), 1);
         assert_eq!(wb.name_in_scope("Größe", None).map(|n| n.formula.as_str()), Some("1"));
+        Ok(())
+    }
+
+    /// An `.xls` name's relative residue is an offset from the cell using it: inserting and
+    /// deleting rows leaves it as it is, a rename or an edit that keeps the definition keeps it
+    /// on the legacy grid, and a new definition is an ordinary XLSX one. Saving warns first.
+    #[test]
+    fn legacy_grid_names_through_edits_and_save() -> Result<()> {
+        let mut s = Session::new();
+        s.new_workbook();
+        std::sync::Arc::make_mut(&mut s.doc_mut()?.wb).names.push(DefinedName {
+            name: "Attend".into(),
+            scope: None,
+            formula: "Sheet1!A65531".into(),
+            comment: String::new(),
+            hidden: false,
+            uid: Default::default(),
+            legacy_grid: true,
+        });
+        let v = |s: &mut Session, a: &str| s.execute("cell.get", json!({"cell": a})).map(|r| r["value"].clone());
+        s.execute("cell.set", json!({"cell": "F15", "input": "15"}))?;
+        s.execute("cell.set", json!({"cell": "F21", "input": "=Attend"}))?;
+        assert_eq!(v(&mut s, "F21")?, json!(15.0));
+        // Rows inserted above both: the use and its target move together, the name stays.
+        s.execute("home.insertRows", json!({"rows": "2:3"}))?;
+        assert_eq!(v(&mut s, "F23")?, json!(15.0));
+        let name = |s: &Session| s.doc().map(|d| d.wb.names.iter().map(|n| (n.name.clone(), n.formula.clone(), n.legacy_grid)).collect::<Vec<_>>());
+        assert_eq!(name(&s)?, [("Attend".into(), "Sheet1!A65531".into(), true)]);
+        // Rows deleted between the use and its target: six up from the use now reads another cell.
+        s.execute("cell.set", json!({"cell": "F13", "input": "13"}))?;
+        s.execute("home.deleteRows", json!({"rows": "18:21"}))?;
+        assert_eq!(v(&mut s, "F19")?, json!(13.0));
+        assert_eq!(name(&s)?, [("Attend".into(), "Sheet1!A65531".into(), true)]);
+        s.execute("edit.undo", json!({}))?;
+        assert_eq!(v(&mut s, "F23")?, json!(15.0));
+        assert!(s.doc()?.wb.names[0].legacy_grid);
+        s.execute("edit.redo", json!({}))?;
+        assert_eq!(v(&mut s, "F19")?, json!(13.0));
+        // Renamed with its definition as it is: still on the legacy grid.
+        s.execute("formulas.defineName", json!({"name": "Present", "oldName": "Attend", "refersTo": "=Sheet1!A65531"}))?;
+        assert_eq!(name(&s)?, [("Present".into(), "Sheet1!A65531".into(), true)]);
+        // Near the top, six up wraps to the bottom of the legacy grid, which the saved name can't
+        // say: the save warns first, naming the use.
+        s.execute("cell.set", json!({"cell": "A65533", "input": "97"}))?;
+        s.execute("cell.set", json!({"cell": "A1048573", "input": "365"}))?;
+        s.execute("cell.set", json!({"cell": "A3", "input": "=Present"}))?;
+        let saved = s.execute("file.saveBytes", json!({"format": "xlsx"}))?;
+        let first = saved["warnings"][0].as_str().unwrap_or_default();
+        assert!(first.contains("Present (workbook) from Sheet1!A3"), "{saved}");
+        assert!(!first.contains("F19"), "{first}");
+        assert_eq!(v(&mut s, "A3")?, json!(97.0));
+        let bytes = crate::io::save_bytes(&s.doc()?.wb, "Reopen.xlsx")?;
+        let (back, _) = crate::io::open_bytes("Reopen.xlsx", &bytes)?;
+        let at = CellRef::parse("A3").unwrap();
+        assert_eq!(back.sheets[0].value(at), Value::Number(97.0));
+        assert!(!back.names[0].legacy_grid);
+        let reopened = crate::DocState::new(back, None, "Reopen.xlsx".into(), crate::Trust::FromFile);
+        assert_eq!(reopened.wb.sheets[0].value(at), Value::Number(365.0));
+        let json = crate::io::save_bytes(&s.doc()?.wb, "Book.json")?;
+        let (back, _) = crate::io::open_bytes("Book.json", &json)?;
+        assert!(back.names[0].legacy_grid);
+        let mut old: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        old["names"][0].as_object_mut().unwrap().remove("legacy_grid");
+        let (back, _) = crate::io::open_bytes("Book.json", &serde_json::to_vec(&old).unwrap())?;
+        assert!(!back.names[0].legacy_grid);
+        // A new definition replaces it with an ordinary name.
+        s.execute("formulas.defineName", json!({"name": "Present", "oldName": "Present", "refersTo": "=Sheet1!A65532"}))?;
+        assert_eq!(name(&s)?, [("Present".into(), "Sheet1!A65532".into(), false)]);
+        Ok(())
+    }
+
+    #[test]
+    fn scoped_legacy_names_recalculate_sheet_first_after_reopen() -> Result<()> {
+        let mut wb = Workbook::new();
+        wb.sheets.push(std::sync::Arc::new(gridcraft_model::Sheet::new("Sheet2")));
+        for (name, scope, formula, legacy_grid) in [
+            ("Attend", None, "Sheet1!$D65536", true),
+            ("ATTEND", Some(0), "Sheet1!B1", true),
+            ("LocalOnly", Some(0), "Sheet1!B1", true),
+            ("On2", Some(0), "Sheet1!$A$1", false),
+        ] {
+            wb.names.push(DefinedName {
+                name: name.into(),
+                scope,
+                formula: formula.into(),
+                comment: String::new(),
+                hidden: false,
+                uid: Default::default(),
+                legacy_grid,
+            });
+        }
+        let at = |a| CellRef::parse(a).unwrap();
+        for (sheet, addr, val) in [(0, "C5", 22.0), (0, "D5", 99.0), (1, "ON2", 44.0)] {
+            wb.sheet_mut(sheet).unwrap().set_value(at(addr), Value::Number(val));
+        }
+        for (sheet, addr, text) in [(0, "A5", "Attend"), (0, "B5", "ATTEND"), (1, "A6", "Attend"), (1, "B6", "LocalOnly"), (1, "C6", "ON2")] {
+            wb.sheet_mut(sheet).unwrap().set_cell(
+                at(addr),
+                Cell { value: Value::Number(-1.0), formula: Some(std::sync::Arc::new(gridcraft_model::Formula::new(text))), ..Default::default() },
+            );
+        }
+        let check = |doc: crate::DocState| {
+            for (sheet, addr, want) in [
+                (0, "A5", Value::Number(22.0)),
+                (0, "B5", Value::Number(22.0)),
+                (1, "A6", Value::Number(99.0)),
+                (1, "B6", Value::Error(CellError::Name)),
+                (1, "C6", Value::Number(44.0)),
+            ] {
+                assert_eq!(doc.wb.sheets[sheet].value(at(addr)), want, "sheet {sheet}!{addr}");
+            }
+        };
+        check(crate::DocState::new(wb.clone(), None, "Imported".into(), crate::Trust::FromFile));
+        let bytes = crate::io::save_bytes(&wb, "Reopen.xlsx")?;
+        let (back, _) = crate::io::open_bytes("Reopen.xlsx", &bytes)?;
+        assert_eq!(back.sheets[1].value(at("B6")), Value::Number(-1.0));
+        check(crate::DocState::new(back, None, "Reopen.xlsx".into(), crate::Trust::FromFile));
         Ok(())
     }
 
@@ -1230,6 +1370,7 @@ mod tests {
             comment: String::new(),
             hidden: true,
             uid: Default::default(),
+            legacy_grid: false,
         });
         // A legacy item is read whether or not it is hidden, so a visible one is data too.
         wb.names.push(DefinedName {
@@ -1239,6 +1380,7 @@ mod tests {
             comment: String::new(),
             hidden: false,
             uid: Default::default(),
+            legacy_grid: false,
         });
         let names = |s: &Session| s.doc().unwrap().wb.names.clone();
         let before = names(&s);
@@ -1272,6 +1414,7 @@ mod tests {
             comment: String::new(),
             hidden: false,
             uid: Default::default(),
+            legacy_grid: false,
         };
         std::sync::Arc::make_mut(&mut s.doc_mut().unwrap().wb).names.push(own.clone());
         s.execute("formulas.defineName", json!({"name": "Rate0", "refersTo": "=2", "oldName": "_gc_rate_0"})).unwrap();
@@ -1380,6 +1523,7 @@ mod tests {
             comment: String::new(),
             hidden,
             uid: Default::default(),
+            legacy_grid: false,
         };
         wb.names.push(name("_Filter", None, "Sheet1!$A$1:$B$9", true));
         wb.names.push(name("TAX", Some(0), "0.25", false));

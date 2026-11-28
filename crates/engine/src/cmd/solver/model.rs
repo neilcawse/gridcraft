@@ -407,7 +407,15 @@ pub(super) fn save_model(wb: &mut Workbook, m: &Model) {
     let Some(sheet_name) = wb.sheet(m.sheet).map(|s| s.name.clone()) else { return };
     wb.names.retain(|n| !(n.scope == Some(m.sheet) && is_model_name(&n.name)));
     let mut put = |name: String, formula: String| {
-        wb.names.push(DefinedName { name, scope: Some(m.sheet), formula, comment: String::new(), hidden: true, uid: Default::default() });
+        wb.names.push(DefinedName {
+            name,
+            scope: Some(m.sheet),
+            formula,
+            comment: String::new(),
+            hidden: true,
+            uid: Default::default(),
+            legacy_grid: false,
+        });
     };
     put("solver_opt".into(), ref_text(&sheet_name, &m.objective.a1()));
     let (typ, val) = match m.goal {

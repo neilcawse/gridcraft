@@ -1379,7 +1379,7 @@ fn chart_ref_to_file(wb: &Workbook, si: usize, f: &str) -> String {
 }
 
 /// A series name that refers to a defined name (as opposed to literal text that parses as one).
-fn is_defined_name(wb: &Workbook, si: usize, f: &str) -> bool {
+pub(crate) fn is_defined_name(wb: &Workbook, si: usize, f: &str) -> bool {
     chart_name(wb, si, f).is_some_and(|(_, _, d)| d.is_some())
 }
 

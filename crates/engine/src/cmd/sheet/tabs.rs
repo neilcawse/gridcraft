@@ -285,14 +285,16 @@ pub(super) fn move_sheet(s: &mut Session, p: &Json) -> Result<Json> {
             // The copy gets its own copies of the sheet's names, referring to the copy, and of
             // the workbook's names that refer to the sheet (`Data (2)!Global` beside workbook
             // `Global`), unless a name of the sheet shadows them there.
+            // A legacy-grid `.xls` name's copy stays on the BIFF8 grid: its relative parts are the
+            // same offsets from the cell using it.
             let local_copy = |nm: &gridcraft_model::DefinedName, formula: String| gridcraft_model::DefinedName {
                 name: nm.name.clone(),
                 scope: Some(at),
                 formula,
                 comment: nm.comment.clone(),
                 hidden: nm.hidden,
-                // Nothing bound to the original's name is bound to its copy.
                 uid: Default::default(),
+                legacy_grid: nm.legacy_grid,
             };
             let rename = |e| gridcraft_formula::adjust::rename_sheet(e, &base, &sh.name);
             let mut seen = std::collections::HashSet::new();

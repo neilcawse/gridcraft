@@ -843,6 +843,7 @@ fn define(wb: &mut Workbook, name: &str, scope: Option<usize>, formula: &str) {
         comment: String::new(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     });
 }
 
@@ -1132,6 +1133,58 @@ fn round_trip_of_a_simple_book_is_clean() {
     assert_eq!(rt.error, None);
     assert!(rt.is_clean(), "{rt:?}");
     assert!(rt.categories.iter().any(|c| c.name == "package"));
+}
+
+/// An `.xls` name on the legacy grid is saved with XLSX offsets (X60): reading back that saved
+/// form is not a lost name.
+#[test]
+fn round_trip_reads_legacy_names_back_in_their_saved_form() {
+    let mut wb = book(&[("F21", "=Attend", n(0.0))]);
+    wb.names.push(gridcraft_engine::model::DefinedName {
+        name: "Attend".into(),
+        scope: None,
+        formula: "Sheet1!A65531".into(),
+        comment: String::new(),
+        hidden: false,
+        uid: Default::default(),
+        legacy_grid: true,
+    });
+    let source = gridcraft_engine::io::save_bytes(&wb, "t.xlsx").unwrap();
+    let rt = round_trip(&wb, &source, &Options::default());
+    assert_eq!(rt.error, None);
+    let names = rt.categories.iter().find(|c| c.name == "names").unwrap();
+    assert_eq!(names.diffs, 0, "{rt:?}");
+}
+
+#[test]
+fn projected_name_comparison_detects_missing_and_changed_names() {
+    let mut source = Workbook::new();
+    define(&mut source, "Attend", None, "Sheet1!A65531");
+    source.names[0].legacy_grid = true;
+    define(&mut source, "Ordinary", None, "Sheet1!A65531");
+    let bytes = gridcraft_engine::io::save_bytes(&source, "test.xlsx").unwrap();
+    let (saved, _) = gridcraft_engine::io::open_bytes("test.xlsx", &bytes).unwrap();
+    assert_eq!(saved.name("Attend", 0).unwrap().formula, "Sheet1!A1048571");
+    assert_eq!(saved.name("Ordinary", 0).unwrap().formula, "Sheet1!A65531");
+    let name_diffs = |back: &Workbook| diff_workbooks(&source, back, &Options::default()).into_iter().find(|c| c.name == "names").unwrap().diffs;
+    assert_eq!(name_diffs(&saved), 0);
+
+    let change = |name: &str, text: Option<(&str, bool)>| {
+        let mut back = saved.clone();
+        let i = back.names.iter().position(|n| n.name == name).unwrap();
+        if let Some((formula, legacy_grid)) = text {
+            back.names[i].formula = formula.into();
+            back.names[i].legacy_grid = legacy_grid;
+        } else {
+            back.names.remove(i);
+        }
+        name_diffs(&back)
+    };
+    assert_eq!(change("Attend", Some(("Sheet1!A1048570", false))), 2);
+    assert_eq!(change("Attend", Some(("Sheet1!A65531", true))), 2);
+    assert_eq!(change("Attend", None), 1);
+    assert_eq!(change("Ordinary", Some(("Sheet1!A1048571", false))), 2);
+    assert_eq!(change("Ordinary", None), 1);
 }
 
 #[test]

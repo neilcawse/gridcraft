@@ -936,3 +936,351 @@ fn xls_duplicate_sheet_names_are_refused() {
     assert!(err.contains("already taken"), "{err}");
     assert!(crate::xls::read_xls_budgeted(&file("One", "Two"), Default::default(), Default::default()).is_ok());
 }
+
+/// A one-sheet (`Sheet1`) workbook with workbook-scope names `names` (Lbl 1, 2, … in order) and
+/// the cell records `cells`.
+fn names_book(names: &[(&str, &[u8])], cells: &[&[u8]]) -> Vec<u8> {
+    let names = names.iter().map(|&(name, body)| (name, 0, body)).collect::<Vec<_>>();
+    scoped_names_book(&names, &[cells.concat()])
+}
+
+fn scoped_names_book(names: &[(&str, u16, &[u8])], sheets: &[Vec<u8>]) -> Vec<u8> {
+    let globals = |mut pos: u32| {
+        let mut g = bof(0x0005);
+        for (i, cells) in sheets.iter().enumerate() {
+            let name = format!("Sheet{}", i + 1);
+            g.extend(rec(0x0085, &cat(&[&pos.to_le_bytes(), &[0, 0, name.len() as u8, 0], name.as_bytes()])));
+            pos += (bof(0x0010).len() + cells.len() + eof().len()) as u32;
+        }
+        g.extend(rec(0x01AE, &u16s(&[sheets.len() as u16, 0x0401])));
+        g.extend(rec(0x0017, &u16s(&[1, 0, 0, 0])));
+        for &(name, scope, body) in names {
+            g.extend(rec(
+                0x0018,
+                &cat(&[&u16s(&[0]), &[0, name.len() as u8], &u16s(&[body.len() as u16, 0, scope]), &[0; 4], &[0], name.as_bytes(), body]),
+            ));
+        }
+        g.extend(eof());
+        g
+    };
+    let mut stream = globals(globals(0).len() as u32);
+    for cells in sheets {
+        stream.extend(bof(0x0010));
+        stream.extend(cells);
+        stream.extend(eof());
+    }
+    compound("Workbook", &stream)
+}
+
+/// PtgRef3d on Sheet1 as a name stores it: a relative row/column is an offset from A1
+/// ([MS-XLS] RgceLocRel), `0xFFFA` six rows up, column byte `0xFF` one column left.
+fn name_ref(row: u16, col: u16) -> Vec<u8> {
+    cat(&[&[0x3A], &0u16.to_le_bytes(), &u16s(&[row, col])])
+}
+
+/// PtgName for Lbl `i` (one-based).
+fn use_name(i: u32) -> Vec<u8> {
+    cat(&[&[0x43], &i.to_le_bytes()])
+}
+
+fn saved_names(bytes: &[u8]) -> Vec<(String, String)> {
+    let (back, _) = read_xlsx(bytes).unwrap();
+    back.names.iter().map(|n| (n.name.clone(), n.formula.clone())).collect()
+}
+
+fn workbook_xml(bytes: &[u8]) -> String {
+    use std::io::Read as _;
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut s = String::new();
+    z.by_name("xl/workbook.xml").unwrap().read_to_string(&mut s).unwrap();
+    s
+}
+
+fn save(wb: &gridcraft_model::Workbook) -> (Vec<u8>, Vec<String>) {
+    let (bytes, report) = crate::write_xlsx_named_with(wb, crate::XlsxKind::Workbook, "book.xlsx", crate::FunctionInfo::default()).unwrap();
+    (bytes, report.warnings)
+}
+
+const LEGACY_NOTICE: &str = "point at cells relative to where they are used";
+
+#[test]
+fn xls_relative_names_keep_their_residue_and_are_marked_for_the_legacy_grid() {
+    // Attend = six rows up (A65531 seen from A1), Left = one column left (IV1), Rate absolute.
+    let attend = name_ref(0xFFFA, 0xC000);
+    let left = name_ref(0, 0xC0FF);
+    let rate = name_ref(0, 0);
+    let file = names_book(
+        &[("Attend", &attend), ("Left", &left), ("Rate", &rate)],
+        &[&formula(20, 5, num(0.0), &use_name(1)), &formula(21, 1, num(0.0), &use_name(2))],
+    );
+    let (wb, _) = read_xls(&file).unwrap();
+    let names: Vec<_> = wb.names.iter().map(|n| (n.name.as_str(), n.formula.as_str(), n.legacy_grid)).collect();
+    assert_eq!(names, [("Attend", "Sheet1!A65531", true), ("Left", "Sheet1!IV1", true), ("Rate", "Sheet1!$A$1", false)]);
+    assert_eq!(ftext(&wb, "F21").as_deref(), Some("Attend"));
+    assert_eq!(ftext(&wb, "B22").as_deref(), Some("Left"));
+}
+
+#[test]
+fn xls_relative_names_save_as_signed_offsets_for_the_xlsx_grid() {
+    let attend = name_ref(0xFFFA, 0xC000);
+    let left = name_ref(0, 0xC0FF);
+    let ahead = name_ref(2, 0xC003);
+    let file = names_book(
+        &[("Attend", &attend), ("Left", &left), ("Ahead", &ahead)],
+        &[&formula(20, 5, num(0.0), &use_name(1)), &formula(21, 1, num(0.0), &use_name(2)), &formula(1, 1, num(0.0), &use_name(3))],
+    );
+    let (wb, _) = read_xls(&file).unwrap();
+    let (bytes, warnings) = save(&wb);
+    // Six up is -6 rows on the big grid too, one left is -1 column, a small positive offset stays.
+    assert_eq!(
+        saved_names(&bytes),
+        [("Attend".into(), "Sheet1!A1048571".into()), ("Left".into(), "Sheet1!XFD1".into()), ("Ahead".into(), "Sheet1!D3".into())]
+    );
+    // Every use is inside both grids' wrap, so it reads the same cells: nothing to warn of.
+    assert!(!warnings.iter().any(|w| w.contains(LEGACY_NOTICE)), "{warnings:?}");
+    // The marker never reaches the file, and the live workbook keeps its legacy names.
+    let xml = workbook_xml(&bytes);
+    assert!(!xml.to_ascii_lowercase().contains("legacy"), "{xml}");
+    assert!(wb.names.iter().filter(|n| n.name != "Rate").all(|n| n.legacy_grid));
+    assert_eq!(wb.names[0].formula, "Sheet1!A65531");
+    let (back, _) = read_xlsx(&bytes).unwrap();
+    assert!(back.names.iter().all(|n| !n.legacy_grid));
+}
+
+#[test]
+fn saving_warns_of_legacy_name_uses_that_read_other_cells_and_names_it_cannot_check() {
+    let left = name_ref(0, 0xC0FF);
+    let unused = name_ref(1, 0xC000);
+    let attend = name_ref(0xFFFA, 0xC000);
+    // INDIRECT("Attend"): PtgStr then PtgFuncVar INDIRECT (iftab 148) with one argument.
+    let indirect = cat(&[&[0x17, 6, 0], b"Attend", &[0x22, 1], &148u16.to_le_bytes()]);
+    let file = names_book(
+        &[("Left", &left), ("Unused", &unused), ("Attend", &attend)],
+        &[
+            // One-left from B22 is A22 on both grids; from A5 it is IV5 in Compatibility Mode
+            // and XFD5 once saved.
+            &formula(21, 1, num(0.0), &use_name(1)),
+            &formula(4, 0, num(0.0), &use_name(1)),
+            &formula(20, 5, num(0.0), &use_name(3)),
+            &formula(30, 0, num(0.0), &indirect),
+        ],
+    );
+    let (wb, _) = read_xls(&file).unwrap();
+    assert_eq!(ftext(&wb, "A31").as_deref(), Some("INDIRECT(\"Attend\")"));
+    let (_, warnings) = save(&wb);
+    let first = &warnings[0];
+    assert!(first.contains(LEGACY_NOTICE), "{warnings:?}");
+    assert!(first.contains("Left (workbook) from Sheet1!A5"), "{first}");
+    assert!(first.contains("Unused (workbook) (no checked use found)"), "{first}");
+    assert!(first.contains("Attend (workbook) (INDIRECT may reach it)"), "{first}");
+    assert!(!first.contains("B22"), "{first}");
+}
+
+#[test]
+fn cell_shaped_xls_names_are_unchanged_and_warned_of_on_save() {
+    // `On2` is a name in Compatibility Mode (column ON is past IV) but cell ON2 on the XLSX grid.
+    // X60 leaves it as it was read: the formula text reads cell ON2, the name is written as it is,
+    // and the save says its binding is not kept. The follow-up lane changes this deliberately.
+    let on2 = name_ref(0, 0);
+    let file = names_book(&[("On2", &on2)], &[&rec(0x0203, &cat(&[&cell(0, 0, 0), &5.0f64.to_le_bytes()])), &formula(2, 0, num(5.0), &use_name(1))]);
+    let (wb, _) = read_xls(&file).unwrap();
+    let names: Vec<_> = wb.names.iter().map(|n| (n.name.as_str(), n.formula.as_str(), n.legacy_grid)).collect();
+    assert_eq!(names, [("On2", "Sheet1!$A$1", false)]);
+    // The use is read as the cell: its text is the reference ON2, not the name.
+    assert_eq!(ftext(&wb, "A3").as_deref(), Some("ON2"));
+    let use_ = wb.sheets[0]
+        .cell(CellRef::parse("A3").unwrap())
+        .and_then(|c| c.formula.as_ref())
+        .and_then(|f| f.with_expr(|e| matches!(e, gridcraft_formula::Expr::Ref(_))));
+    assert_eq!(use_, Some(true));
+    let (bytes, warnings) = save(&wb);
+    assert!(workbook_xml(&bytes).contains("<definedName name=\"On2\">Sheet1!$A$1</definedName>"));
+    assert!(warnings[0].contains("spelled like cells") && warnings[0].contains("On2 (workbook)"), "{warnings:?}");
+}
+
+#[test]
+fn native_xlsx_names_save_without_legacy_warnings() {
+    let mut wb = gridcraft_model::Workbook::new();
+    wb.names.push(gridcraft_model::DefinedName {
+        name: "Left".into(),
+        scope: None,
+        formula: "Sheet1!XFD1".into(),
+        comment: String::new(),
+        hidden: false,
+        uid: Default::default(),
+        legacy_grid: false,
+    });
+    let (bytes, warnings) = save(&wb);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(saved_names(&bytes), [("Left".into(), "Sheet1!XFD1".into())]);
+}
+
+/// A native workbook's sheet-local name used from another sheet is an ordinary `#NAME?`: no
+/// binding was lost, so saving says nothing about it.
+#[test]
+fn native_local_name_used_from_another_sheet_saves_without_a_binding_notice() {
+    let mut wb = gridcraft_model::Workbook::new();
+    wb.sheets.push(std::sync::Arc::new(gridcraft_model::Sheet::new("Sheet2")));
+    wb.names.push(gridcraft_model::DefinedName {
+        name: "LocalOnly".into(),
+        scope: Some(0),
+        formula: "Sheet1!B1".into(),
+        comment: String::new(),
+        hidden: false,
+        uid: Default::default(),
+        legacy_grid: false,
+    });
+    wb.sheet_mut(1).unwrap().set_cell(
+        CellRef::parse("A1").unwrap(),
+        gridcraft_model::Cell { formula: Some(std::sync::Arc::new(gridcraft_model::Formula::new("LocalOnly"))), ..Default::default() },
+    );
+    let (_, warnings) = save(&wb);
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn scoped_xls_names_report_unproven_bindings_on_open_and_save() {
+    // The two callers of each duplicate spelling originally point at distinct Lbl indexes.
+    let global = name_ref(0xFFFF, 0xC000);
+    let local = name_ref(0, 0xC001);
+    let abs = name_ref(0, 0);
+    let names: [(&str, u16, &[u8]); 6] =
+        [("Attend", 0, &global), ("ATTEND", 1, &local), ("On2", 0, &abs), ("ON2", 1, &local), ("LocalOnly", 1, &local), ("On3", 1, &abs)];
+    let sheet = |row, indexes: &[u32]| indexes.iter().enumerate().flat_map(|(c, &i)| formula(row, c as u16, num(-1.0), &use_name(i))).collect();
+    let bytes = scoped_names_book(&names, &[sheet(4, &[1, 2, 3, 4]), sheet(5, &[1, 5, 6])]);
+    let (wb, report) = read_xls(&bytes).unwrap();
+    for (a, b) in [("A5", "B5"), ("C5", "D5")] {
+        assert_eq!(ftext(&wb, a).unwrap().to_ascii_lowercase(), ftext(&wb, b).unwrap().to_ascii_lowercase());
+    }
+    let (saved, save_warnings) = save(&wb);
+    let (back, _) = read_xlsx(&saved).unwrap();
+    for first in [&report.warnings[0], &save_warnings[0]] {
+        assert!(first.starts_with("Name bindings are unproven:"), "{first}");
+        for expected in [
+            "Attend (scopes: workbook, Sheet1); possible consuming cells: Sheet1!A5, Sheet1!B5, Sheet2!A6",
+            "On2 (scopes: workbook, Sheet1); possible consuming cells: Sheet1!C5, Sheet1!D5",
+            "LocalOnly (scopes: Sheet1); no definition in scope at Sheet2!B6",
+            "On3 (scopes: Sheet1); no definition in scope at Sheet2!C6; GridCraft currently reads the cell reference",
+        ] {
+            assert!(first.contains(expected), "missing {expected}: {first}");
+        }
+    }
+    let definitions = |b: &gridcraft_model::Workbook| b.names.iter().map(|n| (n.name.clone(), n.scope)).collect::<Vec<_>>();
+    assert_eq!(definitions(&wb), definitions(&back));
+    assert_eq!(ftext(&back, "C5").as_deref(), Some("ON2"));
+}
+
+#[test]
+fn legacy_name_notice_respects_lexical_bindings_and_quoted_sheet_names() {
+    use gridcraft_model::{Cell, DefinedName, Formula, Sheet, Workbook};
+    let mut wb = Workbook::new();
+    wb.sheets.push(std::sync::Arc::new(Sheet::new("'Edge'")));
+    for (name, scope, formula) in
+        [("Shadowed", None, "IV1"), ("Relative", Some(1), "IV1"), ("Calling", None, "LAMBDA(IV1)"), ("Explicit", None, "LAMBDA(IV1)")]
+    {
+        wb.names.push(DefinedName {
+            name: name.into(),
+            scope,
+            formula: formula.into(),
+            comment: String::new(),
+            hidden: false,
+            uid: Default::default(),
+            legacy_grid: true,
+        });
+    }
+    for (row, text) in
+        ["LET(Shadowed,2,Shadowed+1)", "LAMBDA(Shadowed,Shadowed)(1)", "'''Edge'''!Relative", "Calling()", "LET(Explicit,1,_xludf.Explicit())"]
+            .into_iter()
+            .enumerate()
+    {
+        wb.sheet_mut(0)
+            .unwrap()
+            .set_cell(CellRef::new(row as u32, 0), Cell { formula: Some(std::sync::Arc::new(Formula::new(text))), ..Default::default() });
+    }
+    let functions = crate::FunctionInfo { is_builtin: |name| gridcraft_functions::lookup(name).is_some(), ..Default::default() };
+    let (_, report) = crate::write_xlsx_named_with(&wb, crate::XlsxKind::Workbook, "Names.xlsx", functions).unwrap();
+    let first = &report.warnings[0];
+    assert!(first.contains("Shadowed (workbook) (no checked use found)"), "{first}");
+    assert!(first.contains("Relative ('Edge') from Sheet1!A3"), "{first}");
+    assert!(first.contains("Calling (workbook) from Sheet1!A4"), "{first}");
+    assert!(first.contains("Explicit (workbook) from Sheet1!A5"), "{first}");
+    assert!(!first.contains("Sheet1!A1") && !first.contains("Sheet1!A2"), "{first}");
+}
+
+#[test]
+fn qualified_indirect_to_a_modern_local_does_not_trigger_a_legacy_warning() {
+    let left = name_ref(0, 0xC0FF);
+    let file = names_book(&[("Left", &left)], &[&formula(4, 1, num(-1.0), &use_name(1))]);
+    let (mut wb, _) = read_xls(&file).unwrap();
+    wb.sheets.push(std::sync::Arc::new(gridcraft_model::Sheet::new("Modern")));
+    let mut local = wb.names[0].clone();
+    local.scope = Some(1);
+    local.legacy_grid = false;
+    local.formula = "7".into();
+    wb.names.push(local);
+    let mut other = wb.names[0].clone();
+    other.name = "Unrelated".into();
+    wb.names.push(other);
+    let at = CellRef::new(1, 1);
+    for (text, dynamic) in [
+        ("INDIRECT(\"Modern!Left\")", false),
+        ("INDIRECT(\"Sheet1!Left\")", true),
+        ("INDIRECT(A1)", true),
+        ("LET(INDIRECT,0,INDIRECT(\"Left\"))", true),
+        ("LET(Left,0,INDIRECT(\"Left\"))", false),
+    ] {
+        wb.sheet_mut(0)
+            .unwrap()
+            .set_cell(at, gridcraft_model::Cell { formula: Some(std::sync::Arc::new(gridcraft_model::Formula::new(text))), ..Default::default() });
+        let (_, warnings) = save(&wb);
+        assert_eq!(warnings[0].contains("Left (workbook) (INDIRECT may reach it)"), dynamic, "{text}: {warnings:?}");
+        assert_eq!(warnings[0].contains("Unrelated (workbook) (INDIRECT may reach it)"), text == "INDIRECT(A1)", "{text}: {warnings:?}");
+    }
+}
+
+#[test]
+fn legacy_name_notice_checks_shared_and_array_callers_and_unanchored_consumers() {
+    use gridcraft_model::{Cell, DefinedName, Formula, Sparkline, Workbook};
+    use std::sync::Arc;
+
+    let mut wb = Workbook::new();
+    for (name, formula, legacy_grid) in [("SharedName", "IV1", true), ("ArrayName", "IV1", true), ("SourceName", "IV1", true), ("On2", "$A$1", false)]
+    {
+        wb.names.push(DefinedName {
+            name: name.into(),
+            formula: formula.into(),
+            legacy_grid,
+            scope: None,
+            hidden: false,
+            comment: String::new(),
+            uid: Default::default(),
+        });
+    }
+    let a1 = CellRef::new(0, 0);
+    let a2 = CellRef::new(1, 0);
+    let a3 = CellRef::new(2, 0);
+    let base = Arc::new(gridcraft_formula::parse("LET(SharedName,SharedName,SharedName)").unwrap());
+    let sheet = wb.sheet_mut(0).unwrap();
+    for (at, formula) in [
+        (a1, Formula::from_shared(base, 0, -1)),
+        (a2, Formula::new("ArrayName").with_array(Some(gridcraft_core::RangeRef::new(a2, CellRef::new(1, 1)))).with_legacy(true)),
+        (a3, Formula::unparsed("SourceName")),
+    ] {
+        sheet.set_cell(at, Cell { formula: Some(Arc::new(formula)), ..Default::default() });
+    }
+    sheet.sparklines.push(Sparkline {
+        cell: CellRef::new(0, 2),
+        source: "SourceName".into(),
+        kind: Default::default(),
+        color: Default::default(),
+        markers: false,
+    });
+    let (_, warnings) = save(&wb);
+    let first = &warnings[0];
+    assert!(first.contains("SharedName (workbook) from Sheet1!A1"), "{first}");
+    assert!(first.contains("ArrayName (workbook) from Sheet1!A2"), "{first}");
+    assert!(first.contains("SourceName (workbook) from Sheet1!A3"), "{first}");
+    assert!(first.contains("SourceName (workbook) (not all caller locations could be checked)"), "{first}");
+    assert!(first.contains("spelled like cells on the .xlsx grid") && first.contains("On2 (workbook)"), "{first}");
+    assert!(!first.contains("These names from the Excel 97-2003 workbook"), "{first}");
+}

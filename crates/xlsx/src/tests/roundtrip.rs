@@ -522,6 +522,7 @@ fn sample() -> Workbook {
         comment: "c".into(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     });
     wb.names.push(DefinedName {
         name: "Local".into(),
@@ -530,6 +531,7 @@ fn sample() -> Workbook {
         comment: String::new(),
         hidden: true,
         uid: Default::default(),
+        legacy_grid: false,
     });
     wb.names.push(DefinedName {
         name: "Pick".into(),
@@ -538,6 +540,7 @@ fn sample() -> Workbook {
         comment: String::new(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     });
     wb.cell_styles.push(("Good".into(), red));
     wb
@@ -1744,6 +1747,7 @@ fn builtin_call_spelling_survives_xlsx_import() {
             comment: String::new(),
             hidden: false,
             uid: Default::default(),
+            legacy_grid: false,
         });
     }
     let sh = wb.sheet_mut(0).unwrap();
@@ -1896,6 +1900,7 @@ fn table_save_repairs_the_workbook_namespace() {
         comment: String::new(),
         hidden: false,
         uid: Default::default(),
+        legacy_grid: false,
     });
     wb.sheets.push(Arc::new(Sheet::new("Two")));
     let col = |n: &str| TableColumn { name: n.into(), totals: TotalsFn::None, totals_label: None, formula: None, unique_name: None, xml: None };
